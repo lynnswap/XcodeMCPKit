@@ -8,6 +8,7 @@ XCODE_PID="${XCODE_PID:-${MCP_XCODE_PID:-}}"
 LAZY_INIT="${LAZY_INIT:-}"
 DRY_RUN="${DRY_RUN:-}"
 STDIO="${STDIO:-}"
+STDIO_ARGS=()
 
 if [[ "${1:-}" == "--stdio" ]]; then
   STDIO=1
@@ -79,9 +80,9 @@ if [[ -n "$STDIO" ]]; then
     if [[ -n "$LAZY_INIT" ]]; then
       PROXY_ARGS+=(--proxy-lazy-init)
     fi
-    exec swift run xcode-mcp-stdio-proxy "${PROXY_ARGS[@]}" "${STDIO_ARGS[@]}"
+    exec swift run xcode-mcp-stdio-proxy "${PROXY_ARGS[@]}" "${STDIO_ARGS[@]+"${STDIO_ARGS[@]}"}"
   else
-    exec swift run xcode-mcp-proxy "${ARGS[@]}" --stdio "${STDIO_ARGS[@]}"
+    exec swift run xcode-mcp-proxy "${ARGS[@]}" --stdio "${STDIO_ARGS[@]+"${STDIO_ARGS[@]}"}"
   fi
 else
   exec swift run xcode-mcp-proxy "${ARGS[@]}"

@@ -45,7 +45,54 @@ public final class StdioProxy {
             await writer.send(response.data)
         } catch {
             logger.error("HTTP proxy request failed", metadata: ["error": "\(error)"])
+            if let errorPayload = makeErrorResponse(for: message, error: error) {
+                await writer.send(errorPayload)
+            }
         }
+    }
+
+    private func makeErrorResponse(for message: Data, error: Error) -> Data? {
+        guard let json = try? JSONSerialization.jsonObject(with: message) else {
+            return encodeErrorResponse(id: NSNull(), error: error)
+        }
+
+        if let object = json as? [String: Any] {
+            guard let id = object["id"], !(id is NSNull) else {
+                return nil
+            }
+            return encodeErrorResponse(id: id, error: error)
+        }
+
+        if let array = json as? [Any] {
+            let responses: [[String: Any]] = array.compactMap { element in
+                guard let object = element as? [String: Any] else { return nil }
+                guard let id = object["id"], !(id is NSNull) else { return nil }
+                return buildErrorObject(id: id, error: error)
+            }
+            guard !responses.isEmpty else { return nil }
+            return try? JSONSerialization.data(withJSONObject: responses)
+        }
+
+        return encodeErrorResponse(id: NSNull(), error: error)
+    }
+
+    private func encodeErrorResponse(id: Any, error: Error) -> Data? {
+        let payload = buildErrorObject(id: id, error: error)
+        return try? JSONSerialization.data(withJSONObject: payload)
+    }
+
+    private func buildErrorObject(id: Any, error: Error) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": [
+                "code": -32000,
+                "message": "HTTP proxy request failed",
+                "data": [
+                    "details": String(describing: error)
+                ]
+            ]
+        ]
     }
 
     private func startSSE(sessionId: String) {
