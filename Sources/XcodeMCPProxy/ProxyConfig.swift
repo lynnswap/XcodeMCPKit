@@ -170,6 +170,8 @@ public struct CLIParser {
           --listen host:port         Listen address (default: 127.0.0.1:8765)
           --host host                Listen host (default: 127.0.0.1)
           --port port                Listen port (default: 8765)
+          --stdio                    Run STDIO adapter alongside HTTP/SSE proxy
+          --stdio-framing kind        ndjson | content-length (default: ndjson)
           --upstream-command cmd     Upstream command (default: xcrun)
           --upstream-args a,b,c      Upstream args (default: mcpbridge)
           --upstream-arg value       Append a single upstream arg

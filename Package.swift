@@ -54,6 +54,7 @@ let package = Package(
             name: "XcodeMCPProxyCLI",
             dependencies: [
                 "XcodeMCPProxy",
+                "XcodeMCPStdioProxy",
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),

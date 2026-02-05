@@ -179,7 +179,9 @@ public struct StdioCLIParser {
         )
 
         if !proxyURLWasSet {
-            proxyURL = URL(string: "http://\(listenHost):\(listenPort)/mcp") ?? proxyURL
+            let normalizedHost = normalizeProxyHost(listenHost)
+            let wrappedHost = wrapIPv6HostIfNeeded(normalizedHost)
+            proxyURL = URL(string: "http://\(wrappedHost):\(listenPort)/mcp") ?? proxyURL
         } else if proxyURL.path.isEmpty {
             proxyURL = URL(string: "\(proxyURL.absoluteString)/mcp") ?? proxyURL
         }
@@ -215,5 +217,21 @@ public struct StdioCLIParser {
           --proxy-lazy-init           Initialize upstream only on first client request
           -h, --help                  Show help
         """
+    }
+
+    private static func normalizeProxyHost(_ host: String) -> String {
+        switch host {
+        case "", "0.0.0.0", "::":
+            return "127.0.0.1"
+        default:
+            return host
+        }
+    }
+
+    private static func wrapIPv6HostIfNeeded(_ host: String) -> String {
+        if host.contains(":") && !host.hasPrefix("[") {
+            return "[\(host)]"
+        }
+        return host
     }
 }

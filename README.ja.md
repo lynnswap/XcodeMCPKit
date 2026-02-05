@@ -14,13 +14,16 @@ Xcode のダイアログが、プロキシ起動時に一度だけ表示され�
 2. クライアントを `http://127.0.0.1:8765/mcp` に向ける（例は後述）
 3. Xcode の許可ダイアログが出たら **Allow**
 
-Codex を STDIO で使う場合は、`xcode-mcp-stdio-proxy` を起動してください（HTTP/SSE プロキシは自動起動します）。
+Codex を STDIO で使う場合は、`xcode-mcp-proxy --stdio` を使います（HTTP/SSE + STDIO を同一プロセスで起動）。  
+別プロセスの STDIO アダプタを使う場合は `xcode-mcp-stdio-proxy` を起動してください。
 
 ## 特徴
 
 - `mcpbridge` は **単一プロセスで運用**
 - 複数クライアントは `Mcp-Session-Id` で分離
 - JSON-RPC over HTTP + SSE（Streamable MCP）
+
+アーキテクチャ: `Docs/architecture.md`（英語）
 
 ## 使い方
 
@@ -38,7 +41,8 @@ scripts/run_proxy.sh
 - `XCODE_PID` (任意)
 - `LAZY_INIT` (`--lazy-init` を付与)
 - `STDIO` (STDIO モードで起動)
-- `STDIO_NO_PROXY` (STDIO モード時に HTTP/SSE プロキシを起動しない)
+- `STDIO_NO_PROXY` (別プロセスの STDIO アダプタで既存プロキシへ接続)
+- `STDIO_FRAMING` (`ndjson` / `content-length`)
 
 ### Manual Start
 
@@ -54,14 +58,22 @@ Xcode の対象を固定する場合:
 swift run xcode-mcp-proxy --xcode-pid 12345
 ```
 
-### STDIO Adapter (Codex)
+### STDIO モード (Codex)
 
 ```bash
-swift run xcode-mcp-stdio-proxy
+swift run xcode-mcp-proxy --stdio
 ```
 
-STDIO アダプタは HTTP/SSE プロキシを自動で起動します。既に起動済みの場合は `--no-spawn-proxy` を使ってください。  
-`scripts/run_proxy.sh` で STDIO モードにする場合は `STDIO=1` を指定します（既定で HTTP/SSE プロキシも起動します）。
+HTTP/SSE プロキシと STDIO アダプタを同一プロセスで起動します。
+
+STDIO アダプタを別プロセスで起動する場合:
+
+```bash
+swift run xcode-mcp-stdio-proxy --no-spawn-proxy --proxy-url http://127.0.0.1:8765/mcp
+```
+
+`scripts/run_proxy.sh` で STDIO モードにする場合は `STDIO=1` を指定します。  
+HTTP/SSE が起動済みなら `STDIO_NO_PROXY=1` を指定してください。
 
 ## デフォルト値
 
@@ -87,6 +99,8 @@ STDIO アダプタは HTTP/SSE プロキシを自動で起動します。既に�
 | `--listen host:port` | 待ち受けアドレス |
 | `--host host` | 待ち受けホスト |
 | `--port port` | 待ち受けポート |
+| `--stdio` | STDIO アダプタを HTTP/SSE と同時起動 |
+| `--stdio-framing kind` | `ndjson` / `content-length` |
 | `--upstream-command cmd` | `mcpbridge` コマンド |
 | `--upstream-args a,b,c` | `mcpbridge` 引数（カンマ区切り） |
 | `--upstream-arg value` | `mcpbridge` 引数を1つ追加 |
@@ -114,10 +128,11 @@ url = "http://127.0.0.1:8765/mcp"
 **Codex (STDIO)**:
 
 ```bash
-codex mcp add xcode -- xcode-mcp-stdio-proxy
+codex mcp add xcode -- xcode-mcp-proxy --stdio
 ```
 
-STDIO アダプタは起動時に HTTP/SSE プロキシを自動で立ち上げます。HTTP/SSE を別途起動済みの場合は `--no-spawn-proxy` を使ってください。
+HTTP/SSE プロキシと STDIO アダプタを同一プロセスで起動します。  
+別プロセスの STDIO アダプタを使う場合は `xcode-mcp-stdio-proxy --no-spawn-proxy` を使ってください。
 
 ## エンドポイント
 
@@ -159,7 +174,7 @@ STDIO アダプタは起動時に HTTP/SSE プロキシを自動で立ち上げ�
   ```
 
 - STDIO アダプタが起動時にエラーになる  
-  `xcode-mcp-stdio-proxy --no-spawn-proxy` で起動し、HTTP/SSE プロキシを別途立ち上げてください。
+  HTTP/SSE が起動済みの場合は `xcode-mcp-stdio-proxy --no-spawn-proxy`（または `scripts/run_proxy.sh` で `STDIO_NO_PROXY=1`）を使い、既存のプロキシに接続してください。
 
 - Xcode のダイアログが出ない  
   `--lazy-init` を指定していないか確認してください（指定している場合は最初のリクエストまでダイアログが出ません）。

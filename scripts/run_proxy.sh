@@ -66,20 +66,23 @@ if [[ -n "$LAZY_INIT" ]]; then
 fi
 
 if [[ -n "$STDIO" ]]; then
-  if [[ -z "${STDIO_NO_PROXY:-}" ]]; then
-    swift run xcode-mcp-proxy "${ARGS[@]}" &
-    PROXY_PID=$!
-    trap 'kill $PROXY_PID' EXIT
+  STDIO_ARGS=()
+  if [[ -n "${STDIO_FRAMING:-}" ]]; then
+    STDIO_ARGS+=(--stdio-framing "$STDIO_FRAMING")
   fi
-  STDIO_ARGS=(--no-spawn-proxy --proxy-listen "$LISTEN")
-  if [[ -n "${XCODE_PID:-}" ]]; then
-    STDIO_ARGS+=(--proxy-xcode-pid "$XCODE_PID")
+
+  if [[ -n "${STDIO_NO_PROXY:-}" ]]; then
+    PROXY_ARGS=(--no-spawn-proxy --proxy-listen "$LISTEN")
+    if [[ -n "${XCODE_PID:-}" ]]; then
+      PROXY_ARGS+=(--proxy-xcode-pid "$XCODE_PID")
+    fi
+    if [[ -n "$LAZY_INIT" ]]; then
+      PROXY_ARGS+=(--proxy-lazy-init)
+    fi
+    exec swift run xcode-mcp-stdio-proxy "${PROXY_ARGS[@]}" "${STDIO_ARGS[@]}"
+  else
+    exec swift run xcode-mcp-proxy "${ARGS[@]}" --stdio "${STDIO_ARGS[@]}"
   fi
-  if [[ -n "$LAZY_INIT" ]]; then
-    STDIO_ARGS+=(--proxy-lazy-init)
-  fi
-  swift run xcode-mcp-stdio-proxy "${STDIO_ARGS[@]}"
-  exit $?
 else
   exec swift run xcode-mcp-proxy "${ARGS[@]}"
 fi

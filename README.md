@@ -14,13 +14,16 @@ The Xcode permission dialog appears once when the proxy starts.
 2. Point your client to `http://127.0.0.1:8765/mcp`
 3. Click **Allow** in Xcode’s permission dialog
 
-For Codex over STDIO, launch `xcode-mcp-stdio-proxy` instead (it auto-starts the HTTP/SSE proxy).
+For Codex over STDIO, use `xcode-mcp-proxy --stdio` (it starts HTTP/SSE + STDIO in one process).  
+Alternatively, `xcode-mcp-stdio-proxy` runs the STDIO adapter separately and connects to an existing proxy.
 
 ## Features
 
 - `mcpbridge` runs as a **single process**
 - Multi-client support via `Mcp-Session-Id`
 - JSON-RPC over HTTP + SSE (Streamable MCP)
+
+Architecture: `Docs/architecture.md`
 
 ## Usage
 
@@ -38,7 +41,8 @@ Optional environment variables:
 - `XCODE_PID` (optional)
 - `LAZY_INIT` (set to any value to pass `--lazy-init`)
 - `STDIO` (enable STDIO mode)
-- `STDIO_NO_PROXY` (do not start the HTTP/SSE proxy in STDIO mode)
+- `STDIO_NO_PROXY` (use the separate STDIO adapter and connect to an existing proxy)
+- `STDIO_FRAMING` (`ndjson` or `content-length`)
 
 ### Manual Start
 
@@ -54,14 +58,22 @@ To target a specific Xcode process:
 swift run xcode-mcp-proxy --xcode-pid 12345
 ```
 
-### STDIO Adapter (Codex)
+### STDIO Mode (Codex)
 
 ```bash
-swift run xcode-mcp-stdio-proxy
+swift run xcode-mcp-proxy --stdio
 ```
 
-The STDIO adapter auto-starts the HTTP/SSE proxy. If it is already running, pass `--no-spawn-proxy`.  
-For `scripts/run_proxy.sh`, use `STDIO=1` (it starts the HTTP/SSE proxy by default).
+This starts the HTTP/SSE proxy and STDIO adapter in one process.
+
+To run the STDIO adapter separately:
+
+```bash
+swift run xcode-mcp-stdio-proxy --no-spawn-proxy --proxy-url http://127.0.0.1:8765/mcp
+```
+
+For `scripts/run_proxy.sh`, use `STDIO=1`.  
+If the HTTP/SSE proxy is already running, set `STDIO_NO_PROXY=1` to avoid starting it again.
 
 ## Defaults
 
@@ -87,6 +99,8 @@ Logs are written to stderr.
 | `--listen host:port` | Listen address |
 | `--host host` | Listen host |
 | `--port port` | Listen port |
+| `--stdio` | Run STDIO adapter alongside HTTP/SSE proxy |
+| `--stdio-framing kind` | `ndjson` or `content-length` |
 | `--upstream-command cmd` | `mcpbridge` command |
 | `--upstream-args a,b,c` | `mcpbridge` args (comma-separated) |
 | `--upstream-arg value` | Append a single `mcpbridge` arg |
@@ -114,10 +128,11 @@ url = "http://127.0.0.1:8765/mcp"
 **Codex (STDIO)**:
 
 ```bash
-codex mcp add xcode -- xcode-mcp-stdio-proxy
+codex mcp add xcode -- xcode-mcp-proxy --stdio
 ```
 
-The STDIO adapter auto-starts the HTTP/SSE proxy. If you already run it, pass `--no-spawn-proxy`.
+This starts the HTTP/SSE proxy and STDIO adapter in one process.  
+If you want the STDIO adapter separately, use `xcode-mcp-stdio-proxy --no-spawn-proxy`.
 
 ## Endpoints
 
@@ -159,7 +174,7 @@ The STDIO adapter auto-starts the HTTP/SSE proxy. If you already run it, pass `-
   ```
 
 - STDIO adapter fails to start  
-  Run `xcode-mcp-stdio-proxy --no-spawn-proxy` and start the HTTP/SSE proxy separately.
+  If the HTTP/SSE proxy is already running, use `xcode-mcp-stdio-proxy --no-spawn-proxy` (or `STDIO_NO_PROXY=1` with `scripts/run_proxy.sh`) so the adapter does not try to start another proxy.
 
 - Permission dialog does not appear  
   If `--lazy-init` is enabled, the dialog appears on the first request instead of startup.
