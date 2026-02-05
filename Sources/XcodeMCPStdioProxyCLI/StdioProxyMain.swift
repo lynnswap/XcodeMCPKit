@@ -7,7 +7,7 @@ import XcodeMCPStdioProxy
 struct StdioMain {
     static func main() async {
         ProxyLogging.bootstrap()
-        let logger: Logger = ProxyLogging.make("stdio-cli")
+        let logger: Logger = ProxyLogging.make("stdio-cli(STDIO)")
         do {
             let config = try StdioCLIParser.parse(
                 args: CommandLine.arguments,
@@ -29,7 +29,7 @@ struct StdioMain {
                 proxyServer = nil
             }
 
-            let stdioProxy = StdioProxy(config: config, logger: ProxyLogging.make("stdio"))
+            let stdioProxy = StdioProxy(config: config, logger: ProxyLogging.make("stdio(STDIO)"))
             await stdioProxy.run()
 
             if let proxyServer {

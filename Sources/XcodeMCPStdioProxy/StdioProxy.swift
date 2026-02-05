@@ -11,7 +11,7 @@ public final class StdioProxy {
     private let state = SessionState()
     private var sseClient: SSEClient?
 
-    public init(config: StdioProxyConfig, logger: Logger = ProxyLogging.make("stdio")) {
+    public init(config: StdioProxyConfig, logger: Logger = ProxyLogging.make("stdio(STDIO)")) {
         self.config = config
         self.logger = logger
         self.writer = StdioWriter(framing: config.framing)

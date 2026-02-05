@@ -168,16 +168,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard sessionManager.hasSession(id: sessionId) else {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: sessionId,
-                requestLog: requestLog
-            )
-            return
+        if !sessionManager.hasSession(id: sessionId) {
+            _ = sessionManager.session(id: sessionId)
         }
 
         let session = sessionManager.session(id: sessionId)
@@ -230,14 +222,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
         guard sessionManager.hasSession(id: sessionId) else {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: sessionId,
-                requestLog: requestLog
-            )
+            sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionId: sessionId, requestLog: requestLog)
             return
         }
         sessionManager.removeSession(id: sessionId)
@@ -328,15 +313,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         let headerSessionId = sessionIdFromHeaders(head.headers)
         if let headerSessionId, !sessionManager.hasSession(id: headerSessionId) {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: headerSessionId,
-                requestLog: requestLog
-            )
-            return
+            _ = sessionManager.session(id: headerSessionId)
         }
 
         let sessionId = headerSessionId ?? UUID().uuidString

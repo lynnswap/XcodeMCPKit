@@ -103,7 +103,7 @@ private func runStdioProxy(config: ProxyConfig, framing: StdioFraming, logger: L
         proxyConfig: config
     )
 
-    let stdioProxy = StdioProxy(config: stdioConfig, logger: ProxyLogging.make("stdio"))
+    let stdioProxy = StdioProxy(config: stdioConfig, logger: ProxyLogging.make("stdio(STDIO)"))
     await stdioProxy.run()
 
     _ = server.shutdownGracefully()
