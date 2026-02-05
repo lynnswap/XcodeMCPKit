@@ -7,6 +7,12 @@ LISTEN="${LISTEN:-$HOST:$PORT}"
 XCODE_PID="${XCODE_PID:-${MCP_XCODE_PID:-}}"
 LAZY_INIT="${LAZY_INIT:-}"
 DRY_RUN="${DRY_RUN:-}"
+STDIO="${STDIO:-}"
+
+if [[ "${1:-}" == "--stdio" ]]; then
+  STDIO=1
+  shift
+fi
 
 resolve_xcode_pid() {
   local pid=""
@@ -59,4 +65,21 @@ if [[ -n "$LAZY_INIT" ]]; then
   ARGS+=(--lazy-init)
 fi
 
-exec swift run xcode-mcp-proxy "${ARGS[@]}"
+if [[ -n "$STDIO" ]]; then
+  if [[ -z "${STDIO_NO_PROXY:-}" ]]; then
+    swift run xcode-mcp-proxy "${ARGS[@]}" &
+    PROXY_PID=$!
+    trap 'kill $PROXY_PID' EXIT
+  fi
+  STDIO_ARGS=(--no-spawn-proxy --proxy-listen "$LISTEN")
+  if [[ -n "${XCODE_PID:-}" ]]; then
+    STDIO_ARGS+=(--proxy-xcode-pid "$XCODE_PID")
+  fi
+  if [[ -n "$LAZY_INIT" ]]; then
+    STDIO_ARGS+=(--proxy-lazy-init)
+  fi
+  swift run xcode-mcp-stdio-proxy "${STDIO_ARGS[@]}"
+  exit $?
+else
+  exec swift run xcode-mcp-proxy "${ARGS[@]}"
+fi

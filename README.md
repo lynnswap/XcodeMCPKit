@@ -14,6 +14,8 @@ The Xcode permission dialog appears once when the proxy starts.
 2. Point your client to `http://127.0.0.1:8765/mcp`
 3. Click **Allow** in Xcode’s permission dialog
 
+For Codex over STDIO, launch `xcode-mcp-stdio-proxy` instead (it auto-starts the HTTP/SSE proxy).
+
 ## Features
 
 - `mcpbridge` runs as a **single process**
@@ -35,6 +37,8 @@ Optional environment variables:
 - `LISTEN` (overrides host/port)
 - `XCODE_PID` (optional)
 - `LAZY_INIT` (set to any value to pass `--lazy-init`)
+- `STDIO` (enable STDIO mode)
+- `STDIO_NO_PROXY` (do not start the HTTP/SSE proxy in STDIO mode)
 
 ### Manual Start
 
@@ -49,6 +53,15 @@ To target a specific Xcode process:
 ```bash
 swift run xcode-mcp-proxy --xcode-pid 12345
 ```
+
+### STDIO Adapter (Codex)
+
+```bash
+swift run xcode-mcp-stdio-proxy
+```
+
+The STDIO adapter auto-starts the HTTP/SSE proxy. If it is already running, pass `--no-spawn-proxy`.  
+For `scripts/run_proxy.sh`, use `STDIO=1` (it starts the HTTP/SSE proxy by default).
 
 ## Defaults
 
@@ -98,6 +111,14 @@ Logs are written to stderr.
 url = "http://127.0.0.1:8765/mcp"
 ```
 
+**Codex (STDIO)**:
+
+```bash
+codex mcp add xcode -- xcode-mcp-stdio-proxy
+```
+
+The STDIO adapter auto-starts the HTTP/SSE proxy. If you already run it, pass `--no-spawn-proxy`.
+
 ## Endpoints
 
 - `POST /mcp` (JSON-RPC; responds with JSON or SSE and returns `Mcp-Session-Id`)
@@ -136,6 +157,9 @@ url = "http://127.0.0.1:8765/mcp"
   url = "http://127.0.0.1:8765/mcp"
   tool_timeout_sec = 300
   ```
+
+- STDIO adapter fails to start  
+  Run `xcode-mcp-stdio-proxy --no-spawn-proxy` and start the HTTP/SSE proxy separately.
 
 - Permission dialog does not appear  
   If `--lazy-init` is enabled, the dialog appears on the first request instead of startup.
