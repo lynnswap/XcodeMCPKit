@@ -286,28 +286,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let headerSessionId = sessionIdFromHeaders(head.headers)
-        if let headerSessionId, !sessionManager.hasSession(id: headerSessionId) {
-            sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionId: headerSessionId,
-                requestLog: requestLog
-            )
-            return
-        }
-
         if let object = try? JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any],
            let method = object["method"] as? String,
-           method == "initialize",
-           headerSessionId == nil {
+           method == "initialize" {
             guard let originalIdValue = object["id"], let originalId = RPCId(any: originalIdValue) else {
                 sendPlain(on: context.channel, status: .badRequest, body: "missing id", keepAlive: head.isKeepAlive, sessionId: nil, requestLog: requestLog)
                 return
             }
-            let sessionId = UUID().uuidString
+            let headerSessionId = sessionIdFromHeaders(head.headers)
+            let sessionId = headerSessionId ?? UUID().uuidString
             _ = sessionManager.session(id: sessionId)
             let future = sessionManager.registerInitialize(
                 originalId: originalId,
@@ -336,6 +323,19 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     self.sendPlain(on: channel, status: .gatewayTimeout, body: "upstream timeout", keepAlive: keepAlive, sessionId: sessionId, requestLog: requestLog)
                 }
             }
+            return
+        }
+
+        let headerSessionId = sessionIdFromHeaders(head.headers)
+        if let headerSessionId, !sessionManager.hasSession(id: headerSessionId) {
+            sendPlain(
+                on: context.channel,
+                status: .unauthorized,
+                body: "session not found",
+                keepAlive: head.isKeepAlive,
+                sessionId: headerSessionId,
+                requestLog: requestLog
+            )
             return
         }
 
