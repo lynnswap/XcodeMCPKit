@@ -39,6 +39,7 @@ package final class HTTPPostService: Sendable {
     private let forwardingService: MCPForwardingService
     private let windowQueryService: XcodeWindowQueryService
     private let refreshWorkflow: RefreshCodeIssuesWorkflow
+    private let runDestinationService: XcodeRunDestinationService
     private let logger: Logger
 
     package init(
@@ -47,6 +48,7 @@ package final class HTTPPostService: Sendable {
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
+        runDestinationProcessRunner: (any ProcessRunning)? = nil,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.sessionManager = sessionManager
@@ -67,6 +69,9 @@ package final class HTTPPostService: Sendable {
             targetResolver: refreshCodeIssuesTargetResolver,
             debugState: refreshCodeIssuesDebugState,
             logger: ProxyLogging.make("http.refresh")
+        )
+        self.runDestinationService = XcodeRunDestinationService(
+            processRunner: runDestinationProcessRunner ?? ProcessRunner()
         )
         self.logger = logger
     }
@@ -141,6 +146,43 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        if requestIsBatch,
+            let batchObjects = parsedRequestJSON as? [Any],
+            batchObjects.contains(where: { XcodeRunDestinationToolRequest.parse(from: $0) != nil })
+        {
+            if headerSessionID == nil {
+                return eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: requestIDs,
+                        code: -32000,
+                        message: "expected initialize request",
+                        forceBatchArray: true,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
+            }
+            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
+            Task { [self] in
+                let responseData = await localBatchResponseData(
+                    for: batchObjects,
+                    sessionID: sessionID,
+                    eventLoop: eventLoop
+                )
+                eventLoop.execute {
+                    promise.succeed(
+                        .responseData(
+                            data: responseData,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    )
+                }
+            }
+            return promise.futureResult
+        }
+
         let refreshRequest = requestIsBatch ? nil : refreshCodeIssuesRequest(from: parsedRequestJSON)
         if let refreshRequest, requestIDs.isEmpty == false {
             if headerSessionID == nil {
@@ -171,6 +213,58 @@ package final class HTTPPostService: Sendable {
                     promise.succeed(
                         self.makeResolution(
                             from: attemptResult,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    )
+                }
+            }
+            return promise.futureResult
+        }
+
+        let runDestinationRequest = requestIsBatch ? nil : runDestinationToolRequest(from: parsedRequestJSON)
+        if let runDestinationRequest {
+            if requestIDs.isEmpty {
+                return eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: [],
+                        code: -32600,
+                        message: "missing id",
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
+            }
+
+            if headerSessionID == nil {
+                return eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: requestIDs,
+                        code: -32000,
+                        message: "expected initialize request",
+                        forceBatchArray: requestIsBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
+            }
+
+            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
+            let originalID = requestIDs[0]
+            Task { [self] in
+                let responseData = await runDestinationToolResponseData(
+                    for: runDestinationRequest,
+                    originalID: originalID,
+                    sessionID: sessionID,
+                    eventLoop: eventLoop
+                )
+                eventLoop.execute {
+                    promise.succeed(
+                        .responseData(
+                            data: responseData,
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
@@ -431,6 +525,10 @@ package final class HTTPPostService: Sendable {
         return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier, filePath: filePath)
     }
 
+    private func runDestinationToolRequest(from requestJSON: Any) -> XcodeRunDestinationToolRequest? {
+        XcodeRunDestinationToolRequest.parse(from: requestJSON)
+    }
+
     private func callInternalTool(
         name: String,
         arguments: [String: Any],
@@ -674,5 +772,400 @@ package final class HTTPPostService: Sendable {
                 sessionID: sessionID
             )
         }
+    }
+
+    private func runDestinationToolResponseData(
+        for request: XcodeRunDestinationToolRequest,
+        originalID: RPCID,
+        sessionID: String,
+        eventLoop: EventLoop
+    ) async -> Data {
+        func failureResponse(
+            _ message: String,
+            _ structuredContent: [String: JSONValue] = [:]
+        ) -> Data {
+            self.makeToolCallResponseData(
+                id: originalID,
+                text: message,
+                structuredContent: structuredContent.mapValues(\.foundationObject),
+                isError: true
+            )
+        }
+
+        let workspacePath: String
+        switch request {
+        case .list(let listRequest):
+            guard let tabIdentifier = normalizedNonEmptyString(listRequest.tabIdentifier) else {
+                return failureResponse("tabIdentifier is required")
+            }
+            guard let resolvedWorkspacePath = await resolveWorkspacePath(
+                tabIdentifier: tabIdentifier,
+                sessionID: sessionID,
+                eventLoop: eventLoop
+            ) else {
+                return failureResponse(
+                    "Could not resolve workspace for tabIdentifier \"\(tabIdentifier)\".",
+                    ["tabIdentifier": .string(tabIdentifier)]
+                )
+            }
+            workspacePath = resolvedWorkspacePath
+
+        case .set(let setRequest):
+            guard let tabIdentifier = normalizedNonEmptyString(setRequest.tabIdentifier) else {
+                return failureResponse("tabIdentifier is required")
+            }
+            guard let resolvedWorkspacePath = await resolveWorkspacePath(
+                tabIdentifier: tabIdentifier,
+                sessionID: sessionID,
+                eventLoop: eventLoop
+            ) else {
+                return failureResponse(
+                    "Could not resolve workspace for tabIdentifier \"\(tabIdentifier)\".",
+                    ["tabIdentifier": .string(tabIdentifier)]
+                )
+            }
+            workspacePath = resolvedWorkspacePath
+        }
+
+        switch request {
+        case .list:
+            switch await runDestinationService.listRunDestinations(workspacePath: workspacePath) {
+            case .success(let output):
+                return makeToolCallResponseData(
+                    id: originalID,
+                    text: output.summaryText,
+                    structuredContent: output.foundationObject,
+                    isError: false
+                )
+            case .failure(let error):
+                return failureResponse(error.message, error.structuredContent)
+            }
+
+        case .set(let setRequest):
+            guard let platform = normalizedNonEmptyString(setRequest.platform) else {
+                return failureResponse("platform is required")
+            }
+            switch await runDestinationService.setActiveRunDestination(
+                workspacePath: workspacePath,
+                platform: platform,
+                osVersion: normalizedNonEmptyString(setRequest.osVersion),
+                deviceFamily: setRequest.deviceFamily
+            ) {
+            case .success(let output):
+                return makeToolCallResponseData(
+                    id: originalID,
+                    text: output.summaryText,
+                    structuredContent: output.foundationObject,
+                    isError: false
+                )
+            case .failure(let error):
+                return failureResponse(error.message, error.structuredContent)
+            }
+        }
+    }
+
+    private func localBatchResponseData(
+        for batchObjects: [Any],
+        sessionID: String,
+        eventLoop: EventLoop
+    ) async -> Data {
+        var responseObjects: [[String: Any]] = []
+        responseObjects.reserveCapacity(batchObjects.count)
+
+        for item in batchObjects {
+            guard let itemObject = item as? [String: Any] else {
+                responseObjects.append(
+                    batchErrorObject(
+                        id: nil,
+                        code: -32600,
+                        message: "invalid request"
+                    )
+                )
+                continue
+            }
+
+            let itemData = (try? JSONSerialization.data(withJSONObject: itemObject, options: [])) ?? Data()
+            let requestMetadata = MCPErrorResponder.requestMetadata(from: itemData)
+            let originalID = requestMetadata.ids.first
+
+            if let localHandling = localResponder.handle(
+                object: itemObject,
+                headerSessionID: sessionID,
+                headerSessionExists: true,
+                eventLoop: eventLoop
+            ) {
+                if let responseObject = await batchResponseObject(
+                    from: localHandling,
+                    fallbackID: originalID
+                ) {
+                    responseObjects.append(responseObject)
+                }
+                continue
+            }
+
+            if let refreshRequest = refreshCodeIssuesRequest(from: itemObject) {
+                guard let originalID else {
+                    forwardBatchNotification(
+                        itemObject,
+                        sessionID: sessionID
+                    )
+                    continue
+                }
+
+                let result = await forwardRefreshCodeIssuesRequest(
+                    refreshRequest,
+                    bodyData: itemData,
+                    sessionID: sessionID,
+                    requestIDs: [originalID],
+                    requestIsBatch: false,
+                    eventLoop: eventLoop
+                )
+                if let responseObject = batchResponseObject(
+                    from: result,
+                    fallbackID: originalID
+                ) {
+                    responseObjects.append(responseObject)
+                }
+                continue
+            }
+
+            if let localRequest = XcodeRunDestinationToolRequest.parse(from: itemObject) {
+                guard let originalID else {
+                    responseObjects.append(
+                        batchErrorObject(
+                            id: nil,
+                            code: -32600,
+                            message: "missing id"
+                        )
+                    )
+                    continue
+                }
+                let responseData = await runDestinationToolResponseData(
+                    for: localRequest,
+                    originalID: originalID,
+                    sessionID: sessionID,
+                    eventLoop: eventLoop
+                )
+                if let object = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any] {
+                    responseObjects.append(object)
+                }
+                continue
+            }
+
+            guard let originalID else {
+                forwardBatchNotification(
+                    itemObject,
+                    sessionID: sessionID
+                )
+                continue
+            }
+
+            let result = await forwardOnce(
+                bodyData: itemData,
+                sessionID: sessionID,
+                requestIDs: [originalID],
+                requestIsBatch: false,
+                eventLoop: eventLoop
+            )
+            if let responseObject = batchResponseObject(
+                from: result,
+                fallbackID: originalID
+            ) {
+                responseObjects.append(responseObject)
+            }
+        }
+
+        let responseArray: [Any] = responseObjects
+        return (try? JSONSerialization.data(withJSONObject: responseArray, options: [])) ?? Data("[]".utf8)
+    }
+
+    private func batchResponseObject(
+        from handling: LocalPostHandling,
+        fallbackID: RPCID?
+    ) async -> [String: Any]? {
+        switch handling {
+        case .initialize(let future, _, let originalID):
+            do {
+                var responseBuffer = try await future.get()
+                guard let data = responseBuffer.readData(length: responseBuffer.readableBytes) else {
+                    return batchErrorObject(
+                        id: originalID,
+                        code: -32000,
+                        message: "invalid upstream response"
+                    )
+                }
+                return try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+            } catch {
+                return batchErrorObject(
+                    id: originalID,
+                    code: -32000,
+                    message: "upstream timeout"
+                )
+            }
+
+        case .immediateResponse(let data, _):
+            return try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+
+        case .mcpError(let id, let code, let message, _):
+            return batchErrorObject(
+                id: id ?? fallbackID,
+                code: code,
+                message: message
+            )
+        }
+    }
+
+    private func forwardBatchNotification(
+        _ itemObject: [String: Any],
+        sessionID: String
+    ) {
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: itemObject, options: []),
+            let prepared = try? forwardingService.prepareRequest(
+                bodyData: bodyData,
+                parsedRequestJSON: itemObject,
+                sessionID: sessionID
+            )
+        else {
+            return
+        }
+
+        guard prepared.transform.expectsResponse == false else {
+            return
+        }
+        if prepared.transform.method == "notifications/initialized" && sessionManager.isInitialized() {
+            return
+        }
+        sessionManager.sendUpstream(
+            prepared.transform.upstreamData,
+            upstreamIndex: prepared.upstreamIndex
+        )
+    }
+
+    private func batchResponseObject(
+        from result: RefreshForwardAttemptResult,
+        fallbackID: RPCID
+    ) -> [String: Any]? {
+        switch result {
+        case .success(let responseData):
+            return try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+        case .timeout:
+            return batchErrorObject(
+                id: fallbackID,
+                code: -32000,
+                message: "upstream timeout"
+            )
+        case .upstreamUnavailable:
+            return batchErrorObject(
+                id: fallbackID,
+                code: -32001,
+                message: "upstream unavailable"
+            )
+        case .overloaded:
+            return batchErrorObject(
+                id: fallbackID,
+                code: -32003,
+                message: "refresh queue overloaded"
+            )
+        case .invalidRequest:
+            return batchErrorObject(
+                id: fallbackID,
+                code: -32700,
+                message: "invalid json"
+            )
+        case .invalidUpstreamResponse:
+            return batchErrorObject(
+                id: fallbackID,
+                code: -32000,
+                message: "invalid upstream response"
+            )
+        }
+    }
+
+    private func batchErrorObject(
+        id: RPCID?,
+        code: Int,
+        message: String
+    ) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id?.value.foundationObject ?? NSNull(),
+            "error": [
+                "code": code,
+                "message": message,
+            ],
+        ]
+    }
+
+    private func resolveWorkspacePath(
+        tabIdentifier: String,
+        sessionID: String,
+        eventLoop: EventLoop
+    ) async -> String? {
+        let initializeUpstreamIndex = sessionManager.chooseInitializeUpstreamIndex(
+            sessionID: sessionID
+        )
+        let windows = await listXcodeWindows(
+            sessionID: sessionID,
+            eventLoop: eventLoop,
+            upstreamIndexOverride: initializeUpstreamIndex
+        )
+        return windows?.first(where: { $0.tabIdentifier == tabIdentifier })?.workspacePath
+    }
+
+    private func makeToolCallResponseData(
+        id: RPCID,
+        text: String,
+        structuredContent: [String: Any],
+        isError: Bool
+    ) -> Data {
+        var result: [String: Any] = [
+            "content": [
+                [
+                    "type": "text",
+                    "text": text,
+                ]
+            ]
+        ]
+        if structuredContent.isEmpty == false {
+            result["structuredContent"] = structuredContent
+        }
+        if isError {
+            result["isError"] = true
+        }
+
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "result": result,
+        ]
+
+        guard JSONSerialization.isValidJSONObject(response),
+            let data = try? JSONSerialization.data(withJSONObject: response, options: [])
+        else {
+            let fallback: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": id.value.foundationObject,
+                "result": [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": isError ? "local tool error" : "local tool success",
+                        ]
+                    ],
+                    "isError": isError,
+                ],
+            ]
+            return (try? JSONSerialization.data(withJSONObject: fallback, options: [])) ?? Data()
+        }
+        return data
+    }
+
+    private func normalizedNonEmptyString(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+            trimmed.isEmpty == false
+        else {
+            return nil
+        }
+        return trimmed
     }
 }

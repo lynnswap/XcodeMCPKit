@@ -121,7 +121,7 @@ package struct LocalMCPResponder {
                     "pinned_upstream": .string(pinnedUpstreamIndex.map(String.init) ?? "none"),
                 ]
             )
-            let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+            let rewrittenResult = XcodeToolsListRewriter.rewriteResult(
                 cachedResult,
                 mode: refreshCodeIssuesMode
             )

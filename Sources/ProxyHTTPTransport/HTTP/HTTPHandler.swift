@@ -39,7 +39,8 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
+        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil,
+        runDestinationProcessRunner: (any ProcessRunning)? = nil
     ) {
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
@@ -64,6 +65,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             refreshCodeIssuesCoordinator: refreshCoordinator,
             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
             refreshCodeIssuesDebugState: refreshDebugState,
+            runDestinationProcessRunner: runDestinationProcessRunner,
             logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))

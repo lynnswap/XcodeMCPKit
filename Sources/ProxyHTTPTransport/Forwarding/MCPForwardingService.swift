@@ -366,7 +366,7 @@ package struct MCPForwardingService: Sendable {
         guard method == "tools/list" else {
             return upstreamData
         }
-        return RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
+        return XcodeToolsListRewriter.rewriteResponseDataIfNeeded(
             upstreamData,
             mode: mode
         )

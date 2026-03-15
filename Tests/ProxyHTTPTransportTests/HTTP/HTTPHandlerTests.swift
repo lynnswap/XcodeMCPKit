@@ -883,8 +883,11 @@ struct HTTPHandlerTests {
         #expect(responseID == 2)
 
         let result = responseObject?["result"] as? [String: Any]
-        let tools = result?["tools"] as? [Any]
-        #expect(tools?.count == 0)
+        let tools = result?["tools"] as? [[String: Any]]
+        let toolNames = Set((tools ?? []).compactMap { $0["name"] as? String })
+        #expect((tools?.count ?? 0) == 2)
+        #expect(toolNames.contains("XcodeListRunDestinations"))
+        #expect(toolNames.contains("XcodeSetActiveRunDestination"))
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
@@ -958,14 +961,925 @@ struct HTTPHandlerTests {
         #expect(responseID == 2)
 
         let result = responseObject?["result"] as? [String: Any]
-        let tools = result?["tools"] as? [Any]
-        #expect(tools?.count == 0)
+        let tools = result?["tools"] as? [[String: Any]]
+        let toolNames = Set((tools ?? []).compactMap { $0["name"] as? String })
+        #expect((tools?.count ?? 0) == 2)
+        #expect(toolNames.contains("XcodeListRunDestinations"))
+        #expect(toolNames.contains("XcodeSetActiveRunDestination"))
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
         #expect(sessionManager.chooseUpstreamIndexCallCount() == 2)
         #expect(sessionManager.lastChooseUpstreamShouldPin() == true)
         #expect(sessionManager.refreshToolsListCallCount() == 0)
+    }
+
+    @Test func httpListRunDestinationsReturnsStructuredContent() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    ),
+                    (
+                        name: "iPad Pro 11-inch (M5)",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPad Pro 11-inch (M5)",
+                        deviceModel: "iPad Pro 11-inch (M5)",
+                        osVersion: "26.2",
+                        generic: false
+                    ),
+                    (
+                        name: "iPhone 16",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 16",
+                        deviceModel: "iPhone 16",
+                        osVersion: "18.5",
+                        generic: false
+                    ),
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                guard toolName == "XcodeListWindows" else {
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                    )
+                )
+            }
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (initResponse, _) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "capabilities": [String: Any]()
+                    ],
+                ]
+            )
+            let sessionID = try #require(initResponse.value(forHTTPHeaderField: "Mcp-Session-Id"))
+
+            let (_, object) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: sessionID,
+                payload: toolsCallPayload(
+                    id: 2,
+                    name: "XcodeListRunDestinations",
+                    arguments: [
+                        "tabIdentifier": "windowtab-run-destinations"
+                    ]
+                )
+            )
+
+            let result = object["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let platforms = structuredContent?["platforms"] as? [[String: Any]]
+            let destinations = structuredContent?["destinations"] as? [[String: Any]]
+            let simulatorPlatform = platforms?.first(where: { ($0["id"] as? String) == "ios-simulator" })
+            let osVersions = simulatorPlatform?["osVersions"] as? [String]
+            let deviceFamilies = simulatorPlatform?["deviceFamilies"] as? [String]
+
+            #expect(osVersions == ["26.2", "18.5"])
+            #expect(deviceFamilies == ["iphone", "ipad"])
+            #expect(destinations?.count == 3)
+            #expect(destinations?.contains(where: { ($0["name"] as? String) == "iPhone 17" }) == true)
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpSetActiveRunDestinationUsesRequestedDeviceFamily() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            switch request.label {
+            case "xcode-list-run-destinations":
+                return ProcessOutput(
+                    terminationStatus: 0,
+                    stdout: makeRunDestinationListOutput([
+                        (
+                            name: "iPhone 17",
+                            platform: "iphonesimulator",
+                            architecture: "arm64",
+                            deviceName: "iPhone 17",
+                            deviceModel: "iPhone 17",
+                            osVersion: "26.2",
+                            generic: false
+                        ),
+                        (
+                            name: "iPad Pro 11-inch (M5)",
+                            platform: "iphonesimulator",
+                            architecture: "arm64",
+                            deviceName: "iPad Pro 11-inch (M5)",
+                            deviceModel: "iPad Pro 11-inch (M5)",
+                            osVersion: "26.2",
+                            generic: false
+                        ),
+                    ]),
+                    stderr: ""
+                )
+            case "xcode-set-active-run-destination":
+                #expect(
+                    request.arguments == [
+                        "-",
+                        workspacePath,
+                        "iPad Pro 11-inch (M5)",
+                        "iphonesimulator",
+                        "arm64",
+                        "iPad Pro 11-inch (M5)",
+                        "iPad Pro 11-inch (M5)",
+                        "26.2",
+                        "false",
+                    ]
+                )
+                return ProcessOutput(terminationStatus: 0, stdout: "OK", stderr: "")
+            default:
+                Issue.record("unexpected process request label: \(request.label)")
+                return ProcessOutput(terminationStatus: 1, stdout: "", stderr: "unexpected")
+            }
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                guard toolName == "XcodeListWindows" else {
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                    )
+                )
+            }
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (initResponse, _) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "capabilities": [String: Any]()
+                    ],
+                ]
+            )
+            let sessionID = try #require(initResponse.value(forHTTPHeaderField: "Mcp-Session-Id"))
+
+            let (_, object) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: sessionID,
+                payload: toolsCallPayload(
+                    id: 2,
+                    name: "XcodeSetActiveRunDestination",
+                    arguments: [
+                        "tabIdentifier": "windowtab-run-destinations",
+                        "platform": "ios-simulator",
+                        "osVersion": "26.2",
+                        "deviceFamily": "ipad",
+                    ]
+                )
+            )
+
+            let result = object["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let selectedDestination = structuredContent?["selectedDestination"] as? [String: Any]
+            #expect((selectedDestination?["name"] as? String) == "iPad Pro 11-inch (M5)")
+            #expect((structuredContent?["setterAccepted"] as? Bool) == true)
+            #expect((structuredContent?["readBackUnavailable"] as? Bool) == true)
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpRunDestinationToolUsesInitializeUpstreamForWindowLookup() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    )
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                guard toolName == "XcodeListWindows" else {
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndex(0)
+        sessionManager.setInitializeUpstreamIndex(1)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (_, object) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-run-destinations",
+                payload: toolsCallPayload(
+                    id: 2,
+                    name: "XcodeListRunDestinations",
+                    arguments: [
+                        "tabIdentifier": "windowtab-run-destinations"
+                    ]
+                )
+            )
+
+            let result = object["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let destinations = structuredContent?["destinations"] as? [[String: Any]]
+            #expect((destinations?.first?["name"] as? String) == "iPhone 17")
+            #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchListRunDestinationsReturnsJSONArrayResponse() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    )
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                guard toolName == "XcodeListWindows" else {
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                    )
+                )
+            }
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (initResponse, _) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "capabilities": [String: Any]()
+                    ],
+                ]
+            )
+            let sessionID = try #require(initResponse.value(forHTTPHeaderField: "Mcp-Session-Id"))
+
+            let (_, array) = try await postHTTPJSONArray(
+                url: server.url,
+                sessionID: sessionID,
+                payload: [
+                    toolsCallPayload(
+                        id: 2,
+                        name: "XcodeListRunDestinations",
+                        arguments: [
+                            "tabIdentifier": "windowtab-run-destinations"
+                        ]
+                    )
+                ]
+            )
+            #expect(array.count == 1)
+            let result = array.first?["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let destinations = structuredContent?["destinations"] as? [[String: Any]]
+            #expect((destinations?.first?["name"] as? String) == "iPhone 17")
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchRunDestinationToolWithoutSessionHeaderReturnsInitializeError() async throws {
+        let config = makeConfig()
+        let processRunner = TestProcessRunner { _ in
+            Issue.record("process runner should not be called")
+            return ProcessOutput(terminationStatus: 1, stdout: "", stderr: "unexpected")
+        }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (_, array) = try await postHTTPJSONArray(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    toolsCallPayload(
+                        id: 2,
+                        name: "XcodeListRunDestinations",
+                        arguments: [
+                            "tabIdentifier": "windowtab-run-destinations"
+                        ]
+                    )
+                ]
+            )
+            let error = array.first?["error"] as? [String: Any]
+            #expect((error?["code"] as? NSNumber)?.intValue == -32000)
+            #expect(error?["message"] as? String == "expected initialize request")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchRunDestinationToolMissingIDReturnsErrorObject() async throws {
+        let config = makeConfig()
+        let processRunner = TestProcessRunner { _ in
+            Issue.record("process runner should not be called")
+            return ProcessOutput(terminationStatus: 1, stdout: "", stderr: "unexpected")
+        }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (initResponse, _) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "capabilities": [String: Any]()
+                    ],
+                ]
+            )
+            let sessionID = try #require(initResponse.value(forHTTPHeaderField: "Mcp-Session-Id"))
+
+            let (_, array) = try await postHTTPJSONArray(
+                url: server.url,
+                sessionID: sessionID,
+                payload: [[
+                    "jsonrpc": "2.0",
+                    "method": "tools/call",
+                    "params": [
+                        "name": "XcodeListRunDestinations",
+                        "arguments": [
+                            "tabIdentifier": "windowtab-run-destinations"
+                        ]
+                    ]
+                ]]
+            )
+            let response = array.first
+            let error = response?["error"] as? [String: Any]
+            #expect(response?["id"] is NSNull)
+            #expect((error?["code"] as? NSNumber)?.intValue == -32600)
+            #expect(error?["message"] as? String == "missing id")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchRunDestinationToolReturnsErrorForInvalidBatchMember() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    )
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                guard toolName == "XcodeListWindows" else {
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                    )
+                )
+            }
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (initResponse, _) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "capabilities": [String: Any]()
+                    ],
+                ]
+            )
+            let sessionID = try #require(initResponse.value(forHTTPHeaderField: "Mcp-Session-Id"))
+
+            let (_, anyObject) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: sessionID,
+                payload: [
+                    1,
+                    toolsCallPayload(
+                        id: 2,
+                        name: "XcodeListRunDestinations",
+                        arguments: [
+                            "tabIdentifier": "windowtab-run-destinations"
+                        ]
+                    ),
+                ]
+            )
+            let array = anyObject as? [[String: Any]]
+            #expect(array?.count == 2)
+            let invalidError = array?.first(where: { $0["error"] != nil })?["error"] as? [String: Any]
+            #expect((invalidError?["code"] as? NSNumber)?.intValue == -32600)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchRunDestinationToolForwardsNonLocalNotifications() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    )
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/call" {
+                    guard toolName == "XcodeListWindows" else {
+                        return .immediate(
+                            try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                        )
+                    }
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                        )
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(id: originalID, text: "ok")
+                )
+            }
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (initResponse, _) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: nil,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "capabilities": [String: Any]()
+                    ],
+                ]
+            )
+            let sessionID = try #require(initResponse.value(forHTTPHeaderField: "Mcp-Session-Id"))
+
+            let (_, array) = try await postHTTPJSONArray(
+                url: server.url,
+                sessionID: sessionID,
+                payload: [
+                    toolsCallPayload(
+                        id: 2,
+                        name: "XcodeListRunDestinations",
+                        arguments: [
+                            "tabIdentifier": "windowtab-run-destinations"
+                        ]
+                    ),
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": [
+                            "value": 1
+                        ]
+                    ],
+                ]
+            )
+            #expect(array.count == 1)
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+            #expect(sessionManager.sentUpstreamCount() == 2)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchRunDestinationToolPreservesCachedToolsListHandling() async throws {
+        let config = makeConfig()
+        let workspacePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTTPRunDestinations-\(UUID().uuidString)")
+            .path
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    )
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    Issue.record("tools/list should be served from cache")
+                }
+                #expect(method == "tools/call")
+                guard toolName == "XcodeListWindows" else {
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: windowtab-run-destinations, workspacePath: \(workspacePath)"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: ["tools": [Any]()])!
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (_, array) = try await postHTTPJSONArray(
+                url: server.url,
+                sessionID: "session-batch-cached-tools",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/list",
+                    ],
+                    toolsCallPayload(
+                        id: 3,
+                        name: "XcodeListRunDestinations",
+                        arguments: [
+                            "tabIdentifier": "windowtab-run-destinations"
+                        ]
+                    ),
+                ]
+            )
+
+            #expect(array.count == 2)
+
+            let toolsResult = array.first(where: {
+                ($0["id"] as? NSNumber)?.intValue == 2
+            })?["result"] as? [String: Any]
+            let tools = toolsResult?["tools"] as? [[String: Any]]
+            let toolNames = Set((tools ?? []).compactMap { $0["name"] as? String })
+            #expect(toolNames.contains("XcodeListRunDestinations"))
+            #expect(toolNames.contains("XcodeSetActiveRunDestination"))
+
+            let runDestinationResult = array.first(where: {
+                ($0["id"] as? NSNumber)?.intValue == 3
+            })?["result"] as? [String: Any]
+            let structuredContent = runDestinationResult?["structuredContent"] as? [String: Any]
+            let destinations = structuredContent?["destinations"] as? [[String: Any]]
+            #expect((destinations?.first?["name"] as? String) == "iPhone 17")
+
+            #expect(sessionManager.sentMethods().contains("tools/list") == false)
+            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpBatchRunDestinationToolPreservesRefreshCodeIssuesProxyHandling() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
+        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
+
+        let target = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("App/Sources/App.swift")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "".write(to: target, atomically: true, encoding: .utf8)
+
+        let workspacePath = URL(fileURLWithPath: temporaryRoot)
+            .appendingPathComponent("SampleProject.xcworkspace").path
+        try FileManager.default.createDirectory(
+            atPath: workspacePath,
+            withIntermediateDirectories: true
+        )
+
+        let processRunner = TestProcessRunner { request in
+            #expect(request.label == "xcode-list-run-destinations")
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: makeRunDestinationListOutput([
+                    (
+                        name: "iPhone 17",
+                        platform: "iphonesimulator",
+                        architecture: "arm64",
+                        deviceName: "iPhone 17",
+                        deviceModel: "iPhone 17",
+                        osVersion: "26.2",
+                        generic: false
+                    )
+                ]),
+                stderr: ""
+            )
+        }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                switch toolName {
+                case "XcodeListWindows":
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text:
+                                "{\"message\":\"* tabIdentifier: windowtab-proxy, workspacePath: \(workspacePath)\"}"
+                        )
+                    )
+                case "XcodeListNavigatorIssues":
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                    ]
+                                ],
+                                "structuredContent": [
+                                    "issues": [
+                                        [
+                                            "path": target.path,
+                                            "message": "target warning",
+                                            "line": 12,
+                                            "severity": "warning",
+                                        ]
+                                    ],
+                                    "totalFound": 1,
+                                    "truncated": false,
+                                ],
+                            ]
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+            }
+        )
+        sessionManager.setAvailableUpstreamIndices([1, 0, 0])
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager,
+            runDestinationProcessRunner: processRunner
+        )
+
+        do {
+            let (_, array) = try await postHTTPJSONArray(
+                url: server.url,
+                sessionID: "session-batch-refresh",
+                payload: [
+                    toolsCallPayload(
+                        id: 2,
+                        name: "XcodeRefreshCodeIssuesInFile",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy",
+                            "filePath": "App/Sources/App.swift",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 3,
+                        name: "XcodeListRunDestinations",
+                        arguments: [
+                            "tabIdentifier": "windowtab-proxy"
+                        ]
+                    ),
+                ]
+            )
+
+            #expect(array.count == 2)
+
+            let refreshResult = array.first(where: {
+                ($0["id"] as? NSNumber)?.intValue == 2
+            })?["result"] as? [String: Any]
+            let refreshStructuredContent = refreshResult?["structuredContent"] as? [String: Any]
+            let issues = refreshStructuredContent?["issues"] as? [[String: Any]]
+            #expect((refreshStructuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
+            #expect(issues?.first?["path"] as? String == target.path)
+
+            let runDestinationResult = array.first(where: {
+                ($0["id"] as? NSNumber)?.intValue == 3
+            })?["result"] as? [String: Any]
+            let runDestinationStructuredContent = runDestinationResult?["structuredContent"] as? [String: Any]
+            let destinations = runDestinationStructuredContent?["destinations"] as? [[String: Any]]
+            #expect((destinations?.first?["name"] as? String) == "iPhone 17")
+
+            #expect(sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+                "XcodeListWindows",
+            ])
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
     }
 
     @Test func httpToolsListCachesResultOnMissWhenParamsArePresent() async throws {
@@ -3258,6 +4172,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         var pendingResponses: [PendingResponse] = []
         var sentRequests: [SentRequest] = []
         var availableUpstreamIndices: [Int?] = []
+        var initializeUpstreamIndex: Int?
     }
 
     private let state = NIOLockedValueBox(State())
@@ -3383,7 +4298,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func chooseInitializeUpstreamIndex(sessionID: String) -> Int? {
-        chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
+        if let initializeUpstreamIndex = state.withLockedValue(\.initializeUpstreamIndex) {
+            return initializeUpstreamIndex
+        }
+        return chooseUpstreamIndex(sessionID: sessionID, shouldPin: false)
     }
 
     func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex _: Int) -> Int64 {
@@ -3532,6 +4450,12 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func sentMethods() -> [String] {
+        state.withLockedValue { state in
+            state.sentRequests.map(\.method)
+        }
+    }
+
     func sentToolRequests() -> [String] {
         state.withLockedValue { state in
             state.sentRequests.compactMap { request in
@@ -3571,6 +4495,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setAvailableUpstreamIndices(_ values: [Int?]) {
         state.withLockedValue { $0.availableUpstreamIndices = values }
+    }
+
+    func setInitializeUpstreamIndex(_ value: Int?) {
+        state.withLockedValue { $0.initializeUpstreamIndex = value }
     }
 
     func requestTimeoutNotificationCount() -> Int {
@@ -3624,14 +4552,16 @@ private func addHTTPHandler(
     sessionManager: any RuntimeCoordinating,
     refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
     refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-    refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
+    refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil,
+    runDestinationProcessRunner: (any ProcessRunning)? = nil
 ) throws {
     let handler = HTTPHandler(
         config: config,
         sessionManager: sessionManager,
         refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-        refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
+        refreshCodeIssuesDebugState: refreshCodeIssuesDebugState,
+        runDestinationProcessRunner: runDestinationProcessRunner
     )
     try channel.pipeline.addHandler(handler).wait()
 }
@@ -3712,7 +4642,8 @@ private struct TestHTTPHandlerServer {
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
+        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
+        runDestinationProcessRunner: (any ProcessRunning)? = nil
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let refreshCoordinator =
@@ -3736,7 +4667,8 @@ private struct TestHTTPHandlerServer {
                             sessionManager: sessionManager,
                             refreshCodeIssuesCoordinator: refreshCoordinator,
                             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-                            refreshCodeIssuesDebugState: refreshDebugState
+                            refreshCodeIssuesDebugState: refreshDebugState,
+                            runDestinationProcessRunner: runDestinationProcessRunner
                         )
                     )
                 }
@@ -3767,7 +4699,7 @@ private struct TestHTTPHandlerServer {
 
 private func postHTTPJSON(
     url: URL,
-    sessionID: String,
+    sessionID: String?,
     payload: [String: Any]
 ) async throws -> (HTTPURLResponse, [String: Any]) {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
@@ -3776,7 +4708,9 @@ private func postHTTPJSON(
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    }
 
     let (responseData, response) = try await URLSession.shared.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse else {
@@ -3785,6 +4719,54 @@ private func postHTTPJSON(
     let object =
         (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
         ?? [:]
+    return (httpResponse, object)
+}
+
+private func postHTTPJSONArray(
+    url: URL,
+    sessionID: String?,
+    payload: [[String: Any]]
+) async throws -> (HTTPURLResponse, [[String: Any]]) {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    }
+
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw HTTPTestError.missingResponseHead
+    }
+    let object =
+        (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [[String: Any]]
+        ?? []
+    return (httpResponse, object)
+}
+
+private func postHTTPAnyJSON(
+    url: URL,
+    sessionID: String?,
+    payload: [Any]
+) async throws -> (HTTPURLResponse, Any) {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    }
+
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+        throw HTTPTestError.missingResponseHead
+    }
+    let object = try JSONSerialization.jsonObject(with: responseData, options: [])
     return (httpResponse, object)
 }
 
@@ -3909,4 +4891,35 @@ private func makeToolErrorResponse(id: RPCID, text: String) throws -> Data {
         ],
     ]
     return try JSONSerialization.data(withJSONObject: response, options: [])
+}
+
+private actor TestProcessRunner: ProcessRunning {
+    private let handler: @Sendable (ProcessRequest) throws -> ProcessOutput
+
+    init(handler: @escaping @Sendable (ProcessRequest) throws -> ProcessOutput) {
+        self.handler = handler
+    }
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        try handler(request)
+    }
+}
+
+private func makeRunDestinationListOutput(
+    _ records: [(name: String, platform: String, architecture: String, deviceName: String, deviceModel: String?, osVersion: String?, generic: Bool)]
+) -> String {
+    let recordSeparator = "\u{001E}"
+    let fieldSeparator = "\u{001F}"
+
+    return records.map { record in
+        [
+            record.name,
+            record.platform,
+            record.architecture,
+            record.deviceName,
+            record.deviceModel ?? "",
+            record.osVersion ?? "",
+            record.generic ? "true" : "false",
+        ].joined(separator: fieldSeparator)
+    }.joined(separator: recordSeparator)
 }

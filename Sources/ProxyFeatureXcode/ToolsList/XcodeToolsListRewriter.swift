@@ -1,7 +1,7 @@
 import Foundation
 import ProxyCore
 
-package enum RefreshCodeIssuesToolsListRewriter {
+package enum XcodeToolsListRewriter {
     package static func rewriteResult(
         _ result: JSONValue,
         mode: RefreshCodeIssuesMode
@@ -12,16 +12,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
             return result
         }
 
-        let rewrittenTools = tools.map { toolValue in
-            guard case .object(var toolObject) = toolValue,
-                case .string(let name) = toolObject["name"],
-                name == RefreshCodeIssuesRequest.toolName
-            else {
-                return toolValue
-            }
-            toolObject["description"] = .string(description(for: mode))
-            return .object(toolObject)
-        }
+        let rewrittenTools = rewriteTools(tools, mode: mode)
         resultObject["tools"] = .array(rewrittenTools)
         return .object(resultObject)
     }
@@ -54,7 +45,40 @@ package enum RefreshCodeIssuesToolsListRewriter {
         return rewrittenData
     }
 
-    private static func description(for mode: RefreshCodeIssuesMode) -> String {
+    private static func rewriteTools(
+        _ tools: [JSONValue],
+        mode: RefreshCodeIssuesMode
+    ) -> [JSONValue] {
+        var existingNames = Set<String>()
+        var rewritten: [JSONValue] = tools.map { toolValue in
+            guard case .object(var toolObject) = toolValue,
+                case .string(let name) = toolObject["name"]
+            else {
+                return toolValue
+            }
+
+            existingNames.insert(name)
+            if name == RefreshCodeIssuesRequest.toolName {
+                toolObject["description"] = .string(refreshDescription(for: mode))
+                return .object(toolObject)
+            }
+            return toolValue
+        }
+
+        for toolDefinition in XcodeRunDestinationTool.definitions() {
+            guard case .object(let toolObject) = toolDefinition,
+                case .string(let name) = toolObject["name"],
+                existingNames.contains(name) == false
+            else {
+                continue
+            }
+            rewritten.append(toolDefinition)
+        }
+
+        return rewritten
+    }
+
+    private static func refreshDescription(for mode: RefreshCodeIssuesMode) -> String {
         switch mode {
         case .proxy:
             return """
