@@ -7,6 +7,7 @@ package struct RequestTransform {
     package let idKey: String?
     package let responseIDs: [RPCID]
     package let method: String?
+    package let toolName: String?
     package let originalID: RPCID?
     package let isCacheableToolsListRequest: Bool
 }
@@ -20,6 +21,7 @@ package enum RequestInspector {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
             let method = object["method"] as? String
+            let toolName = toolName(for: method, in: object)
             // We intentionally treat tools/list as stable and cache it regardless of params.
             // Some clients attach pagination-like params even when they expect the full list.
             let isCacheableToolsListRequest = (method == "tools/list")
@@ -34,6 +36,7 @@ package enum RequestInspector {
                     idKey: rpcID.key,
                     responseIDs: [rpcID],
                     method: method,
+                    toolName: toolName,
                     originalID: rpcID,
                     isCacheableToolsListRequest: isCacheableToolsListRequest
                 )
@@ -46,6 +49,7 @@ package enum RequestInspector {
                 idKey: nil,
                 responseIDs: [],
                 method: method,
+                toolName: toolName,
                 originalID: nil,
                 isCacheableToolsListRequest: isCacheableToolsListRequest
             )
@@ -75,6 +79,7 @@ package enum RequestInspector {
                 idKey: nil,
                 responseIDs: responseIDs,
                 method: nil,
+                toolName: nil,
                 originalID: nil,
                 isCacheableToolsListRequest: false
             )
@@ -87,8 +92,20 @@ package enum RequestInspector {
             idKey: nil,
             responseIDs: [],
             method: nil,
+            toolName: nil,
             originalID: nil,
             isCacheableToolsListRequest: false
         )
+    }
+
+    private static func toolName(for method: String?, in object: [String: Any]) -> String? {
+        guard method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let toolName = params["name"] as? String,
+            toolName.isEmpty == false
+        else {
+            return nil
+        }
+        return toolName
     }
 }

@@ -141,15 +141,21 @@ package struct MCPForwardingService: Sendable {
                 upstreamData: rewrittenResourcesData,
                 mode: config.refreshCodeIssuesMode
             )
+            let normalizedToolCallData = Self.rewriteToolCallStructuredContentIfNeeded(
+                method: started.transform.method,
+                toolName: started.transform.toolName,
+                upstreamData: responseData,
+                cachedToolsListResult: sessionManager.cachedToolsListResult()
+            )
             if started.transform.isCacheableToolsListRequest,
-                let object = try? JSONSerialization.jsonObject(with: responseData, options: [])
+                let object = try? JSONSerialization.jsonObject(with: normalizedToolCallData, options: [])
                     as? [String: Any],
                 let resultAny = object["result"],
                 let result = JSONValue(any: resultAny)
             {
                 sessionManager.setCachedToolsListResult(result)
             }
-            if accountSuccess, Self.shouldNotifyUpstreamSuccess(for: responseData) {
+            if accountSuccess, Self.shouldNotifyUpstreamSuccess(for: normalizedToolCallData) {
                 for responseID in started.transform.responseIDs {
                     sessionManager.onRequestSucceeded(
                         sessionID: sessionID,
@@ -158,7 +164,7 @@ package struct MCPForwardingService: Sendable {
                     )
                 }
             }
-            return .success(responseData)
+            return .success(normalizedToolCallData)
 
         case .failure:
             if let firstResponseID = started.transform.responseIDs.first {
@@ -446,6 +452,172 @@ package struct MCPForwardingService: Sendable {
             upstreamData,
             mode: mode
         )
+    }
+
+    private static func rewriteToolCallStructuredContentIfNeeded(
+        method: String?,
+        toolName: String?,
+        upstreamData: Data,
+        cachedToolsListResult: JSONValue?
+    ) -> Data {
+        guard method == "tools/call",
+            let toolName,
+            toolHasOutputSchema(named: toolName, in: cachedToolsListResult),
+            let object = try? JSONSerialization.jsonObject(with: upstreamData, options: []) as? [String: Any],
+            let result = object["result"] as? [String: Any],
+            (result["isError"] as? Bool) != true
+        else {
+            return upstreamData
+        }
+
+        let rewrittenResult = rewrittenToolCallResult(toolName: toolName, result: result)
+        guard rewrittenResult.changed else {
+            return upstreamData
+        }
+
+        var rewrittenObject = object
+        rewrittenObject["result"] = rewrittenResult.result
+        guard JSONSerialization.isValidJSONObject(rewrittenObject),
+            let rewrittenData = try? JSONSerialization.data(withJSONObject: rewrittenObject, options: [])
+        else {
+            return upstreamData
+        }
+        return rewrittenData
+    }
+
+    private static func toolHasOutputSchema(named toolName: String, in toolsListResult: JSONValue?) -> Bool {
+        guard let toolsListResult,
+            case .object(let resultObject) = toolsListResult,
+            case .array(let tools) = resultObject["tools"]
+        else {
+            return false
+        }
+
+        for tool in tools {
+            guard case .object(let toolObject) = tool,
+                case .string(let candidateName) = toolObject["name"],
+                candidateName == toolName
+            else {
+                continue
+            }
+            return toolObject["outputSchema"] != nil
+        }
+        return false
+    }
+
+    private static func structuredToolContent(from result: [String: Any]) -> Any? {
+        guard let content = result["content"] as? [[String: Any]] else {
+            return nil
+        }
+
+        for item in content {
+            guard let text = item["text"] as? String,
+                text.isEmpty == false,
+                let textData = text.data(using: .utf8),
+                let structuredContent = try? JSONSerialization.jsonObject(with: textData, options: [])
+            else {
+                continue
+            }
+
+            if structuredContent is [String: Any] || structuredContent is [Any] {
+                return structuredContent
+            }
+        }
+
+        return nil
+    }
+
+    private static func rewrittenToolCallResult(toolName: String, result: [String: Any]) -> (
+        result: [String: Any], changed: Bool
+    ) {
+        var rewrittenResult = result
+        var changed = false
+
+        if rewrittenResult["structuredContent"] == nil,
+            let structuredContent = structuredToolContent(from: rewrittenResult)
+        {
+            rewrittenResult["structuredContent"] = structuredContent
+            changed = true
+        }
+
+        if let structuredContent = rewrittenResult["structuredContent"],
+            let normalizedStructuredContent = normalizeStructuredContentIfNeeded(
+                toolName: toolName,
+                structuredContent: structuredContent
+            )
+        {
+            rewrittenResult["structuredContent"] = normalizedStructuredContent
+            changed = true
+        }
+
+        return (rewrittenResult, changed)
+    }
+
+    private static func normalizeStructuredContentIfNeeded(
+        toolName: String,
+        structuredContent: Any
+    ) -> Any? {
+        switch toolName {
+        case "GetBuildLog":
+            guard let object = structuredContent as? [String: Any] else {
+                return nil
+            }
+            return normalizeGetBuildLogStructuredContentIfNeeded(object)
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizeGetBuildLogStructuredContentIfNeeded(
+        _ structuredContent: [String: Any]
+    ) -> [String: Any]? {
+        guard let buildLogEntries = structuredContent["buildLogEntries"] as? [[String: Any]] else {
+            return nil
+        }
+
+        var normalizedEntries: [[String: Any]] = []
+        normalizedEntries.reserveCapacity(buildLogEntries.count)
+        var changed = false
+
+        for entry in buildLogEntries {
+            guard let emittedIssues = entry["emittedIssues"] as? [[String: Any]] else {
+                normalizedEntries.append(entry)
+                continue
+            }
+
+            var normalizedIssues: [[String: Any]] = []
+            normalizedIssues.reserveCapacity(emittedIssues.count)
+            var entryChanged = false
+
+            for issue in emittedIssues {
+                guard issue["line"] == nil else {
+                    normalizedIssues.append(issue)
+                    continue
+                }
+
+                var normalizedIssue = issue
+                normalizedIssue["line"] = 0
+                normalizedIssues.append(normalizedIssue)
+                entryChanged = true
+            }
+
+            if entryChanged {
+                var normalizedEntry = entry
+                normalizedEntry["emittedIssues"] = normalizedIssues
+                normalizedEntries.append(normalizedEntry)
+                changed = true
+            } else {
+                normalizedEntries.append(entry)
+            }
+        }
+
+        guard changed else {
+            return nil
+        }
+
+        var normalizedStructuredContent = structuredContent
+        normalizedStructuredContent["buildLogEntries"] = normalizedEntries
+        return normalizedStructuredContent
     }
 
     private static func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

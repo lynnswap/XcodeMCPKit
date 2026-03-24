@@ -20,6 +20,9 @@ package enum RefreshCodeIssuesToolsListRewriter {
                 return toolValue
             }
             toolObject["description"] = .string(description(for: mode))
+            if mode == .proxy {
+                toolObject["outputSchema"] = proxyOutputSchema
+            }
             return .object(toolObject)
         }
         resultObject["tools"] = .array(rewrittenTools)
@@ -66,4 +69,68 @@ package enum RefreshCodeIssuesToolsListRewriter {
             """
         }
     }
+
+    private static let proxyOutputSchema: JSONValue = .object([
+        "type": .string("object"),
+        "required": .array([
+            .string("issues"),
+            .string("truncated"),
+            .string("totalFound"),
+        ]),
+        "properties": .object([
+            "message": .object([
+                "type": .string("string"),
+                "description": .string("Optional message with additional information about the search results"),
+            ]),
+            "truncated": .object([
+                "type": .string("boolean"),
+                "description": .string("Whether results were truncated due to exceeding 100 issues"),
+            ]),
+            "totalFound": .object([
+                "type": .string("integer"),
+                "description": .string("Total number of issues before truncation"),
+            ]),
+            "issues": .object([
+                "type": .string("array"),
+                "description": .string("The list of current issues matching the input filters"),
+                "items": .object([
+                    "type": .string("object"),
+                    "required": .array([
+                        .string("message"),
+                        .string("severity"),
+                    ]),
+                    "properties": .object([
+                        "severity": .object([
+                            "type": .string("string"),
+                            "description": .string("The severity of issue (error, warning, remark)"),
+                        ]),
+                        "line": .object([
+                            "type": .string("integer"),
+                            "description": .string("The line number where the issue was detected, if known"),
+                        ]),
+                        "vitality": .object([
+                            "type": .string("string"),
+                            "enum": .array([
+                                .string("fresh"),
+                                .string("stale"),
+                            ]),
+                            "description": .string("Whether an issue from a previous build is known to still be relevant or whether something might have changed since it was emitted (for example if the source file has been edited and it isn't yet known whether that edit fixes the issue). Possible values: (fresh, stale)"),
+                        ]),
+                        "path": .object([
+                            "type": .string("string"),
+                            "description": .string("The file path where the issue was detected, if any"),
+                        ]),
+                        "message": .object([
+                            "type": .string("string"),
+                            "description": .string("The message describing the issue"),
+                        ]),
+                        "category": .object([
+                            "type": .string("string"),
+                            "description": .string("The category of the issue, if known"),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ]),
+    ])
 }

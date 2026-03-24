@@ -1139,6 +1139,16 @@ struct HTTPHandlerTests {
                         [
                             "name": "XcodeRefreshCodeIssuesInFile",
                             "description": "original description",
+                            "outputSchema": [
+                                "type": "object",
+                                "required": ["filePath", "diagnosticsCount", "content", "success"],
+                                "properties": [
+                                    "filePath": ["type": "string"],
+                                    "diagnosticsCount": ["type": "integer"],
+                                    "content": ["type": "string"],
+                                    "success": ["type": "boolean"],
+                                ],
+                            ],
                         ]
                     ]
                 ],
@@ -1193,8 +1203,11 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
         let description = tools?.first?["description"] as? String
+        let outputSchema = tools?.first?["outputSchema"] as? [String: Any]
+        let required = outputSchema?["required"] as? [String]
         #expect(description?.contains("avoid switching Spaces") == true)
         #expect(description?.contains("--refresh-code-issues-mode upstream") == true)
+        #expect(required == ["issues", "truncated", "totalFound"])
     }
 
     @Test func httpToolsListRewritesRefreshDescriptionOnCachedResponse() async throws {
@@ -1209,6 +1222,16 @@ struct HTTPHandlerTests {
                     [
                         "name": "XcodeRefreshCodeIssuesInFile",
                         "description": "original description",
+                        "outputSchema": [
+                            "type": "object",
+                            "required": ["filePath", "diagnosticsCount", "content", "success"],
+                            "properties": [
+                                "filePath": ["type": "string"],
+                                "diagnosticsCount": ["type": "integer"],
+                                "content": ["type": "string"],
+                                "success": ["type": "boolean"],
+                            ],
+                        ],
                     ]
                 ]
             ])!
@@ -1261,7 +1284,10 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
         let description = tools?.first?["description"] as? String
+        let outputSchema = tools?.first?["outputSchema"] as? [String: Any]
+        let required = outputSchema?["required"] as? [String]
         #expect(description?.contains("native live diagnostics path") == true)
+        #expect(required == ["filePath", "diagnosticsCount", "content", "success"])
     }
 
     @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
@@ -2590,6 +2616,137 @@ struct HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             #expect((result?["isError"] as? Bool) == true)
             #expect(sessionManager.sentUpstreamCount() == 1)
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpToolCallAddsStructuredContentFromJSONStringWhenToolHasOutputSchema() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text:
+                            "{\"message\":\"* tabIdentifier: windowtab1, workspacePath: /tmp/Sample.xcodeproj\\n\"}"
+                    )
+                )
+            }
+        )
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [[
+                    "name": "XcodeListWindows",
+                    "outputSchema": ["type": "object"],
+                ]]
+            ])!
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-structured-tool-call",
+                payload: toolsCallPayload(
+                    id: 14,
+                    name: "XcodeListWindows",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(structuredContent?["message"] as? String == "* tabIdentifier: windowtab1, workspacePath: /tmp/Sample.xcodeproj\n")
+            #expect(content?.first?["text"] as? String == "{\"message\":\"* tabIdentifier: windowtab1, workspacePath: /tmp/Sample.xcodeproj\\n\"}")
+        } catch {
+            await server.shutdown()
+            throw error
+        }
+        await server.shutdown()
+    }
+
+    @Test func httpToolCallNormalizesGetBuildLogIssuesMissingLine() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "GetBuildLog")
+                return .immediate(
+                    try makeToolResultResponse(
+                        id: originalID,
+                        result: [
+                            "content": [[
+                                "type": "text",
+                                "text": "{\"buildResult\":\"The build succeeded\",\"buildIsRunning\":false,\"buildLogEntries\":[{\"buildTask\":\"Build target App\",\"emittedIssues\":[{\"message\":\"Using stub executor library with Swift entry point.\",\"severity\":\"remark\"}]}],\"fullLogPath\":\"/tmp/build.log\",\"totalFound\":1,\"truncated\":false}",
+                            ]],
+                            "structuredContent": [
+                                "buildResult": "The build succeeded",
+                                "buildIsRunning": false,
+                                "buildLogEntries": [[
+                                    "buildTask": "Build target App",
+                                    "emittedIssues": [[
+                                        "message": "Using stub executor library with Swift entry point.",
+                                        "severity": "remark",
+                                    ]],
+                                ]],
+                                "fullLogPath": "/tmp/build.log",
+                                "totalFound": 1,
+                                "truncated": false,
+                            ],
+                        ]
+                    )
+                )
+            }
+        )
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [[
+                    "name": "GetBuildLog",
+                    "outputSchema": ["type": "object"],
+                ]]
+            ])!
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-build-log-normalized",
+                payload: toolsCallPayload(
+                    id: 15,
+                    name: "GetBuildLog",
+                    arguments: [
+                        "tabIdentifier": "windowtab1",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            let buildLogEntries = structuredContent?["buildLogEntries"] as? [[String: Any]]
+            let emittedIssues = buildLogEntries?.first?["emittedIssues"] as? [[String: Any]]
+            let content = result?["content"] as? [[String: Any]]
+
+            #expect((emittedIssues?.first?["line"] as? NSNumber)?.intValue == 0)
+            #expect(content?.first?["text"] as? String == "{\"buildResult\":\"The build succeeded\",\"buildIsRunning\":false,\"buildLogEntries\":[{\"buildTask\":\"Build target App\",\"emittedIssues\":[{\"message\":\"Using stub executor library with Swift entry point.\",\"severity\":\"remark\"}]}],\"fullLogPath\":\"/tmp/build.log\",\"totalFound\":1,\"truncated\":false}")
         } catch {
             await server.shutdown()
             throw error
