@@ -199,7 +199,7 @@ package struct HTTPResponseWriter: Sendable {
         if let remote = request.remoteAddress {
             metadata["remote"] = .string(remote)
         }
-        logger.info("HTTP request", metadata: metadata)
+        logger.debug("HTTP request received", metadata: metadata)
     }
 
     package func logResponse(
@@ -207,21 +207,49 @@ package struct HTTPResponseWriter: Sendable {
         status: HTTPResponseStatus,
         sessionID: String?
     ) {
-        var metadata: Logger.Metadata = [
-            "id": .string(request.id),
-            "method": .string(request.method),
-            "path": .string(request.path),
-            "status": .string("\(status.code)"),
-        ]
-        if let remote = request.remoteAddress {
-            metadata["remote"] = .string(remote)
+        let resolvedSessionID = sessionID ?? "no-session"
+        let message = Self.makeHTTPLogBlock(
+            request: request,
+            statusCode: status.code,
+            sessionID: resolvedSessionID
+        )
+        // Emit the human-readable block directly so the visible timestamp format
+        // is not wrapped by the default swift-log ISO8601 prefix.
+        if let data = (message + "\n").data(using: .utf8) {
+            FileHandle.standardOutput.write(data)
         }
-        if let sessionID {
-            metadata["session"] = .string(sessionID)
-        }
-        logger.info("HTTP response", metadata: metadata)
     }
 
+    package static func makeHTTPLogBlock(
+        request: HTTPHandler.RequestLogContext,
+        statusCode: UInt,
+        sessionID: String,
+        date: Date = Date()
+    ) -> String {
+        let header = "\(formatHeaderDate(date)) info \(sessionID) \(statusCode)"
+        let requestLine = "\(request.method) \(request.path)"
+        return [header, requestLine, request.mcpInvocation, request.requestParamsJSON].joined(separator: "\n")
+    }
+
+    private static let headerDateFormatterThreadKey = "ProxyHTTPTransport.HTTPResponseWriter.headerDateFormatter"
+
+    private static func headerDateFormatter() -> DateFormatter {
+        let threadDictionary = Thread.current.threadDictionary
+        if let formatter = threadDictionary[headerDateFormatterThreadKey] as? DateFormatter {
+            return formatter
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "yy-MM-dd HH:mm:ss"
+        threadDictionary[headerDateFormatterThreadKey] = formatter
+        return formatter
+    }
+
+    private static func formatHeaderDate(_ date: Date) -> String {
+        headerDateFormatter().string(from: date)
+    }
     private func sendResponseData(
         on channel: Channel,
         data: Data,

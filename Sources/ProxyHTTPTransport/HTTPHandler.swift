@@ -17,6 +17,19 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         package let method: String
         package let path: String
         package let remoteAddress: String?
+        package let mcpInvocation: String
+        package let requestParamsJSON: String
+
+        package func withMCPDetails(invocation: String, paramsJSON: String) -> RequestLogContext {
+            RequestLogContext(
+                id: id,
+                method: method,
+                path: path,
+                remoteAddress: remoteAddress,
+                mcpInvocation: invocation,
+                requestParamsJSON: paramsJSON
+            )
+        }
     }
 
     package struct State: Sendable {
@@ -150,7 +163,9 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             id: UUID().uuidString,
             method: head.method.rawValue,
             path: path,
-            remoteAddress: remoteAddressString(for: context.channel)
+            remoteAddress: remoteAddressString(for: context.channel),
+            mcpInvocation: "unknown",
+            requestParamsJSON: "null"
         )
         logRequest(requestLog)
 
@@ -399,6 +414,12 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
+        let details = Self.mcpLogDetails(from: bodyData)
+        let requestLog = requestLog.withMCPDetails(
+            invocation: details.invocation,
+            paramsJSON: details.paramsJSON
+        )
+
         let headerSessionID = HTTPRequestValidator.sessionID(from: head.headers)
         let headerSessionExists = headerSessionID.map { controlService.hasSession(id: $0) } ?? false
         let keepAlive = head.isKeepAlive
@@ -458,6 +479,54 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
                 )
             }
         }
+    }
+
+    package static func mcpLogDetails(from bodyData: Data) -> (invocation: String, paramsJSON: String) {
+        guard let requestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: []) else {
+            return ("unknown", "null")
+        }
+
+        if let object = requestJSON as? [String: Any] {
+            return (
+                mcpInvocation(from: object),
+                jsonString((object["params"] as Any?) ?? NSNull())
+            )
+        }
+
+        if let array = requestJSON as? [Any] {
+            let paramsArray = array.map { item -> Any in
+                guard let object = item as? [String: Any] else { return NSNull() }
+                return object["params"] ?? NSNull()
+            }
+            return (
+                "batch[\(array.count)]",
+                jsonString(paramsArray)
+            )
+        }
+
+        return ("unknown", "null")
+    }
+
+    private static func mcpInvocation(from object: [String: Any]) -> String {
+        let method = (object["method"] as? String) ?? "unknown"
+        guard method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let toolName = params["name"] as? String,
+            toolName.isEmpty == false
+        else {
+            return method
+        }
+        return "\(method):\(toolName)"
+    }
+
+    private static func jsonString(_ value: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+            let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+            let string = String(data: data, encoding: .utf8)
+        else {
+            return "null"
+        }
+        return string
     }
 
 }

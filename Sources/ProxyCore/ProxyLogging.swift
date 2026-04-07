@@ -2,6 +2,71 @@ import Foundation
 import Logging
 import NIOConcurrencyHelpers
 
+private struct CompactDateLogHandler: LogHandler {
+    private static let cachedFormatter = NIOLockedValueBox<DateFormatter>({
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "yy-MM-dd HH:mm:ss"
+        return formatter
+    }())
+
+    let label: String
+    var logLevel: Logger.Level
+    var metadata: Logger.Metadata = [:]
+
+    init(label: String, logLevel: Logger.Level) {
+        self.label = label
+        self.logLevel = logLevel
+    }
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(
+        level: Logger.Level,
+        message: Logger.Message,
+        metadata explicitMetadata: Logger.Metadata?,
+        source: String,
+        file: String,
+        function: String,
+        line: UInt
+    ) {
+        guard level >= logLevel else { return }
+
+        let mergedMetadata = metadata.merging(explicitMetadata ?? [:], uniquingKeysWith: { _, new in new })
+        let timestamp = Self.formatTimestamp(Date())
+
+        var output = "\(timestamp) \(level) \(label):"
+        if !mergedMetadata.isEmpty {
+            output += " \(Self.formatMetadata(mergedMetadata))"
+        }
+        output += " \(message)\n"
+
+        guard let data = output.data(using: .utf8) else { return }
+        FileHandle.standardOutput.write(data)
+    }
+
+    private static func formatTimestamp(_ date: Date) -> String {
+        cachedFormatter.withLockedValue { formatter in
+            formatter.string(from: date)
+        }
+    }
+
+    private static func formatMetadata(_ metadata: Logger.Metadata) -> String {
+        metadata
+            .keys
+            .sorted()
+            .compactMap { key in
+                guard let value = metadata[key] else { return nil }
+                return "\(key)=\(value)"
+            }
+            .joined(separator: " ")
+    }
+}
+
 public enum ProxyLogging {
     private static let bootstrapState = NIOLockedValueBox(false)
     private static let labelPrefix = "XcodeMCPProxy"
@@ -21,9 +86,7 @@ public enum ProxyLogging {
         let level = LogLevelParser.resolve(from: environment)
 
         LoggingSystem.bootstrap { label in
-            var handler = StreamLogHandler.standardError(label: label)
-            handler.logLevel = level
-            return handler
+            CompactDateLogHandler(label: label, logLevel: level)
         }
     }
 
