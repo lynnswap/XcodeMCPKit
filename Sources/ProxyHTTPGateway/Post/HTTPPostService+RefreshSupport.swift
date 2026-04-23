@@ -381,23 +381,6 @@ extension HTTPPostService {
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream
             )
-        case .overloaded(let responseIDs, let isBatch):
-            if responseIDs.isEmpty {
-                return .plain(
-                    status: .tooManyRequests,
-                    body: "refresh queue overloaded",
-                    sessionID: sessionID
-                )
-            }
-            return .mcpError(
-                id: nil,
-                ids: responseIDs,
-                code: -32003,
-                message: "refresh queue overloaded",
-                forceBatchArray: isBatch,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
         case .cancelled(let responseIDs, let isBatch):
             return .mcpError(
                 id: nil,

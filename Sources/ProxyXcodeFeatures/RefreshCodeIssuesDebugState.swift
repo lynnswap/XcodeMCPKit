@@ -1,26 +1,20 @@
 import Foundation
 
 package struct RefreshCodeIssuesQueueDebugSnapshot: Codable, Sendable {
-    package let maxPendingPerKey: Int
-    package let maxPendingTotal: Int
-    package let queueWaitTimeoutSeconds: Double
+    package let defaultRequestTimeoutSeconds: Double
     package let activeByQueueKey: [String: Int]
     package let waitingByQueueKey: [String: Int]
     package let activeRequestCount: Int
     package let waitingRequestCount: Int
 
     package init(
-        maxPendingPerKey: Int,
-        maxPendingTotal: Int,
-        queueWaitTimeoutSeconds: Double,
+        defaultRequestTimeoutSeconds: Double,
         activeByQueueKey: [String: Int],
         waitingByQueueKey: [String: Int],
         activeRequestCount: Int,
         waitingRequestCount: Int
     ) {
-        self.maxPendingPerKey = maxPendingPerKey
-        self.maxPendingTotal = maxPendingTotal
-        self.queueWaitTimeoutSeconds = queueWaitTimeoutSeconds
+        self.defaultRequestTimeoutSeconds = defaultRequestTimeoutSeconds
         self.activeByQueueKey = activeByQueueKey
         self.waitingByQueueKey = waitingByQueueKey
         self.activeRequestCount = activeRequestCount
@@ -156,20 +150,14 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state = State()
-    private let maxPendingPerKey: Int
-    private let maxPendingTotal: Int
-    private let queueWaitTimeoutSeconds: Double
+    private let defaultRequestTimeoutSeconds: Double
     private let recentCompletedLimit: Int
 
     package init(
-        maxPendingPerKey: Int,
-        maxPendingTotal: Int,
-        queueWaitTimeoutSeconds: Double,
+        defaultRequestTimeoutSeconds: Double,
         recentCompletedLimit: Int = 20
     ) {
-        self.maxPendingPerKey = maxPendingPerKey
-        self.maxPendingTotal = maxPendingTotal
-        self.queueWaitTimeoutSeconds = queueWaitTimeoutSeconds
+        self.defaultRequestTimeoutSeconds = defaultRequestTimeoutSeconds
         self.recentCompletedLimit = recentCompletedLimit
     }
 
@@ -284,8 +272,6 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             return "timed_out"
         case "cancelled":
             return "cancelled"
-        case "queue_limit_exceeded", "overloaded":
-            return "rejected"
         default:
             return "failed"
         }
@@ -331,9 +317,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
                 )
             }
         let queue = RefreshCodeIssuesQueueDebugSnapshot(
-            maxPendingPerKey: maxPendingPerKey,
-            maxPendingTotal: maxPendingTotal,
-            queueWaitTimeoutSeconds: queueWaitTimeoutSeconds,
+            defaultRequestTimeoutSeconds: defaultRequestTimeoutSeconds,
             activeByQueueKey: activeByQueueKey,
             waitingByQueueKey: waitingByQueueKey,
             activeRequestCount: activeRequests.filter { $0.state == "running" }.count,

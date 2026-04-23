@@ -113,8 +113,6 @@ extension RefreshCodeIssuesWorkflow {
             return "timeout"
         case .upstreamUnavailable:
             return "upstream_unavailable"
-        case .overloaded:
-            return "overloaded"
         case .cancelled:
             return "cancelled"
         case .invalidRequest:

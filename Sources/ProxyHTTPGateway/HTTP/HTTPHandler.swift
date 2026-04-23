@@ -45,15 +45,11 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     ) {
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault(
-                requestTimeout: config.requestTimeout
-            )
+            ?? RefreshCodeIssuesCoordinator.makeDefault()
         let refreshDebugState =
             refreshCodeIssuesDebugState
             ?? RefreshCodeIssuesDebugState(
-                maxPendingPerKey: refreshCoordinator.maxPendingPerKey,
-                maxPendingTotal: refreshCoordinator.maxPendingTotal,
-                queueWaitTimeoutSeconds: refreshCoordinator.queueWaitTimeoutSeconds
+                defaultRequestTimeoutSeconds: config.requestTimeout
             )
         self.config = config
         self.controlService = HTTPControlService(

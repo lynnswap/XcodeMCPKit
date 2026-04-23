@@ -29,7 +29,6 @@ package enum RefreshForwardAttemptResult: Sendable {
     case success(Data)
     case timeout(responseIDs: [RPCID], isBatch: Bool)
     case upstreamUnavailable(responseIDs: [RPCID], isBatch: Bool)
-    case overloaded(responseIDs: [RPCID], isBatch: Bool)
     case cancelled(responseIDs: [RPCID], isBatch: Bool)
     case invalidRequest
     case invalidUpstreamResponse
@@ -130,6 +129,14 @@ package struct RefreshCodeIssuesWorkflow {
             remainingTimeout(cappedAt: capSeconds, reserving: reserveSeconds)
         }
 
+        func waitTimeout() -> TimeAmount? {
+            guard let remainingNs = remainingNanoseconds() else {
+                return nil
+            }
+            let maxTimeAmountNs = UInt64(Int64.max)
+            return .nanoseconds(Int64(min(remainingNs, maxTimeAmountNs)))
+        }
+
         func canDelay(_ delayNanoseconds: UInt64) -> Bool {
             guard let remainingNanoseconds = remainingNanoseconds() else {
                 return true
@@ -200,6 +207,10 @@ package struct RefreshCodeIssuesWorkflow {
         internalToolCaller: @escaping InternalToolCaller,
         forwarder: @escaping Forwarder
     ) async -> RefreshForwardAttemptResult {
+        let executionBudget = ExecutionBudget(
+            requestTimeout: requestTimeout,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
         let debugRequestID = debugState.beginRequest(
             sessionID: sessionID,
             queueKey: refreshRequest.queueKey,
@@ -214,8 +225,24 @@ package struct RefreshCodeIssuesWorkflow {
             "queue_key": .string(refreshRequest.queueKey),
         ]
 
+        if executionBudget.isExhausted {
+            debugState.updateStep(
+                requestID: debugRequestID,
+                step: "request_timeout_exhausted",
+                state: "timed_out"
+            )
+            debugState.finishRequest(
+                requestID: debugRequestID,
+                outcome: "timeout"
+            )
+            return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
+        }
+
         do {
-            return try await coordinator.withPermit(key: refreshRequest.queueKey) { permit in
+            return try await coordinator.withPermit(
+                key: refreshRequest.queueKey,
+                requestTimeout: executionBudget.waitTimeout()
+            ) { permit in
                 let queueMetadata: Logger.Metadata = [
                     "pending_for_key": .string("\(permit.pendingForKey)"),
                     "pending_total": .string("\(permit.pendingTotal)"),
@@ -251,10 +278,18 @@ package struct RefreshCodeIssuesWorkflow {
                     requestID: debugRequestID
                 )
 
-                let executionBudget = ExecutionBudget(
-                    requestTimeout: requestTimeout,
-                    requestTimeoutOverride: requestTimeoutOverride
-                )
+                if executionBudget.isExhausted {
+                    debugState.updateStep(
+                        requestID: debugRequestID,
+                        step: "queue_wait_timed_out",
+                        state: "timed_out"
+                    )
+                    debugState.finishRequest(
+                        requestID: debugRequestID,
+                        outcome: "timeout"
+                    )
+                    return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
+                }
                 debugState.updateStep(
                     requestID: debugRequestID,
                     step: "execution_budget_started",
@@ -310,28 +345,9 @@ package struct RefreshCodeIssuesWorkflow {
                 )
                 return result
             }
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueLimitExceeded {
-            logger.warning(
-                "Rejected refresh code issues request because queue is full",
-                metadata: [
-                    "session": .string(sessionID),
-                    "mode": .string(mode.rawValue),
-                    "tab_identifier": .string(refreshRequest.tabIdentifier ?? "none"),
-                    "queue_key": .string(refreshRequest.queueKey),
-                ]
-            )
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "queue_limit_exceeded"
-            )
-            debugState.finishRequest(
-                requestID: debugRequestID,
-                outcome: "queue_limit_exceeded"
-            )
-            return .overloaded(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
             logger.warning(
-                "Rejected refresh code issues request after queue wait timeout",
+                "Refresh code issues request timed out while waiting for permit",
                 metadata: [
                     "session": .string(sessionID),
                     "mode": .string(mode.rawValue),
@@ -345,9 +361,9 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "queue_wait_timed_out"
+                outcome: "timeout"
             )
-            return .overloaded(responseIDs: requestIDs, isBatch: requestIsBatch)
+            return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch is CancellationError {
             logger.debug(
                 "Cancelled queued refresh code issues request",

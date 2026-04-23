@@ -1,3 +1,4 @@
+import NIO
 import Testing
 import XcodeMCPTestSupport
 
@@ -7,15 +8,15 @@ import XcodeMCPTestSupport
 struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorSerializesRequestsForSameKey() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(
-            queueWaitTimeout: .seconds(5),
-            queueWaitClock: clock
-        )
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-same",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("first")
                 await releaseFirst.wait()
             }
@@ -25,7 +26,10 @@ struct RefreshCodeIssuesCoordinatorTests {
         }
 
         let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-same",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("second")
             }
         }
@@ -45,7 +49,10 @@ struct RefreshCodeIssuesCoordinatorTests {
         let acquisitions = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-a") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-a",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("first")
                 await releaseFirst.wait()
             }
@@ -55,7 +62,10 @@ struct RefreshCodeIssuesCoordinatorTests {
         }
 
         let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-b") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-b",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("second")
             }
         }
@@ -70,91 +80,68 @@ struct RefreshCodeIssuesCoordinatorTests {
         #expect(await acquisitions.snapshot() == ["first", "second"])
     }
 
-    @Test func refreshCoordinatorRejectsWhenPerKeyQueueLimitIsExceeded() async throws {
+    @Test func refreshCoordinatorAcceptsManyQueuedWaitersForSameKey() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 8,
-            queueWaitTimeout: .seconds(5),
-            queueWaitClock: clock
-        )
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
-        let acquisitions = RecordedValues<String>()
+        let completionCount = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
-                await acquisitions.append("first")
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-many",
+                requestTimeout: nil
+            ) { _ in
+                await completionCount.append("first")
                 await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
+            await completionCount.count() == 1
         }
 
-        let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-same") { _ in
-                await acquisitions.append("second")
+        let queuedTasks = (0..<100).map { index in
+            Task<String, Never> {
+                do {
+                    _ = try await coordinator.withPermit(
+                        key: "windowtab-many",
+                        requestTimeout: nil
+                    ) { _ in
+                        await completionCount.append("queued-\(index)")
+                    }
+                    return "success"
+                } catch {
+                    return "failed"
+                }
             }
         }
 
-        await clock.sleep(untilSuspendedBy: 1)
-
-        do {
-            _ = try await coordinator.withPermit(key: "windowtab-same") { _ in () }
-            #expect(Bool(false))
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueLimitExceeded {
-            #expect(Bool(true))
-        }
+        await Task.yield()
+        await Task.yield()
+        #expect(await completionCount.count() == 1)
 
         await releaseFirst.signal()
         _ = await firstTask.value
-        _ = await secondTask.value
-        #expect(await acquisitions.snapshot() == ["first", "second"])
-    }
-
-    @Test func refreshCoordinatorRejectsWhenGlobalQueueLimitIsExceeded() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 4,
-            maxPendingTotal: 0
-        )
-        let releaseFirst = AsyncGate()
-        let acquisitions = RecordedValues<String>()
-
-        let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-a") { _ in
-                await acquisitions.append("first")
-                await releaseFirst.wait()
-            }
-        }
-        try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
+        for task in queuedTasks {
+            #expect(await task.value == "success")
         }
 
-        do {
-            _ = try await coordinator.withPermit(key: "windowtab-a") { _ in () }
-            #expect(Bool(false))
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueLimitExceeded {
-            #expect(Bool(true))
+        try await spinUntil("waiting for queued completions") {
+            await completionCount.count() == 101
         }
-
-        await releaseFirst.signal()
-        _ = await firstTask.value
     }
 
     @Test func refreshCoordinatorTimeoutRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 4,
-            queueWaitTimeout: .milliseconds(50),
-            queueWaitClock: clock
-        )
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-timeout") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-timeout",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("first")
                 await releaseFirst.wait()
             }
@@ -165,8 +152,13 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         let secondTask = Task<Void, Never> {
             do {
-                _ = try await coordinator.withPermit(key: "windowtab-timeout") { _ in () }
-                await outcomes.append("success")
+                _ = try await coordinator.withPermit(
+                    key: "windowtab-timeout",
+                    requestTimeout: .milliseconds(50)
+                ) { _ in
+                    await outcomes.append("success")
+                }
+                await outcomes.append("unexpected-success")
             } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
                 await outcomes.append("timed-out")
             } catch {
@@ -182,7 +174,10 @@ struct RefreshCodeIssuesCoordinatorTests {
         #expect(await outcomes.snapshot() == ["timed-out"])
 
         let thirdTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-timeout") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-timeout",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("third")
             }
         }
@@ -194,20 +189,58 @@ struct RefreshCodeIssuesCoordinatorTests {
         #expect(await acquisitions.snapshot() == ["first", "third"])
     }
 
+    @Test func refreshCoordinatorNilRequestTimeoutKeepsQueuedWaiterWaiting() async throws {
+        let clock = TestClock()
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let releaseFirst = AsyncGate()
+        let outcomes = RecordedValues<String>()
+
+        let firstTask = Task<Void, Never> {
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-unbounded",
+                requestTimeout: nil
+            ) { _ in
+                await releaseFirst.wait()
+            }
+        }
+
+        let secondTask = Task<Void, Never> {
+            do {
+                _ = try await coordinator.withPermit(
+                    key: "windowtab-unbounded",
+                    requestTimeout: nil
+                ) { _ in
+                    await outcomes.append("success")
+                }
+            } catch {
+                await outcomes.append("unexpected")
+            }
+        }
+
+        await Task.yield()
+        await Task.yield()
+        clock.advance(by: .seconds(10))
+        await Task.yield()
+        #expect(await outcomes.count() == 0)
+
+        await releaseFirst.signal()
+        _ = await firstTask.value
+        _ = await secondTask.value
+        #expect(await outcomes.snapshot() == ["success"])
+    }
+
     @Test func refreshCoordinatorCancellationRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 4,
-            queueWaitTimeout: .seconds(5),
-            queueWaitClock: clock
-        )
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-cancel") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-cancel",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("first")
                 await releaseFirst.wait()
             }
@@ -218,8 +251,12 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         let cancelledTask = Task<Void, Never> {
             do {
-                _ = try await coordinator.withPermit(key: "windowtab-cancel") { _ in () }
-                await outcomes.append("success")
+                _ = try await coordinator.withPermit(
+                    key: "windowtab-cancel",
+                    requestTimeout: .seconds(5)
+                ) { _ in
+                    await outcomes.append("success")
+                }
             } catch is CancellationError {
                 await outcomes.append("cancelled")
             } catch {
@@ -235,7 +272,10 @@ struct RefreshCodeIssuesCoordinatorTests {
         #expect(await outcomes.snapshot() == ["cancelled"])
 
         let thirdTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-cancel") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-cancel",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("third")
             }
         }
@@ -249,17 +289,15 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorResetCancelsQueuedWaiters() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 1,
-            maxPendingTotal: 4,
-            queueWaitTimeout: .seconds(5),
-            queueWaitClock: clock
-        )
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-reset") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-reset",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("first")
                 try await Task.sleep(for: .seconds(5))
             }
@@ -270,7 +308,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         let queuedTask = Task<Void, Never> {
             do {
-                _ = try await coordinator.withPermit(key: "windowtab-reset") { _ in () }
+                _ = try await coordinator.withPermit(
+                    key: "windowtab-reset",
+                    requestTimeout: .seconds(5)
+                ) { _ in () }
                 await outcomes.append("success")
             } catch is CancellationError {
                 await outcomes.append("cancelled")
@@ -288,7 +329,10 @@ struct RefreshCodeIssuesCoordinatorTests {
         #expect(await outcomes.snapshot() == ["cancelled"])
 
         let thirdTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-reset") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-reset",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("third")
             }
         }
@@ -306,7 +350,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         let activeTask = Task<Void, Never> {
             do {
-                _ = try await coordinator.withPermit(key: "windowtab-active-reset") { _ in
+                _ = try await coordinator.withPermit(
+                    key: "windowtab-active-reset",
+                    requestTimeout: .seconds(5)
+                ) { _ in
                     started.signal()
                     try await Task.sleep(for: .seconds(5))
                     await outcomes.append("completed")
@@ -339,7 +386,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         let activeTask = Task<Void, Never> {
             do {
-                _ = try await coordinator.withPermit(key: "windowtab-reset-serialization") { _ in
+                _ = try await coordinator.withPermit(
+                    key: "windowtab-reset-serialization",
+                    requestTimeout: .seconds(5)
+                ) { _ in
                     await acquisitions.append("first")
                     activeStarted.signal()
                     do {
@@ -370,7 +420,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         let secondStarted = TestSignal()
         let secondTask = Task<Void, Never> {
-            _ = try? await coordinator.withPermit(key: "windowtab-reset-serialization") { _ in
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-reset-serialization",
+                requestTimeout: .seconds(5)
+            ) { _ in
                 await acquisitions.append("second")
                 secondStarted.signal()
             }

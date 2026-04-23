@@ -79,7 +79,8 @@ When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagn
 - The default mode is `proxy`, which serves `XcodeRefreshCodeIssuesInFile` through `XcodeListNavigatorIssues`-style diagnostics to avoid switching Spaces.
 - In `upstream` mode, `xcode-mcp-proxy-server` serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
 - This reduces cold-start contention, but it can increase latency when many refresh requests target the same tab at once.
-- If a client bursts too many queued refreshes for the same tab in `upstream` mode, the proxy may return `refresh queue overloaded` instead of letting the queue grow without bound.
+- Queued refreshes are no longer rejected because of a fixed queue cap, but they still consume the request's end-to-end timeout budget while waiting for their turn.
+- If the request deadline is reached before a queued refresh starts running, the proxy returns the same timeout response it would use for an in-flight timeout.
 - If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
 
 ## `session not found`

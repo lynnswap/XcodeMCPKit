@@ -413,14 +413,6 @@ extension RefreshCodeIssuesWorkflow {
                 )
                 finalResult = result
                 break resultLoop
-            case .overloaded:
-                debugState.updateStep(
-                    requestID: debugRequestID,
-                    step: "upstream.overloaded",
-                    state: "failed"
-                )
-                finalResult = result
-                break resultLoop
             case .invalidRequest:
                 debugState.updateStep(
                     requestID: debugRequestID,

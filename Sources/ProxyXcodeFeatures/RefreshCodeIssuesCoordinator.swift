@@ -1,4 +1,5 @@
 import Foundation
+import NIO
 import NIOConcurrencyHelpers
 
 package actor RefreshCodeIssuesCoordinator {
@@ -17,7 +18,6 @@ package actor RefreshCodeIssuesCoordinator {
     }
 
     package enum AcquireError: Error {
-        case queueLimitExceeded
         case queueWaitTimedOut
     }
 
@@ -34,10 +34,7 @@ package actor RefreshCodeIssuesCoordinator {
         let waitUntilFinished: @Sendable () async -> Void
     }
 
-    package nonisolated let maxPendingPerKey: Int
-    package nonisolated let maxPendingTotal: Int
-    package nonisolated let queueWaitTimeout: Duration
-    package nonisolated let queueWaitClock: any Clock<Duration> & Sendable
+    package nonisolated let waitClock: any Clock<Duration> & Sendable
     private var nextWaiterID: UInt64 = 0
     private var nextExecutionID: UInt64 = 0
     private var busyKeys: Set<String> = []
@@ -45,43 +42,14 @@ package actor RefreshCodeIssuesCoordinator {
     private var activeExecutionsByKey: [String: ActiveExecution] = [:]
     private var waitersByKey: [String: [Waiter]] = [:]
 
-    package static func defaultQueueWaitTimeout(for requestTimeout: TimeInterval) -> TimeInterval {
-        requestTimeout > 0 ? min(requestTimeout, 30) : 30
-    }
-
-    package static func makeDefault(requestTimeout: TimeInterval) -> RefreshCodeIssuesCoordinator {
-        RefreshCodeIssuesCoordinator(
-            queueWaitTimeout: defaultQueueWaitTimeout(for: requestTimeout)
-        )
+    package static func makeDefault() -> RefreshCodeIssuesCoordinator {
+        RefreshCodeIssuesCoordinator()
     }
 
     package init(
-        maxPendingPerKey: Int = 4,
-        maxPendingTotal: Int = 32,
-        queueWaitTimeout: TimeInterval = 30
+        waitClock: any Clock<Duration> & Sendable = ContinuousClock()
     ) {
-        self.init(
-            maxPendingPerKey: maxPendingPerKey,
-            maxPendingTotal: maxPendingTotal,
-            queueWaitTimeout: Self.duration(from: queueWaitTimeout),
-            queueWaitClock: ContinuousClock()
-        )
-    }
-
-    package init(
-        maxPendingPerKey: Int = 4,
-        maxPendingTotal: Int = 32,
-        queueWaitTimeout: Duration,
-        queueWaitClock: any Clock<Duration> & Sendable = ContinuousClock()
-    ) {
-        self.maxPendingPerKey = max(0, maxPendingPerKey)
-        self.maxPendingTotal = max(0, maxPendingTotal)
-        self.queueWaitTimeout = queueWaitTimeout
-        self.queueWaitClock = queueWaitClock
-    }
-
-    package nonisolated var queueWaitTimeoutSeconds: Double {
-        Self.seconds(from: queueWaitTimeout)
+        self.waitClock = waitClock
     }
 
     package nonisolated func scheduleReset() {
@@ -121,9 +89,10 @@ package actor RefreshCodeIssuesCoordinator {
 
     package func withPermit<T: Sendable>(
         key: String,
+        requestTimeout: TimeAmount?,
         body: @escaping @Sendable (_ permit: Permit) async throws -> T
     ) async throws -> T {
-        let permit = try await acquire(key: key)
+        let permit = try await acquire(key: key, requestTimeout: requestTimeout)
         let executionID = nextExecutionID
         nextExecutionID &+= 1
         let bodyTask = Task {
@@ -156,7 +125,7 @@ package actor RefreshCodeIssuesCoordinator {
         }
     }
 
-    private func acquire(key: String) async throws -> Permit {
+    private func acquire(key: String, requestTimeout: TimeAmount?) async throws -> Permit {
         if busyKeys.contains(key) == false {
             busyKeys.insert(key)
             return Permit(
@@ -167,10 +136,6 @@ package actor RefreshCodeIssuesCoordinator {
         }
 
         let waiterCountForKey = waitersByKey[key]?.count ?? 0
-        guard waiterCountForKey < maxPendingPerKey, pendingWaiterCount < maxPendingTotal else {
-            throw AcquireError.queueLimitExceeded
-        }
-
         let waiterID = nextWaiterID
         nextWaiterID &+= 1
         let permit = Permit(
@@ -202,22 +167,24 @@ package actor RefreshCodeIssuesCoordinator {
                     )
                     pendingWaiterCount += 1
 
-                    let timeoutTask = Task { [queueWaitClock, queueWaitTimeout, waiterState] in
-                        do {
-                            try await queueWaitClock.sleep(for: queueWaitTimeout)
-                            let shouldRemove = waiterState.withLockedValue { state -> Bool in
-                                guard state == .active else { return false }
-                                state = .timedOut
-                                return true
+                    if let timeoutDuration = Self.duration(from: requestTimeout) {
+                        let timeoutTask = Task { [waitClock, waiterState] in
+                            do {
+                                try await waitClock.sleep(for: timeoutDuration)
+                                let shouldRemove = waiterState.withLockedValue { state -> Bool in
+                                    guard state == .active else { return false }
+                                    state = .timedOut
+                                    return true
+                                }
+                                guard shouldRemove else { return }
+                                self.timeoutWaiter(key: key, waiterID: waiterID)
+                            } catch {
+                                return
                             }
-                            guard shouldRemove else { return }
-                            self.timeoutWaiter(key: key, waiterID: waiterID)
-                        } catch {
-                            return
                         }
-                    }
-                    timeoutTaskBox.withLockedValue { task in
-                        task = timeoutTask
+                        timeoutTaskBox.withLockedValue { task in
+                            task = timeoutTask
+                        }
                     }
 
                     if Task.isCancelled {
@@ -348,23 +315,14 @@ package actor RefreshCodeIssuesCoordinator {
         waitersByKey.removeValue(forKey: key)
     }
 
-    private static func nanoseconds(from interval: TimeInterval) -> UInt64 {
-        let clamped = max(0, interval)
-        let nanoseconds = clamped * 1_000_000_000
-        if nanoseconds >= Double(UInt64.max) {
-            return UInt64.max
+    private static func duration(from requestTimeout: TimeAmount?) -> Duration? {
+        guard let requestTimeout else {
+            return nil
         }
-        return UInt64(nanoseconds.rounded(.up))
-    }
-
-    private static func seconds(from duration: Duration) -> Double {
-        let components = duration.components
-        return Double(components.seconds)
-            + (Double(components.attoseconds) / 1_000_000_000_000_000_000)
-    }
-
-    private static func duration(from interval: TimeInterval) -> Duration {
-        let clampedNanoseconds = min(nanoseconds(from: interval), UInt64(Int64.max))
-        return .nanoseconds(Int64(clampedNanoseconds))
+        let nanoseconds = requestTimeout.nanoseconds
+        guard nanoseconds > 0 else {
+            return .zero
+        }
+        return .nanoseconds(nanoseconds)
     }
 }

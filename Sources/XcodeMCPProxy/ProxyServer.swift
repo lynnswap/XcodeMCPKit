@@ -68,14 +68,10 @@ public final class ProxyServer {
         self.config = config
         self.dependencies = dependencies
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
-            requestTimeout: config.requestTimeout
-        )
+        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault()
         self.refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
         self.refreshCodeIssuesDebugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: refreshCodeIssuesCoordinator.maxPendingPerKey,
-            maxPendingTotal: refreshCodeIssuesCoordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: refreshCodeIssuesCoordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: config.requestTimeout
         )
     }
 
