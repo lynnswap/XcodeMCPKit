@@ -5,11 +5,13 @@ import NIOEmbedded
 import NIOHTTP1
 import Testing
 import ProxyCore
-import ProxyRuntime
-import ProxyFeatureXcode
+import ProxyMCP
+import ProxySession
+import ProxyXcodeFeatures
+ import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPTransport
+@testable import ProxyHTTPGateway
 
 @Suite(.serialized)
 struct HTTPHandlerTests {
@@ -156,7 +158,7 @@ struct HTTPHandlerTests {
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
-        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("A.swift")
+        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("Missing.swift")
         try "".write(to: target, atomically: true, encoding: .utf8)
         let firstSent = SyncSignal()
 
@@ -222,7 +224,7 @@ struct HTTPHandlerTests {
                         name: "XcodeRefreshCodeIssuesInFile",
                         arguments: [
                             "tabIdentifier": "windowtab-debug-state",
-                            "filePath": "A.swift",
+                            "filePath": "Missing.swift",
                         ]
                     )
                 )
@@ -595,7 +597,9 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
+        // tools/list now runs through the shared bootstrap owner, so the client session does
+        // not hold a direct upstream mapping while it waits.
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
         let response = try collectResponse(from: channel)
@@ -1603,6 +1607,78 @@ struct HTTPHandlerTests {
         #expect(toolsResponse.head.headers.first(name: "Content-Type") == "application/json")
     }
 
+    @Test func httpToolCallNormalizesColdSchemaWithoutCatalogPrewarm() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                switch (method, toolName) {
+                case ("tools/list", nil):
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [
+                                    [
+                                        "name": "DocumentationSearch",
+                                        "outputSchema": [
+                                            "type": "object",
+                                        ],
+                                    ],
+                                ],
+                            ]
+                        )
+                    )
+                case ("tools/call", "DocumentationSearch"):
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "{\"answer\":\"ok\"}"
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected request"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-schema-cold",
+                payload: toolsCallPayload(
+                    id: 61,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "hello",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            #expect(structuredContent?["answer"] as? String == "ok")
+            #expect(sessionManager.cachedToolsListResult() == nil)
+            #expect(sessionManager.sentMethods() == ["tools/call"])
+            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpResourcesListReturnsEmptyArray() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -1764,7 +1840,7 @@ struct HTTPHandlerTests {
             options: []
         )
 
-        let object = MCPForwardingService.responseObject(
+        let object = ToolSurface.responseObject(
             from: responseData,
             matching: "wanted"
         )
@@ -2362,13 +2438,10 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
             ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
-            #expect(Set(sessionManager.sentToolRequests()) == Set([
-                "XcodeListWindows@0",
-                "XcodeListNavigatorIssues@0",
-            ]) || Set(sessionManager.sentToolRequests()) == Set([
-                "XcodeListWindows@1",
-                "XcodeListNavigatorIssues@1",
-            ]))
+            let sentToolRequests = sessionManager.sentToolRequests()
+            #expect(sentToolRequests.count == 2)
+            #expect(sentToolRequests.contains { $0.hasPrefix("XcodeListWindows@") })
+            #expect(sentToolRequests.contains { $0.hasPrefix("XcodeListNavigatorIssues@") })
         } catch {
             try? await server.shutdown()
             throw error
@@ -2883,6 +2956,16 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [Any]()
+                            ]
+                        )
+                    )
+                }
                 #expect(method == "tools/call")
                 switch toolName {
                 case "XcodeRefreshCodeIssuesInFile":
@@ -3413,11 +3496,9 @@ struct HTTPHandlerTests {
         )
 
         let config = makeConfig(requestTimeout: 1)
-        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let coordinator = RefreshCodeIssuesCoordinator()
         let debugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: coordinator.maxPendingPerKey,
-            maxPendingTotal: coordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: config.requestTimeout
         )
         let workflow = RefreshCodeIssuesWorkflow(
             mode: .proxy,
@@ -3515,11 +3596,9 @@ struct HTTPHandlerTests {
         )
 
         let config = makeConfig(requestTimeout: 0)
-        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let coordinator = RefreshCodeIssuesCoordinator()
         let debugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: coordinator.maxPendingPerKey,
-            maxPendingTotal: coordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: config.requestTimeout
         )
         let workflow = RefreshCodeIssuesWorkflow(
             mode: .proxy,
@@ -3636,11 +3715,9 @@ struct HTTPHandlerTests {
             withIntermediateDirectories: true
         )
 
-        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let coordinator = RefreshCodeIssuesCoordinator()
         let debugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: coordinator.maxPendingPerKey,
-            maxPendingTotal: coordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: 2
         )
         let workflow = RefreshCodeIssuesWorkflow(
             mode: .proxy,
@@ -3722,11 +3799,9 @@ struct HTTPHandlerTests {
         )
 
         let config = makeConfig(requestTimeout: 1)
-        let coordinator = RefreshCodeIssuesCoordinator(queueWaitTimeout: 1)
+        let coordinator = RefreshCodeIssuesCoordinator()
         let debugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: coordinator.maxPendingPerKey,
-            maxPendingTotal: coordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: coordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: config.requestTimeout
         )
         let workflow = RefreshCodeIssuesWorkflow(
             mode: .proxy,
@@ -4285,6 +4360,16 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [Any]()
+                            ]
+                        )
+                    )
+                }
                 #expect(method == "tools/call")
                 #expect(toolName == "OtherAllowedTool")
                 return .immediate(
@@ -4418,6 +4503,16 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [Any]()
+                            ]
+                        )
+                    )
+                }
                 #expect(method == "tools/call")
                 #expect(toolName == "XcodeListWindows")
                 return .immediate(try makeToolSuccessResponse(id: originalID, text: "allowed"))
@@ -4649,14 +4744,9 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpRefreshCodeIssuesReturnsBackpressureErrorWhenQueueIsFull() async throws {
+    @Test func httpRefreshCodeIssuesQueuesBurstForSameTabWithoutBackpressureError() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 0,
-            maxPendingTotal: 8,
-            queueWaitTimeout: 5
-        )
         let firstSent = SyncSignal()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
@@ -4669,51 +4759,61 @@ struct HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
             config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: coordinator
+            sessionManager: sessionManager
         )
 
         do {
-            let firstTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionID: "session-overload-1",
-                    payload: toolsCallPayload(
-                        id: 21,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-overload",
-                            "filePath": "A.swift",
-                        ]
+            let requestCount = 6
+            let tasks = (0..<requestCount).map { index in
+                Task<(Int, Int?, String?), Error> {
+                    let (response, body) = try await postHTTPJSON(
+                        url: server.url,
+                        sessionID: "session-overload-\(index)",
+                        payload: toolsCallPayload(
+                            id: 21 + index,
+                            name: "XcodeRefreshCodeIssuesInFile",
+                            arguments: [
+                                "tabIdentifier": "windowtab-overload",
+                                "filePath": "File\(index).swift",
+                            ]
+                        )
                     )
-                )
-                return response.statusCode
+                    let error = body["error"] as? [String: Any]
+                    let errorCode = (error?["code"] as? NSNumber)?.intValue
+                    let errorMessage = error?["message"] as? String
+                    return (response.statusCode, errorCode, errorMessage)
+                }
             }
 
             try await firstSent.wait(description: "waiting for first upstream refresh request")
-
-            let (secondResponse, secondBody) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-overload-2",
-                payload: toolsCallPayload(
-                    id: 22,
-                    name: "XcodeRefreshCodeIssuesInFile",
-                    arguments: [
-                        "tabIdentifier": "windowtab-overload",
-                        "filePath": "B.swift",
-                    ]
-                )
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    sessionManager.sentUpstreamCount() == 1
+                        && sessionManager.pendingResponseCount() == 1
+                }
             )
 
-            #expect(secondResponse.statusCode == 200)
-            let error = secondBody["error"] as? [String: Any]
-            #expect((error?["code"] as? NSNumber)?.intValue == -32003)
-            #expect((error?["message"] as? String) == "refresh queue overloaded")
+            for expectedCount in 1...requestCount {
+                #expect(sessionManager.sentUpstreamCount() == expectedCount)
+                #expect(sessionManager.pendingResponseCount() == 1)
+                sessionManager.deliverNextPendingResponse()
+                if expectedCount < requestCount {
+                    #expect(
+                        await waitUntil(timeout: .seconds(2)) {
+                            sessionManager.sentUpstreamCount() == expectedCount + 1
+                                && sessionManager.pendingResponseCount() == 1
+                        }
+                    )
+                }
+            }
 
-            sessionManager.deliverNextPendingResponse()
-            let firstStatusCode = try await firstTask.value
-            #expect(firstStatusCode == 200)
-            #expect(sessionManager.sentUpstreamCount() == 1)
+            for task in tasks {
+                let (statusCode, errorCode, errorMessage) = try await task.value
+                #expect(statusCode == 200)
+                #expect(errorCode == nil)
+                #expect(errorMessage == nil)
+            }
+            #expect(sessionManager.sentUpstreamCount() == requestCount)
         } catch {
             try? await server.shutdown()
             throw error
@@ -4721,18 +4821,13 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpRefreshProxyReturnsBackpressureErrorWhenQueueIsFull() async throws {
+    @Test func httpRefreshProxyQueuesBurstForSameTabWithoutBackpressureError() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 0,
-            maxPendingTotal: 8,
-            queueWaitTimeout: 5
-        )
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
-        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("A.swift")
+        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("Missing.swift")
         try "".write(to: target, atomically: true, encoding: .utf8)
         let firstSent = SyncSignal()
 
@@ -4780,237 +4875,155 @@ struct HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
             config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: coordinator
+            sessionManager: sessionManager
         )
 
         do {
-            let firstTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionID: "session-proxy-overload-1",
-                    payload: toolsCallPayload(
-                        id: 26,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-proxy-overload",
-                            "filePath": "A.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
-            }
-
-            try await firstSent.wait(description: "waiting for first proxy refresh request")
-
-            let (secondResponse, secondBody) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-proxy-overload-2",
-                payload: toolsCallPayload(
-                    id: 27,
-                    name: "XcodeRefreshCodeIssuesInFile",
-                    arguments: [
-                        "tabIdentifier": "windowtab-proxy-overload",
-                        "filePath": "A.swift",
-                    ]
-                )
-            )
-
-            #expect(secondResponse.statusCode == 200)
-            let error = secondBody["error"] as? [String: Any]
-            #expect((error?["code"] as? NSNumber)?.intValue == -32003)
-            #expect((error?["message"] as? String) == "refresh queue overloaded")
-
-            sessionManager.deliverNextPendingResponse()
-            let firstStatusCode = try await firstTask.value
-            #expect(firstStatusCode == 200)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
-    @Test func httpRefreshCodeIssuesReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
-        var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .upstream
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 4,
-            maxPendingTotal: 8,
-            queueWaitTimeout: 0.05
-        )
-        let firstSent = SyncSignal()
-        let sessionManager = TestRuntimeCoordinator(
-            config: config,
-            upstreamPlanResponder: { method, originalID in
-                #expect(method == "tools/call")
-                firstSent.signal()
-                return .manual(try makeToolSuccessResponse(id: originalID, text: "ok"))
-            }
-        )
-        sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
-            config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: coordinator
-        )
-
-        do {
-            let firstTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionID: "session-timeout-1",
-                    payload: toolsCallPayload(
-                        id: 24,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-timeout",
-                            "filePath": "A.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
-            }
-
-            try await firstSent.wait(description: "waiting for first upstream timeout refresh request")
-
-            let (secondResponse, secondBody) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-timeout-2",
-                payload: toolsCallPayload(
-                    id: 25,
-                    name: "XcodeRefreshCodeIssuesInFile",
-                    arguments: [
-                        "tabIdentifier": "windowtab-timeout",
-                        "filePath": "B.swift",
-                    ]
-                )
-            )
-
-            #expect(secondResponse.statusCode == 200)
-            let error = secondBody["error"] as? [String: Any]
-            #expect((error?["code"] as? NSNumber)?.intValue == -32003)
-            #expect((error?["message"] as? String) == "refresh queue overloaded")
-
-            sessionManager.deliverNextPendingResponse()
-            let firstStatusCode = try await firstTask.value
-            #expect(firstStatusCode == 200)
-            #expect(sessionManager.sentUpstreamCount() == 1)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
-    @Test func httpRefreshProxyReturnsBackpressureErrorAfterQueueWaitTimeout() async throws {
-        var config = makeConfig(requestTimeout: 2)
-        config.refreshCodeIssuesMode = .proxy
-        let coordinator = RefreshCodeIssuesCoordinator(
-            maxPendingPerKey: 4,
-            maxPendingTotal: 8,
-            queueWaitTimeout: 0.05
-        )
-        let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
-        defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
-
-        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("A.swift")
-        try "".write(to: target, atomically: true, encoding: .utf8)
-        let firstSent = SyncSignal()
-
-        let sessionManager = TestRuntimeCoordinator(
-            config: config,
-            upstreamRequestResponder: { method, toolName, originalID in
-                #expect(method == "tools/call")
-                switch toolName {
-                case "XcodeListWindows":
-                    return .immediate(
-                        try makeToolSuccessResponse(
-                            id: originalID,
-                            text:
-                                "{\"message\":\"* tabIdentifier: windowtab-proxy-timeout, workspacePath: \(temporaryRoot)\"}"
-                        )
-                    )
-                case "XcodeListNavigatorIssues":
-                    firstSent.signal()
-                    return .manual(
-                        try makeToolResultResponse(
-                            id: originalID,
-                            result: [
-                                "content": [[
-                                    "type": "text",
-                                    "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"warn\",\"line\":1,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
-                                ]],
-                                "structuredContent": [
-                                    "issues": [[
-                                        "path": target.path,
-                                        "message": "warn",
-                                        "line": 1,
-                                        "severity": "warning",
-                                    ]],
-                                    "totalFound": 1,
-                                    "truncated": false,
-                                ],
+            let requestCount = 6
+            let tasks = (0..<requestCount).map { index in
+                Task<(Int, Int?, String?), Error> {
+                    let (response, body) = try await postHTTPJSON(
+                        url: server.url,
+                        sessionID: "session-proxy-overload-\(index)",
+                        payload: toolsCallPayload(
+                            id: 26 + index,
+                            name: "XcodeRefreshCodeIssuesInFile",
+                            arguments: [
+                                "tabIdentifier": "windowtab-proxy-overload",
+                                "filePath": "Missing.swift",
                             ]
                         )
                     )
-                default:
-                    return .immediate(try makeToolErrorResponse(id: originalID, text: "unexpected tool"))
+                    let error = body["error"] as? [String: Any]
+                    let errorCode = (error?["code"] as? NSNumber)?.intValue
+                    let errorMessage = error?["message"] as? String
+                    return (response.statusCode, errorCode, errorMessage)
                 }
             }
-        )
-        sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
-            config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: coordinator
-        )
 
-        do {
-            let firstTask = Task<Int, Error> {
-                let (response, _) = try await postHTTPJSON(
-                    url: server.url,
-                    sessionID: "session-proxy-timeout-1",
-                    payload: toolsCallPayload(
-                        id: 28,
-                        name: "XcodeRefreshCodeIssuesInFile",
-                        arguments: [
-                            "tabIdentifier": "windowtab-proxy-timeout",
-                            "filePath": "A.swift",
-                        ]
-                    )
-                )
-                return response.statusCode
-            }
-
-            try await firstSent.wait(description: "waiting for first proxy timeout refresh request")
-
-            let (secondResponse, secondBody) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-proxy-timeout-2",
-                payload: toolsCallPayload(
-                    id: 29,
-                    name: "XcodeRefreshCodeIssuesInFile",
-                    arguments: [
-                        "tabIdentifier": "windowtab-proxy-timeout",
-                        "filePath": "A.swift",
-                    ]
-                )
+            try await firstSent.wait(description: "waiting for first proxy refresh request")
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    sessionManager.sentUpstreamCount() == 2
+                        && sessionManager.pendingResponseCount() == 1
+                }
             )
 
-            #expect(secondResponse.statusCode == 200)
-            let error = secondBody["error"] as? [String: Any]
-            #expect((error?["code"] as? NSNumber)?.intValue == -32003)
-            #expect((error?["message"] as? String) == "refresh queue overloaded")
+            for expectedRequests in 1...requestCount {
+                #expect(sessionManager.sentUpstreamCount() == expectedRequests * 2)
+                #expect(sessionManager.pendingResponseCount() == 1)
+                sessionManager.deliverNextPendingResponse()
+                if expectedRequests < requestCount {
+                    #expect(
+                        await waitUntil(timeout: .seconds(2)) {
+                            sessionManager.sentUpstreamCount() == (expectedRequests + 1) * 2
+                                && sessionManager.pendingResponseCount() == 1
+                        }
+                    )
+                }
+            }
 
-            sessionManager.deliverNextPendingResponse()
-            let firstStatusCode = try await firstTask.value
-            #expect(firstStatusCode == 200)
+            for task in tasks {
+                let (statusCode, errorCode, errorMessage) = try await task.value
+                #expect(statusCode == 200)
+                #expect(errorCode == nil)
+                #expect(errorMessage == nil)
+            }
+            #expect(sessionManager.sentUpstreamCount() == requestCount * 2)
         } catch {
             try? await server.shutdown()
             throw error
         }
         try await server.shutdown()
+    }
+
+    @Test func refreshWorkflowReturnsStandardTimeoutWhenPermitWaitConsumesRequestDeadline()
+        async throws
+    {
+        let clock = TestClock()
+        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let debugState = RefreshCodeIssuesDebugState(defaultRequestTimeoutSeconds: 2)
+        let workflow = RefreshCodeIssuesWorkflow(
+            mode: .upstream,
+            requestTimeout: 2,
+            coordinator: coordinator,
+            targetResolver: RefreshCodeIssuesTargetResolver(),
+            debugState: debugState,
+            logger: ProxyLogging.make("test.refresh")
+        )
+        let activeStarted = TestSignal()
+        let releaseFirst = TestSignal()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+
+        let activeTask = Task<Void, Never> {
+            _ = try? await coordinator.withPermit(
+                key: "windowtab-timeout",
+                requestTimeout: nil
+            ) { _ in
+                activeStarted.signal()
+                try await releaseFirst.wait(description: "waiting to release first request")
+            }
+        }
+        try await activeStarted.wait(description: "waiting for active queued-timeout execution")
+
+        let requestID = RPCID(any: NSNumber(value: 25))!
+        let requestPayload = toolsCallPayload(
+            id: 25,
+            name: "XcodeRefreshCodeIssuesInFile",
+            arguments: [
+                "tabIdentifier": "windowtab-timeout",
+                "filePath": "B.swift",
+            ]
+        )
+        let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
+
+        let requestTask = Task {
+            await workflow.run(
+                refreshRequest: RefreshCodeIssuesRequest(
+                    tabIdentifier: "windowtab-timeout",
+                    filePath: "B.swift"
+                ),
+                bodyData: requestData,
+                sessionID: "session-timeout-2",
+                requestIDs: [requestID],
+                requestIsBatch: false,
+                requestTimeoutOverride: .milliseconds(50),
+                eventLoop: group.next(),
+                windowsProvider: { _, _, _, _ in
+                    Issue.record("queued timeout should not resolve windows")
+                    return nil
+                },
+                internalUpstreamChooser: { _ in
+                    Issue.record("queued timeout should not choose an internal upstream")
+                    return nil
+                },
+                internalToolCaller: { _, _, _, _, _, _ in
+                    Issue.record("queued timeout should not call internal tools")
+                    return .unavailable
+                },
+                forwarder: { _, _, _, _, _, _, _ in
+                    Issue.record("queued timeout should not reach upstream forwarding")
+                    return .invalidRequest
+                }
+            )
+        }
+
+        await clock.sleep(untilSuspendedBy: 1)
+        clock.advance(by: .milliseconds(50))
+
+        let result = await requestTask.value
+        guard case .timeout(let responseIDs, let isBatch) = result else {
+            Issue.record("expected queued refresh to return standard timeout")
+            releaseFirst.signal()
+            _ = await activeTask.value
+            return
+        }
+        #expect(responseIDs.map(\.key) == [requestID.key])
+        #expect(isBatch == false)
+
+        releaseFirst.signal()
+        _ = await activeTask.value
     }
 
     @Test func httpRefreshProxyInternalToolCallsUpdateUpstreamHealthState() async throws {
@@ -5019,10 +5032,8 @@ struct HTTPHandlerTests {
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
-        let target = URL(fileURLWithPath: temporaryRoot)
-            .appendingPathComponent("Missing.swift")
+        let target = URL(fileURLWithPath: temporaryRoot).appendingPathComponent("Missing.swift")
         try "".write(to: target, atomically: true, encoding: .utf8)
-
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
@@ -5560,6 +5571,69 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
+    func sharedToolsList(
+        sessionID: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = requestTimeoutOverride
+        if let cached = state.withLockedValue({ $0.cachedToolsList }) {
+            return cached
+        }
+        let responseData = try await performSharedControlPlaneRequest(
+            method: "tools/list",
+            toolName: nil,
+            sessionID: sessionID
+        )
+        guard let object = try JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any],
+            let resultAny = object["result"],
+            let result = JSONValue(any: resultAny)
+        else {
+            throw NSError(domain: "TestRuntimeCoordinator", code: 2)
+        }
+        state.withLockedValue { state in
+            state.cachedToolsList = result
+        }
+        return result
+    }
+
+    func sharedXcodeListWindowsResult(
+        sessionID: String,
+        maxAge: TimeInterval,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = sessionID
+        _ = maxAge
+        return try await liveXcodeListWindowsResult(
+            route: .anyHealthy,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+    }
+
+    func liveXcodeListWindowsResult(
+        route _: ControlPlaneRoute,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = requestTimeoutOverride
+        let responseData = try await performSharedControlPlaneRequest(
+            method: "tools/call",
+            toolName: "XcodeListWindows",
+            sessionID: "__test-control-plane__"
+        )
+        guard let object = try JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any],
+            let resultAny = object["result"],
+            let result = JSONValue(any: resultAny)
+        else {
+            throw NSError(domain: "TestRuntimeCoordinator", code: 3)
+        }
+        return result
+    }
+
     func chooseUpstreamIndex() -> Int? {
         state.withLockedValue { state in
             state.chooseUpstreamCalls.append(
@@ -5783,6 +5857,56 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return .immediate(Data())
     }
 
+    private func performSharedControlPlaneRequest(
+        method: String,
+        toolName: String?,
+        sessionID: String
+    ) async throws -> Data {
+        _ = session(id: sessionID)
+        guard let upstreamIndex = chooseUpstreamIndex() else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        state.withLockedValue { state in
+            state.upstreamSendCount += 1
+            state.sentRequests.append(
+                SentRequest(
+                    method: method,
+                    toolName: toolName,
+                    upstreamIndex: upstreamIndex
+                )
+            )
+        }
+
+        let originalID = RPCID(any: "__shared-\(method)-\(UUID().uuidString)")!
+        let plan = responsePlan(
+            method: method,
+            toolName: toolName,
+            originalID: originalID
+        )
+        if let delayNanos = plan.delayNanos {
+            try await Task.sleep(nanoseconds: delayNanos)
+        }
+        guard plan.deliverManually == false else {
+            throw ControlPlaneError.invalidResponse("timeout")
+        }
+        guard let object = try? JSONSerialization.jsonObject(
+            with: plan.data,
+            options: []
+        ) as? [String: Any] else {
+            throw ControlPlaneError.invalidResponse("invalid response")
+        }
+        if let errorObject = object["error"] as? [String: Any] {
+            throw ControlPlaneError.upstreamRPC(
+                code: (errorObject["code"] as? NSNumber)?.intValue ?? -32000,
+                message: errorObject["message"] as? String ?? "upstream error"
+            )
+        }
+        state.withLockedValue { state in
+            state.requestSuccessNotifications += 1
+        }
+        return plan.data
+    }
+
     func debugSnapshot() -> ProxyDebugSnapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
@@ -5882,6 +6006,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             proxyInitialized: isInitialized(),
             cachedToolsListAvailable: cachedToolsListResult() != nil,
             warmupInFlight: false,
+            controlPlane: nil,
             upstreams: [
                 ProxyUpstreamDebugSnapshot(
                     upstreamIndex: 0,
@@ -5983,6 +6108,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func requeuedLeaseCount() -> Int {
         state.withLockedValue { $0.requeuedLeaseCount }
+    }
+
+    func pendingResponseCount() -> Int {
+        state.withLockedValue { $0.pendingResponses.count }
     }
 
     func setInitialized(_ value: Bool) {
@@ -6123,13 +6252,9 @@ private struct TestHTTPHandlerServer {
         let childChannelTracker = HTTPTestServerChannelTracker()
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault(
-                requestTimeout: config.requestTimeout
-            )
+            ?? RefreshCodeIssuesCoordinator.makeDefault()
         let refreshDebugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: refreshCoordinator.maxPendingPerKey,
-            maxPendingTotal: refreshCoordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: refreshCoordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: config.requestTimeout
         )
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)

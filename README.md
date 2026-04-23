@@ -16,6 +16,7 @@ Designed so the Xcode permission dialog appears once when the proxy starts.
 ## Architecture
 
 See [Architecture](Docs/architecture.md) for the process overview.
+See [Maintainer Architecture](Docs/maintainer-architecture.md) for module boundaries and local verification commands.
 
 ## Installation
 
@@ -146,8 +147,23 @@ See Quick Start for how to launch.
 | `MCP_XCODE_CONFIG` | Proxy config TOML path; `--config` takes precedence |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream` |
 | `MCP_LOG_LEVEL` | Log level: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` |
+| `XCODE_MCP_PROXY_DISCOVERY_FILE` | Override the discovery file path for isolated local/live test runs |
+| `XCODE_MCP_PROXY_CACHE_ROOT` | Override the cache root used to derive the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset |
 
 Logs are written to stderr.
+
+## Maintainer Commands
+
+```bash
+scripts/check-architecture.sh
+scripts/test-fast.sh
+scripts/test-process.sh
+scripts/check.sh
+scripts/test-live-mcpbridge.sh
+```
+
+- `test-live-mcpbridge.sh` is local-only and intentionally excluded from CI.
+- The live script uses the currently running Xcode session, requires exactly one Xcode process, uses `127.0.0.1:0`, and writes discovery output under a temp path.
 
 #### Proxy Config
 

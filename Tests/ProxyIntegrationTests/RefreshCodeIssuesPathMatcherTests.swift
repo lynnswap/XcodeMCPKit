@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import ProxyFeatureXcode
+@testable import ProxyXcodeFeatures
 
 @Suite
 struct RefreshCodeIssuesPathMatcherTests {

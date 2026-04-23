@@ -3,9 +3,10 @@ import Logging
 import NIO
 import NIOHTTP1
 import ProxyCore
-import ProxyRuntime
-import ProxyHTTPTransport
-import ProxyFeatureXcode
+import ProxySession
+import ProxyHTTPGateway
+import ProxyXcodeFeatures
+import ProxyXcodeSupport
 
 public final class ProxyServer {
     package struct Dependencies: Sendable {
@@ -67,14 +68,10 @@ public final class ProxyServer {
         self.config = config
         self.dependencies = dependencies
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault(
-            requestTimeout: config.requestTimeout
-        )
+        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault()
         self.refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
         self.refreshCodeIssuesDebugState = RefreshCodeIssuesDebugState(
-            maxPendingPerKey: refreshCodeIssuesCoordinator.maxPendingPerKey,
-            maxPendingTotal: refreshCodeIssuesCoordinator.maxPendingTotal,
-            queueWaitTimeoutSeconds: refreshCodeIssuesCoordinator.queueWaitTimeoutSeconds
+            defaultRequestTimeoutSeconds: config.requestTimeout
         )
     }
 
@@ -216,13 +213,13 @@ public final class ProxyServer {
             return
         }
         do {
-            try Discovery.write(record: record)
+            try Discovery.write(record: record, overrideURL: config.discoveryFileURL)
         } catch {
             logger.warning(
                 "Failed to write discovery file",
                 metadata: [
                     "error": "\(error)",
-                    "path": "\(Discovery.defaultFileURL.path)",
+                    "path": "\(config.discoveryFileURL?.path ?? Discovery.defaultFileURL.path)",
                 ]
             )
         }

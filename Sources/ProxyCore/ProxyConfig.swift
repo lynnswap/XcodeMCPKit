@@ -37,6 +37,7 @@ public struct ProxyConfig: Sendable {
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
+    public var discoveryFileURL: URL?
     public var prewarmToolsList: Bool
     public var autoApproveXcodeDialog: Bool
     public var refreshCodeIssuesMode: RefreshCodeIssuesMode
@@ -55,6 +56,7 @@ public struct ProxyConfig: Sendable {
         transport: ProxyTransport = .http,
         stdioUpstreamURL: URL? = nil,
         stdioUpstreamSource: StdioUpstreamSource? = nil,
+        discoveryFileURL: URL? = nil,
         prewarmToolsList: Bool = true,
         autoApproveXcodeDialog: Bool = false,
         refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy,
@@ -72,6 +74,7 @@ public struct ProxyConfig: Sendable {
         self.transport = transport
         self.stdioUpstreamURL = stdioUpstreamURL
         self.stdioUpstreamSource = stdioUpstreamSource
+        self.discoveryFileURL = discoveryFileURL
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
@@ -105,7 +108,11 @@ public struct CLIParser {
         "Xcode PID support has been removed; --xcode-pid is no longer supported."
 
     public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
-        return try parse(args: args, environment: environment, discoveryOverrideURL: nil)
+        return try parse(
+            args: args,
+            environment: environment,
+            discoveryOverrideURL: ProxyFilesystemLocations.discoveryFileURL(environment: environment)
+        )
     }
 
     static func parse(
@@ -282,6 +289,7 @@ public struct CLIParser {
             transport: transport,
             stdioUpstreamURL: stdioUpstreamURL,
             stdioUpstreamSource: stdioUpstreamSource,
+            discoveryFileURL: discoveryOverrideURL,
             autoApproveXcodeDialog: autoApproveXcodeDialog,
             refreshCodeIssuesMode: refreshCodeIssuesMode
         )

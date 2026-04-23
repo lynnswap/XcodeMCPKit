@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxyRuntime
+@testable import ProxySession
 
 @Suite(.serialized)
 struct UpstreamProcessTests {

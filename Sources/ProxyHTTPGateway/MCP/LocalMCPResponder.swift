@@ -1,0 +1,367 @@
+import Foundation
+import Logging
+import NIO
+import NIOConcurrencyHelpers
+import ProxyCore
+import ProxyMCP
+import ProxyXcodeFeatures
+import ProxySession
+
+package enum LocalPostHandling {
+    case pendingResponse(
+        future: EventLoopFuture<ByteBuffer>,
+        sessionID: String,
+        originalID: RPCID
+    )
+    case immediateResponse(data: Data, sessionID: String)
+    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String)
+}
+
+package struct LocalMCPResponder {
+    private struct EmbeddedTestResolutionError: Error {}
+
+    private let sessionManager: any RuntimeCoordinating
+    private let refreshCodeIssuesMode: RefreshCodeIssuesMode
+    private let disabledToolNames: Set<String>
+    private let logger: Logger
+
+    package init(
+        sessionManager: any RuntimeCoordinating,
+        refreshCodeIssuesMode: RefreshCodeIssuesMode,
+        disabledToolNames: Set<String>,
+        logger: Logger
+    ) {
+        self.sessionManager = sessionManager
+        self.refreshCodeIssuesMode = refreshCodeIssuesMode
+        self.disabledToolNames = disabledToolNames
+        self.logger = logger
+    }
+
+    package func handle(
+        object: [String: Any],
+        headerSessionID: String?,
+        headerSessionExists: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount? = nil
+    ) -> LocalPostHandling? {
+        guard let method = object["method"] as? String else {
+            return nil
+        }
+
+        if method == "initialize" {
+            guard let originalIDValue = object["id"], let originalID = RPCID(any: originalIDValue) else {
+                return .mcpError(
+                    id: nil,
+                    code: -32600,
+                    message: "missing id",
+                    sessionID: headerSessionID ?? UUID().uuidString
+                )
+            }
+            let sessionID = headerSessionID ?? UUID().uuidString
+            _ = sessionManager.session(id: sessionID)
+            let future = sessionManager.registerInitialize(
+                sessionID: sessionID,
+                originalID: originalID,
+                requestObject: object,
+                on: eventLoop
+            )
+            return .pendingResponse(
+                future: future,
+                sessionID: sessionID,
+                originalID: originalID
+            )
+        }
+
+        if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
+            guard let originalIDValue = object["id"], let originalID = RPCID(any: originalIDValue) else {
+                return .mcpError(
+                    id: nil,
+                    code: -32600,
+                    message: "missing id",
+                    sessionID: headerSessionID ?? UUID().uuidString
+                )
+            }
+
+            let sessionID = headerSessionID ?? UUID().uuidString
+            if let headerSessionID, headerSessionExists == false {
+                _ = sessionManager.session(id: headerSessionID)
+            }
+
+            let result: [String: Any] = (method == "resources/list")
+                ? ["resources": [Any]()]
+                : ["resourceTemplates": [Any]()]
+            let response: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": originalID.value.foundationObject,
+                "result": result,
+            ]
+            guard JSONSerialization.isValidJSONObject(response),
+                let data = try? JSONSerialization.data(withJSONObject: response, options: [])
+            else {
+                return nil
+            }
+            return .immediateResponse(data: data, sessionID: sessionID)
+        }
+
+        if method == "tools/list",
+            let headerSessionID,
+            sessionManager.isInitialized(),
+            let originalIDValue = object["id"],
+            let originalID = RPCID(any: originalIDValue)
+        {
+            if headerSessionExists == false {
+                _ = sessionManager.session(id: headerSessionID)
+            }
+            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
+                do {
+                    let result = try Self.waitForAsyncResult {
+                        try await sessionManager.sharedToolsList(
+                            sessionID: headerSessionID,
+                            requestTimeoutOverride: requestTimeoutOverride
+                        )
+                    }
+                    let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+                        result,
+                        mode: refreshCodeIssuesMode,
+                        hiddenToolNames: disabledToolNames
+                    )
+                    var buffer = try Self.encodeResultBuffer(
+                        id: originalID,
+                        result: rewrittenResult
+                    )
+                    let data = buffer.readData(length: buffer.readableBytes) ?? Data()
+                    return .immediateResponse(data: data, sessionID: headerSessionID)
+                } catch {
+                    let data = try? Self.encodeErrorData(id: originalID, error: error)
+                    if let data {
+                        return .immediateResponse(data: data, sessionID: headerSessionID)
+                    }
+                    return Self.fallbackLocalError(
+                        id: originalID,
+                        sessionID: headerSessionID
+                    )
+                }
+            }
+            let promise = eventLoop.makePromise(of: ByteBuffer.self)
+            Task {
+                do {
+                    let result = try await sessionManager.sharedToolsList(
+                        sessionID: headerSessionID,
+                        requestTimeoutOverride: requestTimeoutOverride
+                    )
+                    let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+                        result,
+                        mode: refreshCodeIssuesMode,
+                        hiddenToolNames: disabledToolNames
+                    )
+                    let buffer = try Self.encodeResultBuffer(
+                        id: originalID,
+                        result: rewrittenResult
+                    )
+                    eventLoop.execute {
+                        promise.succeed(buffer)
+                    }
+                } catch {
+                    do {
+                        let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
+                        eventLoop.execute {
+                            promise.succeed(buffer)
+                        }
+                    } catch {
+                        eventLoop.execute {
+                            promise.fail(error)
+                        }
+                    }
+                }
+            }
+            return .pendingResponse(
+                future: promise.futureResult,
+                sessionID: headerSessionID,
+                originalID: originalID
+            )
+        }
+
+        if method == "tools/call",
+            let headerSessionID,
+            sessionManager.isInitialized(),
+            let originalIDValue = object["id"],
+            let originalID = RPCID(any: originalIDValue),
+            let params = object["params"] as? [String: Any],
+            let toolName = params["name"] as? String,
+            toolName == "XcodeListWindows",
+            disabledToolNames.contains(toolName) == false
+        {
+            if headerSessionExists == false {
+                _ = sessionManager.session(id: headerSessionID)
+            }
+            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
+                do {
+                    let result = try Self.waitForAsyncResult {
+                        try await sessionManager.liveXcodeListWindowsResult(
+                            route: .anyHealthy,
+                            requestTimeoutOverride: requestTimeoutOverride
+                        )
+                    }
+                    var buffer = try Self.encodeResultBuffer(
+                        id: originalID,
+                        result: result
+                    )
+                    let data = buffer.readData(length: buffer.readableBytes) ?? Data()
+                    return .immediateResponse(data: data, sessionID: headerSessionID)
+                } catch {
+                    let data = try? Self.encodeErrorData(id: originalID, error: error)
+                    if let data {
+                        return .immediateResponse(data: data, sessionID: headerSessionID)
+                    }
+                    return Self.fallbackLocalError(
+                        id: originalID,
+                        sessionID: headerSessionID
+                    )
+                }
+            }
+            let promise = eventLoop.makePromise(of: ByteBuffer.self)
+            Task {
+                do {
+                    let result = try await sessionManager.liveXcodeListWindowsResult(
+                        route: .anyHealthy,
+                        requestTimeoutOverride: requestTimeoutOverride
+                    )
+                    let buffer = try Self.encodeResultBuffer(
+                        id: originalID,
+                        result: result
+                    )
+                    eventLoop.execute {
+                        promise.succeed(buffer)
+                    }
+                } catch {
+                    do {
+                        let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
+                        eventLoop.execute {
+                            promise.succeed(buffer)
+                        }
+                    } catch {
+                        eventLoop.execute {
+                            promise.fail(error)
+                        }
+                    }
+                }
+            }
+            return .pendingResponse(
+                future: promise.futureResult,
+                sessionID: headerSessionID,
+                originalID: originalID
+            )
+        }
+
+        return nil
+    }
+
+    private static func encodeResultBuffer(
+        id: RPCID,
+        result: JSONValue
+    ) throws -> ByteBuffer {
+        struct EncodingError: Error {}
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "result": result.foundationObject,
+        ]
+        guard JSONSerialization.isValidJSONObject(response) else {
+            throw EncodingError()
+        }
+        let data = try JSONSerialization.data(withJSONObject: response, options: [])
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        return buffer
+    }
+
+    private static func encodeErrorBuffer(
+        id: RPCID,
+        error: Error
+    ) throws -> ByteBuffer {
+        let data = try encodeErrorData(id: id, error: error)
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        return buffer
+    }
+
+    private static func encodeErrorData(
+        id: RPCID,
+        error: Error
+    ) throws -> Data {
+        let mapped = mapMCPError(error)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "error": [
+                "code": mapped.code,
+                "message": mapped.message,
+            ],
+        ]
+        guard JSONSerialization.isValidJSONObject(response) else {
+            struct EncodingError: Error {}
+            throw EncodingError()
+        }
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private static func mapMCPError(_ error: Error) -> (code: Int, message: String) {
+        if error is UpstreamSlotAcquisitionError {
+            return (-32001, "upstream unavailable")
+        }
+        if let error = error as? ControlPlaneRequestError {
+            return mapMCPError(error.underlying)
+        }
+        if let error = error as? ControlPlaneError {
+            switch error {
+            case .invalidResponse:
+                return (-32000, "upstream timeout")
+            case .upstreamRPC(let code, let message):
+                return (code, message)
+            }
+        }
+        return (-32000, "upstream timeout")
+    }
+
+    private static func fallbackLocalError(
+        id: RPCID,
+        sessionID: String
+    ) -> LocalPostHandling {
+        .mcpError(
+            id: id,
+            code: -32000,
+            message: "upstream timeout",
+            sessionID: sessionID
+        )
+    }
+
+    private func shouldUseEmbeddedTestSynchronousResolution(on eventLoop: EventLoop) -> Bool {
+        String(describing: type(of: eventLoop)).contains("EmbeddedEventLoop")
+    }
+
+    private static func waitForAsyncResult<Output: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Output
+    ) throws -> Output {
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = NIOLockedValueBox<Result<Output, Error>?>(nil)
+        Task {
+            let result: Result<Output, Error>
+            do {
+                result = .success(try await operation())
+            } catch {
+                result = .failure(error)
+            }
+            resultBox.withLockedValue { stored in
+                stored = result
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try resultBox.withLockedValue { stored in
+            guard let stored else {
+                throw EmbeddedTestResolutionError()
+            }
+            return try stored.get()
+        }
+    }
+}

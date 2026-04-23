@@ -1,7 +1,7 @@
 import Foundation
 import XcodeMCPTestSupport
 
-@testable import ProxyRuntime
+@testable import ProxySession
 
 actor TestUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>

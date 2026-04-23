@@ -26,10 +26,7 @@ public struct DiscoveryRecord: Codable, Sendable {
 
 public enum Discovery {
     public static var defaultFileURL: URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        return (base ?? FileManager.default.temporaryDirectory)
-            .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
-            .appendingPathComponent("endpoint.json")
+        ProxyFilesystemLocations.discoveryFileURL()
     }
 
     public static func read(overrideURL: URL? = nil) -> DiscoveryRecord? {

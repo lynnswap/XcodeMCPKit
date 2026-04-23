@@ -1,0 +1,497 @@
+import Foundation
+import NIO
+import Testing
+import ProxyCore
+import ProxyMCP
+import ProxySession
+import ProxyXcodeFeatures
+
+@testable import ProxyHTTPGateway
+
+@Suite(.serialized)
+struct ToolSurfaceTests {
+    @Test func toolSurfaceNormalizesStructuredContentFromTextJSON() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        sessionManager.setCachedToolsListResult(
+            try #require(
+                JSONValue(any: [
+                    "tools": [
+                        [
+                            "name": "DocumentationSearch",
+                            "outputSchema": [
+                                "type": "object",
+                            ],
+                        ],
+                    ],
+                ])
+            )
+        )
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"answer\":\"ok\"}",
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: "tools/call",
+            toolName: "DocumentationSearch",
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            upstreamData: upstreamData
+        )
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
+        )
+        let result = try #require(payload["result"] as? [String: Any])
+        let structuredContent = try #require(result["structuredContent"] as? [String: Any])
+        #expect(structuredContent["answer"] as? String == "ok")
+    }
+
+    @Test func toolSurfaceIgnoresNonTextContentDuringNormalization() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        sessionManager.setCachedToolsListResult(
+            try #require(
+                JSONValue(any: [
+                    "tools": [
+                        [
+                            "name": "DocumentationSearch",
+                            "outputSchema": [
+                                "type": "object",
+                            ],
+                        ],
+                    ],
+                ])
+            )
+        )
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    "content": [
+                        [
+                            "type": "image",
+                            "text": "{\"answer\":\"bad\"}",
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: "tools/call",
+            toolName: "DocumentationSearch",
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            upstreamData: upstreamData
+        )
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
+        )
+        let result = try #require(payload["result"] as? [String: Any])
+        #expect(result["structuredContent"] == nil)
+    }
+
+    @Test func toolSurfaceNormalizesMissingGetBuildLogLines() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        sessionManager.setCachedToolsListResult(
+            try #require(
+                JSONValue(any: [
+                    "tools": [
+                        [
+                            "name": "GetBuildLog",
+                            "outputSchema": [
+                                "type": "object",
+                            ],
+                        ],
+                    ],
+                ])
+            )
+        )
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    "structuredContent": [
+                        "emittedIssues": [
+                            [
+                                "message": "missing line",
+                            ],
+                            [
+                                "message": "null line",
+                                "line": NSNull(),
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: "tools/call",
+            toolName: "GetBuildLog",
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            upstreamData: upstreamData
+        )
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
+        )
+        let result = try #require(payload["result"] as? [String: Any])
+        let structuredContent = try #require(result["structuredContent"] as? [String: Any])
+        let issues = try #require(structuredContent["emittedIssues"] as? [[String: Any]])
+        #expect((issues[0]["line"] as? NSNumber)?.intValue == 0)
+        #expect((issues[1]["line"] as? NSNumber)?.intValue == 0)
+    }
+
+    @Test func toolSurfaceRewritesToolsListAndExtractsCanonicalCatalog() throws {
+        var config = makeToolSurfaceConfig()
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: config)
+        let surface = ToolSurface(config: config, sessionManager: sessionManager)
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    "tools": [
+                        [
+                            "name": RefreshCodeIssuesRequest.toolName,
+                            "description": "old",
+                        ],
+                        [
+                            "name": "RunAllTests",
+                            "description": "hidden",
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: nil,
+            toolName: nil,
+            originalID: nil,
+            responseMethodsByIDKey: ["1": "tools/list"],
+            normalizationToolsListResponseIDKey: "1",
+            cacheableToolsListResponseIDKey: "1",
+            upstreamData: upstreamData
+        )
+
+        #expect(rewritten.cacheableToolsListResult != nil)
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
+        )
+        let result = try #require(payload["result"] as? [String: Any])
+        let tools = try #require(result["tools"] as? [[String: Any]])
+        #expect(tools.count == 1)
+        #expect(tools[0]["name"] as? String == RefreshCodeIssuesRequest.toolName)
+        #expect((tools[0]["description"] as? String)?.contains("navigator issues") == true)
+    }
+
+    @Test func toolSurfaceNormalizesMixedBatchUsingCatalogFromSamePayload() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [
+                        "tools": [
+                            [
+                                "name": "DocumentationSearch",
+                                "outputSchema": [
+                                    "type": "object",
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": [
+                        "content": [
+                            [
+                                "type": "text",
+                                "text": "{\"answer\":\"ok\"}",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: nil,
+            toolName: nil,
+            originalID: nil,
+            responseMethodsByIDKey: [
+                "1": "tools/list",
+                "2": "tools/call",
+            ],
+            responseToolNamesByIDKey: [
+                "2": "DocumentationSearch",
+            ],
+            normalizationToolsListResponseIDKey: "1",
+            upstreamData: upstreamData
+        )
+
+        #expect(rewritten.cacheableToolsListResult == nil)
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [[String: Any]]
+        )
+        let callResult = try #require(payload.last?["result"] as? [String: Any])
+        let structuredContent = try #require(callResult["structuredContent"] as? [String: Any])
+        #expect(structuredContent["answer"] as? String == "ok")
+    }
+
+    @Test func toolSurfaceSeedsCanonicalCatalogFromFirstToolsListInBatch() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": [
+                        "tools": [
+                            [
+                                "name": "DocumentationSearch",
+                                "outputSchema": [
+                                    "type": "object",
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": [
+                        "tools": [
+                            [
+                                "name": "OtherTool",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: nil,
+            toolName: nil,
+            originalID: nil,
+            responseMethodsByIDKey: [
+                "1": "tools/list",
+                "2": "tools/list",
+            ],
+            normalizationToolsListResponseIDKey: "1",
+            cacheableToolsListResponseIDKey: "1",
+            upstreamData: upstreamData
+        )
+
+        let result = try #require(rewritten.cacheableToolsListResult)
+        guard case .object(let resultObject) = result,
+            case .array(let tools) = resultObject["tools"],
+            case .object(let firstTool) = try #require(tools.first),
+            case .string(let name) = firstTool["name"]
+        else {
+            Issue.record("expected first tools/list result to seed canonical catalog")
+            return
+        }
+
+        #expect(name == "DocumentationSearch")
+    }
+
+    @Test func toolSurfaceTreatsOnlySyntheticOverloadErrorAsBackpressure() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let exactOverload = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": [
+                    "code": -32002,
+                    "message": "upstream overloaded",
+                ],
+            ],
+            options: []
+        )
+        let differentMessage = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": [
+                    "code": -32002,
+                    "message": "other failure",
+                ],
+            ],
+            options: []
+        )
+
+        #expect(surface.shouldNotifyUpstreamSuccess(for: exactOverload) == false)
+        #expect(surface.shouldNotifyUpstreamSuccess(for: differentMessage) == true)
+    }
+}
+
+private func makeToolSurfaceConfig() -> ProxyConfig {
+    ProxyConfig(
+        listenHost: "localhost",
+        listenPort: 8765,
+        upstreamCommand: "xcrun",
+        upstreamArgs: ["mcpbridge"],
+        maxBodyBytes: 1_048_576,
+        requestTimeout: 300
+    )
+}
+
+private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeCoordinating {
+    private let config: ProxyConfig
+    private var cachedToolsList: JSONValue?
+
+    init(config: ProxyConfig) {
+        self.config = config
+    }
+
+    func session(id: String) -> SessionContext { SessionContext(id: id, config: config) }
+    func hasSession(id: String) -> Bool { false }
+    func removeSession(id: String) {}
+    func debugReset() {}
+    func shutdown() {}
+    func isInitialized() -> Bool { true }
+    func cachedToolsListResult() -> JSONValue? { cachedToolsList }
+    func setCachedToolsListResult(_ result: JSONValue) { cachedToolsList = result }
+
+    func registerInitialize(
+        sessionID: String,
+        originalID: RPCID,
+        requestObject: [String: Any],
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ByteBuffer> {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func sharedToolsList(
+        sessionID: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func sharedXcodeListWindowsResult(
+        sessionID: String,
+        maxAge: TimeInterval,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func liveXcodeListWindowsResult(
+        route: ControlPlaneRoute,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func chooseUpstreamIndex() -> Int? { nil }
+
+    func enqueueOnUpstreamSlot<Output>(
+        leaseID: RequestLeaseID,
+        descriptor: SessionPipelineRequestDescriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndex: Int?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> where Output : Sendable {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64 {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
+    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
+    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
+    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {}
+    func debugSnapshot() -> ProxyDebugSnapshot { fatalError("unused in ToolSurfaceTests") }
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID {
+        fatalError("unused in ToolSurfaceTests")
+    }
+
+    func activateRequestLease(
+        _ leaseID: RequestLeaseID,
+        requestIDKey: String?,
+        upstreamIndex: Int?,
+        timeout: TimeAmount?
+    ) {}
+
+    func completeRequestLease(_ leaseID: RequestLeaseID) {}
+    func requeueRequestLease(_ leaseID: RequestLeaseID) {}
+
+    func failRequestLease(
+        _ leaseID: RequestLeaseID,
+        terminalState: RequestLeaseState,
+        reason: RequestLeaseReleaseReason
+    ) {}
+
+    func handleRequestLeaseTimeout(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    ) {}
+
+    func abandonRequestLease(
+        _ leaseID: RequestLeaseID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    ) {}
+}

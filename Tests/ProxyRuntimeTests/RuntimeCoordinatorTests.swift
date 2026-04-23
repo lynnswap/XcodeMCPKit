@@ -4,8 +4,9 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 import ProxyCore
+import ProxyMCP
 import XcodeMCPTestSupport
-@testable import ProxyRuntime
+@testable import ProxySession
 
 @Suite(.serialized)
 struct RuntimeCoordinatorTests {
@@ -610,6 +611,85 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+    @Test func controlPlaneInitializeTimeoutDoesNotAbortLongerWaiter() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let shortTask = Task {
+            try await manager.controlPlaneCoordinator.clientInitialize(
+                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .milliseconds(50))
+            )
+        }
+        let longTask = Task {
+            try await manager.controlPlaneCoordinator.clientInitialize(
+                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .seconds(1))
+            )
+        }
+
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+
+        await #expect(throws: TimeoutError.self) {
+            _ = try await shortTask.value
+        }
+
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+
+        let longResult = try await longTask.value
+        guard case .object(let object) = longResult else {
+            Issue.record("initialize result should be an object")
+            return
+        }
+        #expect(object["capabilities"] != nil)
+    }
+
+    @Test func controlPlaneInitializeCancellationDoesNotAbortLongerWaiter() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let cancelledTask = Task {
+            try await manager.controlPlaneCoordinator.clientInitialize(
+                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .seconds(1))
+            )
+        }
+        let longTask = Task {
+            try await manager.controlPlaneCoordinator.clientInitialize(
+                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .seconds(1))
+            )
+        }
+
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        cancelledTask.cancel()
+
+        do {
+            _ = try await cancelledTask.value
+            Issue.record("cancelled initialize waiter should not complete successfully")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError but received \(error)")
+        }
+
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+
+        let longResult = try await longTask.value
+        guard case .object(let object) = longResult else {
+            Issue.record("initialize result should be an object")
+            return
+        }
+        #expect(object["capabilities"] != nil)
+    }
+
     @Test func sessionManagerTimeoutDoesNotClearRecreatedSessionInitializeRoutingState()
         async throws
     {
@@ -706,6 +786,716 @@ struct RuntimeCoordinatorTests {
 
         let replacementSnapshotAfterError = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterError.generation == replacementSnapshotBeforeError.generation)
+    }
+
+    @Test func sessionManagerSharedToolsListTimeoutStartsFreshControlPlaneLoad() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let sessionID = "session-tools-timeout"
+        _ = manager.session(id: sessionID)
+
+        let firstTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .milliseconds(50)
+            )
+        }
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
+        let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: firstRequest) == "tools/list")
+        await #expect(throws: TimeoutError.self) {
+            _ = try await firstTask.value
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+
+        let secondTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .milliseconds(50)
+            )
+        }
+        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
+        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        #expect(methodName(from: secondRequest) == "tools/list")
+        await #expect(throws: TimeoutError.self) {
+            _ = try await secondTask.value
+        }
+    }
+
+    @Test func sessionManagerSharedToolsListReusesInFlightPrewarm() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.prewarmToolsList = true
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.refreshToolsListIfNeeded()
+        let prewarmRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: prewarmRequest) == "tools/list")
+
+        let sessionID = "session-tools-prewarm"
+        _ = manager.session(id: sessionID)
+        let foregroundTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(1)
+            )
+        }
+
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                await upstream.sentCount() == 3
+            }
+        )
+
+        let prewarmUpstreamID = try extractUpstreamID(from: prewarmRequest)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": prewarmUpstreamID,
+            "result": ["tools": []],
+        ]
+        await upstream.yield(.message(try JSONSerialization.data(withJSONObject: response)))
+
+        let result = try await foregroundTask.value
+        guard case .object(let object) = result else {
+            Issue.record("tools/list result should be an object")
+            return
+        }
+        #expect(object["tools"] != nil)
+    }
+
+    @Test func sessionManagerSharedToolsListPromotesPartlyConsumedSharedTimeout()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let sessionID = "session-tools-promote-same-timeout"
+        _ = manager.session(id: sessionID)
+
+        let firstTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: firstRequest) == "tools/list")
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let secondTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                await upstream.sentCount() >= 4
+            }
+        )
+        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        #expect(methodName(from: secondRequest) == "tools/list")
+
+        firstTask.cancel()
+        secondTask.cancel()
+
+        do {
+            _ = try await firstTask.value
+            Issue.record("first tools/list waiter should be cancelled after promotion test")
+        } catch is CancellationError {
+        } catch is TimeoutError {
+        } catch {
+            Issue.record("expected CancellationError or TimeoutError for first waiter but received \(error)")
+        }
+        do {
+            _ = try await secondTask.value
+            Issue.record("second tools/list waiter should be cancelled after promotion test")
+        } catch is CancellationError {
+        } catch is TimeoutError {
+        } catch {
+            Issue.record("expected CancellationError or TimeoutError for second waiter but received \(error)")
+        }
+    }
+
+    @Test func sessionManagerSharedToolsListCancellationCancelsLastWaiterLoad() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let sessionID = "session-tools-cancel"
+        _ = manager.session(id: sessionID)
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+    }
+
+    @Test func sessionManagerSharedToolsListStopsPromotingAfterLoadBecomesShared() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let sessionID = "session-tools-shared-no-starvation"
+        _ = manager.session(id: sessionID)
+
+        let firstTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let secondTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let thirdTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        #expect(
+            await staysTrue(for: .milliseconds(250)) {
+                await upstream.sentCount() == 4
+            }
+        )
+
+        firstTask.cancel()
+        secondTask.cancel()
+        thirdTask.cancel()
+        _ = try? await firstTask.value
+        _ = try? await secondTask.value
+        _ = try? await thirdTask.value
+    }
+
+    @Test func sessionManagerPromotedToolsListCancellationRemovesMigratedWaiter() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let sessionID = "session-tools-promoted-cancel"
+        _ = manager.session(id: sessionID)
+        let firstTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let secondTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+
+        firstTask.cancel()
+        do {
+            _ = try await firstTask.value
+            Issue.record("first promoted tools/list waiter should be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for promoted waiter but received \(error)")
+        }
+
+        secondTask.cancel()
+        do {
+            _ = try await secondTask.value
+            Issue.record("second promoted tools/list waiter should be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for promoted waiter but received \(error)")
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+    }
+
+    @Test func sessionManagerSharedToolsListTimeoutCancelsStalePrewarmLoad() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.prewarmToolsList = true
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.refreshToolsListIfNeeded()
+        let prewarmRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: prewarmRequest) == "tools/list")
+
+        let sessionID = "session-tools-prewarm-timeout"
+        _ = manager.session(id: sessionID)
+        let firstTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .milliseconds(50)
+            )
+        }
+
+        await #expect(throws: TimeoutError.self) {
+            _ = try await firstTask.value
+        }
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+
+        let secondTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .milliseconds(50)
+            )
+        }
+        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
+        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        #expect(methodName(from: secondRequest) == "tools/list")
+        await #expect(throws: TimeoutError.self) {
+            _ = try await secondTask.value
+        }
+    }
+
+    @Test func sessionManagerLateToolsListResponseDoesNotReseedCanonicalCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let sessionID = "session-tools-late-response"
+        _ = manager.session(id: sessionID)
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: sessionID,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let toolsRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let toolsUpstreamID = try extractUpstreamID(from: toolsRequest)
+
+        manager.handleUpstreamExit(1, upstreamIndex: 0)
+
+        do {
+            _ = try await task.value
+            Issue.record("tools/list should fail when the only upstream exits")
+        } catch {
+        }
+
+        let lateResponse = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": toolsUpstreamID,
+                "result": ["tools": []],
+            ],
+            options: []
+        )
+        manager.routeUpstreamMessage(lateResponse, upstreamIndex: 0)
+
+        #expect(manager.cachedToolsListResult() == nil)
+    }
+
+    @Test func sessionManagerLiveXcodeListWindowsTimeoutStartsFreshControlPlaneLoad()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let firstTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .milliseconds(50)
+            )
+        }
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
+        let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: firstRequest) == "tools/call")
+        await #expect(throws: TimeoutError.self) {
+            _ = try await firstTask.value
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+
+        let secondTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .milliseconds(50)
+            )
+        }
+        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
+        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        #expect(methodName(from: secondRequest) == "tools/call")
+        await #expect(throws: TimeoutError.self) {
+            _ = try await secondTask.value
+        }
+    }
+
+    @Test func sessionManagerLiveXcodeListWindowsCancellationCancelsLastWaiterLoad()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
+        let request = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: request) == "tools/call")
+
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("cancelled XcodeListWindows waiter should not complete successfully")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError but received \(error)")
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+    }
+
+    @Test func sessionManagerPromotedLiveXcodeListWindowsCancellationRemovesMigratedWaiter()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let firstTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let secondTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+
+        firstTask.cancel()
+        do {
+            _ = try await firstTask.value
+            Issue.record("first promoted XcodeListWindows waiter should be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for promoted XcodeListWindows waiter but received \(error)")
+        }
+
+        secondTask.cancel()
+        do {
+            _ = try await secondTask.value
+            Issue.record("second promoted XcodeListWindows waiter should be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for promoted XcodeListWindows waiter but received \(error)")
+        }
+
+        #expect(
+            await waitUntil(timeout: .seconds(2)) {
+                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+            }
+        )
+    }
+
+    @Test func controlPlaneRPCHandleCancelBeforeQueueStartCapturesQueuedState() {
+        let handle = ControlPlaneRPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+
+        handle.installCancel { snapshot in
+            cancellation.withLockedValue { $0 = snapshot }
+        }
+        handle.cancel()
+
+        let snapshot = cancellation.withLockedValue { $0 }
+        #expect(snapshot?.registrationToken == nil)
+        #expect(snapshot?.upstreamIndex == nil)
+        #expect(snapshot?.requestIDKey == nil)
+        #expect(handle.markRegistered(registrationToken: UUID(), upstreamIndex: 0) == false)
+    }
+
+    @Test func controlPlaneRPCHandleCancelAfterRegisterCapturesRegistrationState() {
+        let handle = ControlPlaneRPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let token = UUID()
+
+        handle.installCancel { snapshot in
+            cancellation.withLockedValue { $0 = snapshot }
+        }
+        #expect(handle.markRegistered(registrationToken: token, upstreamIndex: 2))
+
+        handle.cancel()
+
+        let snapshot = cancellation.withLockedValue { $0 }
+        #expect(snapshot?.registrationToken == token)
+        #expect(snapshot?.upstreamIndex == 2)
+        #expect(snapshot?.requestIDKey == nil)
+        #expect(handle.markAssigned(registrationToken: token, upstreamIndex: 2, requestIDKey: "req") == false)
+    }
+
+    @Test func controlPlaneRPCHandleCancelAfterAssignCapturesRequestMappingState() {
+        let handle = ControlPlaneRPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let token = UUID()
+
+        handle.installCancel { snapshot in
+            cancellation.withLockedValue { $0 = snapshot }
+        }
+        #expect(handle.markRegistered(registrationToken: token, upstreamIndex: 1))
+        #expect(handle.markAssigned(registrationToken: token, upstreamIndex: 1, requestIDKey: "req-1"))
+
+        handle.cancel()
+
+        let snapshot = cancellation.withLockedValue { $0 }
+        #expect(snapshot?.registrationToken == token)
+        #expect(snapshot?.upstreamIndex == 1)
+        #expect(snapshot?.requestIDKey == "req-1")
+    }
+
+    @Test func controlPlaneRPCHandleCancelAfterSendUsesAssignedSnapshotUntilFinished() {
+        let handle = ControlPlaneRPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let token = UUID()
+
+        handle.installCancel { snapshot in
+            cancellation.withLockedValue { $0 = snapshot }
+        }
+        #expect(handle.markRegistered(registrationToken: token, upstreamIndex: 0))
+        #expect(handle.markAssigned(registrationToken: token, upstreamIndex: 0, requestIDKey: "req-after-send"))
+
+        handle.cancel()
+
+        let snapshot = cancellation.withLockedValue { $0 }
+        #expect(snapshot?.registrationToken == token)
+        #expect(snapshot?.upstreamIndex == 0)
+        #expect(snapshot?.requestIDKey == "req-after-send")
+
+        handle.markFinished()
+        handle.cancel()
+        let repeatedSnapshot = cancellation.withLockedValue { $0 }
+        #expect(repeatedSnapshot?.requestIDKey == "req-after-send")
     }
 
     @Test func sessionManagerEagerInitializeRestartsAfterExit() async throws {
@@ -1112,6 +1902,34 @@ struct RuntimeCoordinatorTests {
         let upstreamID2 = try extractUpstreamID(from: (await upstream.sent())[2])
         await upstream.yield(.message(try makeInitializeResponse(id: upstreamID2)))
         _ = try await init2.get()
+    }
+
+    @Test func sessionManagerPrimaryEagerRetryClearsCanonicalToolsCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        #expect(manager.cachedToolsListResult() != nil)
+
+        manager.startPrimaryEagerRetry()
+
+        #expect(manager.cachedToolsListResult() == nil)
     }
 
     @Test func sessionManagerKeepsQueuedRequestsWaitingWhileReinitializeIsInFlight() async throws {
@@ -3062,6 +3880,71 @@ struct RuntimeCoordinatorTests {
         }
         #expect(isQuarantined)
         #expect(manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil)
+    }
+
+    @Test func sessionManagerUpstreamExitClearsCanonicalToolsCatalogImmediately() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        #expect(manager.cachedToolsListResult() != nil)
+
+        manager.handleUpstreamExit(1, upstreamIndex: 0)
+
+        #expect(manager.cachedToolsListResult() == nil)
+    }
+
+    @Test func sessionManagerProtocolViolationClearsCanonicalToolsCatalogImmediately()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdown() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        #expect(manager.cachedToolsListResult() != nil)
+
+        manager.handleUpstreamProtocolViolation(
+            StdioFramerProtocolViolation(
+                reason: .invalidJSON,
+                bufferedByteCount: 64,
+                preview: "{broken"
+            ),
+            upstreamIndex: 0
+        )
+
+        #expect(manager.cachedToolsListResult() == nil)
     }
 
     @Test func sessionManagerProtocolViolationRestartsWarmInitializeForPrimary() async throws {

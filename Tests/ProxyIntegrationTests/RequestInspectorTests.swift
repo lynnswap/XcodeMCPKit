@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ProxyMCP
 
 @testable import ProxyCore
 
@@ -87,6 +88,42 @@ struct RequestInspectorTests {
         let id = (first?["id"] as? NSNumber)?.intValue
         #expect(id == 77)
         #expect(mappedCount == 1)
+        #expect(transform.cacheableToolsListResponseIDKey == "1")
+    }
+
+    @Test func requestInspectorUsesFirstToolsListIDInMixedBatch() async throws {
+        let payload: [Any] = [
+            ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
+            ["jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": ["name": "DocumentationSearch"]],
+            ["jsonrpc": "2.0", "id": 3, "method": "tools/list"],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        let transform = try RequestInspector.transform(
+            data,
+            sessionID: "s1",
+            mapID: { _, originalID in Int64(originalID.key) ?? 0 }
+        )
+
+        #expect(transform.normalizationToolsListResponseIDKey == "1")
+        #expect(transform.cacheableToolsListResponseIDKey == nil)
+    }
+
+    @Test func requestInspectorCachesPureToolsListBatchUsingFirstResponseID() async throws {
+        let payload: [Any] = [
+            ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
+            ["jsonrpc": "2.0", "id": 2, "method": "tools/list"],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        let transform = try RequestInspector.transform(
+            data,
+            sessionID: "s1",
+            mapID: { _, originalID in Int64(originalID.key) ?? 0 }
+        )
+
+        #expect(transform.normalizationToolsListResponseIDKey == "1")
+        #expect(transform.cacheableToolsListResponseIDKey == "1")
     }
 
     @Test func requestInspectorRejectsScalarJSON() async throws {
