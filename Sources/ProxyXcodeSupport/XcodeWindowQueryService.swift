@@ -49,6 +49,15 @@ package struct XcodeWindowQueryService {
         return fallbackText
     }
 
+    package func parseWindowsResult(_ result: Any) -> [XcodeWindowInfo]? {
+        guard let object = result as? [String: Any],
+            let message = extractToolMessage(from: object)
+        else {
+            return nil
+        }
+        return parseXcodeListWindowsMessage(message)
+    }
+
     package func parseXcodeListWindowsMessage(_ message: String) -> [XcodeWindowInfo] {
         message
             .split(separator: "\n")

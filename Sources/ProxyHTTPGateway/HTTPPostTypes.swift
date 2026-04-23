@@ -95,6 +95,10 @@ package final class HTTPPostCancellationHandle: @unchecked Sendable {
         state.withLockedValue { $0.requestIDKeys }
     }
 
+    package var isCancelled: Bool {
+        state.withLockedValue { $0.isTerminal }
+    }
+
     package func activate(upstreamIndex: Int) {
         state.withLockedValue { state in
             guard !state.isTerminal else { return }

@@ -5,6 +5,7 @@ import ProxyCore
 package struct SessionRecord: Sendable {
     package let context: SessionContext
     package let generation: UInt64
+    package var isInitialized: Bool
 }
 
 package final class SessionRegistry: Sendable {
@@ -29,7 +30,8 @@ package final class SessionRegistry: Sendable {
             state.nextGeneration &+= 1
             state.sessions[id] = SessionRecord(
                 context: context,
-                generation: state.nextGeneration
+                generation: state.nextGeneration,
+                isInitialized: false
             )
             return context
         }
@@ -70,6 +72,20 @@ package final class SessionRegistry: Sendable {
             state.sessions.values.compactMap { record in
                 record.context.notificationHub.hasClients ? record.context : nil
             }
+        }
+    }
+
+    package func markInitialized(id sessionID: String) {
+        state.withLockedValue { state in
+            guard var record = state.sessions[sessionID] else { return }
+            record.isInitialized = true
+            state.sessions[sessionID] = record
+        }
+    }
+
+    package func isInitialized(id sessionID: String) -> Bool {
+        state.withLockedValue { state in
+            state.sessions[sessionID]?.isInitialized ?? false
         }
     }
 

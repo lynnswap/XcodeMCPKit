@@ -8,6 +8,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
     package let proxyInitialized: Bool
     package let cachedToolsListAvailable: Bool
     package let warmupInFlight: Bool
+    package let controlPlane: ProxyControlPlaneDebugSnapshot?
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
     package let sessions: [SessionDebugSnapshot]
@@ -23,6 +24,7 @@ package struct HTTPDebugSnapshot: Codable, Sendable {
         self.proxyInitialized = base.proxyInitialized
         self.cachedToolsListAvailable = base.cachedToolsListAvailable
         self.warmupInFlight = base.warmupInFlight
+        self.controlPlane = base.controlPlane
         self.upstreams = base.upstreams
         self.recentTraffic = base.recentTraffic
         self.sessions = base.sessions

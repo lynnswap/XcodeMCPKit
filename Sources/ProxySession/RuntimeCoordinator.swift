@@ -26,6 +26,12 @@ package final class SessionContext: Sendable {
     }
 }
 
+package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
+    weak var value: RuntimeCoordinator?
+
+    package init() {}
+}
+
 package protocol RuntimeCoordinating: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
@@ -35,13 +41,25 @@ package protocol RuntimeCoordinating: Sendable {
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue)
-    func refreshToolsListIfNeeded()
     func registerInitialize(
         sessionID: String,
         originalID: RPCID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
+    func sharedToolsList(
+        sessionID: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue
+    func sharedXcodeListWindowsResult(
+        sessionID: String,
+        maxAge: TimeInterval,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue
+    func liveXcodeListWindowsResult(
+        route: ControlPlaneRoute,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: RequestLeaseID,
@@ -108,6 +126,17 @@ extension RuntimeCoordinating {
     func debugSnapshot() -> ProxyDebugSnapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
+
+    func sharedXcodeListWindowsResult(
+        sessionID _: String,
+        maxAge _: TimeInterval,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        try await liveXcodeListWindowsResult(
+            route: .anyHealthy,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+    }
 }
 
 extension RuntimeCoordinator {
@@ -150,14 +179,16 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamSlotControlling]
-    package let toolsListCache = ToolsListCache()
     package let initializeParamsOverride: [String: JSONValue]?
+    package let canonicalBrokerState = CanonicalBrokerState()
+    package let controlPlaneDebugMirror = ControlPlaneDebugMirror()
 
     package let upstreamHealthManager: UpstreamHealthManager
     package let upstreamSlotScheduler: UpstreamSlotScheduler
     package let nowUptimeNanoseconds: @Sendable () -> UInt64
     package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
         RuntimeScheduledTimeout
+    package let controlPlaneCoordinator: ControlPlaneCoordinator
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
@@ -178,6 +209,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
+        let runtimeBox = WeakRuntimeCoordinatorBox()
         let uptimeProvider = nowUptimeNanoseconds
         let timeoutScheduler = scheduleRuntimeTimeout
             ?? { delay, operation in
@@ -232,6 +264,52 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             configPath: config.configPath,
             logger: ProxyLogging.make("config")
         )
+        self.controlPlaneCoordinator = ControlPlaneCoordinator(
+            brokerState: self.canonicalBrokerState,
+            debugMirror: self.controlPlaneDebugMirror,
+            initializeLoader: { [runtimeBox] deadlineUptimeNs in
+                guard let runtime = runtimeBox.value else {
+                    throw CancellationError()
+                }
+                return try await runtime.awaitCanonicalInitializeSnapshot(
+                    deadlineUptimeNs: deadlineUptimeNs
+                )
+            },
+            toolsCatalogLoader: { [runtimeBox] deadlineUptimeNs in
+                guard let runtime = runtimeBox.value else {
+                    throw CancellationError()
+                }
+                return try await runtime.loadCanonicalToolsCatalog(
+                    deadlineUptimeNs: deadlineUptimeNs
+                )
+            },
+            windowsLoader: { [runtimeBox] route, deadlineUptimeNs in
+                guard let runtime = runtimeBox.value else {
+                    throw CancellationError()
+                }
+                return try await runtime.loadLiveXcodeListWindows(
+                    route: route,
+                    deadlineUptimeNs: deadlineUptimeNs
+                )
+            },
+            upstreamHandshakeStates: { [weak upstreamHealthManager = self.upstreamHealthManager] in
+                guard let upstreamHealthManager else { return [:] }
+                let states = upstreamHealthManager.statesSnapshot()
+                return Dictionary(uniqueKeysWithValues: states.enumerated().map { index, state in
+                    let summary: String
+                    if state.initInFlight {
+                        summary = "initializing"
+                    } else if state.isInitialized {
+                        summary = "initialized"
+                    } else {
+                        summary = "idle"
+                    }
+                    return ("\(index)", summary)
+                })
+            },
+            logger: ProxyLogging.make("control-plane")
+        )
+        runtimeBox.value = self
         schedulerProbeStarter.withLockedValue { startProbes in
             startProbes = { [weak self] probes in
                 self?.startHealthProbes(probes)
@@ -305,11 +383,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             session.notificationHub.closeAll()
         }
 
-        toolsListCache.reset()
         upstreamRouter.resetAll()
         _ = leaseManager.resetAll(reason: .clientDisconnected)
         upstreamSlotScheduler.reset()
         debugRecorder.resetAll()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            await controlPlaneCoordinator.invalidate(
+                reason: "debug_reset",
+                clearInitialize: true,
+                clearToolsCatalog: true
+            )
+            semaphore.signal()
+        }
+        semaphore.wait()
+        canonicalBrokerState.reset()
     }
 
     package func shutdown() {
@@ -326,6 +414,18 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for timeout in upstreamTimeouts {
             timeout?.cancel()
         }
+
+        let controlPlaneSemaphore = DispatchSemaphore(value: 0)
+        Task {
+            await controlPlaneCoordinator.invalidate(
+                reason: "shutdown",
+                clearInitialize: true,
+                clearToolsCatalog: true
+            )
+            controlPlaneSemaphore.signal()
+        }
+        controlPlaneSemaphore.wait()
+        canonicalBrokerState.reset()
 
         let tasks = upstreamTaskBox.withLockedValue { taskBox -> [Task<Void, Never>] in
             let current = taskBox
@@ -347,24 +447,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package func cachedToolsListResult() -> JSONValue? {
-        toolsListCache.cachedResult()
+        canonicalBrokerState.toolsCatalogRaw()
     }
 
     package func setCachedToolsListResult(_ result: JSONValue) {
         guard isValidToolsListResult(result) else { return }
-        toolsListCache.setCachedResult(result)
+        canonicalBrokerState.syncCanonicalToolsCatalog(
+            result,
+            sourceUpstream: canonicalBrokerState.toolsSourceUpstream() ?? 0
+        )
     }
 
     package func refreshToolsListIfNeeded() {
-        let shouldStart = toolsListCache.beginWarmupIfNeeded(
-            isEnabled: config.prewarmToolsList,
-            isInitialized: isInitialized()
-        )
-        guard shouldStart else { return }
-
+        guard config.prewarmToolsList, isInitialized() else { return }
         Task { [weak self] in
-            guard let self else { return }
-            await self.refreshToolsList()
+            await self?.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded()
         }
     }
 
@@ -453,6 +550,20 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
+        registerInitializeWaiter(
+            sessionID: sessionID,
+            originalID: originalID,
+            requestObject: requestObject,
+            on: eventLoop
+        )
+    }
+
+    func registerInitializeWaiter(
+        sessionID: String,
+        originalID: RPCID,
+        requestObject: [String: Any],
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ByteBuffer> {
         _ = session(id: sessionID)
         let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
         let decision = initializeManager.registerInitialize(
@@ -473,6 +584,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if let cachedResult {
             _ = session(id: sessionID)
+            sessionRegistry.markInitialized(id: sessionID)
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
@@ -516,6 +628,129 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             requestObject: requestObject,
             on: eventLoop
         )
+    }
+
+    package func sharedToolsList(
+        sessionID: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = session(id: sessionID)
+        let timeout =
+            requestTimeoutOverride
+            ?? MCPMethodDispatcher.timeoutForMethod(
+                "tools/list",
+                defaultSeconds: config.requestTimeout
+            )
+        let deadline = Self.timeoutDeadline(for: timeout)
+        return try await controlPlaneCoordinator.toolsCatalog(
+            deadlineUptimeNs: deadline
+        )
+    }
+
+    package func sharedXcodeListWindowsResult(
+        sessionID: String,
+        maxAge: TimeInterval = 1,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = session(id: sessionID)
+        _ = maxAge
+        return try await liveXcodeListWindowsResult(
+            route: .anyHealthy,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+    }
+
+    package func liveXcodeListWindowsResult(
+        route: ControlPlaneRoute,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        let timeout =
+            requestTimeoutOverride
+            ?? MCPMethodDispatcher.timeoutForMethod(
+                "tools/call",
+                defaultSeconds: config.requestTimeout
+            )
+        let deadline = Self.timeoutDeadline(for: timeout)
+        return try await controlPlaneCoordinator.listWindows(
+            route: route,
+            deadlineUptimeNs: deadline
+        )
+    }
+
+    func encodeJSONRPCResultBuffer(
+        id: RPCID,
+        result: JSONValue
+    ) throws -> ByteBuffer {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "result": result.foundationObject,
+        ]
+        guard JSONSerialization.isValidJSONObject(response) else {
+            throw TimeoutError()
+        }
+        let data = try JSONSerialization.data(withJSONObject: response, options: [])
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        return buffer
+    }
+
+    func encodeControlPlaneErrorBuffer(
+        id: RPCID,
+        error: Error
+    ) throws -> ByteBuffer {
+        let mapped = Self.mapControlPlaneError(error)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "error": [
+                "code": mapped.code,
+                "message": mapped.message,
+            ],
+        ]
+        guard JSONSerialization.isValidJSONObject(response) else {
+            throw TimeoutError()
+        }
+        let data = try JSONSerialization.data(withJSONObject: response, options: [])
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        return buffer
+    }
+
+    func eventLoopFuture<T: Sendable>(
+        on eventLoop: EventLoop,
+        operation: @escaping @Sendable () async throws -> T
+    ) -> EventLoopFuture<T> {
+        let promise = eventLoop.makePromise(of: T.self)
+        promise.completeWithTask {
+            try await operation()
+        }
+        return promise.futureResult
+    }
+
+    static func timeoutDeadline(for timeout: TimeAmount?) -> UInt64? {
+        guard let timeout, timeout.nanoseconds > 0 else {
+            return nil
+        }
+        return DispatchTime.now().uptimeNanoseconds &+ UInt64(timeout.nanoseconds)
+    }
+
+    static func mapControlPlaneError(_ error: Error) -> (code: Int, message: String) {
+        if error is UpstreamSlotAcquisitionError {
+            return (-32001, "upstream unavailable")
+        }
+        if let error = error as? ControlPlaneRequestError {
+            return mapControlPlaneError(error.underlying)
+        }
+        if let error = error as? ControlPlaneError {
+            switch error {
+            case .invalidResponse:
+                return (-32000, "upstream timeout")
+            case .upstreamRPC(let code, let message):
+                return (code, message)
+            }
+        }
+        return (-32000, "upstream timeout")
     }
 
 }

@@ -319,21 +319,6 @@ extension HTTPPostService {
             )
         }
 
-        if prepared.transform.method == "tools/list" {
-            let hasCache = sessionManager.cachedToolsListResult() != nil
-            let params = (forwardedRequestJSON as? [String: Any])?["params"]
-            let hasParams = params != nil && !(params is NSNull)
-            logger.debug(
-                "tools/list cache miss; forwarding upstream",
-                metadata: [
-                    "session": .string(sessionID),
-                    "has_cache": .string(hasCache ? "true" : "false"),
-                    "has_params": .string(hasParams ? "true" : "false"),
-                    "upstream": .string("\(prepared.upstreamIndex)"),
-                ]
-            )
-        }
-
         if headerSessionID == nil {
             if prepared.transform.isBatch || prepared.transform.method != "initialize"
                 || !prepared.transform.expectsResponse

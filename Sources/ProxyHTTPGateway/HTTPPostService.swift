@@ -19,7 +19,6 @@ package final class HTTPPostService: Sendable {
     package let disabledToolNames: Set<String>
     package let localResponder: LocalMCPResponder
     package let forwardingService: MCPForwardingService
-    package let windowQueryService: XcodeWindowQueryService
     package let refreshWorkflow: RefreshCodeIssuesWorkflow
     package let requestTimeoutSeconds: TimeInterval
     package let logger: Logger
@@ -45,7 +44,6 @@ package final class HTTPPostService: Sendable {
             config: config,
             sessionManager: sessionManager
         )
-        self.windowQueryService = XcodeWindowQueryService()
         self.refreshWorkflow = RefreshCodeIssuesWorkflow(
             mode: config.refreshCodeIssuesMode,
             requestTimeout: config.requestTimeout,
@@ -76,7 +74,8 @@ package final class HTTPPostService: Sendable {
                 object: localRequest.object,
                 headerSessionID: headerSessionID,
                 headerSessionExists: headerSessionExists,
-                eventLoop: eventLoop
+                eventLoop: eventLoop,
+                requestTimeoutOverride: requestTimeoutOverride
             )
         {
             return HTTPPostOperation(

@@ -41,6 +41,17 @@ extension RuntimeCoordinator {
         }
 
         if upstreamIndex != 0 {
+            if let canonicalInitialize = canonicalBrokerState.initializeResult(),
+                !initializeResultsEquivalent(canonicalInitialize, result)
+            {
+                noteIncompatibleUpstream(
+                    upstreamIndex: upstreamIndex,
+                    kind: "initialize",
+                    reason: "initialize.result mismatch"
+                )
+                failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+                return
+            }
             sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
                 self?.markUpstreamInitialized(upstreamIndex: upstreamIndex)
                 self?.upstreamSlotScheduler.wake()
@@ -57,6 +68,10 @@ extension RuntimeCoordinator {
         sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
             guard let self else { return }
             self.initializeManager.storeInitializeResultIfNeeded(result)
+            self.canonicalBrokerState.syncCanonicalInitialize(
+                result,
+                sourceUpstream: upstreamIndex
+            )
             guard let pending = self.initializeManager.finishPrimaryInitializeSuccess() else { return }
             self.markUpstreamInitialized(upstreamIndex: upstreamIndex)
             self.upstreamSlotScheduler.wake()
@@ -88,6 +103,7 @@ extension RuntimeCoordinator {
         result: JSONValue
     ) {
         for item in pending {
+            sessionRegistry.markInitialized(id: item.sessionID)
             if let buffer = encodeInitializeResponse(
                 originalID: item.originalID,
                 result: result
@@ -206,6 +222,17 @@ extension RuntimeCoordinator {
 
     func handleInitializedNotificationSendOverload(upstreamIndex: Int) {
         clearUpstreamState(upstreamIndex: upstreamIndex)
+        let hasHealthySecondary = upstreamIndex == 0 && hasUsableInitializedSecondaryUpstreams()
+        if canonicalBrokerState.toolsSourceUpstream() == upstreamIndex && !hasHealthySecondary {
+            canonicalBrokerState.clearToolsCatalog()
+            Task { [weak self] in
+                await self?.controlPlaneCoordinator.invalidate(
+                    reason: "initialized_notification_overload_\(upstreamIndex)",
+                    clearInitialize: false,
+                    clearToolsCatalog: true
+                )
+            }
+        }
         if upstreamIndex == 0 {
             if hasUsableInitializedSecondaryUpstreams() {
                 initializeManager.setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
@@ -299,7 +326,16 @@ extension RuntimeCoordinator {
     func startPrimaryEagerRetry() {
         clearUpstreamState(upstreamIndex: 0)
         initializeManager.resetCachedInitializeResult()
-        toolsListCache.reset()
+        canonicalBrokerState.clearInitialize()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            await controlPlaneCoordinator.invalidate(
+                reason: "primary_eager_retry",
+                clearInitialize: true
+            )
+            semaphore.signal()
+        }
+        semaphore.wait()
         startEagerInitializePrimary()
     }
 
@@ -314,11 +350,6 @@ extension RuntimeCoordinator {
             }
         }
     }
-
-    func toolsListInternalSessionID() -> String {
-        toolsListCache.internalSessionID { hasSession(id: $0) }
-    }
-
     func makeInternalInitializeRequest(id: Int64) -> [String: Any] {
         let mergedParams = resolvedInitializeParams().mapValues(\.foundationObject)
 

@@ -12,6 +12,12 @@ package struct ProtocolViolationTransition: Sendable {
     package let cancelledInitTimeout: RuntimeScheduledTimeout?
 }
 
+package struct IncompatibilityTransition: Sendable {
+    package let quarantineUntil: UInt64
+    package let cancelledInitTimeout: RuntimeScheduledTimeout?
+    package let initUpstreamID: Int64?
+}
+
 package final class UpstreamHealthManager: Sendable {
     package struct UpstreamState: Sendable {
         package var isInitialized = false
@@ -236,6 +242,34 @@ package final class UpstreamHealthManager: Sendable {
             return ProtocolViolationTransition(
                 quarantineUntil: quarantineUntil,
                 cancelledInitTimeout: cancelledInitTimeout
+            )
+        }
+    }
+
+    package func quarantineIncompatibleUpstream(
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64
+    ) -> IncompatibilityTransition? {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            let quarantineUntil = nowUptimeNs &+ 30_000_000_000
+            let cancelledInitTimeout = state.upstreamStates[upstreamIndex].initTimeout
+            let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
+            state.upstreamStates[upstreamIndex].isInitialized = false
+            state.upstreamStates[upstreamIndex].initInFlight = false
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+            state.upstreamStates[upstreamIndex].initUpstreamID = nil
+            state.upstreamStates[upstreamIndex].didSendInitialized = false
+            state.upstreamStates[upstreamIndex].healthState = .quarantined(
+                untilUptimeNs: quarantineUntil
+            )
+            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
+            return IncompatibilityTransition(
+                quarantineUntil: quarantineUntil,
+                cancelledInitTimeout: cancelledInitTimeout,
+                initUpstreamID: initUpstreamID
             )
         }
     }

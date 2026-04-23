@@ -26,6 +26,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         package var sseSessionID: String?
         package var bodyTooLarge = false
         package var activePostRequestHandles: [String: HTTPPostCancellationHandle] = [:]
+        package var responseWriteTail: EventLoopFuture<Void>?
     }
 
     package let state = NIOLockedValueBox(State())
@@ -418,12 +419,14 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         operation.future.whenComplete { result in
             switch result {
             case .success(let resolution):
-                let writeFuture = self.sendPostResolution(
-                    resolution,
-                    on: channel,
-                    keepAlive: keepAlive,
-                    requestLog: requestLog
-                )
+                let writeFuture = self.enqueueOrderedWrite(on: channel) {
+                    self.sendPostResolution(
+                        resolution,
+                        on: channel,
+                        keepAlive: keepAlive,
+                        requestLog: requestLog
+                    )
+                }
                 writeFuture.whenFailure { error in
                     guard let handle = operation.cancellationHandle else { return }
                     self.logger.warning(
@@ -448,16 +451,39 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
                 _ = self.state.withLockedValue { state in
                     state.activePostRequestHandles.removeValue(forKey: requestLog.id)
                 }
-                _ = self.sendPlain(
-                    on: channel,
-                    status: .internalServerError,
-                    body: "internal server error",
-                    keepAlive: keepAlive,
-                    sessionID: headerSessionID,
-                    requestLog: requestLog
-                )
+                _ = self.enqueueOrderedWrite(on: channel) {
+                    self.sendPlain(
+                        on: channel,
+                        status: .internalServerError,
+                        body: "internal server error",
+                        keepAlive: keepAlive,
+                        sessionID: headerSessionID,
+                        requestLog: requestLog
+                    )
+                }
             }
         }
+    }
+
+    private func enqueueOrderedWrite(
+        on channel: Channel,
+        start: @escaping @Sendable () -> EventLoopFuture<Void>
+    ) -> EventLoopFuture<Void> {
+        let gate = channel.eventLoop.makePromise(of: Void.self)
+        let writePromise = channel.eventLoop.makePromise(of: Void.self)
+        let previous = state.withLockedValue { state in
+            let previous = state.responseWriteTail ?? channel.eventLoop.makeSucceededFuture(())
+            state.responseWriteTail = gate.futureResult
+            return previous
+        }
+        previous.whenComplete { _ in
+            let future = start()
+            future.cascade(to: writePromise)
+            future.whenComplete { _ in
+                gate.succeed(())
+            }
+        }
+        return writePromise.futureResult
     }
 
 }

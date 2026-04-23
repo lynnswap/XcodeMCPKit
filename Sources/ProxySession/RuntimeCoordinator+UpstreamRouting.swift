@@ -169,8 +169,22 @@ extension RuntimeCoordinator {
         } else {
             shouldResetGlobalInit = false
         }
-        if shouldResetGlobalInit {
-            initializeManager.resetCachedInitializeResult()
+        let shouldClearToolsCatalog =
+            canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
+            && !upstreamHealthManager.anyInitialized()
+        if shouldResetGlobalInit || shouldClearToolsCatalog {
+            if shouldResetGlobalInit {
+                initializeManager.resetCachedInitializeResult()
+                canonicalBrokerState.clearInitialize()
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.controlPlaneCoordinator.invalidate(
+                    reason: "upstream_exit_\(upstreamIndex)",
+                    clearInitialize: shouldResetGlobalInit,
+                    clearToolsCatalog: shouldClearToolsCatalog
+                )
+            }
         }
 
         if upstreamIndex == 0 {
@@ -252,7 +266,8 @@ extension RuntimeCoordinator {
 
     package func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
         let initSnapshot = initializeManager.snapshot()
-        let toolsSnapshot = toolsListCache.snapshot()
+        let brokerSnapshot = canonicalBrokerState.snapshot()
+        let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()
         let upstreamStates = upstreamHealthManager.statesSnapshot()
         let leaseSnapshots = leaseManager.debugSnapshots()
         let sessionSnapshots = leaseManager.sessionDebugSnapshots(
@@ -262,8 +277,8 @@ extension RuntimeCoordinator {
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
-            cachedToolsListAvailable: toolsSnapshot.cachedResult != nil,
-            warmupInFlight: toolsSnapshot.warmupInFlight,
+            cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
+            controlPlane: controlPlaneSnapshot,
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,
@@ -604,6 +619,20 @@ extension RuntimeCoordinator {
                     "uptime_ns": .string("\(nowUptimeNs)"),
                 ]
             )
+        }
+        let clearInitialize = upstreamIndex == 0 && initSnapshot.hasInitResult == false
+        let clearToolsCatalog =
+            canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
+            && !upstreamHealthManager.anyInitialized()
+        if clearInitialize || clearToolsCatalog {
+            Task { [weak self] in
+                guard let self else { return }
+                await self.controlPlaneCoordinator.invalidate(
+                    reason: "protocol_violation_\(upstreamIndex)",
+                    clearInitialize: clearInitialize,
+                    clearToolsCatalog: clearToolsCatalog
+                )
+            }
         }
 
         if upstreamIndex == 0 {

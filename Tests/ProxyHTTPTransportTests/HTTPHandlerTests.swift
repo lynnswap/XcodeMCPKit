@@ -597,7 +597,9 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
+        // tools/list now runs through the shared bootstrap owner, so the client session does
+        // not hold a direct upstream mapping while it waits.
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
         let response = try collectResponse(from: channel)
@@ -2364,13 +2366,10 @@ struct HTTPHandlerTests {
                 "XcodeListNavigatorIssues",
             ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
-            #expect(Set(sessionManager.sentToolRequests()) == Set([
-                "XcodeListWindows@0",
-                "XcodeListNavigatorIssues@0",
-            ]) || Set(sessionManager.sentToolRequests()) == Set([
-                "XcodeListWindows@1",
-                "XcodeListNavigatorIssues@1",
-            ]))
+            let sentToolRequests = sessionManager.sentToolRequests()
+            #expect(sentToolRequests.count == 2)
+            #expect(sentToolRequests.contains { $0.hasPrefix("XcodeListWindows@") })
+            #expect(sentToolRequests.contains { $0.hasPrefix("XcodeListNavigatorIssues@") })
         } catch {
             try? await server.shutdown()
             throw error
@@ -5562,6 +5561,69 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return eventLoop.makeSucceededFuture(buffer)
     }
 
+    func sharedToolsList(
+        sessionID: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = requestTimeoutOverride
+        if let cached = state.withLockedValue({ $0.cachedToolsList }) {
+            return cached
+        }
+        let responseData = try await performSharedControlPlaneRequest(
+            method: "tools/list",
+            toolName: nil,
+            sessionID: sessionID
+        )
+        guard let object = try JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any],
+            let resultAny = object["result"],
+            let result = JSONValue(any: resultAny)
+        else {
+            throw NSError(domain: "TestRuntimeCoordinator", code: 2)
+        }
+        state.withLockedValue { state in
+            state.cachedToolsList = result
+        }
+        return result
+    }
+
+    func sharedXcodeListWindowsResult(
+        sessionID: String,
+        maxAge: TimeInterval,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = sessionID
+        _ = maxAge
+        return try await liveXcodeListWindowsResult(
+            route: .anyHealthy,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+    }
+
+    func liveXcodeListWindowsResult(
+        route _: ControlPlaneRoute,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        _ = requestTimeoutOverride
+        let responseData = try await performSharedControlPlaneRequest(
+            method: "tools/call",
+            toolName: "XcodeListWindows",
+            sessionID: "__test-control-plane__"
+        )
+        guard let object = try JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any],
+            let resultAny = object["result"],
+            let result = JSONValue(any: resultAny)
+        else {
+            throw NSError(domain: "TestRuntimeCoordinator", code: 3)
+        }
+        return result
+    }
+
     func chooseUpstreamIndex() -> Int? {
         state.withLockedValue { state in
             state.chooseUpstreamCalls.append(
@@ -5785,6 +5847,56 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return .immediate(Data())
     }
 
+    private func performSharedControlPlaneRequest(
+        method: String,
+        toolName: String?,
+        sessionID: String
+    ) async throws -> Data {
+        _ = session(id: sessionID)
+        guard let upstreamIndex = chooseUpstreamIndex() else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        state.withLockedValue { state in
+            state.upstreamSendCount += 1
+            state.sentRequests.append(
+                SentRequest(
+                    method: method,
+                    toolName: toolName,
+                    upstreamIndex: upstreamIndex
+                )
+            )
+        }
+
+        let originalID = RPCID(any: "__shared-\(method)-\(UUID().uuidString)")!
+        let plan = responsePlan(
+            method: method,
+            toolName: toolName,
+            originalID: originalID
+        )
+        if let delayNanos = plan.delayNanos {
+            try await Task.sleep(nanoseconds: delayNanos)
+        }
+        guard plan.deliverManually == false else {
+            throw ControlPlaneError.invalidResponse("timeout")
+        }
+        guard let object = try? JSONSerialization.jsonObject(
+            with: plan.data,
+            options: []
+        ) as? [String: Any] else {
+            throw ControlPlaneError.invalidResponse("invalid response")
+        }
+        if let errorObject = object["error"] as? [String: Any] {
+            throw ControlPlaneError.upstreamRPC(
+                code: (errorObject["code"] as? NSNumber)?.intValue ?? -32000,
+                message: errorObject["message"] as? String ?? "upstream error"
+            )
+        }
+        state.withLockedValue { state in
+            state.requestSuccessNotifications += 1
+        }
+        return plan.data
+    }
+
     func debugSnapshot() -> ProxyDebugSnapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
@@ -5884,6 +5996,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             proxyInitialized: isInitialized(),
             cachedToolsListAvailable: cachedToolsListResult() != nil,
             warmupInFlight: false,
+            controlPlane: nil,
             upstreams: [
                 ProxyUpstreamDebugSnapshot(
                     upstreamIndex: 0,

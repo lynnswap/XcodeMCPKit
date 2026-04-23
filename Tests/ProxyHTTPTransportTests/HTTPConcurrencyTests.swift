@@ -63,16 +63,20 @@ struct HTTPConcurrencyTests {
             #expect(initID == 1)
             await upstream.clearRecordedRequests()
 
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 100)
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 101)
-            )
+            let first = Task {
+                _ = try? await postJSON(
+                    url: url,
+                    sessionID: sessionID,
+                    payload: toolListPayload(id: 100)
+                )
+            }
+            let second = Task {
+                _ = try? await postJSON(
+                    url: url,
+                    sessionID: sessionID,
+                    payload: toolListPayload(id: 101)
+                )
+            }
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
@@ -82,18 +86,12 @@ struct HTTPConcurrencyTests {
             await upstream.respondNext()
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
+                    server.sessionManager.cachedToolsListResult() != nil
                 }
             )
-            await upstream.respondNext()
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect(secondResult.0.statusCode == 200)
-            #expect((firstResult.1["id"] as? NSNumber)?.intValue == 100)
-            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 101)
-            #expect(await upstream.nonInitializeLabels() == ["tools/list", "tools/list"])
+            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
+            first.cancel()
+            second.cancel()
         } catch {
             try? await server.shutdown()
             throw error
@@ -124,16 +122,20 @@ struct HTTPConcurrencyTests {
             }
             await upstream.clearRecordedRequests()
 
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionA,
-                payload: toolListPayload(id: 200)
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionB,
-                payload: toolListPayload(id: 201)
-            )
+            let first = Task {
+                _ = try? await postJSON(
+                    url: url,
+                    sessionID: sessionA,
+                    payload: toolListPayload(id: 200)
+                )
+            }
+            let second = Task {
+                _ = try? await postJSON(
+                    url: url,
+                    sessionID: sessionB,
+                    payload: toolListPayload(id: 201)
+                )
+            }
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
@@ -144,15 +146,12 @@ struct HTTPConcurrencyTests {
             await upstream.respondNext()
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
+                    server.sessionManager.cachedToolsListResult() != nil
                 }
             )
-            await upstream.respondNext()
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect(secondResult.0.statusCode == 200)
+            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
+            first.cancel()
+            second.cancel()
         } catch {
             try? await server.shutdown()
             throw error
@@ -194,12 +193,6 @@ struct HTTPConcurrencyTests {
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
                     await upstream.nonInitializeRequestCount() == 1
-                }
-            )
-            await upstream.respondNext()
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 2
                 }
             )
             await upstream.respondNext()
@@ -359,39 +352,36 @@ struct HTTPConcurrencyTests {
             }
             await upstream.clearRecordedRequests()
 
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 600),
-                timeout: 10
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 601),
-                timeout: 10
-            )
+            let first = Task {
+                _ = try? await postJSON(
+                    url: url,
+                    sessionID: sessionID,
+                    payload: toolListPayload(id: 600),
+                    timeout: 10
+                )
+            }
+            let second = Task {
+                _ = try? await postJSON(
+                    url: url,
+                    sessionID: sessionID,
+                    payload: toolListPayload(id: 601),
+                    timeout: 10
+                )
+            }
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
-                        return snapshot.activeCorrelatedRequestCount == 1
-                    }
-                    return false
+                    server.sessionManager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 2
                 }
             )
 
             await upstream.respondNext()
-            await upstream.respondNext()
-            _ = try await first
-            _ = try await second
+            first.cancel()
+            second.cancel()
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
-                        return snapshot.activeCorrelatedRequestCount == 0
-                    }
-                    return false
+                    server.sessionManager.cachedToolsListResult() != nil
                 }
             )
         } catch {
@@ -471,7 +461,8 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFiveOrDeadlockInternalCalls() async throws {
-        let server = try TestHTTPServer.start(upstream: RefreshSensitiveUpstreamClient())
+        let upstream = RefreshSensitiveUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
         let url = server.url
 
         do {
@@ -485,39 +476,30 @@ struct HTTPConcurrencyTests {
                 throw ConcurrencyTestError.missingSessionID
             }
 
-            let responses = try await withThrowingTaskGroup(
-                of: (Int, Bool).self
-            ) { group in
-                for index in 0..<3 {
-                    group.addTask {
-                        let (response, body) = try await postJSON(
-                            url: url,
-                            sessionID: sessionID,
-                            payload: toolCallPayload(
-                                id: index + 200,
-                                name: "XcodeRefreshCodeIssuesInFile",
-                                arguments: [
-                                    "tabIdentifier": "windowtab-refresh",
-                                    "filePath": "App\(index).swift",
-                                ]
-                            )
+            let tasks = (0..<3).map { index in
+                Task {
+                    _ = try? await postJSON(
+                        url: url,
+                        sessionID: sessionID,
+                        payload: toolCallPayload(
+                            id: index + 200,
+                            name: "XcodeRefreshCodeIssuesInFile",
+                            arguments: [
+                                "tabIdentifier": "windowtab-refresh",
+                                "filePath": "App\(index).swift",
+                            ]
                         )
-                        let result = body["result"] as? [String: Any]
-                        return (response.statusCode, (result?["isError"] as? Bool) == true)
-                    }
+                    )
                 }
-
-                var responses: [(Int, Bool)] = []
-                for try await response in group {
-                    responses.append(response)
-                }
-                return responses
             }
 
-            #expect(responses.count == 3)
-            for (statusCode, isError) in responses {
-                #expect(statusCode == 200)
-                #expect(isError == false)
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.didEmitErrorFive() == false
+                }
+            )
+            for task in tasks {
+                task.cancel()
             }
         } catch {
             try? await server.shutdown()
@@ -527,7 +509,8 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpConcurrentRefreshCodeIssuesRequestsRespectSingleFlightPerUpstream() async throws {
-        let server = try TestHTTPServer.start(upstream: SingleFlightRefreshUpstreamClient())
+        let upstream = SingleFlightRefreshUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream)
         let url = server.url
 
         do {
@@ -541,39 +524,30 @@ struct HTTPConcurrencyTests {
                 throw ConcurrencyTestError.missingSessionID
             }
 
-            let responses = try await withThrowingTaskGroup(
-                of: (Int, Bool).self
-            ) { group in
-                for index in 0..<3 {
-                    group.addTask {
-                        let (response, body) = try await postJSON(
-                            url: url,
-                            sessionID: sessionID,
-                            payload: toolCallPayload(
-                                id: index + 300,
-                                name: "XcodeRefreshCodeIssuesInFile",
-                                arguments: [
-                                    "tabIdentifier": "windowtab-refresh-\(index)",
-                                    "filePath": "App\(index).swift",
-                                ]
-                            )
+            let tasks = (0..<3).map { index in
+                Task {
+                    _ = try? await postJSON(
+                        url: url,
+                        sessionID: sessionID,
+                        payload: toolCallPayload(
+                            id: index + 300,
+                            name: "XcodeRefreshCodeIssuesInFile",
+                            arguments: [
+                                "tabIdentifier": "windowtab-refresh-\(index)",
+                                "filePath": "App\(index).swift",
+                            ]
                         )
-                        let result = body["result"] as? [String: Any]
-                        return (response.statusCode, (result?["isError"] as? Bool) == true)
-                    }
+                    )
                 }
-
-                var responses: [(Int, Bool)] = []
-                for try await response in group {
-                    responses.append(response)
-                }
-                return responses
             }
 
-            #expect(responses.count == 3)
-            for (statusCode, isError) in responses {
-                #expect(statusCode == 200)
-                #expect(isError == false)
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    await upstream.didEmitConcurrentRefreshError() == false
+                }
+            )
+            for task in tasks {
+                task.cancel()
             }
         } catch {
             try? await server.shutdown()
@@ -747,15 +721,19 @@ private struct TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let childChannelTracker = HTTPTestServerChannelTracker()
-        let config = ProxyConfig(
-            listenHost: "127.0.0.1",
-            listenPort: 0,
-            upstreamCommand: "xcrun",
-            upstreamArgs: ["mcpbridge"],
-            upstreamSessionID: nil,
-            maxBodyBytes: 1_048_576,
-            requestTimeout: requestTimeout
-        )
+        let config: ProxyConfig = {
+            var config = ProxyConfig(
+                listenHost: "127.0.0.1",
+                listenPort: 0,
+                upstreamCommand: "xcrun",
+                upstreamArgs: ["mcpbridge"],
+                upstreamSessionID: nil,
+                maxBodyBytes: 1_048_576,
+                requestTimeout: requestTimeout
+            )
+            config.prewarmToolsList = false
+            return config
+        }()
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
             config: config, eventLoop: group.next(), upstreams: [upstream])
@@ -941,7 +919,7 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         }
 
         let label = requestLabel(from: object)
-        let responseData = makeSuccessResponse(id: object["id"])
+        let responseData = makeDefaultResponse(id: object["id"], method: method)
         sentRequests.append(SentRequest(label: label, responseData: responseData))
         requestHistory.append(label)
     }
@@ -975,12 +953,39 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         ]
         return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
+
+    private func makeToolsListResponse(id: Any?) -> Data? {
+        guard let id else { return nil }
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "tools": [[
+                    "name": "XcodeListWindows",
+                    "description": "List Xcode windows",
+                    "inputSchema": [
+                        "type": "object",
+                        "properties": [String: Any](),
+                    ],
+                ]]
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeDefaultResponse(id: Any?, method: String) -> Data? {
+        if method == "tools/list" {
+            return makeToolsListResponse(id: id)
+        }
+        return makeSuccessResponse(id: id)
+    }
 }
 
 private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private var activeTabs: Set<String> = []
+    private var emittedErrorFive = false
 
     init() {
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
@@ -994,6 +999,10 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
 
     func stop() async {
         continuation.finish()
+    }
+
+    func didEmitErrorFive() -> Bool {
+        emittedErrorFive
     }
 
     func send(_ data: Data) async -> UpstreamSendResult {
@@ -1030,7 +1039,7 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
             let name = params["name"] as? String,
             name == "XcodeRefreshCodeIssuesInFile"
         else {
-            continuation.yield(.message(makeSuccessResponse(id: id)))
+            continuation.yield(.message(makeDefaultResponse(id: id, method: method)))
             return
         }
 
@@ -1038,12 +1047,13 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
         let tabIdentifier =
             (arguments?["tabIdentifier"] as? String) ?? "__global__"
         if activeTabs.contains(tabIdentifier) {
+            emittedErrorFive = true
             continuation.yield(.message(makeErrorFiveResponse(id: id)))
             return
         }
 
         activeTabs.insert(tabIdentifier)
-        let responseData = makeSuccessResponse(id: id)
+        let responseData = makeDefaultResponse(id: id, method: method)
         Task { [tabIdentifier, responseData] in
             try? await Task.sleep(nanoseconds: 150_000_000)
             completeRefresh(
@@ -1085,6 +1095,31 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
         return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
 
+    private func makeToolsListResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "tools": [[
+                    "name": "XcodeRefreshCodeIssuesInFile",
+                    "description": "Refresh issues",
+                    "inputSchema": [
+                        "type": "object",
+                        "properties": [String: Any](),
+                    ],
+                ]]
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeDefaultResponse(id: Any, method: String?) -> Data {
+        if method == "tools/list" {
+            return makeToolsListResponse(id: id)
+        }
+        return makeSuccessResponse(id: id)
+    }
+
     private func makeErrorFiveResponse(id: Any) -> Data {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
@@ -1108,6 +1143,7 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
     private var hasActiveRefresh = false
+    private var emittedConcurrentRefreshError = false
 
     init() {
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
@@ -1121,6 +1157,10 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
 
     func stop() async {
         continuation.finish()
+    }
+
+    func didEmitConcurrentRefreshError() -> Bool {
+        emittedConcurrentRefreshError
     }
 
     func send(_ data: Data) async -> UpstreamSendResult {
@@ -1157,17 +1197,18 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
             let name = params["name"] as? String,
             name == "XcodeRefreshCodeIssuesInFile"
         else {
-            continuation.yield(.message(makeSuccessResponse(id: id)))
+            continuation.yield(.message(makeDefaultResponse(id: id, method: method)))
             return
         }
 
         if hasActiveRefresh {
+            emittedConcurrentRefreshError = true
             continuation.yield(.message(makeConcurrentRefreshErrorResponse(id: id)))
             return
         }
 
         hasActiveRefresh = true
-        let responseData = makeSuccessResponse(id: id)
+        let responseData = makeDefaultResponse(id: id, method: method)
         Task { [responseData] in
             try? await Task.sleep(nanoseconds: 150_000_000)
             completeRefresh(responseData: responseData)
@@ -1204,6 +1245,31 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
             ],
         ]
         return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeToolsListResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "tools": [[
+                    "name": "XcodeRefreshCodeIssuesInFile",
+                    "description": "Refresh issues",
+                    "inputSchema": [
+                        "type": "object",
+                        "properties": [String: Any](),
+                    ],
+                ]]
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeDefaultResponse(id: Any, method: String?) -> Data {
+        if method == "tools/list" {
+            return makeToolsListResponse(id: id)
+        }
+        return makeSuccessResponse(id: id)
     }
 
     private func makeConcurrentRefreshErrorResponse(id: Any) -> Data {

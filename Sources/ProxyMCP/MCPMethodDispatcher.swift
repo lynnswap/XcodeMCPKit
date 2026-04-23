@@ -3,7 +3,6 @@ import NIO
 
 package enum MCPMethodDispatcher {
     private static let capped20sMethods: Set<String> = [
-        "tools/list",
         "resources/list",
         "resources/templates/list",
     ]
@@ -28,6 +27,15 @@ package enum MCPMethodDispatcher {
             return timeout(defaultSeconds: defaultSeconds, capSeconds: 20)
         }
         return makeRequestTimeout(defaultSeconds)
+    }
+
+    package static func timeoutForControlPlane(
+        defaultSeconds: TimeInterval
+    ) -> TimeAmount? {
+        if defaultSeconds > 0 {
+            return makeRequestTimeout(defaultSeconds)
+        }
+        return .seconds(60)
     }
 
     private static func timeout(

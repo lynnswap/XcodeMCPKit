@@ -38,28 +38,26 @@ extension HTTPPostService {
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
     ) async throws -> [XcodeWindowInfo]? {
-        try await windowQueryService.listWindows(
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            toolCaller: { name, arguments, sessionID, eventLoop in
-                switch await self.callInternalTool(
-                    name: name,
-                    arguments: arguments,
-                    sessionID: sessionID,
-                    eventLoop: eventLoop,
-                    cancellationHandle: cancellationHandle,
-                    upstreamIndexOverride: upstreamIndexOverride,
-                    requestTimeoutOverride: requestTimeoutOverride
-                ) {
-                case .success(let result):
-                    return result
-                case .cancelled:
-                    throw CancellationError()
-                case .timeout, .unavailable:
-                    return nil
-                }
-            }
-        )
+        _ = sessionID
+        _ = eventLoop
+        _ = cancellationHandle
+        let windowQueryService = XcodeWindowQueryService()
+        let route: ControlPlaneRoute = if let upstreamIndexOverride {
+            .pinnedUpstream(upstreamIndexOverride)
+        } else {
+            .anyHealthy
+        }
+        do {
+            let result = try await sessionManager.liveXcodeListWindowsResult(
+                route: route,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+            return windowQueryService.parseWindowsResult(result.foundationObject)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return nil
+        }
     }
 
     package func forwardOnce(

@@ -90,6 +90,11 @@ enum MCPResponseEmitter {
         buffer: ByteBuffer?,
         keepAlive: Bool
     ) -> EventLoopFuture<Void> {
+        var headers = headers
+        headers.replaceOrAdd(
+            name: "Content-Length",
+            value: "\(buffer?.readableBytes ?? 0)"
+        )
         var head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
         channel.write(HTTPServerResponsePart.head(head), promise: nil)

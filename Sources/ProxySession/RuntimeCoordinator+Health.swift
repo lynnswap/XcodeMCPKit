@@ -34,7 +34,7 @@ extension RuntimeCoordinator {
     }
 
     func probeUpstreamHealth(upstreamIndex: Int, probeGeneration: UInt64) {
-        let internalSessionID = toolsListInternalSessionID()
+        let internalSessionID = controlPlaneSessionID(for: "health_probe", route: nil)
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
@@ -157,94 +157,6 @@ extension RuntimeCoordinator {
                 "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )
-    }
-
-    func refreshToolsList() async {
-        defer {
-            toolsListCache.endWarmup()
-        }
-
-        let refreshTimeout: TimeAmount = .seconds(5)
-        let nowUptimeNs = nowUptimeNanoseconds()
-        let internalSessionID = toolsListInternalSessionID()
-        _ = session(id: internalSessionID)
-
-        guard
-            let upstreamIndex = chooseUpstreamIndex(),
-            upstreamIndex >= 0,
-            upstreamIndex < upstreams.count
-        else {
-            logger.debug("tools/list refresh: no available upstream")
-            return
-        }
-
-        let originalID = RPCID(any: NSNumber(value: 1))!
-        let refreshSession = session(id: internalSessionID)
-        let future = refreshSession.router.registerRequest(
-            idKey: originalID.key,
-            on: eventLoop,
-            timeout: refreshTimeout
-        )
-        let upstreamID = assignUpstreamID(
-            sessionID: internalSessionID,
-            originalID: originalID,
-            upstreamIndex: upstreamIndex
-        )
-
-        let request: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": upstreamID,
-            "method": "tools/list",
-        ]
-        guard JSONSerialization.isValidJSONObject(request),
-            let requestData = try? JSONSerialization.data(withJSONObject: request, options: [])
-        else {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-            markToolsListRefreshFailed(
-                upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs,
-                reason: "encode_request_failed")
-            return
-        }
-
-        logger.debug(
-            "tools/list refresh started",
-            metadata: [
-                "upstream": .string("\(upstreamIndex)"),
-                "timeout": .string("\(refreshTimeout.nanoseconds)ns"),
-            ]
-        )
-        sendUpstream(requestData, upstreamIndex: upstreamIndex)
-
-        do {
-            var buffer = try await future.get()
-            guard let responseData = buffer.readData(length: buffer.readableBytes),
-                let response = try JSONSerialization.jsonObject(with: responseData, options: [])
-                    as? [String: Any],
-                let resultAny = response["result"],
-                let result = JSONValue(any: resultAny),
-                isValidToolsListResult(result)
-            else {
-                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-                markToolsListRefreshFailed(
-                    upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs,
-                    reason: "invalid_response")
-                return
-            }
-
-            markToolsListRefreshSucceeded(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs)
-            setCachedToolsListResult(result)
-            logger.debug(
-                "tools/list refresh succeeded",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
-                    "bytes": .string("\(responseData.count)"),
-                ]
-            )
-        } catch {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-            markToolsListRefreshFailed(
-                upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs, reason: "timeout")
-        }
     }
 
     func isValidToolsListResult(_ value: JSONValue) -> Bool {

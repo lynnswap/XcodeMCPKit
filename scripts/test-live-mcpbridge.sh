@@ -87,6 +87,15 @@ let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
 print(object["url"] as! String)
 ' "$discovery_file"
 )"
+debug_url="${proxy_url%/mcp}/debug/upstreams"
+debug_body="$temp_root/debug.json"
+
+capture_debug_snapshot() {
+  curl -sS \
+    --max-time 10 \
+    -H 'Accept: application/json' \
+    "$debug_url" >"$debug_body" || true
+}
 
 initialize_headers="$temp_root/initialize.headers"
 initialize_body="$temp_root/initialize.json"
@@ -105,6 +114,8 @@ if [[ -z "$session_id" ]]; then
   echo "error: initialize response did not include Mcp-Session-Id" >&2
   exit 1
 fi
+
+capture_debug_snapshot
 
 tools_body="$temp_root/tools.json"
 tools_list_ok=0
@@ -125,6 +136,7 @@ for _ in {1..2}; do
 done
 
 if (( tools_list_ok == 0 )); then
+  capture_debug_snapshot
   if grep -q '"message":"upstream timeout"' "$tools_body"; then
     echo "warning: tools/list timed out against the current Xcode session; continuing with window and refresh checks" >&2
   else
@@ -183,6 +195,7 @@ for line in message.split(separator: "\n") {
 done
 
 if [[ -z "$window_selection" ]]; then
+  capture_debug_snapshot
   echo "error: failed to resolve an open Xcode workspace from XcodeListWindows" >&2
   exit 1
 fi
@@ -231,8 +244,15 @@ curl -sS \
   --data "$refresh_payload" \
   "$proxy_url" >"$refresh_body"
 
+capture_debug_snapshot
+
 if ! grep -q '"result"\|"error"' "$refresh_body"; then
   echo "error: refresh response missing result/error" >&2
+  exit 1
+fi
+
+if ! grep -q '"controlPlane"' "$debug_body"; then
+  echo "error: debug snapshot did not include controlPlane state" >&2
   exit 1
 fi
 

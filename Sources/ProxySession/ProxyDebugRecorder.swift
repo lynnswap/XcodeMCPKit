@@ -136,7 +136,7 @@ package final class ProxyDebugRecorder: Sendable {
     package func snapshot(
         proxyInitialized: Bool,
         cachedToolsListAvailable: Bool,
-        warmupInFlight: Bool,
+        controlPlane: ProxyControlPlaneDebugSnapshot?,
         upstreamStates: [UpstreamHealthManager.UpstreamState],
         sessionSnapshots: [SessionDebugSnapshot],
         leaseSnapshots: [RequestLeaseDebugSnapshot],
@@ -199,7 +199,8 @@ package final class ProxyDebugRecorder: Sendable {
             generatedAt: Date(),
             proxyInitialized: proxyInitialized,
             cachedToolsListAvailable: cachedToolsListAvailable,
-            warmupInFlight: warmupInFlight,
+            warmupInFlight: controlPlane?.phase == "loading_tools_catalog",
+            controlPlane: controlPlane,
             upstreams: upstreamSnapshots,
             recentTraffic: recordedState.recentTraffic.map {
                 ProxyDebugTrafficEvent(

@@ -211,6 +211,8 @@ package func makeTestURLSession(
     configuration.waitsForConnectivity = waitsForConnectivity
     configuration.timeoutIntervalForRequest = timeout
     configuration.timeoutIntervalForResource = timeout
+    configuration.httpShouldUsePipelining = false
+    configuration.httpMaximumConnectionsPerHost = 20
     return URLSession(configuration: configuration)
 }
 

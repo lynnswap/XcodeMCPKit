@@ -18,47 +18,37 @@ extension HTTPPostService {
         forceBatchArray: Bool
     ) -> EventLoopFuture<HTTPPostResolution> {
         switch handling {
-        case .initialize(let future, let sessionID, let originalID):
-            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
-            future.whenComplete { result in
-                switch result {
-                case .success(let buffer):
-                    var buffer = buffer
-                    guard let data = buffer.readData(length: buffer.readableBytes) else {
-                        promise.succeed(
-                            .plain(
-                                status: .badGateway,
-                                body: "invalid upstream response",
-                                sessionID: sessionID
-                            )
-                        )
-                        return
-                    }
-                    let responseData = forceBatchArray
-                        ? Self.forceBatchArrayResponseDataIfNeeded(data)
-                        : data
-                    promise.succeed(
-                        .responseData(
-                            data: responseData,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
-                    )
-                case .failure:
-                    promise.succeed(
-                        .mcpError(
-                            id: originalID,
-                            ids: [],
-                            code: -32000,
-                            message: "upstream timeout",
-                            forceBatchArray: forceBatchArray,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
+        case .pendingResponse(let future, let sessionID, let originalID):
+            return future.map { buffer in
+                var buffer = buffer
+                guard let data = buffer.readData(length: buffer.readableBytes) else {
+                    return .plain(
+                        status: .badGateway,
+                        body: "invalid upstream response",
+                        sessionID: sessionID
                     )
                 }
+                let responseData = forceBatchArray
+                    ? Self.forceBatchArrayResponseDataIfNeeded(data)
+                    : data
+                return .responseData(
+                    data: responseData,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                )
+            }.flatMapError { _ in
+                eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: originalID,
+                        ids: [],
+                        code: -32000,
+                        message: "upstream timeout",
+                        forceBatchArray: forceBatchArray,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
             }
-            return promise.futureResult
 
         case .immediateResponse(let data, let sessionID):
             let responseData = forceBatchArray
