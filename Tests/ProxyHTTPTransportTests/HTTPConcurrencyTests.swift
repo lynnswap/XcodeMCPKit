@@ -4,9 +4,9 @@ import NIOEmbedded
 import NIOHTTP1
 import Testing
 import ProxyCore
-import ProxyRuntime
+import ProxySession
 import XcodeMCPTestSupport
-@testable import ProxyHTTPTransport
+@testable import ProxyHTTPGateway
 
 @Suite(.serialized)
 struct HTTPConcurrencyTests {

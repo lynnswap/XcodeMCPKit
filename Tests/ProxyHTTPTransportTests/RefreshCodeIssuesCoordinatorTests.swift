@@ -1,7 +1,7 @@
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxyFeatureXcode
+@testable import ProxyXcodeFeatures
 
 @Suite(.serialized)
 struct RefreshCodeIssuesCoordinatorTests {

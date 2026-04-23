@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import ProxyCore
+import ProxyMCP
 
 public actor StdioAdapter {
     private struct RequestEnvelope {

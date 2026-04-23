@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ProxyMCP
 
 @testable import ProxyCore
 

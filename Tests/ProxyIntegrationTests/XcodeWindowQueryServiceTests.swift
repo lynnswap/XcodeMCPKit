@@ -1,6 +1,7 @@
 import Testing
 
-@testable import ProxyFeatureXcode
+@testable import ProxyXcodeFeatures
+@testable import ProxyXcodeSupport
 
 @Suite
 struct XcodeWindowQueryServiceTests {

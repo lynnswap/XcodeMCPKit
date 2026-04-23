@@ -5,11 +5,13 @@ import NIOEmbedded
 import NIOHTTP1
 import Testing
 import ProxyCore
-import ProxyRuntime
-import ProxyFeatureXcode
+import ProxyMCP
+import ProxySession
+import ProxyXcodeFeatures
+ import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPTransport
+@testable import ProxyHTTPGateway
 
 @Suite(.serialized)
 struct HTTPHandlerTests {

@@ -4,8 +4,9 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 import ProxyCore
+import ProxyMCP
 import XcodeMCPTestSupport
-@testable import ProxyRuntime
+@testable import ProxySession
 
 @Suite(.serialized)
 struct RuntimeCoordinatorTests {

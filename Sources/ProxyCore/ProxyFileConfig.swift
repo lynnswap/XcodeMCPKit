@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import ProxyMCP
 import TOMLDecoder
 
 package enum ProxyFileConfigLoader {

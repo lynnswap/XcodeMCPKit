@@ -105,7 +105,7 @@ package struct CLICommandRuntime {
                 "STDIO upstream resolved from discovery file",
                 [
                     "url": "\(url)",
-                    "path": "\(Discovery.defaultFileURL.path)",
+                    "path": "\(config.discoveryFileURL?.path ?? Discovery.defaultFileURL.path)",
                 ]
             )
         case .fallback:
