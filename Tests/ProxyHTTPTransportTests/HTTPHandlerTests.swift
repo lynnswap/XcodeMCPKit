@@ -1607,6 +1607,78 @@ struct HTTPHandlerTests {
         #expect(toolsResponse.head.headers.first(name: "Content-Type") == "application/json")
     }
 
+    @Test func httpToolCallNormalizesColdSchemaWithoutCatalogPrewarm() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                switch (method, toolName) {
+                case ("tools/list", nil):
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [
+                                    [
+                                        "name": "DocumentationSearch",
+                                        "outputSchema": [
+                                            "type": "object",
+                                        ],
+                                    ],
+                                ],
+                            ]
+                        )
+                    )
+                case ("tools/call", "DocumentationSearch"):
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "{\"answer\":\"ok\"}"
+                        )
+                    )
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(
+                            id: originalID,
+                            text: "unexpected request"
+                        )
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-schema-cold",
+                payload: toolsCallPayload(
+                    id: 61,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "hello",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            #expect(structuredContent?["answer"] as? String == "ok")
+            #expect(sessionManager.cachedToolsListResult() == nil)
+            #expect(sessionManager.sentMethods() == ["tools/call"])
+            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpResourcesListReturnsEmptyArray() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -1768,7 +1840,7 @@ struct HTTPHandlerTests {
             options: []
         )
 
-        let object = MCPForwardingService.responseObject(
+        let object = ToolSurface.responseObject(
             from: responseData,
             matching: "wanted"
         )
@@ -2884,6 +2956,16 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [Any]()
+                            ]
+                        )
+                    )
+                }
                 #expect(method == "tools/call")
                 switch toolName {
                 case "XcodeRefreshCodeIssuesInFile":
@@ -4286,6 +4368,16 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [Any]()
+                            ]
+                        )
+                    )
+                }
                 #expect(method == "tools/call")
                 #expect(toolName == "OtherAllowedTool")
                 return .immediate(
@@ -4419,6 +4511,16 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
+                if method == "tools/list" {
+                    return .immediate(
+                        try makeToolResultResponse(
+                            id: originalID,
+                            result: [
+                                "tools": [Any]()
+                            ]
+                        )
+                    )
+                }
                 #expect(method == "tools/call")
                 #expect(toolName == "XcodeListWindows")
                 return .immediate(try makeToolSuccessResponse(id: originalID, text: "allowed"))

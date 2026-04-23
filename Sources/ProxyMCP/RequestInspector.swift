@@ -7,9 +7,12 @@ package struct RequestTransform {
     package let idKey: String?
     package let responseIDs: [RPCID]
     package let responseMethodsByIDKey: [String: String]
+    package let responseToolNamesByIDKey: [String: String]
     package let responseOriginalIDsByKey: [String: RPCID]
     package let method: String?
+    package let toolName: String?
     package let originalID: RPCID?
+    package let normalizationToolsListResponseIDKey: String?
     package let isCacheableToolsListRequest: Bool
     package let cacheableToolsListResponseIDKey: String?
 }
@@ -17,12 +20,14 @@ package struct RequestTransform {
 package enum RequestInspector {
     package static func transform(
         _ data: Data,
+        parsedJSON: Any? = nil,
         sessionID: String,
         mapID: (_ sessionID: String, _ originalID: RPCID) -> Int64
     ) throws -> RequestTransform {
-        let json = try JSONSerialization.jsonObject(with: data, options: [])
+        let json = try parsedJSON ?? JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
             let method = object["method"] as? String
+            let toolName = toolName(from: object, method: method)
             // We intentionally treat tools/list as stable and cache it regardless of params.
             // Some clients attach pagination-like params even when they expect the full list.
             let isCacheableToolsListRequest = (method == "tools/list")
@@ -37,9 +42,12 @@ package enum RequestInspector {
                     idKey: rpcID.key,
                     responseIDs: [rpcID],
                     responseMethodsByIDKey: method.map { [rpcID.key: $0] } ?? [:],
+                    responseToolNamesByIDKey: toolName.map { [rpcID.key: $0] } ?? [:],
                     responseOriginalIDsByKey: [rpcID.key: rpcID],
                     method: method,
+                    toolName: toolName,
                     originalID: rpcID,
+                    normalizationToolsListResponseIDKey: isCacheableToolsListRequest ? rpcID.key : nil,
                     isCacheableToolsListRequest: isCacheableToolsListRequest,
                     cacheableToolsListResponseIDKey: isCacheableToolsListRequest ? rpcID.key : nil
                 )
@@ -52,9 +60,12 @@ package enum RequestInspector {
                 idKey: nil,
                 responseIDs: [],
                 responseMethodsByIDKey: [:],
+                responseToolNamesByIDKey: [:],
                 responseOriginalIDsByKey: [:],
                 method: method,
+                toolName: toolName,
                 originalID: nil,
+                normalizationToolsListResponseIDKey: nil,
                 isCacheableToolsListRequest: isCacheableToolsListRequest,
                 cacheableToolsListResponseIDKey: nil
             )
@@ -64,6 +75,7 @@ package enum RequestInspector {
             var transformed: [Any] = []
             var responseIDs: [RPCID] = []
             var responseMethodsByIDKey: [String: String] = [:]
+            var responseToolNamesByIDKey: [String: String] = [:]
             var responseOriginalIDsByKey: [String: RPCID] = [:]
             responseIDs.reserveCapacity(array.count)
             for item in array {
@@ -75,6 +87,9 @@ package enum RequestInspector {
                         responseOriginalIDsByKey[rpcID.key] = rpcID
                         if let method = object["method"] as? String {
                             responseMethodsByIDKey[rpcID.key] = method
+                            if let toolName = toolName(from: object, method: method) {
+                                responseToolNamesByIDKey[rpcID.key] = toolName
+                            }
                         }
                     }
                     transformed.append(object)
@@ -82,16 +97,36 @@ package enum RequestInspector {
                     transformed.append(item)
                 }
             }
+            let normalizationToolsListResponseIDKey: String? = {
+                for item in array {
+                    guard let object = item as? [String: Any],
+                        object["method"] as? String == "tools/list",
+                        let id = object["id"],
+                        let rpcID = RPCID(any: id)
+                    else {
+                        continue
+                    }
+                    return rpcID.key
+                }
+                return nil
+            }()
             let cacheableToolsListResponseIDKey: String? = {
-                guard array.count == 1,
-                    let firstObject = array.first as? [String: Any],
-                    firstObject["method"] as? String == "tools/list",
-                    let firstID = firstObject["id"],
-                    let rpcID = RPCID(any: firstID)
-                else {
+                guard let normalizationToolsListResponseIDKey else {
                     return nil
                 }
-                return rpcID.key
+                for item in array {
+                    guard let object = item as? [String: Any],
+                        let id = object["id"],
+                        let rpcID = RPCID(any: id)
+                    else {
+                        continue
+                    }
+                    guard object["method"] as? String == "tools/list" else {
+                        return nil
+                    }
+                    _ = rpcID
+                }
+                return normalizationToolsListResponseIDKey
             }()
             let upstream = try JSONSerialization.data(withJSONObject: transformed, options: [])
             return RequestTransform(
@@ -101,9 +136,12 @@ package enum RequestInspector {
                 idKey: nil,
                 responseIDs: responseIDs,
                 responseMethodsByIDKey: responseMethodsByIDKey,
+                responseToolNamesByIDKey: responseToolNamesByIDKey,
                 responseOriginalIDsByKey: responseOriginalIDsByKey,
                 method: nil,
+                toolName: nil,
                 originalID: nil,
+                normalizationToolsListResponseIDKey: normalizationToolsListResponseIDKey,
                 isCacheableToolsListRequest: cacheableToolsListResponseIDKey != nil,
                 cacheableToolsListResponseIDKey: cacheableToolsListResponseIDKey
             )
@@ -116,11 +154,24 @@ package enum RequestInspector {
             idKey: nil,
             responseIDs: [],
             responseMethodsByIDKey: [:],
+            responseToolNamesByIDKey: [:],
             responseOriginalIDsByKey: [:],
             method: nil,
+            toolName: nil,
             originalID: nil,
+            normalizationToolsListResponseIDKey: nil,
             isCacheableToolsListRequest: false,
             cacheableToolsListResponseIDKey: nil
         )
+    }
+
+    private static func toolName(from object: [String: Any], method: String?) -> String? {
+        guard method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let toolName = params["name"] as? String
+        else {
+            return nil
+        }
+        return toolName
     }
 }

@@ -58,7 +58,6 @@ extension HTTPPostService {
                 cancellationHandle: cancellationHandle
             )
         }
-
         let localResponseData = filteredRequest.localResponseData
         let refreshRouting = refreshRequestRouting(from: forwardedRequestJSON)
 

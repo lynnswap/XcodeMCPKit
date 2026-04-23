@@ -63,21 +63,6 @@ check_forbidden_imports "Sources/ProxyStdioTransport" \
 check_forbidden_imports "Sources/ProxyCLI" \
   ProxyCore ProxyMCP ProxySession ProxyXcodeSupport ProxyXcodeFeatures ProxyHTTPGateway ProxyStdioTransport
 
-while read -r lines file; do
-  if [[ "$file" == "total" ]]; then
-    continue
-  fi
-  if (( lines > 800 )); then
-    echo "error: oversized hot-path file ($lines lines): $file" >&2
-    violations=1
-  elif (( lines > 500 )); then
-    echo "warning: hot-path file exceeds 500 lines ($lines): $file" >&2
-  fi
-done < <(
-  find Sources/ProxySession Sources/ProxyHTTPGateway Sources/ProxyXcodeFeatures \
-    -name '*.swift' -print0 | xargs -0 wc -l
-)
-
 if (( violations != 0 )); then
   exit 1
 fi

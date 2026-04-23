@@ -19,6 +19,16 @@
 - `XcodeMCPProxy`
   - Composition root only.
 
+## Ownership Boundaries
+
+- `ProxySession`
+  - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, and lease cleanup.
+- `ProxyHTTPGateway`
+  - Owns request/response transport concerns only.
+  - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
+- `ProxyXcodeFeatures`
+  - Owns refresh workflow and other Xcode-specific feature logic.
+
 ## Dependency Direction
 
 - `ProxyCore` must not depend on gateway/session/Xcode modules.
@@ -31,6 +41,17 @@
 - `ProxyCLI` depends on `XcodeMCPProxy` only.
 
 Run `scripts/check-architecture.sh` after moving files or changing imports.
+
+## Protocol Boundaries
+
+- `stdout`
+  - Protocol payloads only. Do not send logs or debug text here.
+- `stderr`
+  - Human-readable logging only.
+- HTTP request bodies
+  - Parse once per request and pass the parsed payload through forwarding/local handling; do not re-parse in hot-path helpers unless the payload is synthesized internally.
+- Canonical cache invalidation
+  - Synchronous cache clear is allowed before async control-plane cleanup when stale fast paths would otherwise leak invalid state.
 
 ## Local Verification
 
@@ -61,3 +82,12 @@ These mirror the existing release workflow split and intentionally avoid requiri
 - Live runs must terminate the dedicated proxy server and Xcode process they start.
 - Live runs must write discovery output only under their temp root.
 - Do not rely on the user’s default `~/Library/Caches/XcodeMCPProxy/endpoint.json` during tests.
+
+## Review Checklist
+
+- `stdout` is never used for logging or debug formatting.
+- Shared state accessed across callbacks/tasks is either actor-isolated or explicitly synchronized.
+- Request parsing is not duplicated on the hot path.
+- Bind/start/stop failure paths clean up listeners, timers, and child tasks.
+- Canonical initialize/tools cache cannot survive upstream exit/quarantine/eager retry windows.
+- New feature code does not add tool-specific branching to forwarding when a dedicated helper/workflow can own it instead.

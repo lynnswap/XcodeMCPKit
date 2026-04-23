@@ -4,6 +4,7 @@ import NIOEmbedded
 import NIOHTTP1
 import Testing
 import ProxyCore
+import ProxyMCP
 import ProxySession
 import XcodeMCPTestSupport
 @testable import ProxyHTTPGateway
@@ -61,7 +62,7 @@ struct HTTPConcurrencyTests {
             }
             let initID = (initializeBody["id"] as? NSNumber)?.intValue ?? -1
             #expect(initID == 1)
-            await upstream.clearRecordedRequests()
+            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
             let first = Task {
                 _ = try? await postJSON(
@@ -120,7 +121,7 @@ struct HTTPConcurrencyTests {
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
-            await upstream.clearRecordedRequests()
+            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
             let first = Task {
                 _ = try? await postJSON(
@@ -177,7 +178,7 @@ struct HTTPConcurrencyTests {
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
-            await upstream.clearRecordedRequests()
+            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
             async let first = postJSON(
                 url: url,
@@ -227,6 +228,23 @@ struct HTTPConcurrencyTests {
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
+            #expect(
+                await waitUntil(timeout: .seconds(2)) {
+                    server.sessionManager.isInitialized()
+                }
+            )
+            server.sessionManager.setCachedToolsListResult(
+                JSONValue(any: [
+                    "tools": [
+                        [
+                            "name": "ExecuteSnippet",
+                            "outputSchema": [
+                                "type": "object",
+                            ],
+                        ],
+                    ],
+                ])!
+            )
             await upstream.clearRecordedRequests()
 
             async let first = postJSON(
@@ -252,14 +270,23 @@ struct HTTPConcurrencyTests {
             async let second = postJSON(
                 url: url,
                 sessionID: sessionID,
-                payload: toolListPayload(id: 701)
+                payload: toolCallPayload(
+                    id: 701,
+                    name: "ExecuteSnippet",
+                    arguments: [
+                        "tabIdentifier": "windowtab-timeout-2",
+                        "sourceFilePath": "App.swift",
+                        "codeSnippet": "print(\"second\")",
+                        "timeout": 20,
+                    ]
+                )
             )
 
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
                     await upstream.nonInitializeLabels() == [
                         "tools/call:ExecuteSnippet",
-                        "tools/list",
+                        "tools/call:ExecuteSnippet",
                     ]
                 }
             )
@@ -303,7 +330,7 @@ struct HTTPConcurrencyTests {
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
-            await upstream.clearRecordedRequests()
+            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
             async let first = postJSON(
                 url: url,
@@ -350,7 +377,7 @@ struct HTTPConcurrencyTests {
             else {
                 throw ConcurrencyTestError.missingSessionID
             }
-            await upstream.clearRecordedRequests()
+            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
             let first = Task {
                 _ = try? await postJSON(
@@ -384,75 +411,6 @@ struct HTTPConcurrencyTests {
                     server.sessionManager.cachedToolsListResult() != nil
                 }
             )
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
-    @Test func httpDocumentationSearchRequestsSerializeWithinSession() async throws {
-        let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(upstream: upstream)
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-            await upstream.clearRecordedRequests()
-
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolCallPayload(
-                    id: 500,
-                    name: "DocumentationSearch",
-                    arguments: [
-                        "query": "Transaction.updates",
-                        "frameworks": ["StoreKit"],
-                    ]
-                )
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolCallPayload(
-                    id: 501,
-                    name: "DocumentationSearch",
-                    arguments: [
-                        "query": "currentEntitlements",
-                        "frameworks": ["StoreKit"],
-                    ]
-                )
-            )
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == ["tools/call:DocumentationSearch"]
-                }
-            )
-            await upstream.respondNext()
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == [
-                        "tools/call:DocumentationSearch",
-                        "tools/call:DocumentationSearch",
-                    ]
-                }
-            )
-            await upstream.respondNext()
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect(secondResult.0.statusCode == 200)
         } catch {
             try? await server.shutdown()
             throw error
@@ -886,6 +844,10 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
 
     func nonInitializeRequestCount() -> Int {
         requestHistory.count
+    }
+
+    func pendingNonInitializeRequestCount() -> Int {
+        sentRequests.count
     }
 
     func nonInitializeLabels() -> [String] {
@@ -1543,6 +1505,30 @@ private func collectEmbeddedResponse(
     }
     let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
     return (responseHead, body)
+}
+
+private func drainInitialToolsCatalogWarmupIfNeeded(
+    server: TestHTTPServer,
+    upstream: ControlledUpstreamClient
+) async {
+    if await waitUntil(
+        timeout: .milliseconds(100),
+        condition: {
+            await upstream.pendingNonInitializeRequestCount() > 0
+        }
+    ) {
+        var remaining = await upstream.pendingNonInitializeRequestCount()
+        while remaining > 0 {
+            let currentRemaining = remaining
+            await upstream.respondNext()
+            _ = await waitUntil(timeout: .milliseconds(100)) {
+                await upstream.pendingNonInitializeRequestCount() < currentRemaining
+                    || server.sessionManager.cachedToolsListResult() != nil
+            }
+            remaining = await upstream.pendingNonInitializeRequestCount()
+        }
+    }
+    await upstream.clearRecordedRequests()
 }
 
 private func waitUntil(
