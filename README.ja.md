@@ -16,6 +16,7 @@ Xcode のダイアログが、プロキシ起動時に一度だけ表示され�
 ## アーキテクチャ
 
 プロセス構成は [アーキテクチャ](Docs/architecture.md) を参照してください。
+モジュール境界とローカル検証コマンドは [Maintainer Architecture](Docs/maintainer-architecture.md) を参照してください。
 
 ## インストール
 
@@ -145,8 +146,23 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 | `MCP_XCODE_CONFIG` | proxy config TOML のパス。`--config` が優先 |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` または `upstream` |
 | `MCP_LOG_LEVEL` | ログレベル: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` |
+| `XCODE_MCP_PROXY_DISCOVERY_FILE` | discovery file の出力先を上書きします。隔離されたローカル/live テスト向けです |
+| `XCODE_MCP_PROXY_CACHE_ROOT` | `XCODE_MCP_PROXY_DISCOVERY_FILE` 未指定時の discovery 用 cache root を上書きします |
 
 ログは stderr に出力されます。
+
+## Maintainer Commands
+
+```bash
+scripts/check-architecture.sh
+scripts/test-fast.sh
+scripts/test-process.sh
+scripts/check.sh
+scripts/test-live-mcpbridge.sh
+```
+
+- `test-live-mcpbridge.sh` はローカル専用で、CI には含めません。
+- live script は現在起動中の Xcode を使い、Xcode process が 1 つだけある前提で、`127.0.0.1:0` と temp discovery path を使います。
 
 #### Proxy Config
 
