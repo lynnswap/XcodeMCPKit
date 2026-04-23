@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import ProxyCore
 import ProxyMCP
 
@@ -52,11 +53,12 @@ extension RuntimeCoordinator {
     }
 
     func loadCanonicalToolsCatalog(
-        deadlineUptimeNs: UInt64?
+        requestTimeout: TimeAmount?,
+        rpcHandle: ControlPlaneRPCHandle
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = DispatchTime.now().uptimeNanoseconds
-        let requestTimeout =
-            timeAmount(until: deadlineUptimeNs)
+        let effectiveRequestTimeout =
+            requestTimeout
             ?? MCPMethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
@@ -71,7 +73,8 @@ extension RuntimeCoordinator {
                     "id": "__control-plane-tools-\(UUID().uuidString)",
                     "method": "tools/list",
                 ],
-                requestTimeout: requestTimeout
+                requestTimeout: effectiveRequestTimeout,
+                rpcHandle: rpcHandle
             )
             let result = try extractJSONRPCResult(from: response.responseData)
             guard isValidToolsListResult(result) else {
@@ -92,6 +95,9 @@ extension RuntimeCoordinator {
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
             )
         } catch let error as ControlPlaneRequestError {
+            if error.underlying is CancellationError {
+                throw error.underlying
+            }
             if let upstreamIndex = error.upstreamIndex {
                 markToolsListRefreshFailed(
                     upstreamIndex: upstreamIndex,
@@ -105,10 +111,11 @@ extension RuntimeCoordinator {
 
     func loadLiveXcodeListWindows(
         route: ControlPlaneRoute,
-        deadlineUptimeNs: UInt64?
+        requestTimeout: TimeAmount?,
+        rpcHandle: ControlPlaneRPCHandle
     ) async throws -> JSONValue {
-        let requestTimeout =
-            timeAmount(until: deadlineUptimeNs)
+        let effectiveRequestTimeout =
+            requestTimeout
             ?? MCPMethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
@@ -126,7 +133,8 @@ extension RuntimeCoordinator {
                         "arguments": [:],
                     ],
                 ],
-                requestTimeout: requestTimeout
+                requestTimeout: effectiveRequestTimeout,
+                rpcHandle: rpcHandle
             )
             return try extractJSONRPCResult(from: response.responseData)
         } catch let error as ControlPlaneRequestError {
@@ -139,10 +147,12 @@ extension RuntimeCoordinator {
         purpose: String,
         label: String,
         requestObject: [String: Any],
-        requestTimeout: TimeAmount?
+        requestTimeout: TimeAmount?,
+        rpcHandle: ControlPlaneRPCHandle? = nil
     ) async throws -> ControlPlaneRPCResponse {
         let internalSessionID = controlPlaneSessionID(for: purpose, route: route)
         let session = session(id: internalSessionID)
+        let router = session.router
         guard let originalIDValue = requestObject["id"],
             let originalID = RPCID(any: originalIDValue)
         else {
@@ -168,6 +178,29 @@ extension RuntimeCoordinator {
         case .pinnedUpstream(let upstreamIndex):
             upstreamIndex
         }
+        rpcHandle?.installCancel { [self, router] snapshot in
+            if let registrationToken = snapshot.registrationToken {
+                _ = router.cancelPending(token: registrationToken)
+            }
+            if let upstreamIndex = snapshot.upstreamIndex,
+                let requestIDKey = snapshot.requestIDKey
+            {
+                removeUpstreamIDMapping(
+                    sessionID: internalSessionID,
+                    requestIDKey: requestIDKey,
+                    upstreamIndex: upstreamIndex
+                )
+            }
+            self.abandonRequestLease(
+                leaseID,
+                sessionID: internalSessionID,
+                requestIDKeys: snapshot.requestIDKey.map { [$0] } ?? [originalID.key],
+                upstreamIndex: snapshot.upstreamIndex
+            )
+        }
+        if rpcHandle?.isCancelled() == true {
+            throw CancellationError()
+        }
 
         do {
             let future: EventLoopFuture<ControlPlaneRPCResponse> = enqueueOnUpstreamSlot(
@@ -176,6 +209,9 @@ extension RuntimeCoordinator {
                 on: eventLoop,
                 preferredUpstreamIndex: preferredUpstreamIndex
             ) { [self, requestTemplate, originalID] selectedUpstreamIndex in
+                if rpcHandle?.isCancelled() == true {
+                    return self.eventLoop.makeFailedFuture(CancellationError())
+                }
                 let registration = session.router.registerRequestPending(
                     idKey: originalID.key,
                     on: self.eventLoop,
@@ -189,6 +225,19 @@ extension RuntimeCoordinator {
                         )
                     }
                 )
+                if rpcHandle?.markRegistered(
+                    registrationToken: registration.token,
+                    upstreamIndex: selectedUpstreamIndex
+                ) == false {
+                    _ = session.router.cancelPending(token: registration.token)
+                    self.abandonRequestLease(
+                        leaseID,
+                        sessionID: internalSessionID,
+                        requestIDKeys: [originalID.key],
+                        upstreamIndex: selectedUpstreamIndex
+                    )
+                    return self.eventLoop.makeFailedFuture(CancellationError())
+                }
                 self.activateRequestLease(
                     leaseID,
                     requestIDKey: originalID.key,
@@ -200,6 +249,25 @@ extension RuntimeCoordinator {
                     originalID: originalID,
                     upstreamIndex: selectedUpstreamIndex
                 )
+                if rpcHandle?.markAssigned(
+                    registrationToken: registration.token,
+                    upstreamIndex: selectedUpstreamIndex,
+                    requestIDKey: originalID.key
+                ) == false {
+                    _ = session.router.cancelPending(token: registration.token)
+                    self.removeUpstreamIDMapping(
+                        sessionID: internalSessionID,
+                        requestIDKey: originalID.key,
+                        upstreamIndex: selectedUpstreamIndex
+                    )
+                    self.abandonRequestLease(
+                        leaseID,
+                        sessionID: internalSessionID,
+                        requestIDKeys: [originalID.key],
+                        upstreamIndex: selectedUpstreamIndex
+                    )
+                    return self.eventLoop.makeFailedFuture(CancellationError())
+                }
                 var upstreamObject = requestTemplate.mapValues(\.foundationObject)
                 upstreamObject["id"] = upstreamID
                 guard JSONSerialization.isValidJSONObject(upstreamObject),
@@ -222,6 +290,21 @@ extension RuntimeCoordinator {
                             )
                         )
                     )
+                }
+                if rpcHandle?.isCancelled() == true {
+                    _ = session.router.cancelPending(token: registration.token)
+                    self.removeUpstreamIDMapping(
+                        sessionID: internalSessionID,
+                        requestIDKey: originalID.key,
+                        upstreamIndex: selectedUpstreamIndex
+                    )
+                    self.abandonRequestLease(
+                        leaseID,
+                        sessionID: internalSessionID,
+                        requestIDKeys: [originalID.key],
+                        upstreamIndex: selectedUpstreamIndex
+                    )
+                    return self.eventLoop.makeFailedFuture(CancellationError())
                 }
 
                 self.sendUpstream(
@@ -246,7 +329,11 @@ extension RuntimeCoordinator {
                     )
                 }
             }
-            let response = try await future.get()
+            let response = try await withTaskCancellationHandler {
+                try await future.get()
+            } onCancel: {
+                rpcHandle?.cancel()
+            }
             let responseObject = try extractJSONRPCResponseObject(from: response.responseData)
             if responseObject["error"] != nil {
                 failRequestLease(
@@ -263,16 +350,11 @@ extension RuntimeCoordinator {
                     )
                 )
             }
+            rpcHandle?.markFinished()
             markRequestSucceeded(upstreamIndex: response.upstreamIndex)
             completeRequestLease(leaseID)
             return response
         } catch is CancellationError {
-            abandonRequestLease(
-                leaseID,
-                sessionID: internalSessionID,
-                requestIDKeys: [],
-                upstreamIndex: nil
-            )
             throw CancellationError()
         } catch is TimeoutError {
             throw TimeoutError()

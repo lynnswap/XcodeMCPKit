@@ -1,119 +1,100 @@
 import Foundation
 import Logging
-import NIOConcurrencyHelpers
+import NIO
 import ProxyMCP
-
-package enum ControlPlaneRoute: Hashable, Sendable {
-    case anyHealthy
-    case pinnedUpstream(Int)
-
-    package var debugLabel: String {
-        switch self {
-        case .anyHealthy:
-            return "any_healthy"
-        case .pinnedUpstream(let upstreamIndex):
-            return "pinned_\(upstreamIndex)"
-        }
-    }
-}
-
-package struct CanonicalInitializeLoadResult: Sendable {
-    package let result: JSONValue
-    package let sourceUpstream: Int?
-}
-
-package struct CanonicalToolsCatalogLoadResult: Sendable {
-    package let rawResult: JSONValue
-    package let sourceUpstream: Int?
-    package let durationMilliseconds: Int
-}
-
-package struct ControlPlaneWaiterCounts: Codable, Sendable {
-    package let initialize: Int
-    package let toolsCatalog: Int
-    package let windows: Int
-}
-
-package struct ProxyControlPlaneDebugSnapshot: Codable, Sendable {
-    package let phase: String
-    package let canonicalInitializeSourceUpstream: Int?
-    package let canonicalToolsSourceUpstream: Int?
-    package let canonicalReady: Bool
-    package let upstreamHandshakeStates: [String: String]
-    package let waiterCounts: ControlPlaneWaiterCounts
-    package let inFlightControlPlaneRequests: [String]
-    package let lastIncompatibility: CanonicalBrokerIncompatibility?
-}
-
-package final class ControlPlaneDebugMirror: Sendable {
-    private let state = NIOLockedValueBox<ProxyControlPlaneDebugSnapshot?>(nil)
-
-    package init() {}
-
-    package func snapshot() -> ProxyControlPlaneDebugSnapshot? {
-        state.withLockedValue { $0 }
-    }
-
-    package func overwrite(_ snapshot: ProxyControlPlaneDebugSnapshot?) {
-        state.withLockedValue { state in
-            state = snapshot
-        }
-    }
-}
 
 package actor ControlPlaneCoordinator {
     package typealias InitializeLoader =
-        @Sendable (_ deadlineUptimeNs: UInt64?) async throws -> CanonicalInitializeLoadResult
+        @Sendable () async throws -> CanonicalInitializeLoadResult
     package typealias ToolsCatalogLoader =
-        @Sendable (_ deadlineUptimeNs: UInt64?) async throws -> CanonicalToolsCatalogLoadResult
+        @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlaneRPCHandle) async throws
+            -> CanonicalToolsCatalogLoadResult
     package typealias WindowsLoader =
-        @Sendable (_ route: ControlPlaneRoute, _ deadlineUptimeNs: UInt64?) async throws -> JSONValue
+        @Sendable (
+            _ route: ControlPlaneRoute,
+            _ requestTimeout: TimeAmount?,
+            _ rpcHandle: ControlPlaneRPCHandle
+        ) async throws -> JSONValue
     package typealias UpstreamHandshakeStatesProvider = @Sendable () -> [String: String]
 
-    private enum Phase: String, Sendable {
+    enum Phase: String, Sendable {
         case idle
         case loadingInitialize = "loading_initialize"
         case loadingToolsCatalog = "loading_tools_catalog"
         case listingWindows = "listing_windows"
     }
 
-    private struct WaiterState: Sendable {
-        var initialize = 0
-        var toolsCatalog = 0
-        var windows = 0
+    enum ToolsCatalogLoadOrigin: Sendable {
+        case request
+        case prewarm
     }
 
-    private struct InitializeLoad: Sendable {
-        let id: UUID
+    enum ToolsCatalogWaiterKind {
+        case foreground
+        case prewarmObserver
+    }
+
+    typealias WaiterID = UUID
+
+    struct InitializeWaiterRecord {
+        let continuation: CheckedContinuation<JSONValue, Error>
+        let deadlineUptimeNs: UInt64?
+        let timeoutTask: Task<Void, Never>?
+    }
+
+    struct ToolsCatalogWaiterRecord {
+        let continuation: CheckedContinuation<JSONValue, Error>
+        let kind: ToolsCatalogWaiterKind
+        let deadlineUptimeNs: UInt64?
+        let timeoutTask: Task<Void, Never>?
+    }
+
+    struct WindowWaiterRecord {
+        let continuation: CheckedContinuation<JSONValue, Error>
+        let deadlineUptimeNs: UInt64?
+        let timeoutTask: Task<Void, Never>?
+    }
+
+    struct InitializeLoadState {
+        let loadID: UUID
         let task: Task<CanonicalInitializeLoadResult, Error>
+        var waiters: [WaiterID: InitializeWaiterRecord] = [:]
     }
 
-    private struct ToolsCatalogLoad: Sendable {
-        let id: UUID
+    struct ToolsCatalogLoadState {
+        let loadID: UUID
+        let origin: ToolsCatalogLoadOrigin
+        let requestTimeout: TimeAmount?
+        let requestDeadlineUptimeNs: UInt64?
+        let rpcHandle: ControlPlaneRPCHandle
         let task: Task<CanonicalToolsCatalogLoadResult, Error>
+        var waiters: [WaiterID: ToolsCatalogWaiterRecord] = [:]
+        var foregroundWaiterCount = 0
     }
 
-    private struct WindowLoad: Sendable {
-        let id: UUID
+    struct WindowLoadState {
+        let loadID: UUID
+        let route: ControlPlaneRoute
+        let requestTimeout: TimeAmount?
+        let requestDeadlineUptimeNs: UInt64?
+        let rpcHandle: ControlPlaneRPCHandle
         let task: Task<JSONValue, Error>
+        var waiters: [WaiterID: WindowWaiterRecord] = [:]
     }
 
-    private struct DeadlineExceeded: Error {}
+    let brokerState: CanonicalBrokerState
+    let debugMirror: ControlPlaneDebugMirror
+    let initializeLoader: InitializeLoader
+    let toolsCatalogLoader: ToolsCatalogLoader
+    let windowsLoader: WindowsLoader
+    let upstreamHandshakeStates: UpstreamHandshakeStatesProvider
+    let logger: Logger
+    let controlPlaneDefaultTimeout: TimeAmount?
 
-    private let brokerState: CanonicalBrokerState
-    private let debugMirror: ControlPlaneDebugMirror
-    private let initializeLoader: InitializeLoader
-    private let toolsCatalogLoader: ToolsCatalogLoader
-    private let windowsLoader: WindowsLoader
-    private let upstreamHandshakeStates: UpstreamHandshakeStatesProvider
-    private let logger: Logger
-
-    private var phase: Phase = .idle
-    private var waiterState = WaiterState()
-    private var initializeLoad: InitializeLoad?
-    private var toolsCatalogLoad: ToolsCatalogLoad?
-    private var windowLoads: [ControlPlaneRoute: WindowLoad] = [:]
-    private var inFlightRequests = Set<String>()
+    var initializeLoad: InitializeLoadState?
+    var toolsCatalogLoad: ToolsCatalogLoadState?
+    var prewarmToolsCatalogLoad: ToolsCatalogLoadState?
+    var windowLoads: [ControlPlaneRoute: WindowLoadState] = [:]
 
     package init(
         brokerState: CanonicalBrokerState,
@@ -122,7 +103,8 @@ package actor ControlPlaneCoordinator {
         toolsCatalogLoader: @escaping ToolsCatalogLoader,
         windowsLoader: @escaping WindowsLoader,
         upstreamHandshakeStates: @escaping UpstreamHandshakeStatesProvider,
-        logger: Logger
+        logger: Logger,
+        controlPlaneDefaultTimeout: TimeAmount?
     ) {
         self.brokerState = brokerState
         self.debugMirror = debugMirror
@@ -131,67 +113,129 @@ package actor ControlPlaneCoordinator {
         self.windowsLoader = windowsLoader
         self.upstreamHandshakeStates = upstreamHandshakeStates
         self.logger = logger
+        self.controlPlaneDefaultTimeout = controlPlaneDefaultTimeout
     }
 
     package func clientInitialize(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
-        waiterState.initialize += 1
-        syncDebug()
-        defer {
-            waiterState.initialize -= 1
-            syncDebug()
-        }
-
         if let result = brokerState.initializeResult() {
             return result
         }
 
-        let load = initializeLoad ?? startInitializeLoad()
-        let loaded = try await waitForTask(load.task, deadlineUptimeNs: deadlineUptimeNs)
-        return loaded.result
+        let loadID = initializeLoad?.loadID ?? startInitializeLoad()
+        let waiterID = WaiterID()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                registerInitializeWaiter(
+                    loadID: loadID,
+                    waiterID: waiterID,
+                    deadlineUptimeNs: deadlineUptimeNs,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelInitializeWaiter(loadID: loadID, waiterID: waiterID)
+            }
+        }
     }
 
     package func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
-        waiterState.toolsCatalog += 1
-        syncDebug()
-        defer {
-            waiterState.toolsCatalog -= 1
-            syncDebug()
-        }
-
         if let rawResult = brokerState.toolsCatalogRaw() {
             return rawResult
         }
 
-        let load = toolsCatalogLoad ?? startToolsCatalogLoad()
-        let loaded = try await waitForTask(load.task, deadlineUptimeNs: deadlineUptimeNs)
-        return loaded.rawResult
+        let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)
+        let requestedPromotionDeadlineUptimeNs = promotionDeadlineUptimeNs(
+            forWaiterDeadlineUptimeNs: deadlineUptimeNs
+        )
+        let loadID = ensureToolsCatalogForegroundLoad(
+            requestTimeout: requestedTimeout,
+            requestedPromotionDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
+        )
+        let waiterID = WaiterID()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                registerToolsCatalogWaiter(
+                    loadID: loadID,
+                    waiterID: waiterID,
+                    deadlineUptimeNs: deadlineUptimeNs,
+                    kind: .foreground,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelToolsCatalogWaiter(waiterID: waiterID)
+            }
+        }
     }
 
     package func listWindows(
         route: ControlPlaneRoute,
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
-        waiterState.windows += 1
-        syncDebug()
-        defer {
-            waiterState.windows -= 1
-            syncDebug()
-        }
+        let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)
+        let requestedPromotionDeadlineUptimeNs = promotionDeadlineUptimeNs(
+            forWaiterDeadlineUptimeNs: deadlineUptimeNs
+        )
+        let loadID = ensureWindowLoad(
+            route: route,
+            requestTimeout: requestedTimeout,
+            requestedPromotionDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
+        )
+        let waiterID = WaiterID()
 
-        let load = windowLoads[route] ?? startWindowLoad(route: route)
-        return try await waitForTask(load.task, deadlineUptimeNs: deadlineUptimeNs)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                registerWindowWaiter(
+                    route: route,
+                    loadID: loadID,
+                    waiterID: waiterID,
+                    deadlineUptimeNs: deadlineUptimeNs,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWindowWaiter(route: route, waiterID: waiterID)
+            }
+        }
     }
 
-    package func prewarmToolsCatalogIfNeeded() async {
-        guard brokerState.toolsCatalogRaw() == nil, toolsCatalogLoad == nil else {
+    package func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async {
+        guard
+            brokerState.toolsCatalogRaw() == nil,
+            toolsCatalogLoad == nil,
+            prewarmToolsCatalogLoad == nil
+        else {
             syncDebug()
             return
         }
-        let load = startToolsCatalogLoad()
+
+        let loadID = startToolsCatalogLoad(
+            origin: .prewarm,
+            requestTimeout: sharedRequestTimeout(for: deadlineUptimeNs)
+        )
+        let waiterID = WaiterID()
+
         do {
-            _ = try await load.task.value
+            _ = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<JSONValue, Error>) in
+                registerToolsCatalogWaiter(
+                    loadID: loadID,
+                    waiterID: waiterID,
+                    deadlineUptimeNs: deadlineUptimeNs,
+                    kind: .prewarmObserver,
+                    continuation: continuation
+                )
+            }
         } catch {
-            logger.debug("tools catalog prewarm failed", metadata: ["error": .string(String(describing: error))])
+            logger.debug(
+                "tools catalog prewarm failed",
+                metadata: ["error": .string(String(describing: error))]
+            )
         }
     }
 
@@ -209,16 +253,24 @@ package actor ControlPlaneCoordinator {
         clearInitialize: Bool = false,
         clearToolsCatalog: Bool = true
     ) {
-        initializeLoad?.task.cancel()
-        toolsCatalogLoad?.task.cancel()
-        for load in windowLoads.values {
-            load.task.cancel()
+        if let load = initializeLoad {
+            initializeLoad = nil
+            cancelInitializeLoad(load, error: CancellationError())
         }
-        initializeLoad = nil
-        toolsCatalogLoad = nil
+        if let load = toolsCatalogLoad {
+            toolsCatalogLoad = nil
+            cancelToolsCatalogLoad(load, error: CancellationError())
+        }
+        if let load = prewarmToolsCatalogLoad {
+            prewarmToolsCatalogLoad = nil
+            cancelToolsCatalogLoad(load, error: CancellationError())
+        }
+        let activeWindows = Array(windowLoads.values)
         windowLoads.removeAll()
-        inFlightRequests.removeAll()
-        phase = .idle
+        for load in activeWindows {
+            cancelWindowLoad(load, error: CancellationError())
+        }
+
         if clearInitialize {
             brokerState.clearInitialize()
         }
@@ -228,184 +280,394 @@ package actor ControlPlaneCoordinator {
         syncDebug()
     }
 
-    private func startInitializeLoad() -> InitializeLoad {
-        phase = .loadingInitialize
-        inFlightRequests.insert("initialize")
-        let initializeLoader = self.initializeLoader
-        let load = InitializeLoad(
-            id: UUID(),
-            task: Task.detached {
-                return try await initializeLoader(nil)
-            }
-        )
-        initializeLoad = load
-        Task { [load] in
+    func startInitializeLoad() -> UUID {
+        let loadID = UUID()
+        let task = Task.detached {
+            try await self.initializeLoader()
+        }
+        initializeLoad = InitializeLoadState(loadID: loadID, task: task)
+        Task { [loadID] in
             let result: Result<CanonicalInitializeLoadResult, Error>
             do {
-                result = .success(try await load.task.value)
+                result = .success(try await task.value)
             } catch {
                 result = .failure(error)
             }
-            self.completeInitializeLoad(id: load.id, result: result)
+            self.completeInitializeLoad(loadID: loadID, result: result)
         }
         syncDebug()
-        return load
+        return loadID
     }
 
-    private func startToolsCatalogLoad() -> ToolsCatalogLoad {
-        phase = .loadingToolsCatalog
-        inFlightRequests.insert("tools/list")
-        let toolsCatalogLoader = self.toolsCatalogLoader
-        let load = ToolsCatalogLoad(
-            id: UUID(),
-            task: Task.detached {
-                return try await toolsCatalogLoader(nil)
-            }
+    func startToolsCatalogLoad(
+        origin: ToolsCatalogLoadOrigin,
+        requestTimeout: TimeAmount?
+    ) -> UUID {
+        let loadID = UUID()
+        let rpcHandle = ControlPlaneRPCHandle()
+        let requestDeadlineUptimeNs = requestDeadline(for: requestTimeout)
+        let task = Task.detached {
+            try await self.toolsCatalogLoader(requestTimeout, rpcHandle)
+        }
+        let load = ToolsCatalogLoadState(
+            loadID: loadID,
+            origin: origin,
+            requestTimeout: requestTimeout,
+            requestDeadlineUptimeNs: requestDeadlineUptimeNs,
+            rpcHandle: rpcHandle,
+            task: task
         )
-        toolsCatalogLoad = load
-        Task { [load] in
+        switch origin {
+        case .request:
+            toolsCatalogLoad = load
+        case .prewarm:
+            prewarmToolsCatalogLoad = load
+        }
+        Task { [loadID] in
             let result: Result<CanonicalToolsCatalogLoadResult, Error>
             do {
-                result = .success(try await load.task.value)
+                result = .success(try await task.value)
             } catch {
                 result = .failure(error)
             }
-            self.completeToolsCatalogLoad(id: load.id, result: result)
+            self.completeToolsCatalogLoad(loadID: loadID, result: result)
         }
         syncDebug()
-        return load
+        return loadID
     }
 
-    private func startWindowLoad(route: ControlPlaneRoute) -> WindowLoad {
-        phase = .listingWindows
-        let requestKey = "tools/call:XcodeListWindows@\(route.debugLabel)"
-        inFlightRequests.insert(requestKey)
-        let windowsLoader = self.windowsLoader
-        let load = WindowLoad(
-            id: UUID(),
-            task: Task.detached {
-                return try await windowsLoader(route, nil)
-            }
+    func startWindowLoad(
+        route: ControlPlaneRoute,
+        requestTimeout: TimeAmount?
+    ) -> UUID {
+        let loadID = UUID()
+        let rpcHandle = ControlPlaneRPCHandle()
+        let requestDeadlineUptimeNs = requestDeadline(for: requestTimeout)
+        let task = Task.detached {
+            try await self.windowsLoader(route, requestTimeout, rpcHandle)
+        }
+        windowLoads[route] = WindowLoadState(
+            loadID: loadID,
+            route: route,
+            requestTimeout: requestTimeout,
+            requestDeadlineUptimeNs: requestDeadlineUptimeNs,
+            rpcHandle: rpcHandle,
+            task: task
         )
-        windowLoads[route] = load
-        Task { [load, route] in
+        Task { [route, loadID] in
             let result: Result<JSONValue, Error>
             do {
-                result = .success(try await load.task.value)
+                result = .success(try await task.value)
             } catch {
                 result = .failure(error)
             }
-            self.completeWindowLoad(id: load.id, route: route, result: result)
+            self.completeWindowLoad(route: route, loadID: loadID, result: result)
         }
         syncDebug()
-        return load
+        return loadID
     }
 
-    private func finishRequest(_ request: String) {
-        inFlightRequests.remove(request)
+    func ensureToolsCatalogForegroundLoad(
+        requestTimeout: TimeAmount?,
+        requestedPromotionDeadlineUptimeNs: UInt64?
+    ) -> UUID {
+        if let current = toolsCatalogLoad {
+            if current.foregroundWaiterCount <= 1 && shouldPromoteSharedLoad(
+                currentRequestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
+                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
+            ) {
+                return replaceToolsCatalogRequestLoad(current, requestTimeout: requestTimeout)
+            }
+            return current.loadID
+        }
+        if let current = prewarmToolsCatalogLoad {
+            if current.foregroundWaiterCount <= 1 && shouldPromoteSharedLoad(
+                currentRequestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
+                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
+            ) {
+                return promotePrewarmToolsCatalogLoad(current, requestTimeout: requestTimeout)
+            }
+            return current.loadID
+        }
+        return startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
+    }
+
+    func ensureWindowLoad(
+        route: ControlPlaneRoute,
+        requestTimeout: TimeAmount?,
+        requestedPromotionDeadlineUptimeNs: UInt64?
+    ) -> UUID {
+        if let current = windowLoads[route] {
+            if current.waiters.count <= 1 && shouldPromoteSharedLoad(
+                currentRequestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
+                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
+            ) {
+                return replaceWindowLoad(
+                    route: route,
+                    current: current,
+                    requestTimeout: requestTimeout
+                )
+            }
+            return current.loadID
+        }
+        return startWindowLoad(route: route, requestTimeout: requestTimeout)
+    }
+
+    func registerInitializeWaiter(
+        loadID: UUID,
+        waiterID: WaiterID,
+        deadlineUptimeNs: UInt64?,
+        continuation: CheckedContinuation<JSONValue, Error>
+    ) {
+        guard initializeLoad?.loadID == loadID else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if deadlineExceeded(deadlineUptimeNs) {
+            continuation.resume(throwing: TimeoutError())
+            return
+        }
+        let timeoutTask = makeTimeoutTask(deadlineUptimeNs: deadlineUptimeNs) {
+            await self.timeoutInitializeWaiter(loadID: loadID, waiterID: waiterID)
+        }
+        initializeLoad?.waiters[waiterID] = InitializeWaiterRecord(
+            continuation: continuation,
+            deadlineUptimeNs: deadlineUptimeNs,
+            timeoutTask: timeoutTask
+        )
         syncDebug()
     }
 
-    private func completeInitializeLoad(
-        id: UUID,
+    func registerToolsCatalogWaiter(
+        loadID: UUID,
+        waiterID: WaiterID,
+        deadlineUptimeNs: UInt64?,
+        kind: ToolsCatalogWaiterKind,
+        continuation: CheckedContinuation<JSONValue, Error>
+    ) {
+        guard var load = currentToolsCatalogLoadState(loadID: loadID) else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if deadlineExceeded(deadlineUptimeNs) {
+            continuation.resume(throwing: TimeoutError())
+            return
+        }
+        let timeoutTask = makeTimeoutTask(deadlineUptimeNs: deadlineUptimeNs) {
+            await self.timeoutToolsCatalogWaiter(loadID: loadID, waiterID: waiterID)
+        }
+        load.waiters[waiterID] = ToolsCatalogWaiterRecord(
+            continuation: continuation,
+            kind: kind,
+            deadlineUptimeNs: deadlineUptimeNs,
+            timeoutTask: timeoutTask
+        )
+        if kind == .foreground {
+            load.foregroundWaiterCount += 1
+        }
+        setToolsCatalogLoadState(load)
+        syncDebug()
+    }
+
+    func registerWindowWaiter(
+        route: ControlPlaneRoute,
+        loadID: UUID,
+        waiterID: WaiterID,
+        deadlineUptimeNs: UInt64?,
+        continuation: CheckedContinuation<JSONValue, Error>
+    ) {
+        guard var load = windowLoads[route], load.loadID == loadID else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if deadlineExceeded(deadlineUptimeNs) {
+            continuation.resume(throwing: TimeoutError())
+            return
+        }
+        let timeoutTask = makeTimeoutTask(deadlineUptimeNs: deadlineUptimeNs) {
+            await self.timeoutWindowWaiter(route: route, loadID: loadID, waiterID: waiterID)
+        }
+        load.waiters[waiterID] = WindowWaiterRecord(
+            continuation: continuation,
+            deadlineUptimeNs: deadlineUptimeNs,
+            timeoutTask: timeoutTask
+        )
+        windowLoads[route] = load
+        syncDebug()
+    }
+
+    func timeoutInitializeWaiter(loadID: UUID, waiterID: WaiterID) {
+        guard initializeLoad?.loadID == loadID else { return }
+        guard let waiter = initializeLoad?.waiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(throwing: TimeoutError())
+        syncDebug()
+    }
+
+    func cancelInitializeWaiter(loadID: UUID, waiterID: WaiterID) {
+        guard initializeLoad?.loadID == loadID else { return }
+        guard let waiter = initializeLoad?.waiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(throwing: CancellationError())
+        syncDebug()
+    }
+
+    func timeoutToolsCatalogWaiter(loadID: UUID, waiterID: WaiterID) {
+        guard var load = currentToolsCatalogLoadState(loadID: loadID) else { return }
+        guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask?.cancel()
+        if waiter.kind == .foreground {
+            load.foregroundWaiterCount = max(0, load.foregroundWaiterCount - 1)
+        }
+        let shouldCancel = shouldCancelToolsCatalogLoadAfterWaiterRemoval(load)
+        waiter.continuation.resume(throwing: TimeoutError())
+        if shouldCancel {
+            clearToolsCatalogLoadState(loadID: loadID)
+            cancelToolsCatalogLoad(load, error: CancellationError())
+        } else {
+            setToolsCatalogLoadState(load)
+        }
+        syncDebug()
+    }
+
+    func cancelToolsCatalogWaiter(loadID: UUID, waiterID: WaiterID) {
+        guard var load = currentToolsCatalogLoadState(loadID: loadID) else { return }
+        guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask?.cancel()
+        if waiter.kind == .foreground {
+            load.foregroundWaiterCount = max(0, load.foregroundWaiterCount - 1)
+        }
+        let shouldCancel = shouldCancelToolsCatalogLoadAfterWaiterRemoval(load)
+        waiter.continuation.resume(throwing: CancellationError())
+        if shouldCancel {
+            clearToolsCatalogLoadState(loadID: loadID)
+            cancelToolsCatalogLoad(load, error: CancellationError())
+        } else {
+            setToolsCatalogLoadState(load)
+        }
+        syncDebug()
+    }
+
+    func cancelToolsCatalogWaiter(waiterID: WaiterID) {
+        if let load = toolsCatalogLoad, load.waiters[waiterID] != nil {
+            cancelToolsCatalogWaiter(loadID: load.loadID, waiterID: waiterID)
+            return
+        }
+        if let load = prewarmToolsCatalogLoad, load.waiters[waiterID] != nil {
+            cancelToolsCatalogWaiter(loadID: load.loadID, waiterID: waiterID)
+        }
+    }
+
+    func timeoutWindowWaiter(
+        route: ControlPlaneRoute,
+        loadID: UUID,
+        waiterID: WaiterID
+    ) {
+        guard var load = windowLoads[route], load.loadID == loadID else { return }
+        guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(throwing: TimeoutError())
+        if load.waiters.isEmpty {
+            windowLoads.removeValue(forKey: route)
+            cancelWindowLoad(load, error: CancellationError())
+        } else {
+            windowLoads[route] = load
+        }
+        syncDebug()
+    }
+
+    func cancelWindowWaiter(
+        route: ControlPlaneRoute,
+        loadID: UUID,
+        waiterID: WaiterID
+    ) {
+        guard var load = windowLoads[route], load.loadID == loadID else { return }
+        guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(throwing: CancellationError())
+        if load.waiters.isEmpty {
+            windowLoads.removeValue(forKey: route)
+            cancelWindowLoad(load, error: CancellationError())
+        } else {
+            windowLoads[route] = load
+        }
+        syncDebug()
+    }
+
+    func cancelWindowWaiter(
+        route: ControlPlaneRoute,
+        waiterID: WaiterID
+    ) {
+        guard let load = windowLoads[route], load.waiters[waiterID] != nil else { return }
+        cancelWindowWaiter(route: route, loadID: load.loadID, waiterID: waiterID)
+    }
+
+    func completeInitializeLoad(
+        loadID: UUID,
         result: Result<CanonicalInitializeLoadResult, Error>
     ) {
-        guard initializeLoad?.id == id else { return }
+        guard let load = initializeLoad, load.loadID == loadID else { return }
         initializeLoad = nil
-        finishRequest("initialize")
         if case .success(let loaded) = result, let sourceUpstream = loaded.sourceUpstream {
             brokerState.syncCanonicalInitialize(
                 loaded.result,
                 sourceUpstream: sourceUpstream
             )
         }
-        if toolsCatalogLoad == nil, windowLoads.isEmpty {
-            phase = .idle
+        let waiters = Array(load.waiters.values)
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            switch result {
+            case .success(let loaded):
+                waiter.continuation.resume(returning: loaded.result)
+            case .failure(let error):
+                waiter.continuation.resume(throwing: error)
+            }
         }
         syncDebug()
     }
 
-    private func completeToolsCatalogLoad(
-        id: UUID,
+    func completeToolsCatalogLoad(
+        loadID: UUID,
         result: Result<CanonicalToolsCatalogLoadResult, Error>
     ) {
-        guard toolsCatalogLoad?.id == id else { return }
-        toolsCatalogLoad = nil
-        finishRequest("tools/list")
+        guard let load = takeToolsCatalogLoadIfMatching(loadID: loadID) else { return }
         if case .success(let loaded) = result, let sourceUpstream = loaded.sourceUpstream {
             brokerState.syncCanonicalToolsCatalog(
                 loaded.rawResult,
                 sourceUpstream: sourceUpstream
             )
         }
-        if initializeLoad == nil, windowLoads.isEmpty {
-            phase = .idle
+        let waiters = Array(load.waiters.values)
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            switch result {
+            case .success(let loaded):
+                waiter.continuation.resume(returning: loaded.rawResult)
+            case .failure(let error):
+                waiter.continuation.resume(throwing: error)
+            }
         }
         syncDebug()
     }
 
-    private func completeWindowLoad(
-        id: UUID,
+    func completeWindowLoad(
         route: ControlPlaneRoute,
-        result _: Result<JSONValue, Error>
+        loadID: UUID,
+        result: Result<JSONValue, Error>
     ) {
-        guard windowLoads[route]?.id == id else { return }
+        guard let load = windowLoads[route], load.loadID == loadID else { return }
         windowLoads.removeValue(forKey: route)
-        finishRequest("tools/call:XcodeListWindows@\(route.debugLabel)")
-        if initializeLoad == nil, toolsCatalogLoad == nil, windowLoads.isEmpty {
-            phase = .idle
+        let waiters = Array(load.waiters.values)
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            switch result {
+            case .success(let loaded):
+                waiter.continuation.resume(returning: loaded)
+            case .failure(let error):
+                waiter.continuation.resume(throwing: error)
+            }
         }
         syncDebug()
-    }
-
-    private func waitForTask<Output: Sendable>(
-        _ task: Task<Output, Error>,
-        deadlineUptimeNs: UInt64?
-    ) async throws -> Output {
-        guard let deadlineUptimeNs else {
-            return try await task.value
-        }
-        let now = DispatchTime.now().uptimeNanoseconds
-        if now >= deadlineUptimeNs {
-            throw DeadlineExceeded()
-        }
-
-        let timeoutTask = Task {
-            let remaining = deadlineUptimeNs &- now
-            try? await Task.sleep(nanoseconds: remaining)
-        }
-        defer { timeoutTask.cancel() }
-
-        return try await withThrowingTaskGroup(of: Output.self) { group in
-            group.addTask {
-                try await task.value
-            }
-            group.addTask {
-                _ = await timeoutTask.result
-                throw DeadlineExceeded()
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
-    }
-
-    private func syncDebug() {
-        let brokerSnapshot = brokerState.snapshot()
-        let snapshot = ProxyControlPlaneDebugSnapshot(
-            phase: phase.rawValue,
-            canonicalInitializeSourceUpstream: brokerSnapshot.initializeSourceUpstream,
-            canonicalToolsSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-            canonicalReady: brokerSnapshot.canonicalReady,
-            upstreamHandshakeStates: upstreamHandshakeStates(),
-            waiterCounts: ControlPlaneWaiterCounts(
-                initialize: waiterState.initialize,
-                toolsCatalog: waiterState.toolsCatalog,
-                windows: waiterState.windows
-            ),
-            inFlightControlPlaneRequests: inFlightRequests.sorted(),
-            lastIncompatibility: brokerSnapshot.lastIncompatibility
-        )
-        debugMirror.overwrite(snapshot)
     }
 }

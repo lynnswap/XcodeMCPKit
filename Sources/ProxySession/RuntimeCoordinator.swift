@@ -267,29 +267,29 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.controlPlaneCoordinator = ControlPlaneCoordinator(
             brokerState: self.canonicalBrokerState,
             debugMirror: self.controlPlaneDebugMirror,
-            initializeLoader: { [runtimeBox] deadlineUptimeNs in
+            initializeLoader: { [runtimeBox] in
                 guard let runtime = runtimeBox.value else {
                     throw CancellationError()
                 }
-                return try await runtime.awaitCanonicalInitializeSnapshot(
-                    deadlineUptimeNs: deadlineUptimeNs
-                )
+                return try await runtime.awaitCanonicalInitializeSnapshot(deadlineUptimeNs: nil)
             },
-            toolsCatalogLoader: { [runtimeBox] deadlineUptimeNs in
+            toolsCatalogLoader: { [runtimeBox] requestTimeout, rpcHandle in
                 guard let runtime = runtimeBox.value else {
                     throw CancellationError()
                 }
                 return try await runtime.loadCanonicalToolsCatalog(
-                    deadlineUptimeNs: deadlineUptimeNs
+                    requestTimeout: requestTimeout,
+                    rpcHandle: rpcHandle
                 )
             },
-            windowsLoader: { [runtimeBox] route, deadlineUptimeNs in
+            windowsLoader: { [runtimeBox] route, requestTimeout, rpcHandle in
                 guard let runtime = runtimeBox.value else {
                     throw CancellationError()
                 }
                 return try await runtime.loadLiveXcodeListWindows(
                     route: route,
-                    deadlineUptimeNs: deadlineUptimeNs
+                    requestTimeout: requestTimeout,
+                    rpcHandle: rpcHandle
                 )
             },
             upstreamHandshakeStates: { [weak upstreamHealthManager = self.upstreamHealthManager] in
@@ -307,7 +307,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     return ("\(index)", summary)
                 })
             },
-            logger: ProxyLogging.make("control-plane")
+            logger: ProxyLogging.make("control-plane"),
+            controlPlaneDefaultTimeout: MCPMethodDispatcher.timeoutForControlPlane(
+                defaultSeconds: config.requestTimeout
+            )
         )
         runtimeBox.value = self
         schedulerProbeStarter.withLockedValue { startProbes in
@@ -387,16 +390,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         _ = leaseManager.resetAll(reason: .clientDisconnected)
         upstreamSlotScheduler.reset()
         debugRecorder.resetAll()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            await controlPlaneCoordinator.invalidate(
-                reason: "debug_reset",
-                clearInitialize: true,
-                clearToolsCatalog: true
-            )
-            semaphore.signal()
-        }
-        semaphore.wait()
+        invalidateControlPlaneSynchronously(
+            reason: "debug_reset",
+            clearInitialize: true,
+            clearToolsCatalog: true
+        )
         canonicalBrokerState.reset()
     }
 
@@ -415,16 +413,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             timeout?.cancel()
         }
 
-        let controlPlaneSemaphore = DispatchSemaphore(value: 0)
-        Task {
-            await controlPlaneCoordinator.invalidate(
-                reason: "shutdown",
-                clearInitialize: true,
-                clearToolsCatalog: true
-            )
-            controlPlaneSemaphore.signal()
-        }
-        controlPlaneSemaphore.wait()
+        invalidateControlPlaneSynchronously(
+            reason: "shutdown",
+            clearInitialize: true,
+            clearToolsCatalog: true
+        )
         canonicalBrokerState.reset()
 
         let tasks = upstreamTaskBox.withLockedValue { taskBox -> [Task<Void, Never>] in
@@ -460,8 +453,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func refreshToolsListIfNeeded() {
         guard config.prewarmToolsList, isInitialized() else { return }
+        let deadline = Self.timeoutDeadline(
+            for: MCPMethodDispatcher.timeoutForControlPlane(
+                defaultSeconds: config.requestTimeout
+            )
+        )
         Task { [weak self] in
-            await self?.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded()
+            await self?.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
+                deadlineUptimeNs: deadline
+            )
         }
     }
 
@@ -642,9 +642,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = Self.timeoutDeadline(for: timeout)
-        return try await controlPlaneCoordinator.toolsCatalog(
-            deadlineUptimeNs: deadline
-        )
+        return try await awaitControlPlaneOperation {
+            try await self.controlPlaneCoordinator.toolsCatalog(
+                deadlineUptimeNs: deadline
+            )
+        }
     }
 
     package func sharedXcodeListWindowsResult(
@@ -671,10 +673,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = Self.timeoutDeadline(for: timeout)
-        return try await controlPlaneCoordinator.listWindows(
-            route: route,
-            deadlineUptimeNs: deadline
-        )
+        return try await awaitControlPlaneOperation {
+            try await self.controlPlaneCoordinator.listWindows(
+                route: route,
+                deadlineUptimeNs: deadline
+            )
+        }
     }
 
     func encodeJSONRPCResultBuffer(
@@ -733,6 +737,42 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return nil
         }
         return DispatchTime.now().uptimeNanoseconds &+ UInt64(timeout.nanoseconds)
+    }
+
+    func awaitControlPlaneOperation<Output: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Output
+    ) async throws -> Output {
+        let task = Task {
+            try await operation()
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func invalidateControlPlaneSynchronously(
+        reason: String,
+        clearInitialize: Bool,
+        clearToolsCatalog: Bool
+    ) {
+        if clearInitialize {
+            canonicalBrokerState.clearInitialize()
+        }
+        if clearToolsCatalog {
+            canonicalBrokerState.clearToolsCatalog()
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            await controlPlaneCoordinator.invalidate(
+                reason: reason,
+                clearInitialize: clearInitialize,
+                clearToolsCatalog: clearToolsCatalog
+            )
+            semaphore.signal()
+        }
+        semaphore.wait()
     }
 
     static func mapControlPlaneError(_ error: Error) -> (code: Int, message: String) {

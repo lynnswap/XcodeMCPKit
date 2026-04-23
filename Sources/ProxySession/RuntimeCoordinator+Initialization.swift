@@ -224,14 +224,11 @@ extension RuntimeCoordinator {
         clearUpstreamState(upstreamIndex: upstreamIndex)
         let hasHealthySecondary = upstreamIndex == 0 && hasUsableInitializedSecondaryUpstreams()
         if canonicalBrokerState.toolsSourceUpstream() == upstreamIndex && !hasHealthySecondary {
-            canonicalBrokerState.clearToolsCatalog()
-            Task { [weak self] in
-                await self?.controlPlaneCoordinator.invalidate(
-                    reason: "initialized_notification_overload_\(upstreamIndex)",
-                    clearInitialize: false,
-                    clearToolsCatalog: true
-                )
-            }
+            invalidateControlPlaneSynchronously(
+                reason: "initialized_notification_overload_\(upstreamIndex)",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
         }
         if upstreamIndex == 0 {
             if hasUsableInitializedSecondaryUpstreams() {
@@ -326,16 +323,11 @@ extension RuntimeCoordinator {
     func startPrimaryEagerRetry() {
         clearUpstreamState(upstreamIndex: 0)
         initializeManager.resetCachedInitializeResult()
-        canonicalBrokerState.clearInitialize()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            await controlPlaneCoordinator.invalidate(
-                reason: "primary_eager_retry",
-                clearInitialize: true
-            )
-            semaphore.signal()
-        }
-        semaphore.wait()
+        invalidateControlPlaneSynchronously(
+            reason: "primary_eager_retry",
+            clearInitialize: true,
+            clearToolsCatalog: true
+        )
         startEagerInitializePrimary()
     }
 

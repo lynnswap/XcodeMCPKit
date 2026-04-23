@@ -175,16 +175,12 @@ extension RuntimeCoordinator {
         if shouldResetGlobalInit || shouldClearToolsCatalog {
             if shouldResetGlobalInit {
                 initializeManager.resetCachedInitializeResult()
-                canonicalBrokerState.clearInitialize()
             }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.controlPlaneCoordinator.invalidate(
-                    reason: "upstream_exit_\(upstreamIndex)",
-                    clearInitialize: shouldResetGlobalInit,
-                    clearToolsCatalog: shouldClearToolsCatalog
-                )
-            }
+            invalidateControlPlaneSynchronously(
+                reason: "upstream_exit_\(upstreamIndex)",
+                clearInitialize: shouldResetGlobalInit,
+                clearToolsCatalog: shouldClearToolsCatalog
+            )
         }
 
         if upstreamIndex == 0 {
@@ -625,14 +621,11 @@ extension RuntimeCoordinator {
             canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
             && !upstreamHealthManager.anyInitialized()
         if clearInitialize || clearToolsCatalog {
-            Task { [weak self] in
-                guard let self else { return }
-                await self.controlPlaneCoordinator.invalidate(
-                    reason: "protocol_violation_\(upstreamIndex)",
-                    clearInitialize: clearInitialize,
-                    clearToolsCatalog: clearToolsCatalog
-                )
-            }
+            invalidateControlPlaneSynchronously(
+                reason: "protocol_violation_\(upstreamIndex)",
+                clearInitialize: clearInitialize,
+                clearToolsCatalog: clearToolsCatalog
+            )
         }
 
         if upstreamIndex == 0 {
