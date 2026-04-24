@@ -9,9 +9,13 @@ Designed so the Xcode permission dialog appears once when the proxy starts.
 
 1. Start the proxy server
    ```bash
-   xcode-mcp-proxy-server
+   xcode-mcp-proxy-server --auto-approve
    ```
-2. Click **Allow** in Xcode’s permission dialog
+2. Grant the macOS Accessibility permission required for automatic approval.
+
+When you use the `--auto-approve` option, the server watches for Xcode’s permission dialog and automatically clicks **Allow**.
+
+This feature requires macOS Accessibility permission, so it is disabled by default and opt-in. If you do not want to grant that permission, start the server without `--auto-approve` and click **Allow** manually in Xcode.
 
 ## Architecture
 
