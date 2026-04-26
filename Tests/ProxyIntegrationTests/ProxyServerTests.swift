@@ -1,4 +1,5 @@
 import Foundation
+import ProxyRuntime
 import Testing
 
 @testable import XcodeMCPProxy
@@ -65,6 +66,45 @@ struct ProxyServerTests {
         #expect(candidates.contains(fixture.wrapperPath))
         #expect(candidates.contains(fixture.toolPath))
     }
+
+    @Test func makeXPCStatusSortsClientsAndAggregatesCorrelatedRequests() {
+        let payload = ProxyServer.makeXPCStatus(
+            endpointDisplay: "http://localhost:8765",
+            reachable: true,
+            version: "test-version",
+            debugSnapshot: makeDebugSnapshot(
+                upstreamHealth: "healthy",
+                sessions: [
+                    SessionDebugSnapshot(sessionID: "session-b", activeCorrelatedRequestCount: 2),
+                    SessionDebugSnapshot(sessionID: "session-a", activeCorrelatedRequestCount: 2),
+                    SessionDebugSnapshot(sessionID: "session-c", activeCorrelatedRequestCount: 5),
+                ]
+            )
+        )
+
+        #expect(payload.reachable)
+        #expect(payload.version == "test-version")
+        #expect(payload.xcodeHealth == "healthy")
+        #expect(payload.activeClientCount == 3)
+        #expect(payload.activeCorrelatedRequestCount == 9)
+        #expect(payload.clients.map { $0.sessionID } == ["session-c", "session-a", "session-b"])
+        #expect(payload.fetchError == nil)
+    }
+
+    @Test func makeXPCStatusMarksUnreachableProxyWithoutDebugSnapshot() {
+        let payload = ProxyServer.makeXPCStatus(
+            endpointDisplay: "http://localhost:8765",
+            reachable: false,
+            version: "test-version",
+            debugSnapshot: nil
+        )
+
+        #expect(payload.reachable == false)
+        #expect(payload.xcodeHealth == "Unknown")
+        #expect(payload.activeClientCount == 0)
+        #expect(payload.activeCorrelatedRequestCount == 0)
+        #expect(payload.fetchError == "Proxy not reachable at http://localhost:8765.")
+    }
 }
 
 private struct XcrunFixture {
@@ -109,5 +149,51 @@ private func makeXcrunFixture() throws -> XcrunFixture {
         wrapperPath: wrapperPath,
         toolPath: toolPath,
         directoryURL: directoryURL
+    )
+}
+
+private func makeDebugSnapshot(
+    upstreamHealth: String,
+    sessions: [SessionDebugSnapshot]
+) -> ProxyDebugSnapshot {
+    ProxyDebugSnapshot(
+        generatedAt: Date(),
+        proxyInitialized: true,
+        cachedToolsListAvailable: false,
+        warmupInFlight: false,
+        upstreams: [
+            ProxyUpstreamDebugSnapshot(
+                upstreamIndex: 0,
+                isInitialized: true,
+                initInFlight: false,
+                didSendInitialized: true,
+                healthState: upstreamHealth,
+                consecutiveRequestTimeouts: 0,
+                consecutiveToolsListFailures: 0,
+                lastToolsListSuccessUptimeNs: nil,
+                recentStderr: [],
+                lastDecodeError: nil,
+                lastBridgeError: nil,
+                protocolViolationCount: 0,
+                lastProtocolViolationAt: nil,
+                lastProtocolViolationReason: nil,
+                lastProtocolViolationBufferedBytes: nil,
+                lastProtocolViolationPreview: nil,
+                lastProtocolViolationPreviewHex: nil,
+                lastProtocolViolationLeadingByteHex: nil,
+                bufferedStdoutBytes: 0,
+                capacity: 1,
+                requestPickCount: 0,
+                activeCorrelatedRequestCount: sessions.reduce(into: 0) { partialResult, session in
+                    partialResult += session.activeCorrelatedRequestCount
+                },
+                droppedUnmappedNotificationCount: 0,
+                lateResponseDropCount: 0
+            )
+        ],
+        recentTraffic: [],
+        sessions: sessions,
+        leases: [],
+        queuedRequestCount: 0
     )
 }

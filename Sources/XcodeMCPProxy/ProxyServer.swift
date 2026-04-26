@@ -59,6 +59,24 @@ public final class ProxyServer {
     private var isShuttingDown = false
     private var sessionManager: (any RuntimeCoordinating)?
     private var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
+    private var xpcBroadcastTask: RepeatedTask?
+    private lazy var xpcServiceHost = ProxyXPCServiceHost(
+        statusProvider: { [weak self] in
+            self?.currentXPCStatus() ?? ProxyXPCStatusPayload(
+                endpointDisplay: "unavailable",
+                reachable: false,
+                version: ProxyBuildInfo.version,
+                xcodeHealth: "Unknown",
+                activeClientCount: 0,
+                activeCorrelatedRequestCount: 0,
+                clients: [],
+                fetchError: "Proxy server is unavailable."
+            )
+        },
+        shutdownHandler: { [weak self] in
+            _ = self?.shutdownGracefully()
+        }
+    )
 
     public convenience init(config: ProxyConfig) {
         self.init(config: config, dependencies: .live(config: config))
@@ -94,6 +112,8 @@ public final class ProxyServer {
     }
 
     public func start() throws -> Channel {
+        xpcServiceHost.start()
+        startXPCBroadcasting()
         let logger = self.logger
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -142,6 +162,9 @@ public final class ProxyServer {
     }
 
     public func shutdownGracefully() -> EventLoopFuture<Void> {
+        xpcBroadcastTask?.cancel()
+        xpcBroadcastTask = nil
+        xpcServiceHost.stop()
         let promise = group.next().makePromise(of: Void.self)
         let shutdownContext = beginShutdown()
         shutdownContext.autoApprover?.stop()
@@ -435,6 +458,89 @@ public final class ProxyServer {
             self.sessionManager = sessionManager
             runtimeHolder.activate(sessionManager)
             return true
+        }
+    }
+
+    private func currentXPCStatus() -> ProxyXPCStatusPayload {
+        let snapshotContext = runtimeLock.withLock {
+            (
+                isShuttingDown: isShuttingDown,
+                channels: channels,
+                sessionManager: sessionManager
+            )
+        }
+
+        let endpointDisplay = xpcEndpointDisplay(from: snapshotContext.channels)
+        let debugSnapshot = snapshotContext.sessionManager?.debugSnapshot()
+        let reachable = snapshotContext.isShuttingDown == false && snapshotContext.channels.isEmpty == false
+
+        return Self.makeXPCStatus(
+            endpointDisplay: endpointDisplay,
+            reachable: reachable,
+            version: ProxyBuildInfo.version,
+            debugSnapshot: debugSnapshot
+        )
+    }
+
+    package static func makeXPCStatus(
+        endpointDisplay: String,
+        reachable: Bool,
+        version: String,
+        debugSnapshot: ProxyDebugSnapshot?
+    ) -> ProxyXPCStatusPayload {
+        let clients = (debugSnapshot?.sessions ?? [])
+            .map {
+                ProxyXPCClientStatus(
+                    sessionID: $0.sessionID,
+                    activeCorrelatedRequestCount: $0.activeCorrelatedRequestCount
+                )
+            }
+            .sorted {
+                if $0.activeCorrelatedRequestCount == $1.activeCorrelatedRequestCount {
+                    return $0.sessionID < $1.sessionID
+                }
+                return $0.activeCorrelatedRequestCount > $1.activeCorrelatedRequestCount
+            }
+
+        let activeCorrelatedRequestCount = clients.reduce(into: 0) { partialResult, client in
+            partialResult += client.activeCorrelatedRequestCount
+        }
+
+        return ProxyXPCStatusPayload(
+            endpointDisplay: endpointDisplay,
+            reachable: reachable,
+            version: version,
+            xcodeHealth: debugSnapshot?.upstreams.first?.healthState ?? "Unknown",
+            activeClientCount: clients.count,
+            activeCorrelatedRequestCount: activeCorrelatedRequestCount,
+            clients: clients,
+            fetchError: reachable ? nil : "Proxy not reachable at \(endpointDisplay)."
+        )
+    }
+
+    private func xpcEndpointDisplay(from channels: [Channel]) -> String {
+        if let firstChannel = channels.first,
+           let address = firstChannel.localAddress,
+           let port = address.port {
+            let host: String
+            if config.listenHost == "localhost" {
+                host = "localhost"
+            } else {
+                host = address.ipAddress ?? config.listenHost
+            }
+            return "http://\(host):\(port)"
+        }
+
+        return "http://\(config.listenHost):\(config.listenPort)"
+    }
+
+    private func startXPCBroadcasting() {
+        xpcBroadcastTask?.cancel()
+        xpcBroadcastTask = group.next().scheduleRepeatedTask(
+            initialDelay: .seconds(0),
+            delay: .seconds(1)
+        ) { [weak self] _ in
+            self?.xpcServiceHost.pushStatusIfChanged()
         }
     }
 }
