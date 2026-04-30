@@ -5,7 +5,7 @@ import Testing
 import XcodeMCPProxy
 import XcodeMCPTestSupport
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct StdioAdapterIntegrationTests {
     @Test func stdioAdapterDoesNotHangOnEOFWithStalledRequest() async throws {
         let server = try HangingHTTPServer.start()

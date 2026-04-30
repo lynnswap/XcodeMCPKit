@@ -49,7 +49,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let request1 = makeInitializeRequest(id: 1)
         let request2 = makeInitializeRequest(id: 2)
@@ -102,7 +102,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -126,7 +126,7 @@ struct RuntimeCoordinatorTests {
         let upstream = ToggleableOverloadUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -163,7 +163,7 @@ struct RuntimeCoordinatorTests {
             upstreams: [upstream],
             scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -208,7 +208,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -248,7 +248,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -279,7 +279,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-A"
         let session = manager.session(id: sessionID)
@@ -321,7 +321,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-handshake"
         let session = manager.session(id: sessionID)
@@ -362,7 +362,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let firstFuture = manager.registerInitialize(
             sessionID: "session-A",
@@ -411,7 +411,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-removed"
         _ = manager.session(id: sessionID)
@@ -440,7 +440,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-recreated"
         _ = manager.session(id: sessionID)
@@ -486,7 +486,7 @@ struct RuntimeCoordinatorTests {
         let upstream1 = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
@@ -552,7 +552,7 @@ struct RuntimeCoordinatorTests {
             upstreams: [upstream],
             scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
@@ -595,7 +595,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -604,7 +604,7 @@ struct RuntimeCoordinatorTests {
         )
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
 
-        manager.shutdown()
+        await manager.shutdown()
 
         await #expect(throws: CancellationError.self) {
             try await future.get()
@@ -618,7 +618,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let shortTask = Task {
             try await manager.controlPlaneCoordinator.clientInitialize(
@@ -655,7 +655,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let cancelledTask = Task {
             try await manager.controlPlaneCoordinator.clientInitialize(
@@ -699,7 +699,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 0.1)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-timeout-recreated"
         _ = manager.session(id: sessionID)
@@ -739,7 +739,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-error-recreated"
         _ = manager.session(id: sessionID)
@@ -795,7 +795,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -852,7 +852,7 @@ struct RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -909,7 +909,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -979,7 +979,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1020,7 +1020,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1084,7 +1084,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1150,7 +1150,7 @@ struct RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1206,7 +1206,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1260,7 +1260,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1315,7 +1315,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1364,7 +1364,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1505,7 +1505,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
         #expect(manager.isInitialized() == false)
 
         _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
@@ -1527,7 +1527,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 0)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
     }
@@ -1551,7 +1551,7 @@ struct RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
@@ -1581,7 +1581,7 @@ struct RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
@@ -1599,7 +1599,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let version = manager.xcodeChatClientVersion(
             for: "Claude",
@@ -1618,7 +1618,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let version = manager.xcodeChatClientVersion(
             for: "Claude",
@@ -1649,7 +1649,7 @@ struct RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
@@ -1685,7 +1685,7 @@ struct RuntimeCoordinatorTests {
             upstreams: [upstream],
             scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         try await spinUntilSentCount(
             upstream,
@@ -1737,7 +1737,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
@@ -1777,7 +1777,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1870,7 +1870,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // First init establishes the cached init result.
         let init1 = manager.registerInitialize(
@@ -1911,7 +1911,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -1939,7 +1939,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -2041,7 +2041,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // First init establishes the cached init result (primary only).
         let init1 = manager.registerInitialize(
@@ -2110,7 +2110,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
@@ -2170,7 +2170,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
@@ -2224,7 +2224,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Eager init -> upstream0
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -2301,7 +2301,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -2355,7 +2355,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -2403,7 +2403,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-A"
         let session = manager.session(id: sessionID)
@@ -2428,7 +2428,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let initMessages = await upstream.sent()
@@ -2536,7 +2536,7 @@ struct RuntimeCoordinatorTests {
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize primary upstream0.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -2618,7 +2618,7 @@ struct RuntimeCoordinatorTests {
             upstreams: [upstream],
             nowUptimeNanoseconds: { uptimeClock.now() }
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -2687,7 +2687,7 @@ struct RuntimeCoordinatorTests {
             upstreams: [upstream0, upstream1],
             nowUptimeNanoseconds: { uptimeClock.now() }
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -2835,7 +2835,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -2939,7 +2939,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -2988,7 +2988,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
         let init0 = await upstream0.sent()
@@ -3029,7 +3029,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -3096,7 +3096,7 @@ struct RuntimeCoordinatorTests {
         let upstream = AlwaysOverloadedUpstreamClient()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-overloaded"
         let session = manager.session(id: sessionID)
@@ -3137,7 +3137,7 @@ struct RuntimeCoordinatorTests {
         let upstream = AlwaysOverloadedUpstreamClient()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let original = RPCID(any: NSNumber(value: 1001))!
         let future = manager.registerInitialize(
@@ -3168,7 +3168,7 @@ struct RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -3239,7 +3239,7 @@ struct RuntimeCoordinatorTests {
         let upstream = ToggleableOverloadUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initialInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
@@ -3271,7 +3271,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
         manager.setCachedToolsListResult(cachedToolsList)
@@ -3307,7 +3307,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
         manager.setCachedToolsListResult(cachedToolsList)
@@ -3357,7 +3357,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
@@ -3428,7 +3428,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
         manager.setCachedToolsListResult(cachedToolsList)
@@ -3487,7 +3487,7 @@ struct RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1]
         )
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
@@ -3581,7 +3581,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -3659,7 +3659,7 @@ struct RuntimeCoordinatorTests {
         let upstream = ToggleableOverloadUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-disconnect"
         let descriptor = SessionPipelineRequestDescriptor(
@@ -3721,7 +3721,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let leaseID = manager.createRequestLease(
             descriptor: SessionPipelineRequestDescriptor(
@@ -3762,7 +3762,7 @@ struct RuntimeCoordinatorTests {
         let upstream = ToggleableOverloadUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let sessionID = "session-protocol-violation"
         let descriptor = SessionPipelineRequestDescriptor(
@@ -3849,7 +3849,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -3889,7 +3889,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -3919,7 +3919,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -3954,7 +3954,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -3996,7 +3996,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -4081,7 +4081,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -4143,7 +4143,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,
@@ -4235,7 +4235,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: group.next(), upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         _ = manager.session(id: "session-debug-reset")
         manager.setCachedToolsListResult(.object(["tools": .array([])]))
@@ -4272,7 +4272,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdown() }
+        defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 1))!,

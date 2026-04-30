@@ -733,7 +733,7 @@ private struct TestHTTPServer {
             childChannelTracker: childChannelTracker,
             group: group,
             beforeClose: {
-                sessionManager.shutdown()
+                await sessionManager.shutdown()
             }
         )
     }

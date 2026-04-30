@@ -3,6 +3,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-"$repo_root/scripts/check-architecture.sh"
-"$repo_root/scripts/test-fast.sh"
-"$repo_root/scripts/test-process.sh"
+cd "$repo_root"
+
+swift test \
+  -Xswiftc -strict-concurrency=minimal
+
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+  --no-parallel \
+  --filter ProxyProcessTests \
+  -Xswiftc -strict-concurrency=minimal

@@ -271,9 +271,9 @@ package func shutdownHTTPTestServer(
     childChannelTracker: HTTPTestServerChannelTracker,
     group: EventLoopGroup,
     timeout: Duration = .seconds(5),
-    beforeClose: @escaping () -> Void = {}
+    beforeClose: @escaping () async -> Void = {}
 ) async throws {
-    beforeClose()
+    await beforeClose()
 
     var shutdownError: Error?
 

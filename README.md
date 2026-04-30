@@ -159,15 +159,19 @@ Logs are written to stderr.
 ## Maintainer Commands
 
 ```bash
-scripts/check-architecture.sh
-scripts/test-fast.sh
-scripts/test-process.sh
+swift test -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
-scripts/test-live-mcpbridge.sh
+XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS=1 swift test --no-parallel --filter ProxyLiveMCPBridgeTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal
+python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 ```
 
-- `test-live-mcpbridge.sh` is local-only and intentionally excluded from CI.
-- The live script uses the currently running Xcode session, requires exactly one Xcode process, uses `127.0.0.1:0`, and writes discovery output under a temp path.
+- `scripts/check.sh` runs the default suite and the opt-in process / pipe suite.
+- The live `mcpbridge` suite is local-only and intentionally excluded from CI.
+- The live suite uses the currently running Xcode session, requires exactly one Xcode process, uses `127.0.0.1:0`, and writes discovery output under a temp path.
+- The stress suite is opt-in only and intentionally excluded from `scripts/check.sh`; it runs high-volume HTTP/session multiplexing checks.
+- `scripts/benchmark-live-server.py` targets an already-running proxy server and is never run by default, `scripts/check.sh`, or CI. It resolves the endpoint from `--endpoint`, `XCODE_MCP_PROXY_ENDPOINT`, the discovery file, then `http://localhost:8765/mcp`; non-loopback endpoints require `--allow-non-loopback`. It models four agents as four persistent HTTP connections / MCP sessions, sends 100 `DocumentationSearch` requests per agent in a closed loop, reports throughput plus per-request latency percentiles, and deletes benchmark sessions before exit.
 
 #### Proxy Config
 

@@ -22,7 +22,6 @@ jobs:
       - name: Run general test suites
         run: >-
           swift test
-          --skip 'ProcessRunnerTests|UpstreamProcessTests|StdioAdapterIntegrationTests'
           -Xswiftc -strict-concurrency=minimal
 
   test-process-io:
@@ -39,10 +38,12 @@ jobs:
           swift-version: "6.2"
 
       - name: Run serialized process / pipe test suites
+        env:
+          XCODE_MCP_RUN_PROCESS_TESTS: "1"
         run: >-
           swift test
           --no-parallel
-          --filter 'ProcessRunnerTests|UpstreamProcessTests|StdioAdapterIntegrationTests'
+          --filter ProxyProcessTests
           -Xswiftc -strict-concurrency=minimal
 
   build-arm64:

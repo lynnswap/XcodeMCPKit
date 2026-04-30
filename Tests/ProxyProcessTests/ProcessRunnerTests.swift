@@ -4,7 +4,7 @@ import XcodeMCPTestSupport
 
 @testable import ProxySession
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct ProcessRunnerTests {
     @Test func dispatchGroupLeaveGuardLeavesOnlyOnce() {
         let group = DispatchGroup()
