@@ -1,10 +1,12 @@
 import Foundation
+import ProxyCore
 
 package enum RefreshCodeIssuesPathMatcher {
     package static func matches(
         issuePath: String,
         resolvedFilePath: String,
-        caseSensitiveFileSystemOverride: Bool? = nil
+        caseSensitiveFileSystemOverride: Bool? = nil,
+        fileSystem: FileSystemClient = .liveValue
     ) -> Bool {
         let normalizedIssuePath = normalizedPath(issuePath)
         let normalizedResolvedFilePath = normalizedPath(resolvedFilePath)
@@ -25,7 +27,8 @@ package enum RefreshCodeIssuesPathMatcher {
         guard
             isCaseSensitiveFileSystem(
                 atPath: normalizedResolvedFilePath,
-                override: caseSensitiveFileSystemOverride
+                override: caseSensitiveFileSystemOverride,
+                fileSystem: fileSystem
             ) == false
         else {
             return false
@@ -65,13 +68,14 @@ package enum RefreshCodeIssuesPathMatcher {
 
     private static func isCaseSensitiveFileSystem(
         atPath path: String,
-        override: Bool?
+        override: Bool?,
+        fileSystem: FileSystemClient
     ) -> Bool {
         if let override {
             return override
         }
         guard
-            let existingURL = existingURL(forPath: path),
+            let existingURL = existingURL(forPath: path, fileSystem: fileSystem),
             let resourceValues = try? existingURL.resourceValues(
                 forKeys: [.volumeSupportsCaseSensitiveNamesKey]
             ),
@@ -82,12 +86,11 @@ package enum RefreshCodeIssuesPathMatcher {
         return supportsCaseSensitiveNames
     }
 
-    private static func existingURL(forPath path: String) -> URL? {
-        let fileManager = FileManager.default
+    private static func existingURL(forPath path: String, fileSystem: FileSystemClient) -> URL? {
         var currentURL = URL(fileURLWithPath: path)
 
         while true {
-            if fileManager.fileExists(atPath: currentURL.path) {
+            if fileSystem.fileExists(currentURL.path) {
                 return currentURL
             }
             let parentURL = currentURL.deletingLastPathComponent()

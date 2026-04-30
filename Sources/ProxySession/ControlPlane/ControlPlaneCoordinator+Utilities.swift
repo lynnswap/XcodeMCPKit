@@ -44,27 +44,24 @@ extension ControlPlaneCoordinator {
         operation: @escaping @Sendable () async -> Void
     ) -> Task<Void, Never>? {
         guard let deadlineUptimeNs else { return nil }
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = clock.uptimeNanoseconds()
         guard deadlineUptimeNs > now else { return nil }
         let remaining = deadlineUptimeNs - now
         return Task {
-            do {
-                try await Task.sleep(nanoseconds: remaining)
-                await operation()
-            } catch {
-                return
-            }
+            await clock.sleep(.nanoseconds(Int64(min(remaining, UInt64(Int64.max)))))
+            guard Task.isCancelled == false else { return }
+            await operation()
         }
     }
 
     func deadlineExceeded(_ deadlineUptimeNs: UInt64?) -> Bool {
         guard let deadlineUptimeNs else { return false }
-        return DispatchTime.now().uptimeNanoseconds >= deadlineUptimeNs
+        return clock.uptimeNanoseconds() >= deadlineUptimeNs
     }
 
     func requestTimeout(until deadlineUptimeNs: UInt64?) -> TimeAmount? {
         guard let deadlineUptimeNs else { return nil }
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = clock.uptimeNanoseconds()
         guard deadlineUptimeNs > now else {
             return .nanoseconds(0)
         }
@@ -75,7 +72,7 @@ extension ControlPlaneCoordinator {
 
     func requestDeadline(for requestTimeout: TimeAmount?) -> UInt64? {
         guard let requestTimeout, requestTimeout.nanoseconds > 0 else { return nil }
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = clock.uptimeNanoseconds()
         let remainingToMax = UInt64.max &- now
         let clamped = min(UInt64(requestTimeout.nanoseconds), remainingToMax)
         return now &+ clamped

@@ -31,8 +31,7 @@ public enum Discovery {
 
     public static func read(overrideURL: URL? = nil) -> DiscoveryRecord? {
         let url = fileURL(overrideURL)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        guard let record = try? decoder.decode(DiscoveryRecord.self, from: data) else { return nil }
+        guard let record = try? loadRecord(from: url) else { return nil }
         guard isProcessAlive(record.pid) else { return nil }
         guard isLoopbackURL(record.url) else { return nil }
         return record
@@ -42,8 +41,7 @@ public enum Discovery {
         let url = fileURL(overrideURL)
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let data = try encoder.encode(record)
-        try data.write(to: url, options: [.atomic])
+        try persist(record: record, to: url)
     }
 
     public static func makeRecord(
@@ -63,14 +61,24 @@ public enum Discovery {
         )
     }
 
-    private static func fileURL(_ overrideURL: URL?) -> URL {
+    package static func fileURL(_ overrideURL: URL?) -> URL {
         if let overrideURL {
             return overrideURL
         }
         return defaultFileURL
     }
 
-    private static func isProcessAlive(_ pid: Int) -> Bool {
+    package static func loadRecord(from url: URL) throws -> DiscoveryRecord {
+        let data = try Data(contentsOf: url)
+        return try decoder.decode(DiscoveryRecord.self, from: data)
+    }
+
+    package static func persist(record: DiscoveryRecord, to url: URL) throws {
+        let data = try encoder.encode(record)
+        try data.write(to: url, options: [.atomic])
+    }
+
+    package static func isProcessAlive(_ pid: Int) -> Bool {
         guard pid > 0 else { return false }
         let result = kill(pid_t(pid), 0)
         if result == 0 {
@@ -92,7 +100,7 @@ public enum Discovery {
         return decoder
     }()
 
-    private static func makeURLString(host: String, port: Int, scheme: String) -> String {
+    package static func makeURLString(host: String, port: Int, scheme: String) -> String {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
@@ -105,7 +113,7 @@ public enum Discovery {
         return "\(scheme)://\(normalizedHost):\(port)/mcp"
     }
 
-    private static func isLoopbackURL(_ raw: String) -> Bool {
+    package static func isLoopbackURL(_ raw: String) -> Bool {
         guard let components = URLComponents(string: raw),
               let host = components.host else {
             return false

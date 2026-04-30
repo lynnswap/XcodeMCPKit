@@ -531,7 +531,7 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
 }
 
 package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
-    package struct Dependencies: Sendable {
+    package struct Dependencies: DependencyClient {
         package var axClient: any XcodePermissionDialogAXAccessing
         package var agentPathCandidates: @Sendable () -> Set<String>
         package var assistantNameCandidates: @Sendable () -> Set<String>
@@ -581,6 +581,22 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
                 logger: ProxyLogging.make("xcode.permission")
             )
         }
+
+        package static var liveValue: Self {
+            live()
+        }
+
+        package static let testValue = Self(
+            axClient: NoopXcodePermissionDialogAXClient(),
+            agentPathCandidates: { [] },
+            assistantNameCandidates: { [] },
+            serverProcessIDCandidates: { [] },
+            sleep: { _ in
+                try? await Task.sleep(for: .milliseconds(1))
+            },
+            pollInterval: .milliseconds(1),
+            logger: ProxyLogging.make("xcode.permission.test")
+        )
     }
 
     private struct State {
@@ -994,6 +1010,22 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
         return childProcessIDs.prefix(Int(copiedCount)).filter { $0 > 0 }
     }
+}
+
+private struct NoopXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessing {
+    func authorizationStatus(promptIfNeeded _: Bool) -> XcodePermissionDialogAccessibilityStatus {
+        .untrusted
+    }
+
+    func runningXcodeProcessIDs() -> [pid_t] {
+        []
+    }
+
+    func openWindows(for _: pid_t) throws -> [XcodePermissionDialogAXWindow] {
+        []
+    }
+
+    func pressDefaultButton(in _: XcodePermissionDialogAXWindow) throws {}
 }
 
 private extension NSLock {

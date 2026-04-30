@@ -78,14 +78,20 @@ package struct RefreshCodeIssuesWorkflow {
 
     package struct ExecutionBudget: Sendable {
         let deadlineUptimeNs: UInt64?
+        let nowUptimeNanoseconds: @Sendable () -> UInt64
 
-        init(requestTimeout: TimeInterval, requestTimeoutOverride: TimeAmount?) {
+        init(
+            requestTimeout: TimeInterval,
+            requestTimeoutOverride: TimeAmount?,
+            clock: ClockClient
+        ) {
+            self.nowUptimeNanoseconds = clock.uptimeNanoseconds
             if let requestTimeoutOverride, requestTimeoutOverride.nanoseconds > 0 {
                 let timeoutNs = UInt64(requestTimeoutOverride.nanoseconds)
-                self.deadlineUptimeNs = DispatchTime.now().uptimeNanoseconds &+ timeoutNs
+                self.deadlineUptimeNs = clock.uptimeNanoseconds() &+ timeoutNs
             } else if requestTimeout > 0 {
                 let timeoutNs = Self.nanoseconds(from: requestTimeout)
-                self.deadlineUptimeNs = DispatchTime.now().uptimeNanoseconds &+ timeoutNs
+                self.deadlineUptimeNs = clock.uptimeNanoseconds() &+ timeoutNs
             } else {
                 self.deadlineUptimeNs = nil
             }
@@ -95,7 +101,7 @@ package struct RefreshCodeIssuesWorkflow {
             guard let deadlineUptimeNs else {
                 return nil
             }
-            let now = DispatchTime.now().uptimeNanoseconds
+            let now = nowUptimeNanoseconds()
             if now >= deadlineUptimeNs {
                 return 0
             }
@@ -172,6 +178,7 @@ package struct RefreshCodeIssuesWorkflow {
     package let debugState: RefreshCodeIssuesDebugState
     package let windowLookupTimeoutSeconds: TimeInterval
     package let navigatorIssuesTimeoutSeconds: TimeInterval
+    package let clock: ClockClient
     package let logger: Logger
 
     package init(
@@ -182,6 +189,7 @@ package struct RefreshCodeIssuesWorkflow {
         debugState: RefreshCodeIssuesDebugState,
         windowLookupTimeout: TimeInterval = 5,
         navigatorIssuesTimeout: TimeInterval = 15,
+        clock: ClockClient = .liveValue,
         logger: Logger
     ) {
         self.mode = mode
@@ -191,6 +199,7 @@ package struct RefreshCodeIssuesWorkflow {
         self.debugState = debugState
         self.windowLookupTimeoutSeconds = windowLookupTimeout
         self.navigatorIssuesTimeoutSeconds = navigatorIssuesTimeout
+        self.clock = clock
         self.logger = logger
     }
 
@@ -209,7 +218,8 @@ package struct RefreshCodeIssuesWorkflow {
     ) async -> RefreshForwardAttemptResult {
         let executionBudget = ExecutionBudget(
             requestTimeout: requestTimeout,
-            requestTimeoutOverride: requestTimeoutOverride
+            requestTimeoutOverride: requestTimeoutOverride,
+            clock: clock
         )
         let debugRequestID = debugState.beginRequest(
             sessionID: sessionID,

@@ -10,22 +10,38 @@ import ProxyXcodeSupport
 
 public final class ProxyServer {
     package struct Dependencies: Sendable {
+        package var discoveryClient: DiscoveryClient
+        package var executableLookupClient: ExecutableLookupClient
+        package var processID: @Sendable () -> Int
         package var makeAutoApprover: @Sendable () -> any ProxyServerPermissionDialogAutoApprover
         package var makeRuntimeCoordinator:
             @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
 
         package init(
+            discoveryClient: DiscoveryClient = .liveValue,
+            executableLookupClient: ExecutableLookupClient = .liveValue,
+            processID: @escaping @Sendable () -> Int = {
+                Int(ProcessInfo.processInfo.processIdentifier)
+            },
             makeAutoApprover: @escaping @Sendable () -> any ProxyServerPermissionDialogAutoApprover,
             makeRuntimeCoordinator: @escaping @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
         ) {
+            self.discoveryClient = discoveryClient
+            self.executableLookupClient = executableLookupClient
+            self.processID = processID
             self.makeAutoApprover = makeAutoApprover
             self.makeRuntimeCoordinator = makeRuntimeCoordinator
         }
 
         package static func live(config: ProxyConfig) -> Self {
+            let executableLookupClient = ExecutableLookupClient.liveValue
             return Self(
+                executableLookupClient: executableLookupClient,
                 makeAutoApprover: {
-                    let additionalCandidates = ProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
+                    let additionalCandidates = ProxyServer.additionalPermissionDialogExecutableCandidates(
+                        config: config,
+                        executableLookupClient: executableLookupClient
+                    )
                     return XcodePermissionDialogAutoApprover(
                         dependencies: .live(
                             agentPathCandidates: {
@@ -205,21 +221,22 @@ public final class ProxyServer {
     }
 
     private func writeDiscovery(resolvedHost: String, port: Int) {
-        guard let record = Discovery.makeRecord(
-            host: discoveryHost(resolvedHost),
-            port: port,
-            pid: Int(ProcessInfo.processInfo.processIdentifier)
+        guard let record = dependencies.discoveryClient.makeRecord(
+            discoveryHost(resolvedHost),
+            port,
+            dependencies.processID(),
+            "http"
         ) else {
             return
         }
         do {
-            try Discovery.write(record: record, overrideURL: config.discoveryFileURL)
+            try dependencies.discoveryClient.write(record, config.discoveryFileURL)
         } catch {
             logger.warning(
                 "Failed to write discovery file",
                 metadata: [
                     "error": "\(error)",
-                    "path": "\(config.discoveryFileURL?.path ?? Discovery.defaultFileURL.path)",
+                    "path": "\(config.discoveryFileURL?.path ?? dependencies.discoveryClient.defaultFileURL().path)",
                 ]
             )
         }
@@ -238,17 +255,21 @@ public final class ProxyServer {
         "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(ProxyBuildInfo.version))"
     }
 
-    package static func additionalPermissionDialogExecutableCandidates(config: ProxyConfig) -> [String] {
+    package static func additionalPermissionDialogExecutableCandidates(
+        config: ProxyConfig,
+        executableLookupClient: ExecutableLookupClient = .liveValue
+    ) -> [String] {
         var candidates: [String] = []
-        if let resolvedUpstreamCommand = resolvedExecutablePath(for: config.upstreamCommand) {
+        if let resolvedUpstreamCommand = executableLookupClient.resolveExecutablePath(config.upstreamCommand) {
             candidates.append(resolvedUpstreamCommand)
         }
 
-        if let xcrunInvocation = xcrunInvocation(from: config) {
+        if let xcrunInvocation = xcrunInvocation(from: config, executableLookupClient: executableLookupClient) {
             candidates.append(xcrunInvocation.commandPath)
             if let toolResolution = resolvedXcrunTool(
                 from: xcrunInvocation.arguments,
-                xcrunCommandPath: xcrunInvocation.commandPath
+                xcrunCommandPath: xcrunInvocation.commandPath,
+                executableLookupClient: executableLookupClient
             ) {
                 candidates.append(toolResolution)
             }
@@ -257,8 +278,11 @@ public final class ProxyServer {
         return candidates
     }
 
-    private static func xcrunInvocation(from config: ProxyConfig) -> (commandPath: String, arguments: [String])? {
-        if let resolvedCommand = resolvedExecutablePath(for: config.upstreamCommand),
+    private static func xcrunInvocation(
+        from config: ProxyConfig,
+        executableLookupClient: ExecutableLookupClient
+    ) -> (commandPath: String, arguments: [String])? {
+        if let resolvedCommand = executableLookupClient.resolveExecutablePath(config.upstreamCommand),
            resolvedCommand.hasSuffix("/xcrun") {
             return (resolvedCommand, config.upstreamArgs)
         }
@@ -267,7 +291,7 @@ public final class ProxyServer {
             if argument == "xcrun" {
                 return true
             }
-            guard let resolved = resolvedExecutablePath(for: argument) else {
+            guard let resolved = executableLookupClient.resolveExecutablePath(argument) else {
                 return false
             }
             return resolved.hasSuffix("/xcrun")
@@ -276,22 +300,23 @@ public final class ProxyServer {
         }
 
         let commandArgument = config.upstreamArgs[xcrunIndex]
-        let resolvedCommand = resolvedExecutablePath(for: commandArgument) ?? commandArgument
+        let resolvedCommand = executableLookupClient.resolveExecutablePath(commandArgument) ?? commandArgument
         let remainingArguments = Array(config.upstreamArgs.dropFirst(xcrunIndex + 1))
         return (resolvedCommand, remainingArguments)
     }
 
     private static func resolvedXcrunTool(
         from upstreamArgs: [String],
-        xcrunCommandPath: String
+        xcrunCommandPath: String,
+        executableLookupClient: ExecutableLookupClient
     ) -> String? {
         guard let selection = firstXcrunToolSelection(from: upstreamArgs) else {
             return nil
         }
-        return resolvedXcrunToolPath(
-            xcrunCommandPath: xcrunCommandPath,
-            toolName: selection.toolName,
-            preToolArguments: selection.preToolArguments
+        return executableLookupClient.resolveXcrunToolPath(
+            xcrunCommandPath,
+            selection.toolName,
+            selection.preToolArguments
         )
     }
 
@@ -330,67 +355,6 @@ public final class ProxyServer {
             candidates.insert(name)
         }
         return Array(candidates)
-    }
-
-    private static func resolvedExecutablePath(for command: String) -> String? {
-        guard command.isEmpty == false else {
-            return nil
-        }
-
-        if command.contains("/") {
-            return URL(fileURLWithPath: command).standardizedFileURL.path
-        }
-
-        let pathValue =
-            ProcessInfo.processInfo.environment["PATH"]
-            ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-        for directory in pathValue.split(separator: ":").map(String.init) where directory.isEmpty == false {
-            let candidate = URL(fileURLWithPath: directory).appendingPathComponent(command).path
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
-            }
-        }
-
-        return nil
-    }
-
-    private static func resolvedXcrunToolPath(
-        xcrunCommandPath: String,
-        toolName: String,
-        preToolArguments: [String]
-    ) -> String? {
-        let executablePath: String
-        if xcrunCommandPath.contains("/") {
-            executablePath = URL(fileURLWithPath: xcrunCommandPath).standardizedFileURL.path
-        } else if let resolvedCommandPath = resolvedExecutablePath(for: xcrunCommandPath) {
-            executablePath = resolvedCommandPath
-        } else {
-            executablePath = "/usr/bin/xcrun"
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = preToolArguments + ["--find", toolName]
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard process.terminationStatus == 0 else {
-            return nil
-        }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              output.isEmpty == false else {
-            return nil
-        }
-        return output
     }
 
     private func beginShutdown() -> (

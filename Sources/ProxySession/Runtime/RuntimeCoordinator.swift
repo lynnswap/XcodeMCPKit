@@ -185,6 +185,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package let upstreamHealthManager: UpstreamHealthManager
     package let upstreamSlotScheduler: UpstreamSlotScheduler
+    package let clock: ClockClient
     package let nowUptimeNanoseconds: @Sendable () -> UInt64
     package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
         RuntimeScheduledTimeout
@@ -201,16 +202,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyConfig,
         eventLoop: EventLoop,
         upstreams: [any UpstreamSlotControlling],
-        nowUptimeNanoseconds: @escaping @Sendable () -> UInt64 = {
-            DispatchTime.now().uptimeNanoseconds
-        },
+        clock: ClockClient = .liveValue,
+        nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
         scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
             RuntimeScheduledTimeout)? = nil
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
         let runtimeBox = WeakRuntimeCoordinatorBox()
-        let uptimeProvider = nowUptimeNanoseconds
+        let uptimeProvider = nowUptimeNanoseconds ?? clock.uptimeNanoseconds
+        let runtimeClock = ClockClient(
+            now: clock.now,
+            uptimeNanoseconds: uptimeProvider,
+            sleep: clock.sleep,
+            sleepForTimeInterval: clock.sleepForTimeInterval
+        )
         let timeoutScheduler = scheduleRuntimeTimeout
             ?? { delay, operation in
                 RuntimeScheduledTimeout.schedule(
@@ -222,12 +228,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.config = config
         self.eventLoop = eventLoop
         self.upstreams = upstreams
+        self.clock = runtimeClock
         self.sessionRegistry = SessionRegistry(config: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.leaseManager = LeaseManager()
         self.upstreamRouter = UpstreamRouter(upstreamCount: upstreams.count)
         self.upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
-        self.nowUptimeNanoseconds = nowUptimeNanoseconds
+        self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             upstreamCount: upstreams.count,
@@ -310,7 +317,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             logger: ProxyLogging.make("control-plane"),
             controlPlaneDefaultTimeout: MCPMethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
-            )
+            ),
+            clock: runtimeClock
         )
         runtimeBox.value = self
         schedulerProbeStarter.withLockedValue { startProbes in
@@ -453,7 +461,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func refreshToolsListIfNeeded() {
         guard config.prewarmToolsList, isInitialized() else { return }
-        let deadline = Self.timeoutDeadline(
+        let deadline = timeoutDeadline(
             for: MCPMethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
@@ -641,7 +649,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 "tools/list",
                 defaultSeconds: config.requestTimeout
             )
-        let deadline = Self.timeoutDeadline(for: timeout)
+        let deadline = timeoutDeadline(for: timeout)
         return try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.toolsCatalog(
                 deadlineUptimeNs: deadline
@@ -672,7 +680,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 "tools/call",
                 defaultSeconds: config.requestTimeout
             )
-        let deadline = Self.timeoutDeadline(for: timeout)
+        let deadline = timeoutDeadline(for: timeout)
         return try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.listWindows(
                 route: route,
@@ -732,11 +740,22 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return promise.futureResult
     }
 
+    func timeoutDeadline(for timeout: TimeAmount?) -> UInt64? {
+        Self.timeoutDeadline(for: timeout, nowUptimeNanoseconds: nowUptimeNanoseconds)
+    }
+
     static func timeoutDeadline(for timeout: TimeAmount?) -> UInt64? {
+        timeoutDeadline(for: timeout, nowUptimeNanoseconds: ClockClient.liveValue.uptimeNanoseconds)
+    }
+
+    private static func timeoutDeadline(
+        for timeout: TimeAmount?,
+        nowUptimeNanoseconds: @Sendable () -> UInt64
+    ) -> UInt64? {
         guard let timeout, timeout.nanoseconds > 0 else {
             return nil
         }
-        return DispatchTime.now().uptimeNanoseconds &+ UInt64(timeout.nanoseconds)
+        return nowUptimeNanoseconds() &+ UInt64(timeout.nanoseconds)
     }
 
     func awaitControlPlaneOperation<Output: Sendable>(

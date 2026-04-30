@@ -60,27 +60,48 @@ package struct XcodeMCPProxyServerCommand {
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
         package var stderr: (String) -> Void
-        package var terminateExistingServer: (String, Int) -> Bool
         package var makeServer: (ProxyConfig) -> any ProxyServerCommandServer
         package var isAddressAlreadyInUse: (Error) -> Bool
-        package var detectExistingProxyServerPIDs: (String, Int) -> [Int]
+        package var existingProxyServerClient: ExistingProxyServerClient
 
         package init(
             bootstrapLogging: @escaping ([String: String]) -> Void,
             stdout: @escaping (String) -> Void,
             stderr: @escaping (String) -> Void,
-            terminateExistingServer: @escaping (String, Int) -> Bool,
             makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
             isAddressAlreadyInUse: @escaping (Error) -> Bool,
-            detectExistingProxyServerPIDs: @escaping (String, Int) -> [Int]
+            existingProxyServerClient: ExistingProxyServerClient = .liveValue
         ) {
             self.bootstrapLogging = bootstrapLogging
             self.stdout = stdout
             self.stderr = stderr
-            self.terminateExistingServer = terminateExistingServer
             self.makeServer = makeServer
             self.isAddressAlreadyInUse = isAddressAlreadyInUse
-            self.detectExistingProxyServerPIDs = detectExistingProxyServerPIDs
+            self.existingProxyServerClient = existingProxyServerClient
+        }
+
+        package init(
+            bootstrapLogging: @escaping ([String: String]) -> Void,
+            stdout: @escaping (String) -> Void,
+            stderr: @escaping (String) -> Void,
+            terminateExistingServer: @escaping @Sendable (String, Int) -> Bool,
+            makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
+            isAddressAlreadyInUse: @escaping (Error) -> Bool,
+            detectExistingProxyServerPIDs: @escaping @Sendable (String, Int) -> [Int]
+        ) {
+            self.init(
+                bootstrapLogging: bootstrapLogging,
+                stdout: stdout,
+                stderr: stderr,
+                makeServer: makeServer,
+                isAddressAlreadyInUse: isAddressAlreadyInUse,
+                existingProxyServerClient: ExistingProxyServerClient(
+                    terminateExistingServer: { host, port, _ in
+                        terminateExistingServer(host, port)
+                    },
+                    detectExistingProxyServerPIDs: detectExistingProxyServerPIDs
+                )
+            )
         }
 
         package static var live: Self {
@@ -88,10 +109,9 @@ package struct XcodeMCPProxyServerCommand {
                 bootstrapLogging: ProxyLogging.bootstrap,
                 stdout: { print($0) },
                 stderr: { FileHandle.writeLine($0, to: .standardError) },
-                terminateExistingServer: XcodeMCPProxyServerCommand.terminateExistingProxyServerIfNeeded,
                 makeServer: { ProxyServer(config: $0) },
                 isAddressAlreadyInUse: XcodeMCPProxyServerCommand.isAddressAlreadyInUse,
-                detectExistingProxyServerPIDs: XcodeMCPProxyServerCommand.detectExistingProxyServerPIDs
+                existingProxyServerClient: .liveValue
             )
         }
     }
