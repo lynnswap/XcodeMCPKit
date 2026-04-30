@@ -65,6 +65,32 @@ struct ProxyServerTests {
         #expect(candidates.contains(fixture.wrapperPath))
         #expect(candidates.contains(fixture.toolPath))
     }
+
+    @Test func executableLookupClientResolvesPathAndXcrunToolThroughInjectedClients() {
+        let fileSystem = testDependency(of: FileSystemClient.self) {
+            $0.isExecutableFile = { path in
+                path == "/custom/bin/xcrun"
+            }
+        }
+        let client = ExecutableLookupClient.live(
+            environment: { ["PATH": "/usr/bin:/custom/bin"] },
+            fileSystem: fileSystem,
+            runCommand: { executablePath, arguments in
+                #expect(executablePath == "/custom/bin/xcrun")
+                #expect(arguments == ["--sdk", "macosx", "--find", "mcpbridge"])
+                return "/custom/toolchain/mcpbridge\n"
+            }
+        )
+
+        #expect(client.resolveExecutablePath("xcrun") == "/custom/bin/xcrun")
+        #expect(
+            client.resolveXcrunToolPath(
+                "xcrun",
+                "mcpbridge",
+                ["--sdk", "macosx"]
+            ) == "/custom/toolchain/mcpbridge"
+        )
+    }
 }
 
 private struct XcrunFixture {

@@ -1,4 +1,5 @@
 import Foundation
+import ProxyCore
 
 package struct RefreshCodeIssuesQueueDebugSnapshot: Codable, Sendable {
     package let defaultRequestTimeoutSeconds: Double
@@ -152,13 +153,16 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
     private var state = State()
     private let defaultRequestTimeoutSeconds: Double
     private let recentCompletedLimit: Int
+    private let clock: ClockClient
 
     package init(
         defaultRequestTimeoutSeconds: Double,
-        recentCompletedLimit: Int = 20
+        recentCompletedLimit: Int = 20,
+        clock: ClockClient = .liveValue
     ) {
         self.defaultRequestTimeoutSeconds = defaultRequestTimeoutSeconds
         self.recentCompletedLimit = recentCompletedLimit
+        self.clock = clock
     }
 
     package func beginRequest(
@@ -168,7 +172,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         filePath: String?,
         mode: String
     ) -> String {
-        let now = Date()
+        let now = clock.now()
         let requestID = UUID().uuidString
         let record = RequestRecord(
             id: requestID,
@@ -229,7 +233,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         outcome: String,
         metadata: [String: String] = [:]
     ) {
-        let now = Date()
+        let now = clock.now()
         lock.lock()
         guard var record = state.activeRequests.removeValue(forKey: requestID) else {
             lock.unlock()
@@ -340,7 +344,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         requestID: String,
         mutate: (inout RequestRecord, Date) -> Void
     ) {
-        let now = Date()
+        let now = clock.now()
         lock.lock()
         guard var record = state.activeRequests[requestID] else {
             lock.unlock()

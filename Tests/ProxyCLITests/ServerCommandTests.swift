@@ -444,6 +444,46 @@ struct ServerCommandTests {
         #expect(fakeServer.waitCount() == 1)
     }
 
+    @Test func serverCommandUsesExistingProxyServerClientForForceRestart() async throws {
+        let restarted = CapturedLines()
+        let warnings = CapturedLines()
+        let fakeServer = RecordingProxyServer()
+        let existingServerClient = testDependency(of: ExistingProxyServerClient.self) {
+            $0.terminateExistingServer = { host, port, emitWarning in
+                restarted.append("\(host):\(port)")
+                emitWarning("fake restart warning")
+                return true
+            }
+        }
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                stderr: { warnings.append($0) },
+                makeServer: { config in
+                    fakeServer.record(config: config)
+                    return fakeServer
+                },
+                isAddressAlreadyInUse: { _ in false },
+                existingProxyServerClient: existingServerClient
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy-server",
+                "--listen", "127.0.0.1:9001",
+                "--force-restart",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 0)
+        #expect(restarted.snapshot() == ["127.0.0.1:9001"])
+        #expect(warnings.snapshot() == ["fake restart warning"])
+        #expect(fakeServer.startCount() == 1)
+    }
+
     @Test func serverCommandDryRunPrintsResolvedCommand() async throws {
         let output = CapturedLines()
         let command = XcodeMCPProxyServerCommand(

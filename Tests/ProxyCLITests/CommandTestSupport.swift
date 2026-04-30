@@ -1,6 +1,6 @@
 import Foundation
 
-final class CapturedLines {
+final class CapturedLines: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
 
@@ -17,7 +17,7 @@ final class CapturedLines {
     }
 }
 
-final class LockedBox<Value> {
+final class LockedBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value
 

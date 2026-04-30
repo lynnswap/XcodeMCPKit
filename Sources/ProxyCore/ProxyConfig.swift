@@ -111,14 +111,16 @@ public struct CLIParser {
         return try parse(
             args: args,
             environment: environment,
-            discoveryOverrideURL: ProxyFilesystemLocations.discoveryFileURL(environment: environment)
+            discoveryOverrideURL: ProxyFilesystemLocations.discoveryFileURL(environment: environment),
+            discoveryClient: .liveValue
         )
     }
 
-    static func parse(
+    package static func parse(
         args: [String],
         environment: [String: String],
-        discoveryOverrideURL: URL?
+        discoveryOverrideURL: URL?,
+        discoveryClient: DiscoveryClient = .liveValue
     ) throws -> ProxyConfig {
         var listenHost = "localhost"
         var listenPort = 0
@@ -248,7 +250,8 @@ public struct CLIParser {
                 }
                 let resolved = try resolveDefaultStdioUpstream(
                     environment: environment,
-                    discoveryOverrideURL: discoveryOverrideURL
+                    discoveryOverrideURL: discoveryOverrideURL,
+                    discoveryClient: discoveryClient
                 )
                 stdioUpstreamURL = resolved.url
                 stdioUpstreamSource = resolved.source
@@ -343,12 +346,13 @@ public struct CLIParser {
 
     private static func resolveDefaultStdioUpstream(
         environment: [String: String],
-        discoveryOverrideURL: URL? = nil
+        discoveryOverrideURL: URL? = nil,
+        discoveryClient: DiscoveryClient
     ) throws -> (url: URL, source: StdioUpstreamSource) {
         if let raw = nonEmpty(environment[Self.stdioEndpointEnv]) {
             return (try parseHTTPURL(raw, label: Self.stdioEndpointEnv), .environment)
         }
-        if let record = Discovery.read(overrideURL: discoveryOverrideURL),
+        if let record = discoveryClient.read(discoveryOverrideURL),
            let resolved = try? parseHTTPURL(record.url, label: "discovery") {
             return (resolved, .discovery)
         }

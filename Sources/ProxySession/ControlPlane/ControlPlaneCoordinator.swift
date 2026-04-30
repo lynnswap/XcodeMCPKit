@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIO
+import ProxyCore
 import ProxyMCP
 
 package actor ControlPlaneCoordinator {
@@ -90,6 +91,7 @@ package actor ControlPlaneCoordinator {
     let upstreamHandshakeStates: UpstreamHandshakeStatesProvider
     let logger: Logger
     let controlPlaneDefaultTimeout: TimeAmount?
+    let clock: ClockClient
 
     var initializeLoad: InitializeLoadState?
     var toolsCatalogLoad: ToolsCatalogLoadState?
@@ -104,7 +106,8 @@ package actor ControlPlaneCoordinator {
         windowsLoader: @escaping WindowsLoader,
         upstreamHandshakeStates: @escaping UpstreamHandshakeStatesProvider,
         logger: Logger,
-        controlPlaneDefaultTimeout: TimeAmount?
+        controlPlaneDefaultTimeout: TimeAmount?,
+        clock: ClockClient = .liveValue
     ) {
         self.brokerState = brokerState
         self.debugMirror = debugMirror
@@ -114,6 +117,7 @@ package actor ControlPlaneCoordinator {
         self.upstreamHandshakeStates = upstreamHandshakeStates
         self.logger = logger
         self.controlPlaneDefaultTimeout = controlPlaneDefaultTimeout
+        self.clock = clock
     }
 
     package func clientInitialize(deadlineUptimeNs: UInt64?) async throws -> JSONValue {

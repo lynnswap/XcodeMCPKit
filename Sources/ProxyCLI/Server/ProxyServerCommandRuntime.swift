@@ -37,7 +37,11 @@ package struct ProxyServerCommandRuntime {
             let proxyArgs = ["xcode-mcp-proxy"] + options.forwardedArgs
             let config = try CLIParser.parse(args: proxyArgs, environment: environment)
             if options.forceRestart, config.listenPort > 0 {
-                _ = dependencies.terminateExistingServer(config.listenHost, config.listenPort)
+                _ = dependencies.existingProxyServerClient.terminateExistingServer(
+                    config.listenHost,
+                    config.listenPort,
+                    dependencies.stderr
+                )
             }
 
             do {
@@ -50,7 +54,7 @@ package struct ProxyServerCommandRuntime {
                     let message = XcodeMCPProxyServerCommand.portInUseMessage(
                         host: config.listenHost,
                         port: config.listenPort,
-                        pids: dependencies.detectExistingProxyServerPIDs(
+                        pids: dependencies.existingProxyServerClient.detectExistingProxyServerPIDs(
                             config.listenHost,
                             config.listenPort
                         )

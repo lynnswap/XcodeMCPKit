@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import ProxyCore
 import ProxyXcodeSupport
 
 package struct RefreshCodeIssuesResolvedTarget: Sendable, Equatable {
@@ -25,10 +26,12 @@ package actor RefreshCodeIssuesTargetResolver {
         let filePath: String
     }
 
-    private let fileManager = FileManager.default
+    private let fileSystem: FileSystemClient
     private var resolvedFilePathCache: [FileResolutionKey: String] = [:]
 
-    package init() {}
+    package init(fileSystem: FileSystemClient = .liveValue) {
+        self.fileSystem = fileSystem
+    }
 
     package func resolve(
         tabIdentifier: String?,
@@ -164,16 +167,11 @@ package actor RefreshCodeIssuesTargetResolver {
             return nil
         }
         let requestedComponents = requestedRelativeComponents
-        let enumerator = fileManager.enumerator(
-            at: URL(fileURLWithPath: workspaceRoot),
-            includingPropertiesForKeys: nil
-        )
-
         var bestPath: String?
         var bestScore = 0
         var ambiguous = false
 
-        while let fileURL = enumerator?.nextObject() as? URL {
+        for fileURL in fileSystem.enumeratedFileURLs(URL(fileURLWithPath: workspaceRoot)) {
             guard fileURL.hasDirectoryPath == false else { continue }
             guard fileURL.lastPathComponent == requestedBasename else { continue }
             guard resolvedRegularFilePath(
@@ -246,11 +244,7 @@ package actor RefreshCodeIssuesTargetResolver {
         guard isPath(path, containedIn: workspaceRoot) else {
             return false
         }
-        let url = URL(fileURLWithPath: path)
-        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]) else {
-            return false
-        }
-        return values.isRegularFile == true
+        return fileSystem.regularFileExists(path)
     }
 
     private func resolvedRegularFilePath(_ path: String, containedIn workspaceRoot: String) -> String? {
@@ -265,11 +259,7 @@ package actor RefreshCodeIssuesTargetResolver {
         guard isPath(path, containedIn: workspaceRoot) else {
             return false
         }
-        let url = URL(fileURLWithPath: path)
-        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey]) else {
-            return false
-        }
-        return values.isDirectory == true
+        return fileSystem.directoryExists(path)
     }
 
     private func sanitizedRelativePathComponents(_ path: String) -> [String]? {

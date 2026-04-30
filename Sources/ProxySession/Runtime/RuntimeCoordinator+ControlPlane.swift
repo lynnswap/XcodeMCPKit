@@ -56,7 +56,7 @@ extension RuntimeCoordinator {
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlaneRPCHandle
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let startedAt = nowUptimeNanoseconds()
         let effectiveRequestTimeout =
             requestTimeout
             ?? MCPMethodDispatcher.timeoutForControlPlane(
@@ -439,13 +439,13 @@ extension RuntimeCoordinator {
     }
 
     func elapsedMilliseconds(sinceUptimeNanoseconds startedAt: UInt64) -> Int {
-        let elapsed = DispatchTime.now().uptimeNanoseconds &- startedAt
+        let elapsed = nowUptimeNanoseconds() &- startedAt
         return Int(elapsed / 1_000_000)
     }
 
     func timeAmount(until deadlineUptimeNs: UInt64?) -> TimeAmount? {
         guard let deadlineUptimeNs else { return nil }
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = nowUptimeNanoseconds()
         guard deadlineUptimeNs > now else {
             return .nanoseconds(0)
         }
