@@ -176,6 +176,34 @@ struct RuntimeCoordinatorTests {
         #expect(await upstream.startCount() > 0)
     }
 
+    @Test func readinessGateRetriesLaunchAfterFailedAutoLaunch() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let launchRecorder = XcodeLaunchRecorder(outcomes: [false, true])
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                launchRecorder: launchRecorder
+            )
+        )
+        defer { manager.shutdownAndWait() }
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await launchRecorder.launchCount() == 2
+        })
+        #expect(await upstream.startCount() == 0)
+
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+    }
+
     @Test func readinessGateRetriesLaunchWhenXcodeQuitsWhileWaiting() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -5362,10 +5390,18 @@ private actor ControlledReadinessSleep {
 
 private actor XcodeLaunchRecorder {
     private var count = 0
+    private var outcomes: [Bool]
+
+    init(outcomes: [Bool] = []) {
+        self.outcomes = outcomes
+    }
 
     func launch() -> Bool {
         count += 1
-        return true
+        guard outcomes.isEmpty == false else {
+            return true
+        }
+        return outcomes.removeFirst()
     }
 
     func launchCount() -> Int {

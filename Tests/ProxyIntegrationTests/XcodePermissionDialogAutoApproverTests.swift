@@ -67,6 +67,47 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(decision?.defaultButtonTitle == "許可")
     }
 
+    @Test func matcherRejectsLocalizedAllowDialogWithMismatchedProcessIdentifier() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "エージェント XcodeMCPKit、プロセス識別子 7001 が Xcode のツール使用を要求しています。"
+            ],
+            defaultButton: makeButton(title: "許可")
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test func matcherRejectsPathDialogWithLocalizedMismatchedProcessIdentifier() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "エージェント XcodeMCPKit at /tmp/xcode-mcp-proxy-server、プロセス ID 7001 が Xcode のツール使用を要求しています。"
+            ],
+            defaultButton: makeButton(title: "許可")
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
     @Test func matcherRejectsDialogThatContainsAssistantNameWithoutPIDWhenDefaultButtonIsNotAllow() {
         let snapshot = makeSnapshot(
             processBundleIdentifier: "com.apple.dt.Xcode",

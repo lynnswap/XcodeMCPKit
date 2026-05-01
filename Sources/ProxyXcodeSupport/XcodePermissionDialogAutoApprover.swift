@@ -221,6 +221,9 @@ package enum XcodePermissionDialogMatcher {
             return true
         }
         let containsUnmatchedPIDReference = normalizedTextNodes.contains(where: containsPIDReference)
+        if containsAssistantName && containsUnmatchedPIDReference {
+            return false
+        }
         if containsAssistantName && !containsUnmatchedPIDReference
             && looksLikeAllowButton(defaultButtonDescription)
         {
@@ -288,12 +291,21 @@ package enum XcodePermissionDialogMatcher {
     }
 
     private static func containsPIDReference(_ text: String) -> Bool {
-        guard text.contains("pid") else {
+        guard text.unicodeScalars.contains(where: { scalar in
+            CharacterSet.decimalDigits.contains(scalar)
+        }) else {
             return false
         }
-        return text.unicodeScalars.contains { scalar in
-            CharacterSet.decimalDigits.contains(scalar)
-        }
+        let labels = [
+            "pid",
+            "process id",
+            "process identifier",
+            "process-id",
+            "process_identifier",
+            "プロセス",
+            "識別子",
+        ]
+        return labels.contains { text.contains($0) }
     }
 
     private static func normalizedText(_ text: String?) -> String? {

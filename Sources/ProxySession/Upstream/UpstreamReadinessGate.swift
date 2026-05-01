@@ -416,12 +416,12 @@ package actor UpstreamReadinessCoordinator {
         guard didRequestLaunchWhileUnavailable == false else {
             return (didRequestLaunchWhileUnavailable, didLogRunningWait)
         }
-        await launchUnavailableTarget()
-        return (true, didLogRunningWait)
+        let didLaunch = await launchUnavailableTarget()
+        return (didLaunch, didLogRunningWait)
     }
 
-    private func launchUnavailableTarget() async {
-        guard let launchIfUnavailable = gate.launchIfUnavailable else { return }
+    private func launchUnavailableTarget() async -> Bool {
+        guard let launchIfUnavailable = gate.launchIfUnavailable else { return false }
         logger.info(
             "Xcode is not running; launching Xcode",
             metadata: [
@@ -435,6 +435,7 @@ package actor UpstreamReadinessCoordinator {
                     "target": .string(gate.targetName)
                 ]
             )
+            return true
         } else {
             logger.warning(
                 "Could not launch Xcode automatically; waiting for Xcode",
@@ -442,6 +443,7 @@ package actor UpstreamReadinessCoordinator {
                     "target": .string(gate.targetName)
                 ]
             )
+            return false
         }
     }
 
