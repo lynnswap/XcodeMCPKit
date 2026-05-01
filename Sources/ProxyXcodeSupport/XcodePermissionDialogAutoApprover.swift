@@ -247,6 +247,7 @@ package enum XcodePermissionDialogMatcher {
         let allowDescriptions: Set<String> = [
             "allow",
             "許可",
+            "action-button-1",
         ]
         return allowDescriptions.contains(description)
     }

@@ -67,6 +67,29 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(decision?.defaultButtonTitle == "許可")
     }
 
+    @Test func matcherMatchesAssistantNameWithoutPIDWhenAllowButtonUsesFallbackIdentifier() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow",
+            textValues: [
+                "The agent XcodeMCPKit wants to use Xcode's tools."
+            ],
+            defaultButton: XcodePermissionDialogButtonSnapshot(
+                role: "AXButton",
+                identifier: "action-button-1"
+            )
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision?.defaultButtonTitle == "action-button-1")
+    }
+
     @Test func matcherRejectsLocalizedAllowDialogWithMismatchedProcessIdentifier() {
         let snapshot = makeSnapshot(
             processBundleIdentifier: "com.apple.dt.Xcode",
