@@ -228,6 +228,39 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
     }
 
+    @Test func readinessGateRetriesLaunchWhenSuccessfulOpenDoesNotProduceXcodeProcess() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let availability = AvailabilityFlag(isAvailable: false)
+        let launchRecorder = XcodeLaunchRecorder()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                availability: availability,
+                launchRetryIntervalNanoseconds: 2_000_000,
+                launchRecorder: launchRecorder
+            )
+        )
+        defer { manager.shutdownAndWait() }
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await launchRecorder.launchCount() >= 2
+        })
+        #expect(await upstream.startCount() == 0)
+
+        await availability.setAvailable(true)
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        #expect(await upstream.startCount() > 0)
+    }
+
     @Test func readinessGateRetriesLaunchWhenXcodeQuitsWhileWaiting() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -5437,6 +5470,7 @@ private func makeTestReadinessGate(
     readiness: ReadinessFlag,
     availability: AvailabilityFlag? = nil,
     sleepRecorder: ControlledReadinessSleep? = nil,
+    launchRetryIntervalNanoseconds: UInt64 = 5_000_000_000,
     launchRecorder: XcodeLaunchRecorder? = nil
 ) -> UpstreamReadinessGate {
     let launchIfUnavailable: (@Sendable () async -> Bool)?
@@ -5462,6 +5496,7 @@ private func makeTestReadinessGate(
         targetName: "mcpbridge",
         pollIntervalNanoseconds: 1_000_000,
         progressLogIntervalNanoseconds: 5_000_000_000,
+        launchRetryIntervalNanoseconds: launchRetryIntervalNanoseconds,
         initialRetryBackoffNanoseconds: 1_000_000_000,
         maxRetryBackoffNanoseconds: 8_000_000_000,
         uptimeNanoseconds: {

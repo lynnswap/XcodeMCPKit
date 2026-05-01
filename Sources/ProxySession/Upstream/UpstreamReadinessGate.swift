@@ -8,6 +8,7 @@ package struct UpstreamReadinessGate: Sendable {
     package let targetName: String
     package let pollIntervalNanoseconds: UInt64
     package let progressLogIntervalNanoseconds: UInt64
+    package let launchRetryIntervalNanoseconds: UInt64
     package let initialRetryBackoffNanoseconds: UInt64
     package let maxRetryBackoffNanoseconds: UInt64
     package let uptimeNanoseconds: @Sendable () -> UInt64
@@ -21,6 +22,7 @@ package struct UpstreamReadinessGate: Sendable {
         targetName: String,
         pollIntervalNanoseconds: UInt64,
         progressLogIntervalNanoseconds: UInt64,
+        launchRetryIntervalNanoseconds: UInt64,
         initialRetryBackoffNanoseconds: UInt64,
         maxRetryBackoffNanoseconds: UInt64,
         uptimeNanoseconds: @escaping @Sendable () -> UInt64,
@@ -33,6 +35,7 @@ package struct UpstreamReadinessGate: Sendable {
         self.targetName = targetName
         self.pollIntervalNanoseconds = pollIntervalNanoseconds
         self.progressLogIntervalNanoseconds = progressLogIntervalNanoseconds
+        self.launchRetryIntervalNanoseconds = launchRetryIntervalNanoseconds
         self.initialRetryBackoffNanoseconds = initialRetryBackoffNanoseconds
         self.maxRetryBackoffNanoseconds = maxRetryBackoffNanoseconds
         self.uptimeNanoseconds = uptimeNanoseconds
@@ -52,6 +55,7 @@ package struct UpstreamReadinessGate: Sendable {
             targetName: "upstream",
             pollIntervalNanoseconds: 0,
             progressLogIntervalNanoseconds: 0,
+            launchRetryIntervalNanoseconds: 0,
             initialRetryBackoffNanoseconds: 0,
             maxRetryBackoffNanoseconds: 0,
             uptimeNanoseconds: uptimeNanoseconds,
@@ -72,6 +76,7 @@ package struct UpstreamReadinessGate: Sendable {
             targetName: "mcpbridge",
             pollIntervalNanoseconds: 1_000_000_000,
             progressLogIntervalNanoseconds: 5_000_000_000,
+            launchRetryIntervalNanoseconds: 5_000_000_000,
             initialRetryBackoffNanoseconds: 1_000_000_000,
             maxRetryBackoffNanoseconds: 8_000_000_000,
             uptimeNanoseconds: uptimeNanoseconds,
@@ -333,7 +338,7 @@ package actor UpstreamReadinessCoordinator {
 
     private func waitUntilReady() async {
         var didLogWaiting = false
-        var didRequestLaunchWhileUnavailable = false
+        var lastUnavailableLaunchUptimeNs: UInt64?
         var didLogRunningWait = false
         var lastProgressLogUptimeNs: UInt64?
         var indicatorIndex = 0
@@ -381,10 +386,11 @@ package actor UpstreamReadinessCoordinator {
             }
 
             let launchState = await updateLaunchStateIfNeeded(
-                didRequestLaunchWhileUnavailable: didRequestLaunchWhileUnavailable,
-                didLogRunningWait: didLogRunningWait
+                lastUnavailableLaunchUptimeNs: lastUnavailableLaunchUptimeNs,
+                didLogRunningWait: didLogRunningWait,
+                nowUptimeNs: nowUptimeNs
             )
-            didRequestLaunchWhileUnavailable = launchState.didRequestLaunchWhileUnavailable
+            lastUnavailableLaunchUptimeNs = launchState.lastUnavailableLaunchUptimeNs
             didLogRunningWait = launchState.didLogRunningWait
 
             await gate.sleepNanoseconds(gate.pollIntervalNanoseconds)
@@ -394,13 +400,15 @@ package actor UpstreamReadinessCoordinator {
     }
 
     private func updateLaunchStateIfNeeded(
-        didRequestLaunchWhileUnavailable: Bool,
-        didLogRunningWait: Bool
-    ) async -> (didRequestLaunchWhileUnavailable: Bool, didLogRunningWait: Bool) {
+        lastUnavailableLaunchUptimeNs: UInt64?,
+        didLogRunningWait: Bool,
+        nowUptimeNs: UInt64
+    ) async -> (lastUnavailableLaunchUptimeNs: UInt64?, didLogRunningWait: Bool) {
         guard gate.launchIfUnavailable != nil else {
-            return (didRequestLaunchWhileUnavailable, didLogRunningWait)
+            return (lastUnavailableLaunchUptimeNs, didLogRunningWait)
         }
 
+        let canObserveAvailability = gate.isAvailable != nil
         if let isAvailable = gate.isAvailable, await isAvailable() {
             if didLogRunningWait == false {
                 logger.info(
@@ -410,14 +418,16 @@ package actor UpstreamReadinessCoordinator {
                     ]
                 )
             }
-            return (false, true)
+            return (nil, true)
         }
 
-        guard didRequestLaunchWhileUnavailable == false else {
-            return (didRequestLaunchWhileUnavailable, didLogRunningWait)
+        if let lastLaunch = lastUnavailableLaunchUptimeNs,
+           (canObserveAvailability == false
+            || nowUptimeNs &- lastLaunch < gate.launchRetryIntervalNanoseconds) {
+            return (lastUnavailableLaunchUptimeNs, didLogRunningWait)
         }
         let didLaunch = await launchUnavailableTarget()
-        return (didLaunch, didLogRunningWait)
+        return (didLaunch ? gate.uptimeNanoseconds() : nil, didLogRunningWait)
     }
 
     private func launchUnavailableTarget() async -> Bool {
