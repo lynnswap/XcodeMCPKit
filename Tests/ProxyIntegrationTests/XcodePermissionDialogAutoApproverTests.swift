@@ -47,13 +47,98 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(decision?.defaultButtonTitle == "allow")
     }
 
-    @Test func matcherRejectsLocalizedDialogThatContainsAssistantNameWithoutPID() {
+    @Test func matcherMatchesLocalizedAllowDialogThatContainsAssistantNameWithoutPID() {
         let snapshot = makeSnapshot(
             processBundleIdentifier: "com.apple.dt.Xcode",
             title: "許可",
             textValues: [
                 "エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"
-            ]
+            ],
+            defaultButton: makeButton(title: "許可")
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision?.defaultButtonTitle == "許可")
+    }
+
+    @Test func matcherMatchesAssistantNameWithoutPIDWhenAllowButtonUsesFallbackIdentifier() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow",
+            textValues: [
+                "The agent XcodeMCPKit wants to use Xcode's tools."
+            ],
+            defaultButton: XcodePermissionDialogButtonSnapshot(
+                role: "AXButton",
+                identifier: "action-button-1"
+            )
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision?.defaultButtonTitle == "action-button-1")
+    }
+
+    @Test func matcherRejectsLocalizedAllowDialogWithMismatchedProcessIdentifier() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "エージェント XcodeMCPKit、プロセス識別子 7001 が Xcode のツール使用を要求しています。"
+            ],
+            defaultButton: makeButton(title: "許可")
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test func matcherRejectsPathDialogWithLocalizedMismatchedProcessIdentifier() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "エージェント XcodeMCPKit at /tmp/xcode-mcp-proxy-server、プロセス ID 7001 が Xcode のツール使用を要求しています。"
+            ],
+            defaultButton: makeButton(title: "許可")
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 4317,
+            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test func matcherRejectsDialogThatContainsAssistantNameWithoutPIDWhenDefaultButtonIsNotAllow() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "許可",
+            textValues: [
+                "エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"
+            ],
+            defaultButton: makeButton(title: "OK")
         )
 
         let decision = XcodePermissionDialogMatcher.decision(
@@ -295,6 +380,14 @@ struct XcodePermissionDialogAutoApproverTests {
 
         #expect(candidates.contains(symlinkExecutable.path))
         #expect(candidates.contains(realExecutable.path))
+    }
+
+    @Test func parseProcessIDLinesIgnoresInvalidPGrepOutput() {
+        let processIDs = LiveXcodePermissionDialogAXClient.parseProcessIDLines(
+            "\n 4317\nnot-a-pid\n0\n-1\n 6119 \n"
+        )
+
+        #expect(processIDs == [4317, 6119])
     }
 
     @Test func autoApproverPromptsAccessibilityOnceAndRemainsInactiveWhenUntrusted() async {

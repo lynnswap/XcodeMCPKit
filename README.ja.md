@@ -119,7 +119,7 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 - listen: `localhost:8765`
 - request timeout: `300` seconds（`0` で無制限）
 - max body size: `1048576` bytes
-- initialization: eager at startup
+- initialization: Xcode 未起動なら起動し、利用可能になったら eager initialize / attach
 - discovery: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
 
 #### オプション

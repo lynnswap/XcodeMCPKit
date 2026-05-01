@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import ProxyCore
 import ProxyMCP
@@ -185,9 +186,9 @@ extension RuntimeCoordinator {
 
         if upstreamIndex == 0 {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
-                startEagerInitializePrimary()
+                startEagerInitializePrimary(applyBackoff: true)
             } else {
-                startUpstreamWarmInitialize(upstreamIndex: 0)
+                startUpstreamWarmInitialize(upstreamIndex: 0, applyBackoff: true)
             }
         } else if globalInit.hadGlobalInit {
             if shouldResetGlobalInit {
@@ -198,10 +199,10 @@ extension RuntimeCoordinator {
                 } else {
                     initializeManager
                         .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(false)
-                    startEagerInitializePrimary()
+                    startEagerInitializePrimary(applyBackoff: true)
                 }
             }
-            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
         }
     }
 
@@ -581,6 +582,35 @@ extension RuntimeCoordinator {
 
     func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
         debugRecorder.recordStderr(message, upstreamIndex: upstreamIndex)
+        let classification = UpstreamStderrClassifier.classify(message)
+        let decision = upstreamStderrLogLimiter.decision(
+            upstreamIndex: upstreamIndex,
+            message: message,
+            classification: classification,
+            nowUptimeNs: nowUptimeNanoseconds()
+        )
+        guard decision.shouldLog else { return }
+
+        var metadata: [String: Logger.MetadataValue] = [
+            "upstream": .string("\(upstreamIndex)")
+        ]
+        if decision.suppressedDuplicateCount > 0 {
+            metadata["suppressed_duplicates"] = .string("\(decision.suppressedDuplicateCount)")
+        }
+
+        switch classification {
+        case .xcodeUnavailable:
+            logger.info(
+                "mcpbridge reported that no Xcode process is running; waiting for Xcode before restarting",
+                metadata: metadata
+            )
+        case .unknown:
+            metadata["message"] = .string(message)
+            logger.error(
+                "Upstream stderr",
+                metadata: metadata
+            )
+        }
     }
 
     func handleUpstreamProtocolViolation(
@@ -630,12 +660,12 @@ extension RuntimeCoordinator {
 
         if upstreamIndex == 0 {
             if initSnapshot.hasInitResult {
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             } else {
-                startEagerInitializePrimary()
+                startEagerInitializePrimary(applyBackoff: true)
             }
         } else if initSnapshot.hasInitResult {
-            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
         }
     }
 
