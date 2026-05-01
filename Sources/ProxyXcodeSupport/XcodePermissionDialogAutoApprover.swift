@@ -114,18 +114,21 @@ package enum XcodePermissionDialogMatcher {
         let normalizedAgentPaths = normalizedCandidates(agentPathCandidates)
         let normalizedAssistantNames = normalizedCandidates(assistantNameCandidates)
         let pidCandidates = normalizedPIDCandidates(serverProcessIDCandidates)
+        let normalizedTextNodes = normalizedTextNodes(for: snapshot)
+        let defaultButtonDescription = normalizedButtonDescription(snapshot.defaultButton)
         guard containsAssistantNameAndPID(
-            in: normalizedTextNodes(for: snapshot),
+            in: normalizedTextNodes,
             agentPathCandidates: normalizedAgentPaths,
             assistantNameCandidates: normalizedAssistantNames,
-            serverProcessIDCandidates: pidCandidates
+            serverProcessIDCandidates: pidCandidates,
+            defaultButtonDescription: defaultButtonDescription
         ) else {
             return nil
         }
 
         return XcodePermissionDialogMatchDecision(
             fingerprint: fingerprint(for: snapshot, processID: processID),
-            defaultButtonTitle: normalizedButtonDescription(snapshot.defaultButton)
+            defaultButtonTitle: defaultButtonDescription
         )
     }
 
@@ -190,7 +193,8 @@ package enum XcodePermissionDialogMatcher {
         in normalizedTextNodes: [String],
         agentPathCandidates: Set<String>,
         assistantNameCandidates: Set<String>,
-        serverProcessIDCandidates: Set<String>
+        serverProcessIDCandidates: Set<String>,
+        defaultButtonDescription: String
     ) -> Bool {
         let containsPath = normalizedTextNodes.contains { text in
             agentPathCandidates.contains(where: { text.contains($0) })
@@ -216,6 +220,12 @@ package enum XcodePermissionDialogMatcher {
         if containsAssistantName && containsPID {
             return true
         }
+        let containsUnmatchedPIDReference = normalizedTextNodes.contains(where: containsPIDReference)
+        if containsAssistantName && !containsUnmatchedPIDReference
+            && looksLikeAllowButton(defaultButtonDescription)
+        {
+            return true
+        }
         guard containsPID == false, containsPath else {
             return false
         }
@@ -228,6 +238,14 @@ package enum XcodePermissionDialogMatcher {
             return true
         }
         return containsAssistantName
+    }
+
+    private static func looksLikeAllowButton(_ description: String) -> Bool {
+        let allowDescriptions: Set<String> = [
+            "allow",
+            "許可",
+        ]
+        return allowDescriptions.contains(description)
     }
 
     private static func normalizedButtonDescription(
@@ -267,6 +285,15 @@ package enum XcodePermissionDialogMatcher {
         }
 
         return currentDigits == candidate
+    }
+
+    private static func containsPIDReference(_ text: String) -> Bool {
+        guard text.contains("pid") else {
+            return false
+        }
+        return text.unicodeScalars.contains { scalar in
+            CharacterSet.decimalDigits.contains(scalar)
+        }
     }
 
     private static func normalizedText(_ text: String?) -> String? {
@@ -370,7 +397,7 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
             "com.apple.dt.Xcode",
             "com.apple.dt.ExternalViewService",
         ]
-        let processIDs = NSWorkspace.shared.runningApplications.compactMap { application -> pid_t? in
+        var processIDs = Set(NSWorkspace.shared.runningApplications.compactMap { application -> pid_t? in
             guard let bundleIdentifier = application.bundleIdentifier else {
                 return nil
             }
@@ -378,8 +405,46 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
                 return nil
             }
             return application.processIdentifier
+        })
+        processIDs.formUnion(Self.runningProcessIDs(named: "Xcode"))
+        return processIDs.sorted()
+    }
+
+    package static func parseProcessIDLines(_ output: String) -> [pid_t] {
+        output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> pid_t? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let value = Int32(trimmed), value > 0 else {
+                    return nil
+                }
+                return pid_t(value)
+            }
+    }
+
+    private static func runningProcessIDs(named processName: String) -> [pid_t] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-x", processName]
+
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return []
         }
-        return Array(Set(processIDs)).sorted()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            return []
+        }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else {
+            return []
+        }
+        return parseProcessIDLines(output)
     }
 
     package func openWindows(for processID: pid_t) throws -> [XcodePermissionDialogAXWindow] {
@@ -397,25 +462,56 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
         processID: pid_t,
         window: AXUIElement
     ) throws -> XcodePermissionDialogAXWindow? {
-        guard let defaultButton = copyElement(attribute: kAXDefaultButtonAttribute as CFString, from: window) else {
+        let role = copyString(attribute: kAXRoleAttribute as CFString, from: window)
+        if let role, role != kAXWindowRole as String {
             return nil
         }
+
+        let subrole = copyString(attribute: kAXSubroleAttribute as CFString, from: window)
+        if let subrole,
+           subrole != kAXDialogSubrole as String,
+           subrole != "AXSystemDialog" {
+            return nil
+        }
+
+        let isModal = copyBool(attribute: kAXModalAttribute as CFString, from: window) ?? false
+        guard isModal else {
+            return nil
+        }
+
+        let isMinimized = copyBool(attribute: kAXMinimizedAttribute as CFString, from: window)
+        guard isMinimized != true else {
+            return nil
+        }
+
+        let isMain = copyBool(attribute: kAXMainAttribute as CFString, from: window)
+        let document = copyString(attribute: kAXDocumentAttribute as CFString, from: window)
+        let hasProxy = copyElement(attribute: kAXProxyAttribute as CFString, from: window) != nil
+        if isMain == true && (hasNonEmptyText(document) || hasProxy) {
+            return nil
+        }
+
         let children = (try? copyElementArray(attribute: kAXChildrenAttribute as CFString, from: window)) ?? []
+        guard let defaultButton = copyElement(attribute: kAXDefaultButtonAttribute as CFString, from: window)
+            ?? fallbackAllowButton(in: window)
+        else {
+            return nil
+        }
         let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
 
         let snapshot = XcodePermissionDialogWindowSnapshot(
             processBundleIdentifier: processBundleIdentifier,
             title: copyString(attribute: kAXTitleAttribute as CFString, from: window) ?? "",
             textValues: collectTextValues(from: window),
-            role: copyString(attribute: kAXRoleAttribute as CFString, from: window),
-            subrole: copyString(attribute: kAXSubroleAttribute as CFString, from: window),
+            role: role,
+            subrole: subrole,
             windowIdentifier: copyString(attribute: kAXIdentifierAttribute as CFString, from: window),
-            isModal: copyBool(attribute: kAXModalAttribute as CFString, from: window) ?? false,
-            isMain: copyBool(attribute: kAXMainAttribute as CFString, from: window),
-            isMinimized: copyBool(attribute: kAXMinimizedAttribute as CFString, from: window),
-            document: copyString(attribute: kAXDocumentAttribute as CFString, from: window),
+            isModal: isModal,
+            isMain: isMain,
+            isMinimized: isMinimized,
+            document: document,
             childCount: children.count,
-            hasProxy: copyElement(attribute: kAXProxyAttribute as CFString, from: window) != nil,
+            hasProxy: hasProxy,
             defaultButton: buttonSnapshot(from: defaultButton),
             cancelButton: copyElement(attribute: kAXCancelButtonAttribute as CFString, from: window)
                 .flatMap(buttonSnapshot(from:))
@@ -426,6 +522,47 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
             snapshot: snapshot,
             defaultButton: defaultButton
         )
+    }
+
+    private func fallbackAllowButton(in root: AXUIElement) -> AXUIElement? {
+        var queue: [AXUIElement] = [root]
+        var visited = 0
+
+        while queue.isEmpty == false, visited < maxDescendantCount {
+            let element = queue.removeFirst()
+            visited += 1
+
+            if isAllowButton(element) {
+                return element
+            }
+            let children = (try? copyElementArray(attribute: kAXChildrenAttribute as CFString, from: element)) ?? []
+            queue.append(contentsOf: children)
+        }
+
+        return nil
+    }
+
+    private func isAllowButton(_ element: AXUIElement) -> Bool {
+        let role = copyString(attribute: kAXRoleAttribute as CFString, from: element)
+        guard role == kAXButtonRole as String else { return false }
+        let title = copyString(attribute: kAXTitleAttribute as CFString, from: element)
+            .flatMap(normalizedButtonText)
+        let identifier = copyString(attribute: kAXIdentifierAttribute as CFString, from: element)
+            .flatMap(normalizedButtonText)
+        return title == "allow"
+            || title == "許可"
+            || identifier == "action-button-1"
+    }
+
+    private func normalizedButtonText(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return nil }
+        return trimmed.lowercased()
+    }
+
+    private func hasNonEmptyText(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
     private func collectTextValues(from root: AXUIElement) -> [String] {

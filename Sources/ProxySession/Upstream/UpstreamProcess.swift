@@ -491,7 +491,6 @@ private extension ProcessBackedUpstreamSession {
             return
         }
         let message = suffix.isEmpty ? trimmed : trimmed + suffix
-        logger.error("Upstream stderr: \(message)")
         continuation.yield(.stderr(message))
     }
 

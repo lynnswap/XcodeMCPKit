@@ -42,6 +42,431 @@ struct RuntimeCoordinatorTests {
         #expect(environment["MCP_XCODE_SESSION_ID"] == "session-explicit")
     }
 
+    @Test func xcodeReadinessRequiresWorkspaceWindow() {
+        let pids: Set<pid_t> = [1234]
+
+        #expect(
+            XcodeReadinessProbe.hasReadyWorkspaceWindow(
+                xcodeProcessIDs: pids,
+                windows: []
+            ) == false
+        )
+        #expect(
+            XcodeReadinessProbe.hasReadyWorkspaceWindow(
+                xcodeProcessIDs: pids,
+                windows: [
+                    .init(ownerPID: 1234, title: "Welcome to Xcode", layer: 0, alpha: 1)
+                ]
+            ) == false
+        )
+        #expect(
+            XcodeReadinessProbe.hasReadyWorkspaceWindow(
+                xcodeProcessIDs: pids,
+                windows: [
+                    .init(ownerPID: 5678, title: "XcodeMCPKit — xcode", layer: 0, alpha: 1)
+                ]
+            ) == false
+        )
+        #expect(
+            XcodeReadinessProbe.hasReadyWorkspaceWindow(
+                xcodeProcessIDs: pids,
+                windows: [
+                    .init(ownerPID: 1234, title: "XcodeMCPKit — xcode", layer: 1, alpha: 1)
+                ]
+            ) == false
+        )
+        #expect(
+            XcodeReadinessProbe.hasReadyWorkspaceWindow(
+                xcodeProcessIDs: pids,
+                windows: [
+                    .init(ownerPID: 1234, title: "XcodeMCPKit — xcode", layer: 0, alpha: 1)
+                ]
+            ) == true
+        )
+    }
+
+    @Test func xcodeReadinessFallsBackToProcessWhenAccessibilityWindowsAreUnavailable() {
+        #expect(
+            XcodeReadinessProbe.isReady(
+                xcodeProcessIDs: [1234],
+                windows: nil
+            )
+        )
+        #expect(
+            XcodeReadinessProbe.isReady(
+                xcodeProcessIDs: [],
+                windows: nil
+            ) == false
+        )
+        #expect(
+            XcodeReadinessProbe.isReady(
+                xcodeProcessIDs: [1234],
+                windows: [
+                    .init(ownerPID: 1234, title: "Welcome to Xcode", layer: 0, alpha: 1)
+                ]
+            ) == false
+        )
+    }
+
+    @Test func xcodeReadinessParsesPGrepOutput() {
+        let output = ProcessOutput(terminationStatus: 0, stdout: "1234\n\n5678\n", stderr: "")
+
+        #expect(XcodeReadinessProbe.processIDs(fromPGrepOutput: output) == [1234, 5678])
+        #expect(
+            XcodeReadinessProbe.processIDs(
+                fromPGrepOutput: ProcessOutput(terminationStatus: 1, stdout: "1234\n", stderr: "")
+            ).isEmpty
+        )
+    }
+
+    @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+        )
+        defer { manager.shutdownAndWait() }
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await upstream.startCount() == 0)
+        #expect(await upstream.sentCount() == 0)
+
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: sent) == "initialize")
+        #expect(await upstream.startCount() > 0)
+    }
+
+    @Test func readinessGateLaunchesXcodeWhenUnavailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let launchRecorder = XcodeLaunchRecorder()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                launchRecorder: launchRecorder
+            )
+        )
+        defer { manager.shutdownAndWait() }
+
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await launchRecorder.launchCount() == 1
+        })
+        #expect(await upstream.startCount() == 0)
+        #expect(await upstream.sentCount() == 0)
+
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        #expect(await launchRecorder.launchCount() == 1)
+        #expect(await upstream.startCount() > 0)
+    }
+
+    @Test func readinessGateRetriesLaunchWhenXcodeQuitsWhileWaiting() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let availability = AvailabilityFlag(isAvailable: true)
+        let launchRecorder = XcodeLaunchRecorder()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                availability: availability,
+                launchRecorder: launchRecorder
+            )
+        )
+        defer { manager.shutdownAndWait() }
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await launchRecorder.launchCount() == 0)
+        #expect(await upstream.startCount() == 0)
+
+        await availability.setAvailable(false)
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await launchRecorder.launchCount() == 1
+        })
+        #expect(await upstream.startCount() == 0)
+
+        await availability.setAvailable(true)
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        #expect(await upstream.startCount() > 0)
+    }
+
+    @Test func readinessGateCompletesPendingInitializeAfterXcodeAppears() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await upstream.sentCount() == 0)
+
+        await readiness.setReady(true)
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: sent) == "initialize")
+        let upstreamID = try extractUpstreamID(from: sent)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+
+        let response = try decodeJSON(
+            from: try await waitWithTimeout(
+                "waiting for deferred initialize response",
+                timeout: .seconds(2)
+            ) {
+                try await future.get()
+            }
+        )
+        #expect((response["id"] as? NSNumber)?.intValue == 1)
+        let initializeRequests = await upstream.sent().filter { methodName(from: $0) == "initialize" }
+        #expect(initializeRequests.count == 1)
+    }
+
+    @Test func readinessGateDebugResetDropsWaitingEagerInitialize() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+        )
+        defer { manager.shutdownAndWait() }
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await upstream.sentCount() == 0)
+
+        manager.debugReset()
+        await readiness.setReady(true)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(await upstream.sentCount() == 0)
+        #expect(await upstream.startCount() == 0)
+    }
+
+    @Test func readinessGateDoesNotSendTimedOutInitializeWaiterWhenXcodeAppears() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let clock = TestClock()
+        let config = makeConfig(requestTimeout: 0.05)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: clock)
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        await clock.sleep(untilSuspendedBy: 1)
+        clock.advance(by: .milliseconds(60))
+        await #expect(throws: TimeoutError.self) {
+            _ = try await future.get()
+        }
+        #expect(await upstream.sentCount() == 0)
+
+        let retryFuture = manager.registerInitialize(
+            originalID: RPCID(any: NSNumber(value: 2))!,
+            requestObject: makeInitializeRequest(id: 2),
+            on: eventLoop
+        )
+        await clock.sleep(untilSuspendedBy: 1)
+        clock.advance(by: .milliseconds(60))
+        await #expect(throws: TimeoutError.self) {
+            _ = try await retryFuture.get()
+        }
+        #expect(await upstream.sentCount() == 0)
+
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        #expect(await upstream.sentCount() == 1)
+        #expect(await upstream.startCount() == 2)
+        let initializeRequests = await upstream.sent().filter { methodName(from: $0) == "initialize" }
+        #expect(initializeRequests.count == 1)
+    }
+
+    @Test func readinessGateWaitsInsteadOfTightRetryingWhenXcodeDisappears() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: true)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+        )
+        defer { manager.shutdownAndWait() }
+
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            manager.isInitialized()
+        })
+
+        await readiness.setReady(false)
+        await upstream.yield(.exit(1))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(await upstream.sentCount() == 2)
+
+        await readiness.setReady(true)
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
+    }
+
+    @Test func readinessGateBacksOffBeforeRetryingWhenXcodeIsStillAvailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: true)
+        let sleepRecorder = ControlledReadinessSleep()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder
+            )
+        )
+        defer { manager.shutdownAndWait() }
+
+        let firstInit = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let firstInitID = try extractUpstreamID(from: firstInit)
+        await upstream.yield(.message(try makeInitializeResponse(id: firstInitID)))
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            manager.isInitialized()
+        })
+
+        await upstream.yield(.exit(1))
+        _ = try await waitWithTimeout(
+            "waiting for readiness retry backoff",
+            timeout: .seconds(2)
+        ) {
+            try await sleepRecorder.nextSleep(at: 0)
+        }
+        #expect(await upstream.sentCount() == 2)
+
+        await sleepRecorder.resumeNext()
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
+        let secondInit = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let secondInitID = try extractUpstreamID(from: secondInit)
+        await upstream.yield(.message(try makeInitializeResponse(id: secondInitID)))
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            manager.isInitialized()
+        })
+
+        await upstream.yield(.exit(1))
+        let secondDelay = try await waitWithTimeout(
+            "waiting for second readiness retry backoff",
+            timeout: .seconds(2)
+        ) {
+            try await sleepRecorder.nextSleep(at: 1)
+        }
+        #expect(secondDelay == 1_000_000_000)
+        await sleepRecorder.resumeNext()
+    }
+
+    @Test func upstreamStderrClassifierTreatsNoXcodeFatalAsAvailabilityWait() {
+        let message =
+            "mcpbridge/MCPBridge.swift:125: Fatal error: MCP_XCODE_PID environment variable not set and no running Xcode processes found"
+
+        #expect(UpstreamStderrClassifier.classify(message) == .xcodeUnavailable)
+    }
+
+    @Test func upstreamStderrLogLimiterSuppressesRepeatedMessages() {
+        let limiter = UpstreamStderrLogLimiter(duplicateLogIntervalNanoseconds: 1_000_000_000)
+        let message = "some upstream stderr"
+        let first = limiter.decision(
+            upstreamIndex: 0,
+            message: message,
+            classification: .unknown,
+            nowUptimeNs: 0
+        )
+        let second = limiter.decision(
+            upstreamIndex: 0,
+            message: message,
+            classification: .unknown,
+            nowUptimeNs: 100_000_000
+        )
+        let third = limiter.decision(
+            upstreamIndex: 0,
+            message: message,
+            classification: .unknown,
+            nowUptimeNs: 1_100_000_000
+        )
+
+        #expect(first.shouldLog)
+        #expect(!second.shouldLog)
+        #expect(third.shouldLog)
+        #expect(third.suppressedDuplicateCount == 1)
+    }
+
+    @Test func upstreamStderrStillRecordsInDebugSnapshotWhenRateLimited() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        manager.handleUpstreamStderr("repeated stderr", upstreamIndex: 0)
+        manager.handleUpstreamStderr("repeated stderr", upstreamIndex: 0)
+
+        let snapshot = manager.debugSnapshot()
+        #expect(snapshot.upstreams[0].recentStderr.count == 2)
+    }
+
     @Test func sessionManagerQueuesInitializeRequests() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -4861,6 +5286,140 @@ private actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
     func nextSent(at index: Int) async throws -> Data {
         try await sentMessages.nextValue(at: index)
     }
+}
+
+private actor ReadinessFlag {
+    private var ready: Bool
+
+    init(isReady: Bool) {
+        self.ready = isReady
+    }
+
+    func setReady(_ value: Bool) {
+        ready = value
+    }
+
+    func isReady() -> Bool {
+        ready
+    }
+}
+
+private actor AvailabilityFlag {
+    private var available: Bool
+
+    init(isAvailable: Bool) {
+        self.available = isAvailable
+    }
+
+    func setAvailable(_ value: Bool) {
+        available = value
+    }
+
+    func isAvailable() -> Bool {
+        available
+    }
+}
+
+private actor ControlledReadinessSleep {
+    private var sleeps: [UInt64] = []
+    private var sleepContinuations: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
+
+    func sleep(nanoseconds: UInt64) async {
+        sleeps.append(nanoseconds)
+        resumeReadyWaiters()
+        await withCheckedContinuation { continuation in
+            sleepContinuations.append(continuation)
+        }
+    }
+
+    func nextSleep(at index: Int) async throws -> UInt64 {
+        if index < sleeps.count {
+            return sleeps[index]
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters.append((index, continuation))
+        }
+    }
+
+    func resumeNext() {
+        guard !sleepContinuations.isEmpty else { return }
+        sleepContinuations.removeFirst().resume()
+    }
+
+    private func resumeReadyWaiters() {
+        var remaining: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
+        for waiter in waiters {
+            if waiter.index < sleeps.count {
+                waiter.continuation.resume(returning: sleeps[waiter.index])
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        waiters = remaining
+    }
+}
+
+private actor XcodeLaunchRecorder {
+    private var count = 0
+
+    func launch() -> Bool {
+        count += 1
+        return true
+    }
+
+    func launchCount() -> Int {
+        count
+    }
+}
+
+private func makeTestReadinessGate(
+    readiness: ReadinessFlag,
+    availability: AvailabilityFlag? = nil,
+    sleepRecorder: ControlledReadinessSleep? = nil,
+    launchRecorder: XcodeLaunchRecorder? = nil
+) -> UpstreamReadinessGate {
+    let launchIfUnavailable: (@Sendable () async -> Bool)?
+    if let launchRecorder {
+        launchIfUnavailable = {
+            await launchRecorder.launch()
+        }
+    } else {
+        launchIfUnavailable = nil
+    }
+
+    let isAvailable: (@Sendable () async -> Bool)?
+    if let availability {
+        isAvailable = {
+            await availability.isAvailable()
+        }
+    } else {
+        isAvailable = nil
+    }
+
+    return UpstreamReadinessGate(
+        isEnabled: true,
+        targetName: "mcpbridge",
+        pollIntervalNanoseconds: 1_000_000,
+        progressLogIntervalNanoseconds: 5_000_000_000,
+        initialRetryBackoffNanoseconds: 1_000_000_000,
+        maxRetryBackoffNanoseconds: 8_000_000_000,
+        uptimeNanoseconds: {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        sleepNanoseconds: { nanoseconds in
+            if let sleepRecorder, nanoseconds >= 1_000_000_000 {
+                await sleepRecorder.sleep(nanoseconds: nanoseconds)
+            } else {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+        },
+        isAvailable: isAvailable,
+        launchIfUnavailable: launchIfUnavailable,
+        isReady: {
+            await readiness.isReady()
+        }
+    )
 }
 
 private func makeInitializeRequest(id: Int) -> [String: Any] {

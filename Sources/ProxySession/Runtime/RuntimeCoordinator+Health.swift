@@ -168,7 +168,16 @@ extension RuntimeCoordinator {
         return false
     }
 
-    func startUpstreamWarmInitialize(upstreamIndex: Int) {
+    func startUpstreamWarmInitialize(upstreamIndex: Int, applyBackoff: Bool = false) {
+        runWhenUpstreamReady(
+            reason: "warm_initialize_\(upstreamIndex)",
+            applyBackoff: applyBackoff
+        ) { [weak self] in
+            self?.startUpstreamWarmInitializeWhenReady(upstreamIndex: upstreamIndex)
+        }
+    }
+
+    private func startUpstreamWarmInitializeWhenReady(upstreamIndex: Int) {
         guard upstreamHealthManager.beginWarmInitialize(upstreamIndex: upstreamIndex) else { return }
 
         let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
@@ -209,7 +218,7 @@ extension RuntimeCoordinator {
         if upstreamIndex == 0 {
             let shouldRetryEagerInit = initializeManager.consumeRetryAfterWarmInitFailureIfNeeded()
             if shouldRetryEagerInit {
-                startEagerInitializePrimary()
+                startEagerInitializePrimary(applyBackoff: true)
             }
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()

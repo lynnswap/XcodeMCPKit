@@ -120,7 +120,7 @@ See Quick Start for how to launch.
 - request timeout: `300` seconds (`0` disables)
 - requests sharing the same MCP session are forwarded FIFO, one at a time
 - max body size: `1048576` bytes
-- initialization: eager at startup
+- initialization: launches Xcode if needed, eager when Xcode is available, and attaches after Xcode becomes ready
 - discovery: `~/Library/Caches/XcodeMCPProxy/endpoint.json`
 
 #### Options

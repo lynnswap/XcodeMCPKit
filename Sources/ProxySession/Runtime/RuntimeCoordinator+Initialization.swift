@@ -4,7 +4,18 @@ import ProxyCore
 import ProxyMCP
 
 extension RuntimeCoordinator {
-    func startEagerInitializePrimary() {
+    func startEagerInitializePrimary(applyBackoff: Bool = false) {
+        runWhenUpstreamReady(
+            reason: "primary_initialize",
+            applyBackoff: applyBackoff
+        ) { [weak self] in
+            guard let self else { return }
+            self.startAllUpstreamSlots()
+            self.startEagerInitializePrimaryWhenReady()
+        }
+    }
+
+    private func startEagerInitializePrimaryWhenReady() {
         let decision = initializeManager.beginEagerInitializePrimary()
         let shouldSend = decision.shouldSendRequest
         let shouldScheduleTimeout = decision.shouldScheduleTimeout
@@ -13,8 +24,35 @@ extension RuntimeCoordinator {
         }
         guard shouldSend else { return }
 
+        sendPrimaryInitializeRequestIfStillPending()
+    }
+
+    func startPrimaryInitializeRequestWhenReady(applyBackoff: Bool = false) {
+        let token = upstreamReadinessGate.isEnabled ? UpstreamReadinessWaiterToken() : nil
+        if let token {
+            replacePrimaryInitializeReadinessWaiter(with: token)
+        }
+        runWhenUpstreamReady(
+            reason: "primary_initialize_request",
+            applyBackoff: applyBackoff,
+            token: token
+        ) { [weak self, token] in
+            guard let self else { return }
+            if let token {
+                self.clearPrimaryInitializeReadinessWaiter(token)
+                guard !token.isCancelled else { return }
+            }
+            self.startAllUpstreamSlots()
+            self.sendPrimaryInitializeRequestIfStillPending()
+        }
+    }
+
+    private func sendPrimaryInitializeRequestIfStillPending() {
         let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: 0)
-        initializeManager.setPrimaryInitUpstreamID(upstreamID)
+        guard initializeManager.beginPrimaryInitializeSend(upstreamID: upstreamID) else {
+            upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
+            return
+        }
         markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
 
         let request = makeInternalInitializeRequest(id: upstreamID)
@@ -156,6 +194,7 @@ extension RuntimeCoordinator {
     func completeInitPendingWithError(_ errorObject: [String: Any]) {
         let result = initializeManager.completePrimaryInitializeFailure()
         guard let result else { return }
+        cancelPrimaryInitializeReadinessWaiter()
         result.timeout?.cancel()
         if let upstreamID = result.upstreamID {
             upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
@@ -176,7 +215,7 @@ extension RuntimeCoordinator {
         }
 
         if result.shouldRetryEagerInitialize {
-            startEagerInitializePrimary()
+            startEagerInitializePrimary(applyBackoff: true)
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
@@ -262,6 +301,7 @@ extension RuntimeCoordinator {
     func failInitPending(error: Error) {
         let result = initializeManager.completePrimaryInitializeFailure()
         guard let result else { return }
+        cancelPrimaryInitializeReadinessWaiter()
         result.timeout?.cancel()
         if let upstreamID = result.upstreamID {
             upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
@@ -274,7 +314,7 @@ extension RuntimeCoordinator {
         }
 
         if result.shouldRetryEagerInitialize {
-            startEagerInitializePrimary()
+            startEagerInitializePrimary(applyBackoff: true)
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
@@ -304,6 +344,7 @@ extension RuntimeCoordinator {
     func markUpstreamInitialized(upstreamIndex: Int) {
         let timeout = upstreamHealthManager.markInitialized(upstreamIndex: upstreamIndex)
         timeout?.cancel()
+        noteUpstreamInitializationSucceeded()
     }
 
     func warmUpSecondaryUpstreams() {
@@ -328,7 +369,7 @@ extension RuntimeCoordinator {
             clearInitialize: true,
             clearToolsCatalog: true
         )
-        startEagerInitializePrimary()
+        startEagerInitializePrimary(applyBackoff: true)
     }
 
     func hasUsableInitializedSecondaryUpstreams() -> Bool {

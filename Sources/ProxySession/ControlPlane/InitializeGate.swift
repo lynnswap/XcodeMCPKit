@@ -98,9 +98,17 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func setPrimaryInitUpstreamID(_ upstreamID: Int64) {
+    package func beginPrimaryInitializeSend(upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
+            guard !state.isShuttingDown,
+                  state.initResult == nil,
+                  state.initInFlight,
+                  state.primaryInitUpstreamID == nil
+            else {
+                return false
+            }
             state.primaryInitUpstreamID = upstreamID
+            return true
         }
     }
 

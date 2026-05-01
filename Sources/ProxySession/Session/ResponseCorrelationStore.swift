@@ -31,13 +31,13 @@ extension RuntimeCoordinator {
             }()
         )
         if count <= 1 {
-            return [ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig), startImmediately: true)]
+            return [ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))]
         }
         var upstreams: [ManagedUpstreamSlot] = []
         upstreams.reserveCapacity(count)
         for _ in 0..<count {
             upstreams.append(
-                ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig), startImmediately: true)
+                ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
             )
         }
         return upstreams

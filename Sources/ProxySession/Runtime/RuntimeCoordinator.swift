@@ -172,6 +172,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let sessionRegistry: SessionRegistry
     package let initializeManager = InitializeManager()
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
+    package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
+    package let primaryInitializeReadinessTokenBox =
+        NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
+    package let upstreamReadinessGenerationBox = NIOLockedValueBox<UInt64>(0)
     package let debugRecorder: ProxyDebugRecorder
     package let leaseManager: LeaseManager
     package let eventLoop: EventLoop
@@ -185,6 +189,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package let upstreamHealthManager: UpstreamHealthManager
     package let upstreamSlotScheduler: UpstreamSlotScheduler
+    package let upstreamReadinessGate: UpstreamReadinessGate
+    package let upstreamReadinessCoordinator: UpstreamReadinessCoordinator
     package let clock: ClockClient
     package let nowUptimeNanoseconds: @Sendable () -> UInt64
     package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
@@ -195,7 +201,17 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let count = max(1, min(config.upstreamProcessCount, 10))
         let upstreams = Self.makeDefaultUpstreams(
             config: config, sharedSessionID: config.upstreamSessionID, count: count)
-        self.init(config: config, eventLoop: eventLoop, upstreams: upstreams)
+        let clock = ClockClient.liveValue
+        self.init(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: upstreams,
+            clock: clock,
+            upstreamReadinessGate: Self.defaultUpstreamReadinessGate(
+                config: config,
+                clock: clock
+            )
+        )
     }
 
     package init(
@@ -203,6 +219,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         eventLoop: EventLoop,
         upstreams: [any UpstreamSlotControlling],
         clock: ClockClient = .liveValue,
+        upstreamReadinessGate: UpstreamReadinessGate? = nil,
         nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
         scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
             RuntimeScheduledTimeout)? = nil
@@ -236,6 +253,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
+        let resolvedReadinessGate = upstreamReadinessGate
+            ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
+        self.upstreamReadinessGate = resolvedReadinessGate
+        self.upstreamReadinessCoordinator = UpstreamReadinessCoordinator(
+            gate: resolvedReadinessGate,
+            logger: ProxyLogging.make("upstream.readiness")
+        )
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             upstreamCount: upstreams.count,
             defaultCapacity: 1,
@@ -351,9 +375,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 }
             }
             tasks.append(task)
-            Task {
-                await upstream.start()
-            }
         }
         upstreamTaskBox.withLockedValue { taskBox in
             taskBox = tasks
@@ -397,7 +418,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamRouter.resetAll()
         _ = leaseManager.resetAll(reason: .clientDisconnected)
         upstreamSlotScheduler.reset()
+        advanceUpstreamReadinessGeneration()
+        resetUpstreamReadinessWaiters()
+        cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
+        upstreamStderrLogLimiter.reset()
         invalidateControlPlaneSynchronously(
             reason: "debug_reset",
             clearInitialize: true,
@@ -420,6 +445,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for timeout in upstreamTimeouts {
             timeout?.cancel()
         }
+        await upstreamReadinessCoordinator.shutdown()
 
         invalidateControlPlaneSynchronously(
             reason: "shutdown",
@@ -622,15 +648,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         if shouldSend {
-            let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: 0)
-            initializeManager.setPrimaryInitUpstreamID(upstreamID)
-            markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
-            let initRequest = makeInternalInitializeRequest(id: upstreamID)
-            if let data = try? JSONSerialization.data(withJSONObject: initRequest, options: []) {
-                sendUpstream(data, upstreamIndex: 0, ensureRunning: true)
-            } else {
-                failInitPending(error: TimeoutError())
-            }
+            startPrimaryInitializeRequestWhenReady()
         }
 
         guard let promise = pendingPromise else {
