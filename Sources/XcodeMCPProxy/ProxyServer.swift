@@ -72,6 +72,7 @@ public final class ProxyServer {
     private let logger: Logger = ProxyLogging.make("server")
     private let runtimeLock = NSLock()
     private let runtimeHolder = RuntimeHolder()
+    private let acceptedChannelTracker = ProxyAcceptedChannelTracker()
     private var isShuttingDown = false
     private var sessionManager: (any RuntimeCoordinating)?
     private var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
@@ -114,6 +115,9 @@ public final class ProxyServer {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .serverChannelInitializer { [acceptedChannelTracker] channel in
+                channel.pipeline.addHandler(ProxyAcceptedChannelHandler(tracker: acceptedChannelTracker))
+            }
             .childChannelInitializer {
                 [runtimeHolder, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver, refreshCodeIssuesDebugState, logger] channel in
                 runtimeHolder.sessionManager(on: channel.eventLoop).flatMap { sessionManager in
@@ -157,22 +161,60 @@ public final class ProxyServer {
         return first
     }
 
-    public func shutdownGracefully() -> EventLoopFuture<Void> {
-        let promise = group.next().makePromise(of: Void.self)
+    public func shutdown() async throws {
         let shutdownContext = beginShutdown()
         shutdownContext.autoApprover?.stop()
-        shutdownContext.sessionManager?.shutdown()
-        for channel in shutdownContext.channels {
-            channel.close(promise: nil)
+
+        var shutdownError: (any Error)?
+        do {
+            try await closeChannels(shutdownContext.channels)
+        } catch {
+            shutdownError = error
         }
-        group.shutdownGracefully { error in
-            if let error {
-                promise.fail(error)
-            } else {
-                promise.succeed(())
+
+        await shutdownContext.sessionManager?.shutdown()
+        do {
+            try await shutdownEventLoopGroup()
+        } catch {
+            if shutdownError == nil {
+                shutdownError = error
             }
         }
-        return promise.futureResult
+
+        if let shutdownError {
+            throw shutdownError
+        }
+    }
+
+    private func closeChannels(_ listenChannels: [Channel]) async throws {
+        let listenCloseFutures = listenChannels.map(\.closeFuture)
+        for channel in listenChannels {
+            channel.close(mode: .all, promise: nil)
+        }
+        try await EventLoopFuture.andAllSucceed(listenCloseFutures, on: group.next()).get()
+
+        while true {
+            let childChannels = acceptedChannelTracker.snapshot()
+            guard !childChannels.isEmpty else { break }
+
+            let childCloseFutures = childChannels.map(\.closeFuture)
+            for channel in childChannels {
+                channel.close(mode: .all, promise: nil)
+            }
+            try await EventLoopFuture.andAllSucceed(childCloseFutures, on: group.next()).get()
+        }
+    }
+
+    private func shutdownEventLoopGroup() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            group.shutdownGracefully { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
     }
 
     private func resolvedListenAddress(for channel: Channel) -> (String, Int) {
@@ -410,6 +452,44 @@ private enum ProxyServerError: Error {
 
 private enum RuntimeHolderError: Error {
     case shuttingDown
+}
+
+private final class ProxyAcceptedChannelTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var channels: [ObjectIdentifier: Channel] = [:]
+
+    func register(_ channel: Channel) {
+        let id = ObjectIdentifier(channel)
+        lock.withLock {
+            channels[id] = channel
+        }
+        channel.closeFuture.whenComplete { [weak self] _ in
+            guard let self else { return }
+            _ = lock.withLock {
+                channels.removeValue(forKey: id)
+            }
+        }
+    }
+
+    func snapshot() -> [Channel] {
+        lock.withLock { Array(channels.values) }
+    }
+}
+
+private final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = Channel
+
+    private let tracker: ProxyAcceptedChannelTracker
+
+    init(tracker: ProxyAcceptedChannelTracker) {
+        self.tracker = tracker
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let channel = unwrapInboundIn(data)
+        tracker.register(channel)
+        context.fireChannelRead(data)
+    }
 }
 
 private final class RuntimeHolder: @unchecked Sendable {

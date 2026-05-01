@@ -40,7 +40,8 @@
 - `ProxyHTTPGateway` is the highest-level internal target and may depend on the lower-level targets above.
 - `ProxyCLI` depends on `XcodeMCPProxy` only.
 
-Run `scripts/check-architecture.sh` after moving files or changing imports.
+Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
+the default suite includes `ProxyArchitectureTests`.
 
 ## Protocol Boundaries
 
@@ -56,30 +57,55 @@ Run `scripts/check-architecture.sh` after moving files or changing imports.
 ## Local Verification
 
 - Fast regression suite:
-  - `scripts/test-fast.sh`
+  - `swift test -Xswiftc -strict-concurrency=minimal`
 - Process / pipe suite:
-  - `scripts/test-process.sh`
+  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal`
 - Full local maintainer check:
   - `scripts/check.sh`
 
 These mirror the existing release workflow split and intentionally avoid requiring real `mcpbridge`.
 
+## Stress Suite
+
+- In-process entry point:
+  - `XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal`
+- Purpose:
+  - Validate high-volume HTTP/session multiplexing without a live `mcpbridge`.
+- Isolation rules:
+  - Opt-in only; excluded from default `swift test`, `scripts/check.sh`, and CI.
+  - Uses an in-process HTTP server and fake upstream.
+  - Current coverage opens 4 MCP sessions and sends 1,000 parallel `DocumentationSearch` calls per session.
+
+### Running Server Benchmark
+
+- Entry point:
+  - `python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100`
+- Purpose:
+  - Benchmark an already-running `xcode-mcp-proxy-server` with real `DocumentationSearch` calls.
+- Isolation rules:
+  - Manual-only; excluded from default `swift test`, `scripts/check.sh`, and CI.
+  - Resolves the endpoint from `--endpoint`, `XCODE_MCP_PROXY_ENDPOINT`, discovery file, then `http://localhost:8765/mcp`.
+  - Rejects non-loopback endpoints by default; `--allow-non-loopback` is required to benchmark a remote endpoint.
+  - Defaults to 4 agents, each represented by one persistent HTTP connection and one MCP session.
+  - Each agent sends 100 `DocumentationSearch` requests in a closed loop, then reports throughput and per-request latency percentiles.
+  - Deletes benchmark MCP sessions before exit.
+
 ## Live `mcpbridge` Suite
 
 - Entry point:
-  - `scripts/test-live-mcpbridge.sh`
+  - `XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS=1 swift test --no-parallel --filter ProxyLiveMCPBridgeTests -Xswiftc -strict-concurrency=minimal`
 - Purpose:
   - Validate the real `mcpbridge` path, `tools/list`, `XcodeListWindows`, `XcodeRefreshCodeIssuesInFile`, and proxy auto-approve behavior in a local-only environment.
 - Isolation rules:
   - Uses the currently running Xcode session and requires exactly one Xcode process.
   - Uses `127.0.0.1:0`.
-  - Uses `XCODE_MCP_PROXY_DISCOVERY_FILE` so the default discovery path is untouched.
+  - Uses a temp discovery file so the default discovery path is untouched.
   - Avoids `--force-restart`.
   - Reads the active workspace from `XcodeListWindows` and refreshes an existing Swift file without opening a new project.
 
 ## Cleanup Expectations
 
-- Live runs must terminate the dedicated proxy server and Xcode process they start.
+- Live runs must terminate the dedicated in-process proxy server.
 - Live runs must write discovery output only under their temp root.
 - Do not rely on the user’s default `~/Library/Caches/XcodeMCPProxy/endpoint.json` during tests.
 

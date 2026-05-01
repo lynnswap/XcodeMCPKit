@@ -37,7 +37,7 @@ package protocol RuntimeCoordinating: Sendable {
     func hasSession(id: String) -> Bool
     func removeSession(id: String)
     func debugReset()
-    func shutdown()
+    func shutdown() async
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue)
@@ -406,7 +406,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         canonicalBrokerState.reset()
     }
 
-    package func shutdown() {
+    package func shutdown() async {
         let shutdownState = initializeManager.beginShutdown()
         let pendingInitializes = shutdownState.pending
         for pending in pendingInitializes {
@@ -436,11 +436,25 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for task in tasks {
             task.cancel()
         }
-        for upstream in upstreams {
-            Task {
-                await upstream.stop()
+        await withTaskGroup(of: Void.self) { group in
+            for upstream in upstreams {
+                group.addTask {
+                    await upstream.stop()
+                }
             }
         }
+        for task in tasks {
+            await task.value
+        }
+    }
+
+    package func shutdownAndWait() {
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) { [self] in
+            await shutdown()
+            semaphore.signal()
+        }
+        semaphore.wait()
     }
 
     package func isInitialized() -> Bool {

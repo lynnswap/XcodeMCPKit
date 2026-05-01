@@ -400,7 +400,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     func hasSession(id: String) -> Bool { false }
     func removeSession(id: String) {}
     func debugReset() {}
-    func shutdown() {}
+    func shutdown() async {}
     func isInitialized() -> Bool { true }
     func cachedToolsListResult() -> JSONValue? { cachedToolsList }
     func setCachedToolsListResult(_ result: JSONValue) { cachedToolsList = result }

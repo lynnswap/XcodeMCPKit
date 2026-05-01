@@ -5524,7 +5524,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func shutdown() {}
+    func shutdown() async {}
 
     func isInitialized() -> Bool {
         state.withLockedValue { state in
@@ -6295,7 +6295,7 @@ private struct TestHTTPHandlerServer {
             childChannelTracker: childChannelTracker,
             group: group,
             beforeClose: {
-                sessionManager.shutdown()
+                await sessionManager.shutdown()
             }
         )
     }

@@ -158,15 +158,19 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 ## Maintainer Commands
 
 ```bash
-scripts/check-architecture.sh
-scripts/test-fast.sh
-scripts/test-process.sh
+swift test -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
-scripts/test-live-mcpbridge.sh
+XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS=1 swift test --no-parallel --filter ProxyLiveMCPBridgeTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal
+python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 ```
 
-- `test-live-mcpbridge.sh` はローカル専用で、CI には含めません。
-- live script は現在起動中の Xcode を使い、Xcode process が 1 つだけある前提で、`127.0.0.1:0` と temp discovery path を使います。
+- `scripts/check.sh` は default suite と opt-in の process / pipe suite を実行します。
+- live `mcpbridge` suite はローカル専用で、CI には含めません。
+- live suite は現在起動中の Xcode を使い、Xcode process が 1 つだけある前提で、`127.0.0.1:0` と temp discovery path を使います。
+- stress suite は明示 opt-in 専用で、`scripts/check.sh` には含めません。大量 HTTP / session multiplexing を検証します。
+- `scripts/benchmark-live-server.py` は起動済み proxy server に直接投げる手動用ベンチマーク資材です。通常テスト、`scripts/check.sh`、CI では実行しません。endpoint は `--endpoint`、`XCODE_MCP_PROXY_ENDPOINT`、discovery file、`http://localhost:8765/mcp` の順で解決し、非 loopback endpoint は `--allow-non-loopback` が必要です。4つの agent を4本の persistent HTTP connection / MCP session として扱い、各 agent が 100 個の `DocumentationSearch` request を closed-loop で送り、throughput と request latency percentile を出します。終了前に benchmark 用 session は削除します。
 
 #### Proxy Config
 

@@ -1,0 +1,344 @@
+import Foundation
+import NIO
+import ProxyCore
+import Testing
+
+@testable import XcodeMCPProxy
+
+@Suite(.serialized, .enabled(if: LiveMCPBridgeTestEnvironment.isEnabled))
+struct LiveMCPBridgeTests {
+    @Test func proxyServerTalksToLiveMCPBridge() async throws {
+        let xcrunResult = try runProcess("/usr/bin/xcrun", ["--find", "mcpbridge"])
+        guard xcrunResult.terminationStatus == 0,
+              xcrunResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            Issue.record("mcpbridge is not available in the selected Xcode toolchain")
+            throw LiveMCPBridgeTestError.mcpbridgeNotFound
+        }
+
+        let pgrepResult = try runProcess("/usr/bin/pgrep", ["-x", "Xcode"])
+        guard pgrepResult.terminationStatus == 0 else {
+            Issue.record("no running Xcode process found; open Xcode first")
+            throw LiveMCPBridgeTestError.xcodeProcessNotFound
+        }
+        let xcodeProcessIDs = pgrepResult.stdout.split(whereSeparator: \.isNewline)
+        guard xcodeProcessIDs.count == 1 else {
+            Issue.record(
+                "expected exactly one running Xcode process for auto-resolved mcpbridge, found \(xcodeProcessIDs.count)"
+            )
+            throw LiveMCPBridgeTestError.ambiguousXcodeProcessCount
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("xcode-mcp-live-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: tempRoot)
+        }
+
+        let discoveryFile = tempRoot.appendingPathComponent("endpoint.json")
+        let defaultDiscoveryFile = ProxyFilesystemLocations.discoveryFileURL()
+        let defaultDiscoveryBefore = try? Data(contentsOf: defaultDiscoveryFile)
+
+        let config = ProxyConfig(
+            listenHost: "127.0.0.1",
+            listenPort: 0,
+            upstreamCommand: "/usr/bin/xcrun",
+            upstreamArgs: ["mcpbridge"],
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 20,
+            discoveryFileURL: discoveryFile,
+            autoApproveXcodeDialog: true
+        )
+        var dependencies = ProxyServer.Dependencies.live(config: config)
+        dependencies.discoveryClient = .live(
+            defaultFileURL: { discoveryFile }
+        )
+        let server = ProxyServer(config: config, dependencies: dependencies)
+        let urlSession = URLSession(configuration: .ephemeral)
+        defer {
+            urlSession.invalidateAndCancel()
+        }
+
+        do {
+            let address = try server.startAndWriteDiscovery()
+            let discoveryRecord = try readDiscoveryRecord(from: discoveryFile)
+            #expect(discoveryRecord.port == address.port)
+
+            let proxyURL = try #require(URL(string: discoveryRecord.url))
+            let debugURL = try debugSnapshotURL(for: proxyURL)
+            try await waitForServerReadiness(debugURL, urlSession: urlSession)
+
+            let initializeResponse = try await postJSON(
+                to: proxyURL,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "protocolVersion": "2025-03-26",
+                        "clientInfo": [
+                            "name": "XcodeMCPKitLiveTest",
+                            "version": "dev",
+                        ],
+                        "capabilities": [:],
+                    ],
+                ],
+                sessionID: nil,
+                urlSession: urlSession
+            )
+            let sessionID = try #require(
+                initializeResponse.response.value(forHTTPHeaderField: "Mcp-Session-Id")
+            )
+
+            var debugBody = try await get(debugURL, urlSession: urlSession)
+
+            var toolsBody = Data()
+            var toolsListOK = false
+            for _ in 0..<2 {
+                let response = try await postJSON(
+                    to: proxyURL,
+                    payload: [
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/list",
+                    ],
+                    sessionID: sessionID,
+                    urlSession: urlSession
+                )
+                toolsBody = response.body
+                if bodyString(toolsBody).contains(#""name":"XcodeRefreshCodeIssuesInFile""#) {
+                    toolsListOK = true
+                    break
+                }
+                try await Task.sleep(for: .seconds(2))
+            }
+
+            if !toolsListOK && !bodyString(toolsBody).contains(#""message":"upstream timeout""#) {
+                debugBody = try await get(debugURL, urlSession: urlSession)
+                Issue.record("tools/list did not expose XcodeRefreshCodeIssuesInFile: \(bodyString(toolsBody))")
+                throw LiveMCPBridgeTestError.refreshToolNotFound
+            }
+
+            let windowSelection = try await resolveWindowSelection(
+                proxyURL: proxyURL,
+                sessionID: sessionID,
+                urlSession: urlSession
+            )
+            let sourceFile = try #require(firstSwiftSourceFile(under: searchRoot(for: windowSelection.workspacePath)))
+
+            let refreshResponse = try await postJSON(
+                to: proxyURL,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "XcodeRefreshCodeIssuesInFile",
+                        "arguments": [
+                            "filePath": sourceFile.path,
+                            "tabIdentifier": windowSelection.tabIdentifier,
+                        ],
+                    ],
+                ],
+                sessionID: sessionID,
+                urlSession: urlSession
+            )
+            #expect(bodyString(refreshResponse.body).contains(#""result""#) || bodyString(refreshResponse.body).contains(#""error""#))
+
+            debugBody = try await get(debugURL, urlSession: urlSession)
+            #expect(bodyString(debugBody).contains(#""controlPlane""#))
+
+            let defaultDiscoveryAfter = try? Data(contentsOf: defaultDiscoveryFile)
+            #expect(defaultDiscoveryBefore == defaultDiscoveryAfter)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+}
+
+private enum LiveMCPBridgeTestEnvironment {
+    static let isEnabled =
+        ProcessInfo.processInfo.environment["XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS"] == "1"
+}
+
+private struct CommandResult {
+    let stdout: String
+    let stderr: String
+    let terminationStatus: Int32
+}
+
+private func runProcess(_ executablePath: String, _ arguments: [String]) throws -> CommandResult {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executablePath)
+    process.arguments = arguments
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+    process.waitUntilExit()
+
+    return CommandResult(
+        stdout: String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+        stderr: String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+        terminationStatus: process.terminationStatus
+    )
+}
+
+private func readDiscoveryRecord(from fileURL: URL) throws -> DiscoveryRecord {
+    let data = try Data(contentsOf: fileURL)
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return try decoder.decode(DiscoveryRecord.self, from: data)
+}
+
+private func debugSnapshotURL(for proxyURL: URL) throws -> URL {
+    var components = try #require(URLComponents(url: proxyURL, resolvingAgainstBaseURL: false))
+    components.path = "/debug/upstreams"
+    components.query = nil
+    return try #require(components.url)
+}
+
+private func waitForServerReadiness(_ debugURL: URL, urlSession: URLSession) async throws {
+    var lastError: Error?
+    for _ in 0..<50 {
+        do {
+            _ = try await get(debugURL, timeoutInterval: 1, urlSession: urlSession)
+            return
+        } catch {
+            lastError = error
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    Issue.record("proxy HTTP listener was not reachable: \(String(describing: lastError))")
+    throw LiveMCPBridgeTestError.httpServerNotReady
+}
+
+private func postJSON(
+    to url: URL,
+    payload: [String: Any],
+    sessionID: String?,
+    urlSession: URLSession
+) async throws -> (body: Data, response: HTTPURLResponse) {
+    var request = URLRequest(url: url, timeoutInterval: 25)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let sessionID {
+        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    }
+    request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+    let (data, response) = try await urlSession.data(for: request)
+    return (data, try #require(response as? HTTPURLResponse))
+}
+
+private func get(
+    _ url: URL,
+    timeoutInterval: TimeInterval = 10,
+    urlSession: URLSession
+) async throws -> Data {
+    var request = URLRequest(url: url, timeoutInterval: timeoutInterval)
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    let (data, response) = try await urlSession.data(for: request)
+    _ = try #require(response as? HTTPURLResponse)
+    return data
+}
+
+private func bodyString(_ data: Data) -> String {
+    String(data: data, encoding: .utf8) ?? ""
+}
+
+private func resolveWindowSelection(
+    proxyURL: URL,
+    sessionID: String,
+    urlSession: URLSession
+) async throws -> (tabIdentifier: String, workspacePath: String) {
+    for _ in 0..<2 {
+        let response = try await postJSON(
+            to: proxyURL,
+            payload: [
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": [
+                    "name": "XcodeListWindows",
+                    "arguments": [:],
+                ],
+            ],
+            sessionID: sessionID,
+            urlSession: urlSession
+        )
+        if let selection = try windowSelection(from: response.body) {
+            return selection
+        }
+        try await Task.sleep(for: .seconds(1))
+    }
+
+    Issue.record("failed to resolve an open Xcode workspace from XcodeListWindows")
+    throw LiveMCPBridgeTestError.windowSelectionNotFound
+}
+
+private func windowSelection(from data: Data) throws -> (tabIdentifier: String, workspacePath: String)? {
+    let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    let result = object?["result"] as? [String: Any] ?? [:]
+    let structured = result["structuredContent"] as? [String: Any]
+    let structuredMessage = structured?["message"] as? String
+    let content = result["content"] as? [[String: Any]] ?? []
+    let contentMessage = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    let message = structuredMessage?.isEmpty == false ? structuredMessage ?? "" : contentMessage
+
+    for line in message.split(separator: "\n") {
+        let raw = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.hasPrefix("* tabIdentifier: ") else { continue }
+        let suffix = raw.dropFirst("* tabIdentifier: ".count)
+        guard let comma = suffix.range(of: ", workspacePath: ") else { continue }
+        let tabIdentifier = String(suffix[..<comma.lowerBound])
+        let workspacePath = String(suffix[comma.upperBound...])
+        if !workspacePath.isEmpty {
+            return (tabIdentifier, workspacePath)
+        }
+    }
+
+    return nil
+}
+
+private func searchRoot(for workspacePath: String) -> URL {
+    let workspaceURL = URL(fileURLWithPath: workspacePath)
+    if ["xcworkspace", "xcodeproj"].contains(workspaceURL.pathExtension.lowercased()) {
+        return workspaceURL.deletingLastPathComponent()
+    }
+    return workspaceURL
+}
+
+private func firstSwiftSourceFile(under root: URL) -> URL? {
+    guard let enumerator = FileManager.default.enumerator(
+        at: root,
+        includingPropertiesForKeys: [.isRegularFileKey]
+    ) else {
+        return nil
+    }
+
+    while let url = enumerator.nextObject() as? URL {
+        guard url.pathExtension == "swift" else { continue }
+        guard !url.path.contains("/.build/") else { continue }
+        return url
+    }
+    return nil
+}
+
+private enum LiveMCPBridgeTestError: Error {
+    case mcpbridgeNotFound
+    case xcodeProcessNotFound
+    case ambiguousXcodeProcessCount
+    case httpServerNotReady
+    case refreshToolNotFound
+    case windowSelectionNotFound
+}

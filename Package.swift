@@ -217,6 +217,12 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
+            name: "ProxyArchitectureTests",
+            dependencies: [],
+            path: "Tests/ProxyArchitectureTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
             name: "ProxyRuntimeTests",
             dependencies: [
                 "XcodeMCPProxy",
@@ -235,6 +241,32 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Tests/ProxyRuntimeTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "ProxyProcessTests",
+            dependencies: [
+                "XcodeMCPProxy",
+                "ProxySession",
+                "XcodeMCPTestSupport",
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ],
+            path: "Tests/ProxyProcessTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "ProxyStressTests",
+            dependencies: [
+                "XcodeMCPProxy",
+                "ProxyCore",
+                "ProxySession",
+                "ProxyHTTPGateway",
+                "XcodeMCPTestSupport",
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ],
+            path: "Tests/ProxyStressTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
@@ -304,6 +336,16 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Tests/ProxyIntegrationTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "ProxyLiveMCPBridgeTests",
+            dependencies: [
+                "XcodeMCPProxy",
+                "ProxyCore",
+                .product(name: "NIO", package: "swift-nio"),
+            ],
+            path: "Tests/ProxyLiveMCPBridgeTests",
             swiftSettings: strictSwiftSettings
         ),
     ]
