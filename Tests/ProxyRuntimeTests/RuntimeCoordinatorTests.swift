@@ -119,6 +119,30 @@ struct RuntimeCoordinatorTests {
         )
     }
 
+    @Test func defaultReadinessGateRecognizesFlaggedXcrunMCPBridgeInvocation() {
+        var config = makeConfig(requestTimeout: 5)
+        config.upstreamArgs = ["--sdk", "macosx", "mcpbridge"]
+        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config))
+
+        config.upstreamCommand = "/usr/bin/xcrun"
+        config.upstreamArgs = ["--sdk=macosx", "--toolchain", "default", "mcpbridge"]
+        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config))
+    }
+
+    @Test func defaultReadinessGateIgnoresNonMCPBridgeAndCustomWrapperInvocations() {
+        var config = makeConfig(requestTimeout: 5)
+        config.upstreamArgs = ["--sdk", "macosx", "swift"]
+        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
+
+        config.upstreamCommand = "/bin/echo"
+        config.upstreamArgs = ["xcrun", "mcpbridge"]
+        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
+
+        config.upstreamCommand = "xcrun"
+        config.upstreamArgs = ["--sdk", "mcpbridge"]
+        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
+    }
+
     @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
