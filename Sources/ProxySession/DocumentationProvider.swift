@@ -407,7 +407,8 @@ package actor DocumentationProviderConnection {
             throw ControlPlaneError.invalidResponse("missing DocumentationSearch request id")
         }
 
-        let upstreamID = "__documentation-provider-\(nextID)"
+        let upstreamID = nextID
+        let upstreamIDKey = String(upstreamID)
         nextID += 1
         object["id"] = upstreamID
         guard JSONSerialization.isValidJSONObject(object) else {
@@ -421,20 +422,20 @@ package actor DocumentationProviderConnection {
                     originalID: originalID,
                     continuation: continuation
                 )
-                pendingResponses[upstreamID] = pending
-                scheduleTimeoutIfNeeded(id: upstreamID, timeout: timeout, pending: pending)
+                pendingResponses[upstreamIDKey] = pending
+                scheduleTimeoutIfNeeded(id: upstreamIDKey, timeout: timeout, pending: pending)
 
                 Task { [weak self, session] in
                     let sendResult = await session.send(upstreamData)
                     guard sendResult == .accepted else {
-                        await self?.failPending(id: upstreamID, error: UpstreamSlotAcquisitionError.unavailable)
+                        await self?.failPending(id: upstreamIDKey, error: UpstreamSlotAcquisitionError.unavailable)
                         return
                     }
                 }
             }
         } onCancel: {
             Task { [weak self] in
-                await self?.failPending(id: upstreamID, error: CancellationError())
+                await self?.failPending(id: upstreamIDKey, error: CancellationError())
             }
         }
     }
@@ -530,6 +531,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard requestTimeout?.nanoseconds != 0 else {
             return .unavailable
         }
+        guard !Task.isCancelled else {
+            return .unavailable
+        }
         guard let provider = await providerIfAvailable(requestTimeout: requestTimeout) else {
             return .unavailable
         }
@@ -549,11 +553,16 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             throw UpstreamSlotAcquisitionError.unavailable
         }
 
+        let callTimeout = Self.requestTimeout(until: requestDeadline)
+        guard callTimeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+
         let response: Data
         do {
             response = try await provider.profile.connection.call(
                 requestData,
-                timeout: initialTimeout
+                timeout: callTimeout
             )
         } catch {
             await invalidate(reason: "documentation_provider_call_failed")
@@ -625,14 +634,21 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
+        let selectionDeadline = Self.requestDeadline(for: requestTimeout)
         var profiles: [CandidateProfile] = []
         for target in discovery.runningXcodeTargets() {
-            if requestTimeout?.nanoseconds == 0 {
+            guard !Task.isCancelled else {
+                break
+            }
+            let candidateTimeout = Self.requestTimeout(until: selectionDeadline)
+            if candidateTimeout?.nanoseconds == 0 {
                 break
             }
             do {
-                let profile = try await probe(target: target, requestTimeout: requestTimeout)
+                let profile = try await probe(target: target, requestTimeout: candidateTimeout)
                 profiles.append(profile)
+            } catch is CancellationError {
+                break
             } catch {
                 continue
             }
@@ -657,31 +673,44 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         target: DocumentationProviderTarget,
         requestTimeout: TimeAmount?
     ) async throws -> CandidateProfile {
-        let probeTimeout = requestTimeout ?? .seconds(30)
+        let probeDeadline = Self.requestDeadline(for: requestTimeout ?? .seconds(30))
         let session = try await sessionFactory.startSession(for: target)
         let connection = DocumentationProviderConnection(session: session)
         await connection.start()
         do {
+            let initializeTimeout = Self.requestTimeout(until: probeDeadline)
+            guard initializeTimeout?.nanoseconds != 0 else {
+                throw TimeoutError()
+            }
             let initialize = try await connection.call(
                 try Self.makeInitializeRequestData(),
-                timeout: probeTimeout
+                timeout: initializeTimeout
             )
             let serverVersion = Self.serverVersion(fromInitializeResponse: initialize) ?? ""
+            try Task.checkCancellation()
             try await connection.sendNotification([
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized",
             ])
+            let toolsListTimeout = Self.requestTimeout(until: probeDeadline)
+            guard toolsListTimeout?.nanoseconds != 0 else {
+                throw TimeoutError()
+            }
             let toolsList = try await connection.call(
                 try Self.makeToolsListRequestData(),
-                timeout: probeTimeout
+                timeout: toolsListTimeout
             )
             let toolsResult = try Self.resultValue(from: toolsList)
             guard let descriptor = DocumentationToolCatalog.descriptor(in: toolsResult) else {
                 throw UpstreamSlotAcquisitionError.unavailable
             }
+            let documentationProbeTimeout = Self.requestTimeout(until: probeDeadline)
+            guard documentationProbeTimeout?.nanoseconds != 0 else {
+                throw TimeoutError()
+            }
             let probeResponse = try await connection.call(
                 try Self.makeDocumentationProbeRequestData(),
-                timeout: probeTimeout
+                timeout: documentationProbeTimeout
             )
             guard !DocumentationToolCatalog.responseIsDocumentationNotEnabled(probeResponse),
                   !DocumentationToolCatalog.responseIsToolError(probeResponse) else {

@@ -807,6 +807,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 return update
             }
         } catch {
+            logger.debug(
+                "documentation provider tools/list update failed",
+                metadata: [
+                    "error": .string(String(describing: error)),
+                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
+                ]
+            )
             await manager.invalidate(reason: "tools_list_timeout")
             return .unavailable
         }

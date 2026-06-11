@@ -343,6 +343,7 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxy",
                 "ProxyCore",
+                "ProxyXcodeSupport",
                 .product(name: "NIO", package: "swift-nio"),
             ],
             path: "Tests/ProxyLiveMCPBridgeTests",

@@ -304,6 +304,33 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
+    @Test func documentationProviderManagerUsesNumericIDsForMCPBridgeProbe() async throws {
+        let target = documentationProviderTarget(processID: 111)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        requiresNumericRequestIDs: true
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
     @Test func documentationProviderManagerRetriesDocumentationSearchOnAlternateCandidate() async throws {
         let xcode26 = documentationProviderTarget(processID: 201)
         let xcode27 = documentationProviderTarget(processID: 202)
@@ -5581,19 +5608,22 @@ private struct ScriptedDocumentationSessionPlan: Sendable {
     let includesDocumentationSearch: Bool
     let probeResponse: ScriptedDocumentationResponse
     let userCallResponses: [ScriptedDocumentationResponse]
+    let requiresNumericRequestIDs: Bool
 
     init(
         serverVersion: String,
         toolCount: Int,
         includesDocumentationSearch: Bool,
         probeResponse: ScriptedDocumentationResponse,
-        userCallResponses: [ScriptedDocumentationResponse] = []
+        userCallResponses: [ScriptedDocumentationResponse] = [],
+        requiresNumericRequestIDs: Bool = false
     ) {
         self.serverVersion = serverVersion
         self.toolCount = toolCount
         self.includesDocumentationSearch = includesDocumentationSearch
         self.probeResponse = probeResponse
         self.userCallResponses = userCallResponses
+        self.requiresNumericRequestIDs = requiresNumericRequestIDs
     }
 }
 
@@ -5645,6 +5675,9 @@ private actor ScriptedDocumentationSession: UpstreamSession {
             return .accepted
         }
         guard let requestID = object["id"] else {
+            return .accepted
+        }
+        if plan.requiresNumericRequestIDs, !(requestID is NSNumber) {
             return .accepted
         }
 
