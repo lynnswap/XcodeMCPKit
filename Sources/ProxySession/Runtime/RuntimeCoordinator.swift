@@ -64,6 +64,7 @@ package protocol RuntimeCoordinating: Sendable {
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> Data
+    func hasDocumentationProvider() -> Bool
     func invalidateDocumentationProvider(reason: String) async
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
@@ -109,6 +110,10 @@ package protocol RuntimeCoordinating: Sendable {
 }
 
 extension RuntimeCoordinating {
+    package func hasDocumentationProvider() -> Bool {
+        false
+    }
+
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
@@ -832,6 +837,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
         }
         return result.data
+    }
+
+    package func hasDocumentationProvider() -> Bool {
+        documentationProviderManager != nil
     }
 
     private func documentationToolListUpdate(

@@ -214,6 +214,7 @@ package struct LocalMCPResponder {
             let params = object["params"] as? [String: Any],
             let toolName = params["name"] as? String,
             toolName == DocumentationToolCatalog.toolName,
+            sessionManager.hasDocumentationProvider(),
             disabledToolNames.contains(toolName) == false
         {
             if headerSessionExists == false {

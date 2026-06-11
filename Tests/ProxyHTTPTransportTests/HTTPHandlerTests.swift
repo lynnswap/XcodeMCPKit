@@ -1663,6 +1663,113 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpDocumentationSearchFallsThroughWhenNoDocumentationProviderExists() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "DocumentationSearch")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "{\"answer\":\"upstream-docs\"}"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-docs-fallthrough",
+                payload: toolsCallPayload(
+                    id: 62,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "hello",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func httpBatchDocumentationSearchFallsThroughWhenNoDocumentationProviderExists() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: toolName == "DocumentationSearch"
+                            ? "{\"answer\":\"upstream-docs\"}"
+                            : "other-tool-result"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-docs-batch-fallthrough",
+                payload: [
+                    toolsCallPayload(
+                        id: 63,
+                        name: "DocumentationSearch",
+                        arguments: [
+                            "query": "hello",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 64,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 63 }
+            let docsResult = docs?["result"] as? [String: Any]
+            let docsContent = docsResult?["content"] as? [[String: Any]]
+            #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 64 }
+            let otherResult = other?["result"] as? [String: Any]
+            let otherContent = otherResult?["content"] as? [[String: Any]]
+            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+            #expect(sessionManager.sentToolNames() == ["DocumentationSearch", "OtherAllowedTool"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpBatchRoutesDocumentationSearchThroughProviderAndForwardsOtherCalls() async throws {
         let config = makeConfig(requestTimeout: 2)
         let documentationRequests = NIOLockedValueBox<[String]>([])
@@ -6050,6 +6157,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             throw UpstreamSlotAcquisitionError.unavailable
         }
         return try documentationSearchResponder(requestData)
+    }
+
+    func hasDocumentationProvider() -> Bool {
+        documentationSearchResponder != nil
     }
 
     func chooseUpstreamIndex() -> Int? {

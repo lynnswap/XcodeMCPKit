@@ -436,6 +436,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
+    func hasDocumentationProvider() -> Bool { false }
+
     func chooseUpstreamIndex() -> Int? { nil }
 
     func enqueueOnUpstreamSlot<Output>(
