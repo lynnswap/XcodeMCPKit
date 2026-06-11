@@ -147,6 +147,10 @@ struct RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) != nil)
 
+        config.disabledToolNames = [DocumentationToolCatalog.toolName]
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+
+        config.disabledToolNames = []
         config.upstreamArgs = ["--sdk", "macosx", "swift"]
         #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
 

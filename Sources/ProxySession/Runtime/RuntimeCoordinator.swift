@@ -241,6 +241,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package static func makeDefaultDocumentationProviderManager(
         config: ProxyConfig
     ) -> (any DocumentationProviderManaging)? {
+        guard config.disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+            return nil
+        }
         guard isDefaultXcrunMCPBridgeInvocation(config: config) else {
             return nil
         }
