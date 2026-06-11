@@ -1744,6 +1744,82 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpBatchToolsListUsesLocalToolSurfaceAndForwardsOtherCalls() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "OtherAllowedTool")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "other-tool-result"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [
+                    [
+                        "name": "DocumentationSearch",
+                        "description": "docs provider",
+                    ],
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])!
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-tools-list-batch-local",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 731,
+                        "method": "tools/list",
+                    ],
+                    toolsCallPayload(
+                        id: 732,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+
+            let toolsList = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 731 }
+            let toolsResult = toolsList?["result"] as? [String: Any]
+            let tools = try #require(toolsResult?["tools"] as? [[String: Any]])
+            #expect(tools.map { $0["name"] as? String }.contains("DocumentationSearch"))
+
+            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 732 }
+            let otherResult = other?["result"] as? [String: Any]
+            let otherContent = otherResult?["content"] as? [[String: Any]]
+            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+
+            #expect(sessionManager.sentMethods() == ["tools/call"])
+            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpBatchDocumentationSearchSharesSingleDeadline() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let documentationRequests = NIOLockedValueBox<[String]>([])

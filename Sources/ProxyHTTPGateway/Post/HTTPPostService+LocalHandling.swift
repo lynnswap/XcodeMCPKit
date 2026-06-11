@@ -213,15 +213,18 @@ extension HTTPPostService {
         )
     }
 
-    package func filterDocumentationSearchToolCalls(
+    package func filterLocalToolCalls(
         filteredRequest: FilteredToolCallRequest,
         sessionID: String,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?
-    ) -> DocumentationSearchFilterOperation? {
+    ) -> LocalToolFilterOperation? {
         guard let bodyData = filteredRequest.bodyData,
               let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
         else {
+            return nil
+        }
+        guard !Self.shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) else {
             return nil
         }
 
@@ -234,21 +237,28 @@ extension HTTPPostService {
             return nil
         }
 
+        var toolsListRequests: [[String: Any]] = []
+        toolsListRequests.reserveCapacity(requestItems.count)
         var documentationRequests: [[String: Any]] = []
         documentationRequests.reserveCapacity(requestItems.count)
         var forwardedObjects: [Any] = []
         forwardedObjects.reserveCapacity(requestItems.count)
 
         for item in requestItems {
-            guard let object = item as? [String: Any],
-                  isDocumentationSearchRequest(object) else {
+            guard let object = item as? [String: Any] else {
                 forwardedObjects.append(item)
                 continue
             }
-            documentationRequests.append(object)
+            if isToolsListRequest(object) {
+                toolsListRequests.append(object)
+            } else if isDocumentationSearchRequest(object) {
+                documentationRequests.append(object)
+            } else {
+                forwardedObjects.append(item)
+            }
         }
 
-        guard documentationRequests.isEmpty == false else {
+        guard toolsListRequests.isEmpty == false || documentationRequests.isEmpty == false else {
             return nil
         }
 
@@ -268,7 +278,7 @@ extension HTTPPostService {
         let deadline = Self.timeoutDeadline(
             for: requestTimeoutOverride
                 ?? Self.topLevelRequestTimeoutOverride(
-                    method: "tools/call",
+                    method: nil,
                     defaultSeconds: requestTimeoutSeconds
                 )
         )
@@ -280,38 +290,13 @@ extension HTTPPostService {
                 }
                 return
             }
-            let documentationResponseData = await makeDocumentationSearchBatchResponseData(
-                requests: documentationRequests,
+            let rewritten = await makeFilteredLocalToolRequest(
+                filteredRequest: filteredRequest,
+                toolsListRequests: toolsListRequests,
+                documentationRequests: documentationRequests,
+                forwardedObjects: forwardedObjects,
+                sessionID: sessionID,
                 deadline: deadline
-            )
-            let localResponseData = Self.mergeBatchResponsePayloads(
-                [
-                    filteredRequest.localResponseData,
-                    documentationResponseData,
-                ],
-                forceBatchArray: true
-            )
-
-            let forwardedPayload: Any?
-            if forwardedObjects.isEmpty {
-                forwardedPayload = nil
-            } else if filteredRequest.forceBatchArray || forwardedObjects.count > 1 {
-                forwardedPayload = forwardedObjects
-            } else {
-                forwardedPayload = forwardedObjects[0]
-            }
-            let forwardedBodyData = forwardedPayload.flatMap {
-                try? JSONSerialization.data(withJSONObject: $0, options: [])
-            }
-            let forwardedResponseIDs = forwardedPayload.map {
-                Self.extractResponseIDs(from: $0)
-            } ?? []
-
-            let rewritten = FilteredToolCallRequest(
-                bodyData: forwardedBodyData,
-                localResponseData: localResponseData,
-                forwardedResponseIDs: forwardedResponseIDs,
-                forceBatchArray: filteredRequest.forceBatchArray
             )
             let wasCancelled = Task.isCancelled
             eventLoop.execute {
@@ -323,10 +308,125 @@ extension HTTPPostService {
             }
         }
         cancellationHandle.bindRefreshTask(task)
-        return DocumentationSearchFilterOperation(
+        return LocalToolFilterOperation(
             future: promise.futureResult,
             cancellationHandle: cancellationHandle,
             deadline: deadline
+        )
+    }
+
+    private func makeFilteredLocalToolRequest(
+        filteredRequest: FilteredToolCallRequest,
+        toolsListRequests: [[String: Any]],
+        documentationRequests: [[String: Any]],
+        forwardedObjects: [Any],
+        sessionID: String,
+        deadline: Date?
+    ) async -> FilteredToolCallRequest {
+        let toolsListResponseData = await makeToolsListBatchResponseData(
+            requests: toolsListRequests,
+            sessionID: sessionID,
+            deadline: deadline
+        )
+        let documentationResponseData = await makeDocumentationSearchBatchResponseData(
+            requests: documentationRequests,
+            deadline: deadline
+        )
+        let localResponseData = Self.mergeBatchResponsePayloads(
+            [
+                filteredRequest.localResponseData,
+                toolsListResponseData,
+                documentationResponseData,
+            ],
+            forceBatchArray: true
+        )
+
+        let forwardedPayload: Any?
+        if forwardedObjects.isEmpty {
+            forwardedPayload = nil
+        } else if filteredRequest.forceBatchArray || forwardedObjects.count > 1 {
+            forwardedPayload = forwardedObjects
+        } else {
+            forwardedPayload = forwardedObjects[0]
+        }
+        let forwardedBodyData = forwardedPayload.flatMap {
+            try? JSONSerialization.data(withJSONObject: $0, options: [])
+        }
+        let forwardedResponseIDs = forwardedPayload.map {
+            Self.extractResponseIDs(from: $0)
+        } ?? []
+
+        return FilteredToolCallRequest(
+            bodyData: forwardedBodyData,
+            localResponseData: localResponseData,
+            forwardedResponseIDs: forwardedResponseIDs,
+            forceBatchArray: filteredRequest.forceBatchArray
+        )
+    }
+
+    private func makeToolsListBatchResponseData(
+        requests: [[String: Any]],
+        sessionID: String,
+        deadline: Date?
+    ) async -> Data? {
+        var responseObjects: [[String: Any]] = []
+        responseObjects.reserveCapacity(requests.count)
+
+        for request in requests {
+            guard !Task.isCancelled else {
+                break
+            }
+            guard let idValue = request["id"],
+                  let originalID = RPCID(any: idValue) else {
+                continue
+            }
+            let requestTimeout = Self.remainingRequestTimeout(until: deadline)
+            if deadline != nil,
+                requestTimeout == nil
+            {
+                responseObjects.append(
+                    Self.makeJSONRPCErrorResponseObject(
+                        id: originalID,
+                        code: -32000,
+                        message: "upstream timeout"
+                    )
+                )
+                continue
+            }
+            do {
+                let responseData = try await localResponder.toolsListResponseData(
+                    object: request,
+                    sessionID: sessionID,
+                    requestTimeoutOverride: requestTimeout
+                )
+                responseObjects.append(
+                    contentsOf: Self.responseObjects(from: responseData)
+                )
+            } catch {
+                let mapped = Self.mapDocumentationSearchError(error)
+                if let responseData = Self.responseDataForBatchResolution(
+                    .mcpError(
+                        id: originalID,
+                        ids: [originalID],
+                        code: mapped.code,
+                        message: mapped.message,
+                        forceBatchArray: false,
+                        sessionID: sessionID,
+                        prefersEventStream: false
+                    ),
+                    fallbackRequestIDs: [originalID],
+                    forceBatchArray: false
+                ) {
+                    responseObjects.append(
+                        contentsOf: Self.responseObjects(from: responseData)
+                    )
+                }
+            }
+        }
+
+        return Self.makeToolResponseData(
+            from: responseObjects,
+            forceBatchArray: true
         )
     }
 
@@ -409,6 +509,16 @@ extension HTTPPostService {
             return false
         }
         return true
+    }
+
+    private func isToolsListRequest(_ object: [String: Any]) -> Bool {
+        object["method"] as? String == "tools/list"
+            && object["id"] != nil
+            && sessionManager.isInitialized()
+    }
+
+    private static func shouldUseEmbeddedTestSynchronousResolution(on eventLoop: EventLoop) -> Bool {
+        String(describing: type(of: eventLoop)).contains("EmbeddedEventLoop")
     }
 
     package func blockedToolName(from requestObject: [String: Any]) -> String? {

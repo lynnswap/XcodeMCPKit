@@ -15,7 +15,7 @@ package final class HTTPPostService: Sendable {
         let forceBatchArray: Bool
     }
 
-    package struct DocumentationSearchFilterOperation {
+    package struct LocalToolFilterOperation {
         let future: EventLoopFuture<FilteredToolCallRequest>
         let cancellationHandle: HTTPPostCancellationHandle
         let deadline: Date?
@@ -186,16 +186,16 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let documentationFilter = filterDocumentationSearchToolCalls(
+        if let localToolFilter = filterLocalToolCalls(
             filteredRequest: filteredRequest,
             sessionID: sessionID,
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride
         ) {
             if let parentCancellationHandle,
-                parentCancellationHandle.bindChildHandle(documentationFilter.cancellationHandle) == false
+                parentCancellationHandle.bindChildHandle(localToolFilter.cancellationHandle) == false
             {
-                documentationFilter.cancellationHandle.cancel(using: sessionManager)
+                localToolFilter.cancellationHandle.cancel(using: sessionManager)
                 return HTTPPostOperation(
                     future: eventLoop.makeSucceededFuture(
                         .empty(status: .accepted, sessionID: sessionID)
@@ -204,9 +204,9 @@ package final class HTTPPostService: Sendable {
                 )
             }
 
-            let future = documentationFilter.future.flatMap { rewrittenRequest in
-                let forwardingTimeout = Self.remainingRequestTimeout(until: documentationFilter.deadline)
-                if documentationFilter.deadline != nil,
+            let future = localToolFilter.future.flatMap { rewrittenRequest in
+                let forwardingTimeout = Self.remainingRequestTimeout(until: localToolFilter.deadline)
+                if localToolFilter.deadline != nil,
                     forwardingTimeout == nil,
                     rewrittenRequest.bodyData != nil
                 {
@@ -232,17 +232,17 @@ package final class HTTPPostService: Sendable {
                     prefersEventStream: prefersEventStream,
                     eventLoop: eventLoop,
                     requestTimeoutOverride: forwardingTimeout,
-                    parentCancellationHandle: documentationFilter.cancellationHandle
+                    parentCancellationHandle: localToolFilter.cancellationHandle
                 ).future
             }
             future.whenComplete { result in
                 guard (try? result.get()) != nil else { return }
-                documentationFilter.cancellationHandle.markCompleted()
-                self.sessionManager.completeRequestLease(documentationFilter.cancellationHandle.leaseID)
+                localToolFilter.cancellationHandle.markCompleted()
+                self.sessionManager.completeRequestLease(localToolFilter.cancellationHandle.leaseID)
             }
             return HTTPPostOperation(
                 future: future,
-                cancellationHandle: documentationFilter.cancellationHandle
+                cancellationHandle: localToolFilter.cancellationHandle
             )
         }
 

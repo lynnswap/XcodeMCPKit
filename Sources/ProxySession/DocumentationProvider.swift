@@ -525,6 +525,29 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let task: Task<CandidateProfile?, Never>
     }
 
+    private enum ProviderSelectionWaitResult: Sendable {
+        case completed(CandidateProfile?)
+        case timedOut
+    }
+
+    private final class ProviderSelectionWaitState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didResume = false
+
+        func resume(
+            _ result: ProviderSelectionWaitResult,
+            continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didResume else {
+                return
+            }
+            didResume = true
+            continuation.resume(returning: result)
+        }
+    }
+
     private let discovery: any XcodeTargetDiscovering
     private let sessionFactory: any DocumentationProviderSessionMaking
     private let logger: Logger
@@ -654,17 +677,33 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return activeProvider
         }
         let selection: ProviderSelection
+        let didStartSelection: Bool
         if let providerSelection {
             selection = providerSelection
+            didStartSelection = false
         } else {
             selection = ProviderSelection(
                 id: UUID(),
                 task: Task { await self.selectProvider(requestTimeout: requestTimeout) }
             )
             providerSelection = selection
+            didStartSelection = true
         }
 
-        let selected = await selection.task.value
+        let waitResult = await waitForSelection(selection, requestTimeout: requestTimeout)
+        let selected: CandidateProfile?
+        switch waitResult {
+        case .completed(let profile):
+            selected = profile
+        case .timedOut:
+            if didStartSelection,
+                providerSelection?.id == selection.id
+            {
+                providerSelection = nil
+                selection.task.cancel()
+            }
+            return nil
+        }
         let selectionIsCurrent = providerSelection?.id == selection.id
         if selectionIsCurrent {
             providerSelection = nil
@@ -689,6 +728,30 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let provider = ActiveProvider(profile: selected)
         activeProvider = provider
         return provider
+    }
+
+    private func waitForSelection(
+        _ selection: ProviderSelection,
+        requestTimeout: TimeAmount?
+    ) async -> ProviderSelectionWaitResult {
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return .completed(await selection.task.value)
+        }
+
+        return await withCheckedContinuation { continuation in
+            let state = ProviderSelectionWaitState()
+            Task.detached {
+                let profile = await selection.task.value
+                state.resume(
+                    .completed(profile),
+                    continuation: continuation
+                )
+            }
+            Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                state.resume(.timedOut, continuation: continuation)
+            }
+        }
     }
 
     private func invalidate(_ provider: ActiveProvider, reason _: String) async {

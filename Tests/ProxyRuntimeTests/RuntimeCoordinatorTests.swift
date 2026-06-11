@@ -389,6 +389,45 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
+    @Test func documentationProviderManagerBoundsReusedProviderSelectionByCallerTimeout() async throws {
+        let target = documentationProviderTarget(processID: 122)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 500_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        async let longUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
+        try await spinUntil("waiting for provider selection to start") {
+            await factory.startAttempts() == [target.processID]
+        }
+
+        let shortStart = Date()
+        let shortUpdate = await manager.toolListUpdate(requestTimeout: .milliseconds(1))
+        #expect(Date().timeIntervalSince(shortStart) < 0.1)
+        if case .unavailable = shortUpdate {
+        } else {
+            Issue.record("short tools/list should time out while reusing provider selection")
+        }
+
+        let finalUpdate = await longUpdate
+        let result = DocumentationToolCatalog.applying(finalUpdate, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
     @Test func documentationProviderManagerChecksAllRunningXcodeTargetsBeforePublishingDescriptor() async throws {
         let xcode26 = documentationProviderTarget(processID: 201)
         let xcode27 = documentationProviderTarget(processID: 202)
