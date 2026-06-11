@@ -10,7 +10,7 @@ extension RuntimeCoordinator {
             applyBackoff: applyBackoff
         ) { [weak self] in
             guard let self else { return }
-            self.startAllUpstreamSlots()
+            self.startPrimaryUpstreamSlot()
             self.startEagerInitializePrimaryWhenReady()
         }
     }
@@ -42,7 +42,7 @@ extension RuntimeCoordinator {
                 self.clearPrimaryInitializeReadinessWaiter(token)
                 guard !token.isCancelled else { return }
             }
-            self.startAllUpstreamSlots()
+            self.startPrimaryUpstreamSlot()
             self.sendPrimaryInitializeRequestIfStillPending()
         }
     }

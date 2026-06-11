@@ -190,6 +190,32 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(decision?.defaultButtonTitle == "allow")
     }
 
+    @Test func matcherMatchesDeveloperSystemPolicyDialogWithTitleNameAndBodyPID() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode.DeveloperSystemPolicyService",
+            title: #"Allow "XcodeMCPKit" to access Xcode?"#,
+            textValues: [
+                "The agent wants to use Xcode's tools to perform actions like building, testing, or modifying code.",
+                "Path: /Users/kn/Dev/XcodeMCPKit/.build/arm64-apple-macosx/debug/xcode-mcp-proxy-server",
+                "PID: 23474",
+                "Signed by: xcode-mcp-proxy-server-55554944e4908a045cea3fc2aa2f6e03b9059810",
+            ],
+            defaultButton: makeButton(title: "Allow")
+        )
+
+        let decision = XcodePermissionDialogMatcher.decision(
+            for: snapshot,
+            processID: 1036,
+            agentPathCandidates: [
+                "/Users/kn/Dev/XcodeMCPKit/.build/arm64-apple-macosx/debug/xcode-mcp-proxy-server",
+            ],
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [23474]
+        )
+
+        #expect(decision?.defaultButtonTitle == "allow")
+    }
+
     @Test func matcherMatchesWhenAnyPIDCandidateSharesAWindowWithAssistantName() {
         let snapshot = makeSnapshot(
             processBundleIdentifier: "com.apple.dt.Xcode",

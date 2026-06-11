@@ -461,6 +461,30 @@ struct RuntimeCoordinatorTests {
         #expect(await upstream.startCount() > 0)
     }
 
+    @Test func readinessGateStartsOnlyPrimaryUpstreamBeforePrimaryAttachCompletes() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+        )
+        defer { manager.shutdownAndWait() }
+
+        await readiness.setReady(true)
+        let sent = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: sent) == "initialize")
+        #expect(await upstream0.startCount() > 0)
+        #expect(await upstream1.startCount() == 0)
+        #expect(await upstream1.sentCount() == 0)
+    }
+
     @Test func readinessGateLaunchesXcodeWhenUnavailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

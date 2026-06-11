@@ -64,6 +64,13 @@ extension RuntimeCoordinator {
         }
     }
 
+    func startPrimaryUpstreamSlot() {
+        guard let primary = upstreams.first else { return }
+        Task {
+            await primary.start()
+        }
+    }
+
     func noteUpstreamInitializationSucceeded() {
         guard upstreamReadinessGate.isEnabled else { return }
         Task { [upstreamReadinessCoordinator] in
