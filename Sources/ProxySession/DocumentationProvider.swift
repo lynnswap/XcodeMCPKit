@@ -616,7 +616,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 requestData,
                 timeout: callTimeout
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             await invalidate(provider, reason: "documentation_provider_call_failed")
             let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
             guard replacementSelectionTimeout?.nanoseconds != 0 else {
@@ -643,6 +646,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
 
         await invalidate(provider, reason: "documentation_search_not_enabled")
+        try Task.checkCancellation()
         let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
         guard replacementSelectionTimeout?.nanoseconds != 0,
               let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
@@ -664,7 +668,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 data: retryResponse,
                 didInvalidateProvider: true
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
         }
     }

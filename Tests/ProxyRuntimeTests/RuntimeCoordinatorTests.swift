@@ -674,6 +674,47 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [xcode.processID])
     }
 
+    @Test func documentationProviderManagerKeepsProviderWhenDocumentationCallIsCancelled() async throws {
+        let xcode = documentationProviderTarget(processID: 302)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.hang]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
+            sessionFactory: factory
+        )
+        let task = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 92, query: "UIView"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let didStart = await waitUntil(timeout: .seconds(1)) {
+            await factory.startedPIDs() == [xcode.processID]
+        }
+        #expect(didStart)
+
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [xcode.processID])
+    }
+
     @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
