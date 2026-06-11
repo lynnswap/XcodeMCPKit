@@ -800,6 +800,42 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
     }
 
+    @Test func documentationProviderManagerContinuesAfterCandidateProbeTimesOut() async throws {
+        let hung = documentationProviderTarget(processID: 205)
+        let working = documentationProviderTarget(processID: 206)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                hung.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .hang
+                    ),
+                ],
+                working.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [hung, working]),
+            sessionFactory: factory,
+            providerSelectionTimeout: .milliseconds(50)
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [hung.processID, working.processID])
+    }
+
     @Test func documentationProviderManagerHonorsPinnedProcessID() async throws {
         let pinned = documentationProviderTarget(processID: 203)
         let other = documentationProviderTarget(processID: 204)
@@ -995,6 +1031,153 @@ struct RuntimeCoordinatorTests {
             to: try jsonValue(["tools": []])
         )
         #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startAttempts() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerInvalidatesReplacementWhenRetryTransportFails() async throws {
+        let xcode26 = documentationProviderTarget(processID: 225)
+        let xcode27 = documentationProviderTarget(processID: 226)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+            Issue.record("DocumentationSearch should report an invalidated retry failure")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.providerIsActive == false)
+            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        }
+
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerInvalidatesReplacementWhenNotEnabledRetryTransportFails()
+        async throws
+    {
+        let xcode26 = documentationProviderTarget(processID: 227)
+        let xcode27 = documentationProviderTarget(processID: 228)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.notEnabled]
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 78, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+            Issue.record("DocumentationSearch should report an invalidated not-enabled retry failure")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.providerIsActive == false)
+            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        }
+
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
         #expect(await factory.startAttempts() == [
             xcode26.processID,
             xcode27.processID,

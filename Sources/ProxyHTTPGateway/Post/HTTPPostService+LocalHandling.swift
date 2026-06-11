@@ -237,6 +237,12 @@ extension HTTPPostService {
             return nil
         }
 
+        let hasLocalToolsListRequest = requestItems.contains { item in
+            guard let object = item as? [String: Any] else {
+                return false
+            }
+            return isToolsListRequest(object)
+        }
         var toolsListRequests: [[String: Any]] = []
         toolsListRequests.reserveCapacity(requestItems.count)
         var documentationRequests: [[String: Any]] = []
@@ -251,7 +257,10 @@ extension HTTPPostService {
             }
             if isToolsListRequest(object) {
                 toolsListRequests.append(object)
-            } else if isDocumentationSearchRequest(object) {
+            } else if isDocumentationSearchRequest(
+                object,
+                allowInactiveProvider: hasLocalToolsListRequest
+            ) {
                 documentationRequests.append(object)
             } else {
                 forwardedObjects.append(item)
@@ -510,8 +519,15 @@ extension HTTPPostService {
         )
     }
 
-    private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
-        guard sessionManager.hasActiveDocumentationProvider() else {
+    private func isDocumentationSearchRequest(
+        _ object: [String: Any],
+        allowInactiveProvider: Bool = false
+    ) -> Bool {
+        let hasRoute =
+            allowInactiveProvider
+            ? sessionManager.hasDocumentationProvider()
+            : sessionManager.hasActiveDocumentationProvider()
+        guard hasRoute else {
             return false
         }
         guard object["method"] as? String == "tools/call",

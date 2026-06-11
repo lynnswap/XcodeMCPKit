@@ -678,7 +678,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 throw CancellationError()
             } catch {
                 try Task.checkCancellation()
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: true)
+                await invalidate(replacement, reason: "documentation_provider_retry_call_failed")
+                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
             }
             if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
                 await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
@@ -722,7 +723,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             throw CancellationError()
         } catch {
             try Task.checkCancellation()
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
+            await invalidate(replacement, reason: "documentation_search_retry_call_failed")
+            throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
         }
     }
 
@@ -870,16 +872,19 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             ]
         )
         var profiles: [CandidateProfile] = []
-        for target in targets {
+        for (index, target) in targets.enumerated() {
             guard !Task.isCancelled, !isShutdown else {
                 break
             }
-            let candidateTimeout = Self.requestTimeout(until: selectionDeadline)
+            let candidateTimeout = Self.candidateProbeTimeout(
+                until: selectionDeadline,
+                remainingCandidateCount: targets.count - index
+            )
             if candidateTimeout?.nanoseconds == 0 {
                 break
             }
             do {
-                let profile = try await probe(target: target, requestTimeout: candidateTimeout)
+                let profile = try await boundedProbe(target: target, requestTimeout: candidateTimeout)
                 guard !Task.isCancelled, !isShutdown else {
                     await profile.connection.stop()
                     break
@@ -929,6 +934,34 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             ]
         )
         return selected
+    }
+
+    private func boundedProbe(
+        target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?
+    ) async throws -> CandidateProfile {
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return try await probe(target: target, requestTimeout: requestTimeout)
+        }
+        return try await withThrowingTaskGroup(of: CandidateProfile.self) { group in
+            group.addTask {
+                try await self.probe(target: target, requestTimeout: requestTimeout)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                throw TimeoutError()
+            }
+            do {
+                guard let result = try await group.next() else {
+                    throw UpstreamSlotAcquisitionError.unavailable
+                }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
     }
 
     private func probe(
@@ -1118,5 +1151,19 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         let remaining = deadlineUptimeNs - now
         return .nanoseconds(Int64(min(remaining, UInt64(Int64.max))))
+    }
+
+    private static func candidateProbeTimeout(
+        until deadlineUptimeNs: UInt64?,
+        remainingCandidateCount: Int
+    ) -> TimeAmount? {
+        guard let remaining = requestTimeout(until: deadlineUptimeNs) else {
+            return nil
+        }
+        guard remaining.nanoseconds > 0 else {
+            return .nanoseconds(0)
+        }
+        let divisor = max(Int64(remainingCandidateCount), 1)
+        return .nanoseconds(max(remaining.nanoseconds / divisor, 1))
     }
 }
