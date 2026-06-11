@@ -250,6 +250,37 @@ extension HTTPPostService {
             ?? responseData
     }
 
+    package static func mergeLocalToolResponseData(
+        _ localResponseData: Data?,
+        into resolution: HTTPPostResolution,
+        fallbackRequestIDs: [RPCID],
+        forceBatchArray: Bool,
+        sessionID: String,
+        prefersEventStream: Bool
+    ) -> HTTPPostResolution {
+        guard localResponseData != nil else {
+            return resolution
+        }
+        let forwardedResponseData = responseDataForBatchResolution(
+            resolution,
+            fallbackRequestIDs: fallbackRequestIDs,
+            forceBatchArray: forceBatchArray
+        )
+        let mergedData = mergeBatchResponsePayloads(
+            [
+                forwardedResponseData,
+                localResponseData,
+            ],
+            forceBatchArray: forceBatchArray
+        )
+        return makeLocalResponseResolution(
+            responseData: mergedData,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream,
+            emptyStatus: .accepted
+        )
+    }
+
     package static func mergeBatchResponsePayloads(
         _ payloads: [Data?],
         forceBatchArray: Bool

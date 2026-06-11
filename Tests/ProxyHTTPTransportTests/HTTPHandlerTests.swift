@@ -1744,6 +1744,100 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpBatchForwardsOtherCallsWhileDocumentationSearchIsStillResolving() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let documentationStarted = NIOLockedValueBox(false)
+        let releaseDocumentation = DispatchSemaphore(value: 0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "OtherAllowedTool")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "other-tool-result"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                documentationStarted.withLockedValue { $0 = true }
+                _ = releaseDocumentation.wait(timeout: .now() + 2)
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"docs\"}"
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+        defer {
+            releaseDocumentation.signal()
+        }
+
+        do {
+            let postTask = Task {
+                try await postHTTPAnyData(
+                    url: server.url,
+                    sessionID: "session-docs-batch-forwarding-not-blocked",
+                    payload: [
+                        toolsCallPayload(
+                            id: 721,
+                            name: "DocumentationSearch",
+                            arguments: [
+                                "query": "UIView animate",
+                            ]
+                        ),
+                        toolsCallPayload(
+                            id: 722,
+                            name: "OtherAllowedTool",
+                            arguments: [:]
+                        ),
+                    ]
+                )
+            }
+
+            let didStartDocumentation = await waitUntil(timeout: .seconds(1)) {
+                documentationStarted.withLockedValue { $0 }
+            }
+            #expect(didStartDocumentation)
+            let didForwardOtherTool = await waitUntil(timeout: .seconds(1)) {
+                sessionManager.sentToolNames() == ["OtherAllowedTool"]
+            }
+            #expect(didForwardOtherTool)
+            releaseDocumentation.signal()
+
+            let rawResponse = try await postTask.value
+            #expect(rawResponse.statusCode == 200)
+            let bodyData = try JSONSerialization.jsonObject(
+                with: rawResponse.bodyData,
+                options: []
+            )
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 721 }
+            let docsResult = docs?["result"] as? [String: Any]
+            let structuredContent = docsResult?["structuredContent"] as? [String: Any]
+            #expect(structuredContent?["answer"] as? String == "docs")
+            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 722 }
+            let otherResult = other?["result"] as? [String: Any]
+            let otherContent = otherResult?["content"] as? [[String: Any]]
+            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpBatchToolsListUsesLocalToolSurfaceAndForwardsOtherCalls() async throws {
         let config = makeConfig(requestTimeout: 2)
         let sessionManager = TestRuntimeCoordinator(
@@ -1899,11 +1993,12 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
-                Issue.record("unexpected forwarded request: \(method) \(toolName ?? "")")
+                #expect(method == "tools/call")
+                #expect(toolName == "OtherAllowedTool")
                 return .immediate(
                     try makeToolSuccessResponse(
                         id: originalID,
-                        text: "unexpected"
+                        text: "other-tool-result"
                     )
                 )
             },
@@ -1971,7 +2066,7 @@ struct HTTPHandlerTests {
                 sessionManager.leaseDebugSnapshots().first { $0.state == .abandoned }
             )
             #expect(abandonedLease.releaseReason == "clientDisconnected")
-            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
             try await group.shutdownGracefully()
         } catch {
             documentationRelease.signal()
@@ -6690,6 +6785,28 @@ private func postHTTPAnyJSON(
         }
         let object = try JSONSerialization.jsonObject(with: responseData, options: [])
         return (httpResponse, object)
+    }
+}
+
+private func postHTTPAnyData(
+    url: URL,
+    sessionID: String,
+    payload: [Any]
+) async throws -> RawHTTPResponse {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = data
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+
+    return try await withTestURLSession { session in
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HTTPTestError.missingResponseHead
+        }
+        return RawHTTPResponse(statusCode: httpResponse.statusCode, bodyData: responseData)
     }
 }
 

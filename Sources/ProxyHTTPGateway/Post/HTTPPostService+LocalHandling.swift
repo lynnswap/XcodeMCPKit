@@ -282,7 +282,11 @@ extension HTTPPostService {
                     defaultSeconds: requestTimeoutSeconds
                 )
         )
-        let promise = eventLoop.makePromise(of: FilteredToolCallRequest.self)
+        let forwardedRequest = makeForwardedLocalToolRequest(
+            forwardedObjects: forwardedObjects,
+            forceBatchArray: filteredRequest.forceBatchArray
+        )
+        let promise = eventLoop.makePromise(of: Data?.self)
         let task = Task { [self] in
             guard !Task.isCancelled else {
                 eventLoop.execute {
@@ -290,11 +294,10 @@ extension HTTPPostService {
                 }
                 return
             }
-            let rewritten = await makeFilteredLocalToolRequest(
-                filteredRequest: filteredRequest,
+            let localResponseData = await makeLocalToolBatchResponseData(
+                initialLocalResponseData: filteredRequest.localResponseData,
                 toolsListRequests: toolsListRequests,
                 documentationRequests: documentationRequests,
-                forwardedObjects: forwardedObjects,
                 sessionID: sessionID,
                 deadline: deadline
             )
@@ -304,47 +307,26 @@ extension HTTPPostService {
                     promise.fail(CancellationError())
                     return
                 }
-                promise.succeed(rewritten)
+                promise.succeed(localResponseData)
             }
         }
         cancellationHandle.bindRefreshTask(task)
         return LocalToolFilterOperation(
-            future: promise.futureResult,
+            localResponseFuture: promise.futureResult,
+            forwardedRequest: forwardedRequest,
             cancellationHandle: cancellationHandle,
             deadline: deadline
         )
     }
 
-    private func makeFilteredLocalToolRequest(
-        filteredRequest: FilteredToolCallRequest,
-        toolsListRequests: [[String: Any]],
-        documentationRequests: [[String: Any]],
+    private func makeForwardedLocalToolRequest(
         forwardedObjects: [Any],
-        sessionID: String,
-        deadline: Date?
-    ) async -> FilteredToolCallRequest {
-        let toolsListResponseData = await makeToolsListBatchResponseData(
-            requests: toolsListRequests,
-            sessionID: sessionID,
-            deadline: deadline
-        )
-        let documentationResponseData = await makeDocumentationSearchBatchResponseData(
-            requests: documentationRequests,
-            deadline: deadline
-        )
-        let localResponseData = Self.mergeBatchResponsePayloads(
-            [
-                filteredRequest.localResponseData,
-                toolsListResponseData,
-                documentationResponseData,
-            ],
-            forceBatchArray: true
-        )
-
+        forceBatchArray: Bool
+    ) -> FilteredToolCallRequest {
         let forwardedPayload: Any?
         if forwardedObjects.isEmpty {
             forwardedPayload = nil
-        } else if filteredRequest.forceBatchArray || forwardedObjects.count > 1 {
+        } else if forceBatchArray || forwardedObjects.count > 1 {
             forwardedPayload = forwardedObjects
         } else {
             forwardedPayload = forwardedObjects[0]
@@ -358,10 +340,37 @@ extension HTTPPostService {
 
         return FilteredToolCallRequest(
             bodyData: forwardedBodyData,
-            localResponseData: localResponseData,
+            localResponseData: nil,
             forwardedResponseIDs: forwardedResponseIDs,
-            forceBatchArray: filteredRequest.forceBatchArray
+            forceBatchArray: forceBatchArray
         )
+    }
+
+    private func makeLocalToolBatchResponseData(
+        initialLocalResponseData: Data?,
+        toolsListRequests: [[String: Any]],
+        documentationRequests: [[String: Any]],
+        sessionID: String,
+        deadline: Date?
+    ) async -> Data? {
+        let toolsListResponseData = await makeToolsListBatchResponseData(
+            requests: toolsListRequests,
+            sessionID: sessionID,
+            deadline: deadline
+        )
+        let documentationResponseData = await makeDocumentationSearchBatchResponseData(
+            requests: documentationRequests,
+            deadline: deadline
+        )
+        let localResponseData = Self.mergeBatchResponsePayloads(
+            [
+                initialLocalResponseData,
+                toolsListResponseData,
+                documentationResponseData,
+            ],
+            forceBatchArray: true
+        )
+        return localResponseData
     }
 
     private func makeToolsListBatchResponseData(

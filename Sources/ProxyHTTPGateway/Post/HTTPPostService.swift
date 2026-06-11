@@ -16,7 +16,8 @@ package final class HTTPPostService: Sendable {
     }
 
     package struct LocalToolFilterOperation {
-        let future: EventLoopFuture<FilteredToolCallRequest>
+        let localResponseFuture: EventLoopFuture<Data?>
+        let forwardedRequest: FilteredToolCallRequest
         let cancellationHandle: HTTPPostCancellationHandle
         let deadline: Date?
     }
@@ -204,28 +205,26 @@ package final class HTTPPostService: Sendable {
                 )
             }
 
-            let future = localToolFilter.future.flatMap { rewrittenRequest in
-                let forwardingTimeout = Self.remainingRequestTimeout(until: localToolFilter.deadline)
-                if localToolFilter.deadline != nil,
-                    forwardingTimeout == nil,
-                    rewrittenRequest.bodyData != nil
-                {
-                    return eventLoop.makeSucceededFuture(
-                        Self.makePartialBatchErrorResolution(
-                            localResponseData: rewrittenRequest.localResponseData,
-                            responseIDs: rewrittenRequest.forwardedResponseIDs,
-                            code: -32000,
-                            message: "upstream timeout",
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream,
-                            forceBatchArray: rewrittenRequest.forceBatchArray,
-                            fallbackStatus: .gatewayTimeout,
-                            fallbackBody: "upstream timeout"
-                        )
+            let forwardingTimeout = Self.remainingRequestTimeout(until: localToolFilter.deadline)
+            let forwardingFuture: EventLoopFuture<HTTPPostResolution>
+            if localToolFilter.deadline != nil,
+                forwardingTimeout == nil,
+                localToolFilter.forwardedRequest.bodyData != nil
+            {
+                forwardingFuture = eventLoop.makeSucceededFuture(
+                    .mcpError(
+                        id: nil,
+                        ids: localToolFilter.forwardedRequest.forwardedResponseIDs,
+                        code: -32000,
+                        message: "upstream timeout",
+                        forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     )
-                }
-                return self.makeForwardingOperation(
-                    filteredRequest: rewrittenRequest,
+                )
+            } else {
+                forwardingFuture = self.makeForwardingOperation(
+                    filteredRequest: localToolFilter.forwardedRequest,
                     sessionID: sessionID,
                     headerSessionID: headerSessionID,
                     requestIsBatch: requestIsBatch,
@@ -234,6 +233,18 @@ package final class HTTPPostService: Sendable {
                     requestTimeoutOverride: forwardingTimeout,
                     parentCancellationHandle: localToolFilter.cancellationHandle
                 ).future
+            }
+            let future = forwardingFuture.and(localToolFilter.localResponseFuture).map {
+                forwardingResolution,
+                localResponseData in
+                Self.mergeLocalToolResponseData(
+                    localResponseData,
+                    into: forwardingResolution,
+                    fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
+                    forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                )
             }
             future.whenComplete { result in
                 guard (try? result.get()) != nil else { return }
