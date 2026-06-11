@@ -226,7 +226,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 config: config,
                 clock: clock
             ),
-            documentationProviderManager: DocumentationProviderManager()
+            documentationProviderManager: DocumentationProviderManager(),
+            prewarmDocumentationProviderOnStartup: true
         )
     }
 
@@ -239,7 +240,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
         scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
             RuntimeScheduledTimeout)? = nil,
-        documentationProviderManager: (any DocumentationProviderManaging)? = nil
+        documentationProviderManager: (any DocumentationProviderManaging)? = nil,
+        prewarmDocumentationProviderOnStartup: Bool = false
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
@@ -399,6 +401,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         startEagerInitializePrimary()
+        if prewarmDocumentationProviderOnStartup {
+            prewarmDocumentationProvider()
+        }
     }
 
     package func session(id: String) -> SessionContext {
@@ -533,6 +538,24 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             await self?.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
                 deadlineUptimeNs: deadline
             )
+        }
+    }
+
+    package func prewarmDocumentationProvider() {
+        guard let documentationProviderManager else { return }
+        let timeoutSeconds = config.requestTimeout > 0
+            ? min(config.requestTimeout, 30)
+            : 30
+        let timeout = MCPMethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
+        Task { [documentationProviderManager, logger] in
+            logger.debug(
+                "Prewarming documentation provider",
+                metadata: [
+                    "timeout_seconds": .string("\(timeoutSeconds)"),
+                ]
+            )
+            await documentationProviderManager.prewarm(requestTimeout: timeout)
+            logger.debug("Documentation provider prewarm completed")
         }
     }
 

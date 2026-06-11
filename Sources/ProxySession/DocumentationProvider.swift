@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import Logging
 import NIO
 import ProxyCore
 import ProxyMCP
@@ -22,6 +23,7 @@ package struct DocumentationProviderCallResult: Sendable {
 }
 
 package protocol DocumentationProviderManaging: Sendable {
+    func prewarm(requestTimeout: TimeAmount?) async
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
     func callDocumentationSearch(
         requestData: Data,
@@ -33,6 +35,8 @@ package protocol DocumentationProviderManaging: Sendable {
 
 package struct DisabledDocumentationProviderManager: DocumentationProviderManaging {
     package init() {}
+
+    package func prewarm(requestTimeout _: TimeAmount?) async {}
 
     package func toolListUpdate(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
         .unchanged
@@ -517,14 +521,21 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private let discovery: any XcodeTargetDiscovering
     private let sessionFactory: any DocumentationProviderSessionMaking
+    private let logger: Logger
     private var activeProvider: ActiveProvider?
 
     package init(
         discovery: any XcodeTargetDiscovering = LiveXcodeTargetDiscovery(),
-        sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory()
+        sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
+        logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
         self.sessionFactory = sessionFactory
+        self.logger = logger
+    }
+
+    package func prewarm(requestTimeout: TimeAmount?) async {
+        _ = await toolListUpdate(requestTimeout: requestTimeout)
     }
 
     package func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
@@ -635,8 +646,16 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
         let selectionDeadline = Self.requestDeadline(for: requestTimeout)
+        let targets = discovery.runningXcodeTargets()
+        logger.debug(
+            "Selecting documentation provider from running Xcode processes",
+            metadata: [
+                "candidate_count": .string("\(targets.count)"),
+                "candidates": .string(targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
+            ]
+        )
         var profiles: [CandidateProfile] = []
-        for target in discovery.runningXcodeTargets() {
+        for target in targets {
             guard !Task.isCancelled else {
                 break
             }
@@ -650,6 +669,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             } catch is CancellationError {
                 break
             } catch {
+                logger.debug(
+                    "Documentation provider candidate rejected",
+                    metadata: [
+                        "pid": .string("\(target.processID)"),
+                        "app_path": .string(target.appPath),
+                        "error": .string(String(describing: error)),
+                    ]
+                )
                 continue
             }
         }
@@ -666,6 +693,15 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         for profile in profiles where profile.target != selected.target {
             await profile.connection.stop()
         }
+        logger.info(
+            "Selected documentation provider",
+            metadata: [
+                "pid": .string("\(selected.target.processID)"),
+                "app_path": .string(selected.target.appPath),
+                "server_version": .string(selected.serverVersion),
+                "tool_count": .string("\(selected.toolCount)"),
+            ]
+        )
         return selected
     }
 
