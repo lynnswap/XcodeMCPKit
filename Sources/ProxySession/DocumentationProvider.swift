@@ -160,6 +160,9 @@ package enum DocumentationToolCatalog {
             object["message"] as? String
         }
         texts += responseResultObjects(in: data).flatMap { object -> [String] in
+            guard object["isError"] as? Bool == true else {
+                return []
+            }
             guard let content = object["content"] as? [[String: Any]] else {
                 return []
             }

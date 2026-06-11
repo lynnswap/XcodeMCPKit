@@ -329,6 +329,62 @@ struct RuntimeCoordinatorTests {
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
     }
 
+    @Test func documentationSearchDoesNotInvalidateWhenSuccessfulAnswerMentionsNotEnabled()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let providerResponse = try makeJSONRPCResponse(
+            id: 43,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "A user may see: Tool 'DocumentationSearch' is not enabled.",
+                    ],
+                ],
+                "isError": false,
+            ]
+        )
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callResults: [
+                DocumentationProviderCallResult(
+                    data: providerResponse,
+                    didInvalidateProvider: false
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        let cachedTools = try jsonValue([
+            "tools": [
+                documentationDescriptor(version: "27.0").foundationObject,
+            ],
+        ])
+        manager.setCachedToolsListResult(cachedTools)
+
+        let responseData = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
+        #expect(responseData == providerResponse)
+        let cachedResult = try #require(manager.cachedToolsListResult())
+        #expect(DocumentationToolCatalog.descriptor(in: cachedResult) != nil)
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
     @Test func documentationSearchKeepsProviderActiveAfterSuccessfulRetryInvalidatesCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
