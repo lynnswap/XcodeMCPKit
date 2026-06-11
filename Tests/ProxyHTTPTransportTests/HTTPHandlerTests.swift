@@ -2411,6 +2411,93 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpBatchStartsDocumentationFallbackBeforeOtherForwardedRequestTimesOut()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 0.25)
+        let localDocumentationRequests = NIOLockedValueBox(0)
+        let fallbackDocumentationRequests = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                if toolName == "DocumentationSearch" {
+                    fallbackDocumentationRequests.withLockedValue { $0 += 1 }
+                    return .immediate(
+                        try makeToolSuccessResponse(
+                            id: originalID,
+                            text: "{\"answer\":\"upstream-docs\"}"
+                        )
+                    )
+                }
+                #expect(toolName == "OtherAllowedTool")
+                return .manual(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "other-tool-result"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                _ = requestData
+                localDocumentationRequests.withLockedValue { $0 += 1 }
+                throw UpstreamSlotAcquisitionError.unavailable
+            },
+            documentationProviderIsActive: false
+        )
+        sessionManager.setAvailableUpstreamIndices([0, 1])
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-docs-fallback-before-other-timeout",
+                payload: [
+                    toolsCallPayload(
+                        id: 761,
+                        name: "DocumentationSearch",
+                        arguments: [
+                            "query": "UIView fallback before timeout",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 762,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+
+            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 761 }
+            let docsResult = docs?["result"] as? [String: Any]
+            let docsContent = docsResult?["content"] as? [[String: Any]]
+            #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+
+            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 762 }
+            let otherError = other?["error"] as? [String: Any]
+            #expect(otherError?["message"] as? String == "upstream timeout")
+
+            #expect(sessionManager.sentToolRequests() == [
+                "OtherAllowedTool@0",
+                "DocumentationSearch@1",
+            ])
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
+            #expect(fallbackDocumentationRequests.withLockedValue { $0 } == 1)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpBatchDocumentationSearchSharesSingleDeadline() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let documentationRequests = NIOLockedValueBox<[String]>([])
