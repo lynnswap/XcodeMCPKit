@@ -23,7 +23,7 @@ package struct DocumentationProviderCallResult: Sendable {
 }
 
 package protocol DocumentationProviderManaging: Sendable {
-    func prewarm(requestTimeout: TimeAmount?) async
+    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
     func callDocumentationSearch(
         requestData: Data,
@@ -36,7 +36,9 @@ package protocol DocumentationProviderManaging: Sendable {
 package struct DisabledDocumentationProviderManager: DocumentationProviderManaging {
     package init() {}
 
-    package func prewarm(requestTimeout _: TimeAmount?) async {}
+    package func prewarm(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
+        .unchanged
+    }
 
     package func toolListUpdate(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
         .unchanged
@@ -336,10 +338,14 @@ package protocol DocumentationProviderSessionMaking: Sendable {
 }
 
 package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
-    package init() {}
+    private let baseEnvironment: [String: String]
+
+    package init(baseEnvironment: [String: String] = ProcessInfo.processInfo.environment) {
+        self.baseEnvironment = baseEnvironment
+    }
 
     package func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
-        var environment = ProcessInfo.processInfo.environment
+        var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
         environment["MCP_XCODE_PID"] = String(target.processID)
         environment["DEVELOPER_DIR"] = target.developerDir
@@ -563,6 +569,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let discovery: any XcodeTargetDiscovering
     private let sessionFactory: any DocumentationProviderSessionMaking
     private let providerSelectionTimeout: TimeAmount?
+    private let pinnedProcessID: pid_t?
+    private let initializeParams: [String: JSONValue]
     private let logger: Logger
     private var activeProvider: ActiveProvider?
     private var providerSelection: ProviderSelection?
@@ -572,17 +580,21 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         discovery: any XcodeTargetDiscovering = LiveXcodeTargetDiscovery(),
         sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
         providerSelectionTimeout: TimeAmount? = .seconds(30),
+        pinnedProcessID: pid_t? = nil,
+        initializeParams: [String: JSONValue] = DocumentationProviderManager.defaultInitializeParams(),
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
         self.sessionFactory = sessionFactory
         self.providerSelectionTimeout = providerSelectionTimeout
+        self.pinnedProcessID = pinnedProcessID
+        self.initializeParams = initializeParams
         self.logger = logger
     }
 
-    package func prewarm(requestTimeout: TimeAmount?) async {
-        guard !isShutdown else { return }
-        _ = await toolListUpdate(requestTimeout: requestTimeout)
+    package func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        guard !isShutdown else { return .unavailable }
+        return await toolListUpdate(requestTimeout: requestTimeout)
     }
 
     package func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
@@ -820,11 +832,19 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return nil
         }
         let selectionDeadline = Self.requestDeadline(for: requestTimeout)
-        let targets = discovery.runningXcodeTargets()
+        let discoveredTargets = discovery.runningXcodeTargets()
+        let targets: [DocumentationProviderTarget]
+        if let pinnedProcessID {
+            targets = discoveredTargets.filter { $0.processID == pinnedProcessID }
+        } else {
+            targets = discoveredTargets
+        }
         logger.debug(
             "Selecting documentation provider from running Xcode processes",
             metadata: [
                 "candidate_count": .string("\(targets.count)"),
+                "discovered_candidate_count": .string("\(discoveredTargets.count)"),
+                "pinned_pid": .string(pinnedProcessID.map(String.init) ?? ""),
                 "candidates": .string(targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
             ]
         )
@@ -906,7 +926,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 throw TimeoutError()
             }
             let initialize = try await connection.call(
-                try Self.makeInitializeRequestData(),
+                try makeInitializeRequestData(),
                 timeout: initializeTimeout
             )
             let serverVersion = Self.serverVersion(fromInitializeResponse: initialize) ?? ""
@@ -953,20 +973,24 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private static func makeInitializeRequestData() throws -> Data {
+    package static func defaultInitializeParams() -> [String: JSONValue] {
+        [
+            "protocolVersion": .string("2025-03-26"),
+            "capabilities": .object([:]),
+            "clientInfo": .object([
+                "name": .string("XcodeMCPKit"),
+                "version": .string("dev"),
+            ]),
+        ]
+    }
+
+    private func makeInitializeRequestData() throws -> Data {
         try JSONSerialization.data(
             withJSONObject: [
                 "jsonrpc": "2.0",
                 "id": "initialize",
                 "method": "initialize",
-                "params": [
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": [:],
-                    "clientInfo": [
-                        "name": "XcodeMCPKitDocumentationProvider",
-                        "version": "dev",
-                    ],
-                ],
+                "params": initializeParams.mapValues(\.foundationObject),
             ],
             options: []
         )

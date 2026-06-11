@@ -193,6 +193,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(manager.hasActiveDocumentationProvider())
         let observedTimeout = try #require(await documentationProvider.lastToolListTimeout())
         #expect(observedTimeout.nanoseconds > 0)
     }
@@ -230,6 +231,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(manager.hasActiveDocumentationProvider() == false)
     }
 
     @Test func sharedToolsListTimeoutDoesNotInvalidateDocumentationProvider() async throws {
@@ -267,6 +269,7 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(manager.hasActiveDocumentationProvider() == false)
         #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
     }
 
@@ -320,6 +323,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(responseData == providerResponse)
         #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.hasActiveDocumentationProvider() == false)
         #expect(await documentationProvider.callCount() == 1)
         let observedTimeout = try #require(await documentationProvider.lastCallTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
@@ -349,6 +353,7 @@ struct RuntimeCoordinatorTests {
         let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(30).nanoseconds)
         #expect(await documentationProvider.toolListUpdateCount() == 1)
+        #expect(manager.hasActiveDocumentationProvider())
     }
 
     @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
@@ -433,6 +438,69 @@ struct RuntimeCoordinatorTests {
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerUsesConfiguredInitializeParamsForProbe() async throws {
+        let target = documentationProviderTarget(processID: 112)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let initializeParams = try jsonValue([
+            "protocolVersion": "2025-03-26",
+            "capabilities": [
+                "roots": [
+                    "listChanged": true,
+                ],
+            ],
+            "clientInfo": [
+                "name": "ConfiguredAssistant",
+                "version": "9.9.9",
+            ],
+        ])
+        guard case .object(let initializeObject) = initializeParams else {
+            Issue.record("expected initialize params object")
+            return
+        }
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            initializeParams: initializeObject
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        let observedParams = try #require(await factory.initializeParams(for: target.processID).first)
+        guard case .object(let observedObject) = observedParams else {
+            Issue.record("expected initialize params object")
+            return
+        }
+        guard case .string("2025-03-26")? = observedObject["protocolVersion"] else {
+            Issue.record("expected configured protocol version")
+            return
+        }
+        guard case .object(let capabilities)? = observedObject["capabilities"],
+              case .object(let roots)? = capabilities["roots"],
+              case .bool(true)? = roots["listChanged"] else {
+            Issue.record("expected configured capabilities")
+            return
+        }
+        guard case .object(let clientInfo)? = observedObject["clientInfo"],
+              case .string("ConfiguredAssistant")? = clientInfo["name"],
+              case .string("9.9.9")? = clientInfo["version"] else {
+            Issue.record("expected configured client info")
+            return
+        }
     }
 
     @Test func documentationProviderManagerCoalescesConcurrentProviderSelection() async throws {
@@ -618,6 +686,42 @@ struct RuntimeCoordinatorTests {
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
+    }
+
+    @Test func documentationProviderManagerHonorsPinnedProcessID() async throws {
+        let pinned = documentationProviderTarget(processID: 203)
+        let other = documentationProviderTarget(processID: 204)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                pinned.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+                other.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [pinned, other]),
+            sessionFactory: factory,
+            pinnedProcessID: pinned.processID
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
+        #expect(await factory.startedPIDs() == [pinned.processID])
     }
 
     @Test func documentationProviderManagerPrefersNewerServerVersionWhenToolCountsTie() async throws {
@@ -6020,6 +6124,7 @@ private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionM
     private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
     private var startAttemptProcessIDs: [pid_t] = []
     private var startedProcessIDs: [pid_t] = []
+    private var initializeParamsByPID: [pid_t: [JSONValue]] = [:]
     private let startDelayNanoseconds: UInt64?
 
     init(
@@ -6042,7 +6147,11 @@ private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionM
         let plan = plans.removeFirst()
         plansByPID[target.processID] = plans
         startedProcessIDs.append(target.processID)
-        return ScriptedDocumentationSession(plan: plan)
+        return ScriptedDocumentationSession(
+            processID: target.processID,
+            plan: plan,
+            recorder: self
+        )
     }
 
     func startedPIDs() -> [pid_t] {
@@ -6052,17 +6161,33 @@ private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionM
     func startAttempts() -> [pid_t] {
         startAttemptProcessIDs
     }
+
+    func recordInitializeParams(_ params: JSONValue, for processID: pid_t) {
+        initializeParamsByPID[processID, default: []].append(params)
+    }
+
+    func initializeParams(for processID: pid_t) -> [JSONValue] {
+        initializeParamsByPID[processID] ?? []
+    }
 }
 
 private actor ScriptedDocumentationSession: UpstreamSession {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private let processID: pid_t
     private let plan: ScriptedDocumentationSessionPlan
+    private let recorder: ScriptedDocumentationSessionFactory
     private var documentationCallCount = 0
     private var remainingUserCallResponses: [ScriptedDocumentationResponse]
 
-    init(plan: ScriptedDocumentationSessionPlan) {
+    init(
+        processID: pid_t,
+        plan: ScriptedDocumentationSessionPlan,
+        recorder: ScriptedDocumentationSessionFactory
+    ) {
+        self.processID = processID
         self.plan = plan
+        self.recorder = recorder
         self.remainingUserCallResponses = plan.userCallResponses
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
         self.events = AsyncStream { continuation in
@@ -6086,6 +6211,9 @@ private actor ScriptedDocumentationSession: UpstreamSession {
 
         switch method {
         case "initialize":
+            if let params = object["params"], let value = JSONValue(any: params) {
+                await recorder.recordInitializeParams(value, for: processID)
+            }
             yieldResponse(
                 id: requestID,
                 result: [
@@ -6209,13 +6337,13 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
         self.toolListDelayNanoseconds = toolListDelayNanoseconds
     }
 
-    func prewarm(requestTimeout: TimeAmount?) async {
+    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
         if let prewarmDelayNanoseconds {
             try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return .unavailable }
         }
         prewarmTimeouts.append(requestTimeout)
-        _ = await toolListUpdate(requestTimeout: requestTimeout)
+        return await toolListUpdate(requestTimeout: requestTimeout)
     }
 
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {

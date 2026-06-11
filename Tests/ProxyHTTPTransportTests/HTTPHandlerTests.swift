@@ -1709,6 +1709,60 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpDocumentationSearchFallsThroughWhenDocumentationProviderIsInactive() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let localDocumentationRequests = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "DocumentationSearch")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "{\"answer\":\"upstream-docs\"}"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                _ = requestData
+                localDocumentationRequests.withLockedValue { $0 += 1 }
+                throw UpstreamSlotAcquisitionError.unavailable
+            },
+            documentationProviderIsActive: false
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-docs-inactive-fallthrough",
+                payload: toolsCallPayload(
+                    id: 65,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "hello",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let content = result?["content"] as? [[String: Any]]
+            #expect(content?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 0)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpBatchDocumentationSearchFallsThroughWhenNoDocumentationProviderExists() async throws {
         let config = makeConfig(requestTimeout: 2)
         let sessionManager = TestRuntimeCoordinator(
@@ -6110,6 +6164,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
     private let documentationSearchResponder:
         (@Sendable (_ requestData: Data) throws -> Data)?
+    private let documentationProviderIsActive: Bool
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = RequestLeaseRegistry()
 
@@ -6118,6 +6173,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
+        documentationProviderIsActive: Bool? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6125,6 +6181,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
         self.documentationSearchResponder = documentationSearchResponder
+        self.documentationProviderIsActive = documentationProviderIsActive ?? (documentationSearchResponder != nil)
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
@@ -6133,6 +6190,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
+        documentationProviderIsActive: Bool? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6140,6 +6198,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
         self.documentationSearchResponder = documentationSearchResponder
+        self.documentationProviderIsActive = documentationProviderIsActive ?? (documentationSearchResponder != nil)
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
@@ -6148,6 +6207,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
+        documentationProviderIsActive: Bool? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6155,6 +6215,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
         self.documentationSearchResponder = documentationSearchResponder
+        self.documentationProviderIsActive = documentationProviderIsActive ?? (documentationSearchResponder != nil)
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
@@ -6315,6 +6376,10 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func hasDocumentationProvider() -> Bool {
         documentationSearchResponder != nil
+    }
+
+    func hasActiveDocumentationProvider() -> Bool {
+        documentationProviderIsActive
     }
 
     func chooseUpstreamIndex() -> Int? {

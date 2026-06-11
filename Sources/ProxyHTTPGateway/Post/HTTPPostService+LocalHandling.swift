@@ -511,7 +511,7 @@ extension HTTPPostService {
     }
 
     private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
-        guard sessionManager.hasDocumentationProvider() else {
+        guard sessionManager.hasActiveDocumentationProvider() else {
             return false
         }
         guard object["method"] as? String == "tools/call",
