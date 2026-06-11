@@ -15,6 +15,12 @@ package final class HTTPPostService: Sendable {
         let forceBatchArray: Bool
     }
 
+    package struct DocumentationSearchFilterOperation {
+        let future: EventLoopFuture<FilteredToolCallRequest>
+        let cancellationHandle: HTTPPostCancellationHandle
+        let deadline: Date?
+    }
+
     package let sessionManager: any RuntimeCoordinating
     package let disabledToolNames: Set<String>
     package let localResponder: LocalMCPResponder
@@ -180,26 +186,63 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let documentationFilterFuture = filterDocumentationSearchToolCalls(
+        if let documentationFilter = filterDocumentationSearchToolCalls(
             filteredRequest: filteredRequest,
             sessionID: sessionID,
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride
         ) {
+            if let parentCancellationHandle,
+                parentCancellationHandle.bindChildHandle(documentationFilter.cancellationHandle) == false
+            {
+                documentationFilter.cancellationHandle.cancel(using: sessionManager)
+                return HTTPPostOperation(
+                    future: eventLoop.makeSucceededFuture(
+                        .empty(status: .accepted, sessionID: sessionID)
+                    ),
+                    cancellationHandle: nil
+                )
+            }
+
+            let future = documentationFilter.future.flatMap { rewrittenRequest in
+                let forwardingTimeout = Self.remainingRequestTimeout(until: documentationFilter.deadline)
+                if documentationFilter.deadline != nil,
+                    forwardingTimeout == nil,
+                    rewrittenRequest.bodyData != nil
+                {
+                    return eventLoop.makeSucceededFuture(
+                        Self.makePartialBatchErrorResolution(
+                            localResponseData: rewrittenRequest.localResponseData,
+                            responseIDs: rewrittenRequest.forwardedResponseIDs,
+                            code: -32000,
+                            message: "upstream timeout",
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream,
+                            forceBatchArray: rewrittenRequest.forceBatchArray,
+                            fallbackStatus: .gatewayTimeout,
+                            fallbackBody: "upstream timeout"
+                        )
+                    )
+                }
+                return self.makeForwardingOperation(
+                    filteredRequest: rewrittenRequest,
+                    sessionID: sessionID,
+                    headerSessionID: headerSessionID,
+                    requestIsBatch: requestIsBatch,
+                    prefersEventStream: prefersEventStream,
+                    eventLoop: eventLoop,
+                    requestTimeoutOverride: forwardingTimeout,
+                    parentCancellationHandle: documentationFilter.cancellationHandle
+                ).future
+            }
+            future.whenComplete { result in
+                guard (try? result.get()) != nil else { return }
+                documentationFilter.cancellationHandle.markCompleted()
+                self.sessionManager.completeRequestLease(documentationFilter.cancellationHandle.leaseID)
+            }
             return HTTPPostOperation(
-                future: documentationFilterFuture.flatMap { rewrittenRequest in
-                    self.makeForwardingOperation(
-                        filteredRequest: rewrittenRequest,
-                        sessionID: sessionID,
-                        headerSessionID: headerSessionID,
-                        requestIsBatch: requestIsBatch,
-                        prefersEventStream: prefersEventStream,
-                        eventLoop: eventLoop,
-                        requestTimeoutOverride: requestTimeoutOverride,
-                        parentCancellationHandle: parentCancellationHandle
-                    ).future
-                },
-                cancellationHandle: nil
+                future: future,
+                cancellationHandle: documentationFilter.cancellationHandle
             )
         }
 

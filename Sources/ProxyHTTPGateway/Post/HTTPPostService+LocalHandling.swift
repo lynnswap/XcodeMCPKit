@@ -218,7 +218,7 @@ extension HTTPPostService {
         sessionID: String,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?
-    ) -> EventLoopFuture<FilteredToolCallRequest>? {
+    ) -> DocumentationSearchFilterOperation? {
         guard let bodyData = filteredRequest.bodyData,
               let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
         else {
@@ -252,11 +252,37 @@ extension HTTPPostService {
             return nil
         }
 
+        let requestIDs = Self.extractResponseIDs(from: parsedRequestJSON)
+        let descriptor = Self.topLevelRequestDescriptor(
+            sessionID: sessionID,
+            parsedRequestJSON: parsedRequestJSON,
+            requestIsBatch: filteredRequest.forceBatchArray,
+            requestIDs: requestIDs
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
+        let cancellationHandle = HTTPPostCancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDs.map(\.key)
+        )
+        let deadline = Self.timeoutDeadline(
+            for: requestTimeoutOverride
+                ?? Self.topLevelRequestTimeoutOverride(
+                    method: "tools/call",
+                    defaultSeconds: requestTimeoutSeconds
+                )
+        )
         let promise = eventLoop.makePromise(of: FilteredToolCallRequest.self)
-        Task {
+        let task = Task { [self] in
+            guard !Task.isCancelled else {
+                eventLoop.execute {
+                    promise.fail(CancellationError())
+                }
+                return
+            }
             let documentationResponseData = await makeDocumentationSearchBatchResponseData(
                 requests: documentationRequests,
-                requestTimeoutOverride: requestTimeoutOverride
+                deadline: deadline
             )
             let localResponseData = Self.mergeBatchResponsePayloads(
                 [
@@ -287,22 +313,35 @@ extension HTTPPostService {
                 forwardedResponseIDs: forwardedResponseIDs,
                 forceBatchArray: filteredRequest.forceBatchArray
             )
+            let wasCancelled = Task.isCancelled
             eventLoop.execute {
+                if wasCancelled {
+                    promise.fail(CancellationError())
+                    return
+                }
                 promise.succeed(rewritten)
             }
         }
-        return promise.futureResult
+        cancellationHandle.bindRefreshTask(task)
+        return DocumentationSearchFilterOperation(
+            future: promise.futureResult,
+            cancellationHandle: cancellationHandle,
+            deadline: deadline
+        )
     }
 
     private func makeDocumentationSearchBatchResponseData(
         requests: [[String: Any]],
-        requestTimeoutOverride: TimeAmount?
+        deadline: Date?
     ) async -> Data? {
         var responseObjects: [[String: Any]] = []
         responseObjects.reserveCapacity(requests.count)
         let normalizer = ToolCallNormalizer(sessionManager: sessionManager)
 
         for request in requests {
+            guard !Task.isCancelled else {
+                break
+            }
             guard let idValue = request["id"],
                   let originalID = RPCID(any: idValue) else {
                 continue
@@ -318,10 +357,23 @@ extension HTTPPostService {
                 )
                 continue
             }
+            let requestTimeout = Self.remainingRequestTimeout(until: deadline)
+            if deadline != nil,
+                requestTimeout == nil
+            {
+                responseObjects.append(
+                    Self.makeJSONRPCErrorResponseObject(
+                        id: originalID,
+                        code: -32000,
+                        message: "upstream timeout"
+                    )
+                )
+                continue
+            }
             do {
                 let responseData = try await sessionManager.callDocumentationSearch(
                     requestData: requestData,
-                    requestTimeoutOverride: requestTimeoutOverride
+                    requestTimeoutOverride: requestTimeout
                 )
                 let normalizedData = normalizer.normalizeResponseDataIfNeeded(
                     method: "tools/call",

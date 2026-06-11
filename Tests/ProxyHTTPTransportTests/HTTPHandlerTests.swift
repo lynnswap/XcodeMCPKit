@@ -1744,6 +1744,166 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpBatchDocumentationSearchSharesSingleDeadline() async throws {
+        let config = makeConfig(requestTimeout: 0.1)
+        let documentationRequests = NIOLockedValueBox<[String]>([])
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            documentationSearchResponder: { requestData in
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let params = try #require(object["params"] as? [String: Any])
+                let arguments = try #require(params["arguments"] as? [String: Any])
+                let query = arguments["query"] as? String ?? ""
+                documentationRequests.withLockedValue { requests in
+                    requests.append(query)
+                }
+                Thread.sleep(forTimeInterval: 0.2)
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"\(query)\"}"
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-docs-batch-deadline",
+                payload: [
+                    toolsCallPayload(
+                        id: 711,
+                        name: "DocumentationSearch",
+                        arguments: [
+                            "query": "first",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 712,
+                        name: "DocumentationSearch",
+                        arguments: [
+                            "query": "second",
+                        ]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+
+            let first = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 711 }
+            #expect(first?["result"] != nil)
+
+            let second = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 712 }
+            let secondError = try #require(second?["error"] as? [String: Any])
+            #expect((secondError["code"] as? NSNumber)?.intValue == -32000)
+            #expect(secondError["message"] as? String == "upstream timeout")
+            #expect(documentationRequests.withLockedValue { $0 } == ["first"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
+    @Test func httpBatchDocumentationSearchCancellationAbandonsPrefilterLease() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let documentationStarted = DispatchSemaphore(value: 0)
+        let documentationRelease = DispatchSemaphore(value: 0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                Issue.record("unexpected forwarded request: \(method) \(toolName ?? "")")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "unexpected"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                documentationStarted.signal()
+                _ = documentationRelease.wait(timeout: .now() + 2)
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"cancelled\"}"
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let service = HTTPPostService(
+                config: config,
+                sessionManager: sessionManager,
+                refreshCodeIssuesCoordinator: .makeDefault(),
+                refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState(
+                    defaultRequestTimeoutSeconds: config.requestTimeout
+                )
+            )
+            let payload: [[String: Any]] = [
+                toolsCallPayload(
+                    id: 721,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "UIView",
+                    ]
+                ),
+                toolsCallPayload(
+                    id: 722,
+                    name: "OtherAllowedTool",
+                    arguments: [:]
+                ),
+            ]
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.handle(
+                bodyData: bodyData,
+                headerSessionID: "session-docs-batch-cancel",
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: group.next()
+            )
+            let cancellationHandle = try #require(operation.cancellationHandle)
+
+            try #require(await waitForHTTPTestSemaphore(documentationStarted, timeoutSeconds: 1) == .success)
+            service.cancel(cancellationHandle)
+            documentationRelease.signal()
+
+            do {
+                _ = try await operation.future.get()
+                Issue.record("cancelled documentation batch should not complete successfully")
+            } catch {
+                #expect(error is CancellationError)
+            }
+            let abandonedLease = try #require(
+                sessionManager.leaseDebugSnapshots().first { $0.state == .abandoned }
+            )
+            #expect(abandonedLease.releaseReason == "clientDisconnected")
+            #expect(sessionManager.sentToolNames().isEmpty)
+            try await group.shutdownGracefully()
+        } catch {
+            documentationRelease.signal()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
     @Test func httpResourcesListReturnsEmptyArray() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -6236,6 +6396,22 @@ private func makeHTTPTemporaryWorkspaceRoot() -> String {
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url.path
+}
+
+private func waitForHTTPTestSemaphore(
+    _ semaphore: DispatchSemaphore,
+    timeoutSeconds: TimeInterval
+) async -> DispatchTimeoutResult {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            let timeoutMilliseconds = Int((timeoutSeconds * 1000).rounded(.up))
+            continuation.resume(
+                returning: semaphore.wait(
+                    timeout: .now() + .milliseconds(timeoutMilliseconds)
+                )
+            )
+        }
+    }
 }
 
 private func addHTTPHandler(

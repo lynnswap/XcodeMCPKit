@@ -577,16 +577,20 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
         } catch {
             await invalidate(reason: "documentation_provider_call_failed")
-            let retryTimeout = Self.requestTimeout(until: requestDeadline)
-            guard retryTimeout?.nanoseconds != 0 else {
+            let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
+            guard replacementSelectionTimeout?.nanoseconds != 0 else {
                 throw error
             }
-            guard let replacement = await providerIfAvailable(requestTimeout: retryTimeout) else {
+            guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+                throw error
+            }
+            let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
+            guard retryCallTimeout?.nanoseconds != 0 else {
                 throw error
             }
             let retryResponse = try await replacement.profile.connection.call(
                 requestData,
-                timeout: retryTimeout
+                timeout: retryCallTimeout
             )
             return DocumentationProviderCallResult(
                 data: retryResponse,
@@ -598,15 +602,19 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
 
         await invalidate(reason: "documentation_search_not_enabled")
-        let retryTimeout = Self.requestTimeout(until: requestDeadline)
-        guard retryTimeout?.nanoseconds != 0,
-              let replacement = await providerIfAvailable(requestTimeout: retryTimeout) else {
+        let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
+        guard replacementSelectionTimeout?.nanoseconds != 0,
+              let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
+        }
+        let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
+        guard retryCallTimeout?.nanoseconds != 0 else {
             return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
         }
         do {
             let retryResponse = try await replacement.profile.connection.call(
                 requestData,
-                timeout: retryTimeout
+                timeout: retryCallTimeout
             )
             if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
                 await invalidate(reason: "documentation_search_retry_not_enabled")
