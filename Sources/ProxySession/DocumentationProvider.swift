@@ -508,6 +508,7 @@ package actor DocumentationProviderConnection {
 
 package actor DocumentationProviderManager: DocumentationProviderManaging {
     private struct CandidateProfile: Sendable {
+        let id: UUID
         let target: DocumentationProviderTarget
         let connection: DocumentationProviderConnection
         let descriptor: JSONValue
@@ -519,10 +520,16 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let profile: CandidateProfile
     }
 
+    private struct ProviderSelection: Sendable {
+        let id: UUID
+        let task: Task<CandidateProfile?, Never>
+    }
+
     private let discovery: any XcodeTargetDiscovering
     private let sessionFactory: any DocumentationProviderSessionMaking
     private let logger: Logger
     private var activeProvider: ActiveProvider?
+    private var providerSelection: ProviderSelection?
 
     package init(
         discovery: any XcodeTargetDiscovering = LiveXcodeTargetDiscovery(),
@@ -576,7 +583,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 timeout: callTimeout
             )
         } catch {
-            await invalidate(reason: "documentation_provider_call_failed")
+            await invalidate(provider, reason: "documentation_provider_call_failed")
             let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
             guard replacementSelectionTimeout?.nanoseconds != 0 else {
                 throw error
@@ -601,7 +608,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return DocumentationProviderCallResult(data: response, didInvalidateProvider: false)
         }
 
-        await invalidate(reason: "documentation_search_not_enabled")
+        await invalidate(provider, reason: "documentation_search_not_enabled")
         let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
         guard replacementSelectionTimeout?.nanoseconds != 0,
               let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
@@ -617,7 +624,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 timeout: retryCallTimeout
             )
             if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
-                await invalidate(reason: "documentation_search_retry_not_enabled")
+                await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
             }
             return DocumentationProviderCallResult(
                 data: retryResponse,
@@ -629,6 +636,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     package func invalidate(reason _: String) async {
+        providerSelection?.task.cancel()
+        providerSelection = nil
         guard let provider = activeProvider else {
             return
         }
@@ -644,12 +653,51 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if let activeProvider {
             return activeProvider
         }
-        guard let selected = await selectProvider(requestTimeout: requestTimeout) else {
+        let selection: ProviderSelection
+        if let providerSelection {
+            selection = providerSelection
+        } else {
+            selection = ProviderSelection(
+                id: UUID(),
+                task: Task { await self.selectProvider(requestTimeout: requestTimeout) }
+            )
+            providerSelection = selection
+        }
+
+        let selected = await selection.task.value
+        let selectionIsCurrent = providerSelection?.id == selection.id
+        if selectionIsCurrent {
+            providerSelection = nil
+        }
+
+        if let activeProvider {
+            if let selected, selected.id != activeProvider.profile.id {
+                await selected.connection.stop()
+            }
+            return activeProvider
+        }
+
+        guard selectionIsCurrent else {
+            if let selected {
+                await selected.connection.stop()
+            }
+            return nil
+        }
+        guard let selected else {
             return nil
         }
         let provider = ActiveProvider(profile: selected)
         activeProvider = provider
         return provider
+    }
+
+    private func invalidate(_ provider: ActiveProvider, reason _: String) async {
+        guard let activeProvider, activeProvider.profile.id == provider.profile.id else {
+            await provider.profile.connection.stop()
+            return
+        }
+        self.activeProvider = nil
+        await provider.profile.connection.stop()
     }
 
     private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
@@ -687,6 +735,13 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 )
                 continue
             }
+        }
+
+        if Task.isCancelled {
+            for profile in profiles {
+                await profile.connection.stop()
+            }
+            return nil
         }
 
         guard let selected = profiles.max(by: { lhs, rhs in
@@ -761,6 +816,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 throw UpstreamSlotAcquisitionError.unavailable
             }
             return CandidateProfile(
+                id: UUID(),
                 target: target,
                 connection: connection,
                 descriptor: descriptor,

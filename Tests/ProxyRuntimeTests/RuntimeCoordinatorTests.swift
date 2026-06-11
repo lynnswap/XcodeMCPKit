@@ -357,6 +357,38 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
+    @Test func documentationProviderManagerCoalescesConcurrentProviderSelection() async throws {
+        let target = documentationProviderTarget(processID: 121)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 100_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        async let firstUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
+        async let secondUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
+        let results = await [firstUpdate, secondUpdate]
+
+        for update in results {
+            let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+            #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        }
+        #expect(await factory.startAttempts() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
     @Test func documentationProviderManagerChecksAllRunningXcodeTargetsBeforePublishingDescriptor() async throws {
         let xcode26 = documentationProviderTarget(processID: 201)
         let xcode27 = documentationProviderTarget(processID: 202)
@@ -5714,13 +5746,23 @@ private struct ScriptedDocumentationSessionPlan: Sendable {
 
 private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
+    private var startAttemptProcessIDs: [pid_t] = []
     private var startedProcessIDs: [pid_t] = []
+    private let startDelayNanoseconds: UInt64?
 
-    init(plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]) {
+    init(
+        plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]],
+        startDelayNanoseconds: UInt64? = nil
+    ) {
         self.plansByPID = plansByPID
+        self.startDelayNanoseconds = startDelayNanoseconds
     }
 
     func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
+        startAttemptProcessIDs.append(target.processID)
+        if let startDelayNanoseconds {
+            try? await Task.sleep(nanoseconds: startDelayNanoseconds)
+        }
         guard var plans = plansByPID[target.processID],
               plans.isEmpty == false else {
             throw UpstreamSlotAcquisitionError.unavailable
@@ -5733,6 +5775,10 @@ private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionM
 
     func startedPIDs() -> [pid_t] {
         startedProcessIDs
+    }
+
+    func startAttempts() -> [pid_t] {
+        startAttemptProcessIDs
     }
 }
 
