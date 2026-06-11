@@ -329,6 +329,68 @@ struct RuntimeCoordinatorTests {
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
     }
 
+    @Test func documentationSearchKeepsProviderActiveAfterSuccessfulRetryInvalidatesCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let providerResponse = try makeJSONRPCResponse(
+            id: 42,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "{\"answer\":\"retry\"}",
+                    ],
+                ],
+                "isError": false,
+            ]
+        )
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callResults: [
+                DocumentationProviderCallResult(
+                    data: providerResponse,
+                    didInvalidateProvider: true
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+        _ = try await manager.sharedToolsList(
+            sessionID: "session-docs-retry-active",
+            requestTimeoutOverride: nil
+        )
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(manager.cachedToolsListResult() != nil)
+
+        let responseData = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 42, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(responseData == providerResponse)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
     @Test func startupPrewarmsDocumentationProviderWhenEnabled() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -816,6 +878,76 @@ struct RuntimeCoordinatorTests {
         #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data) == false)
         #expect(try toolContentText(in: result.data) == "{\"answer\":\"retry\"}")
         #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerInvalidatesReplacementWhenRetryReturnsNotEnabled() async throws {
+        let xcode26 = documentationProviderTarget(processID: 221)
+        let xcode27 = documentationProviderTarget(processID: 222)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.notEnabled]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        let result = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        #expect(result.didInvalidateProvider)
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data))
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startAttempts() == [
+            xcode26.processID,
+            xcode27.processID,
             xcode26.processID,
             xcode27.processID,
             xcode26.processID,
@@ -6093,6 +6225,7 @@ private enum ScriptedDocumentationResponse: Sendable {
     case successText(String)
     case hang
     case notEnabled
+    case exit
 }
 
 private struct ScriptedDocumentationSessionPlan: Sendable {
@@ -6282,6 +6415,8 @@ private actor ScriptedDocumentationSession: UpstreamSession {
                 text: "Tool 'DocumentationSearch' is not enabled.",
                 isError: true
             )
+        case .exit:
+            continuation.yield(.exit(1))
         }
     }
 

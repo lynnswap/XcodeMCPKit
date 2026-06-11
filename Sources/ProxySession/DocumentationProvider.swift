@@ -662,6 +662,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 requestData,
                 timeout: retryCallTimeout
             )
+            if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
+                await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
+            }
             return DocumentationProviderCallResult(
                 data: retryResponse,
                 didInvalidateProvider: true

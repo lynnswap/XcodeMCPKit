@@ -844,17 +844,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             requestData: requestData,
             requestTimeoutOverride: timeout
         )
-        if result.didInvalidateProvider
-            || DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
-        {
-            setDocumentationProviderActive(false)
+        let responseIsDocumentationNotEnabled =
+            DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
+        setDocumentationProviderActive(responseIsDocumentationNotEnabled == false)
+        if result.didInvalidateProvider || responseIsDocumentationNotEnabled {
             invalidateControlPlaneSynchronously(
                 reason: "documentation_provider_invalidated",
                 clearInitialize: false,
                 clearToolsCatalog: true
             )
-        } else {
-            setDocumentationProviderActive(true)
         }
         return result.data
     }
