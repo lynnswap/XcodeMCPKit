@@ -143,6 +143,227 @@ struct RuntimeCoordinatorTests {
         #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
     }
 
+    @Test func sharedToolsListMergesDocumentationProviderDescriptor() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-docs-tools",
+            requestTimeoutOverride: nil
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+    }
+
+    @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "26.6").foundationObject,
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-docs-unavailable",
+            requestTimeoutOverride: nil
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+    }
+
+    @Test func documentationSearchInvalidatesCanonicalToolsCatalogWhenProviderStales() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let providerResponse = try makeJSONRPCResponse(
+            id: 41,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "Tool 'DocumentationSearch' is not enabled.",
+                    ],
+                ],
+                "isError": true,
+            ]
+        )
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callResults: [
+                DocumentationProviderCallResult(
+                    data: providerResponse,
+                    didInvalidateProvider: true
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "27.0").foundationObject,
+                ],
+            ])
+        )
+        #expect(manager.cachedToolsListResult() != nil)
+
+        let responseData = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 41, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(responseData == providerResponse)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
+    @Test func documentationProviderManagerRejectsDescriptorWhenProbeCallIsNotEnabled() async throws {
+        let target = documentationProviderTarget(processID: 101)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate()
+        let result = DocumentationToolCatalog.applying(
+            update,
+            to: try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "stale").foundationObject,
+                ],
+            ])
+        )
+
+        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerRetriesDocumentationSearchOnAlternateCandidate() async throws {
+        let xcode26 = documentationProviderTarget(processID: 201)
+        let xcode27 = documentationProviderTarget(processID: 202)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.notEnabled]
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.successText("{\"answer\":\"retry\"}")]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        let result = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 73, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(result.didInvalidateProvider)
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data) == false)
+        #expect(try toolContentText(in: result.data) == "{\"answer\":\"retry\"}")
+        #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+    }
+
     @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -5204,6 +5425,325 @@ private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {
         requestTimeout: requestTimeout,
         prewarmToolsList: false
     )
+}
+
+private func jsonValue(_ object: [String: Any]) throws -> JSONValue {
+    try #require(JSONValue(any: object))
+}
+
+private func documentationDescriptor(version: String) -> JSONValue {
+    JSONValue(any: [
+        "name": DocumentationToolCatalog.toolName,
+        "description": "docs-\(version)",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": [
+                    "type": "string",
+                ],
+            ],
+            "required": ["query"],
+        ],
+    ])!
+}
+
+private func toolNames(in result: JSONValue) -> [String] {
+    guard case .object(let object) = result,
+          case .array(let tools)? = object["tools"] else {
+        return []
+    }
+    return tools.compactMap { tool in
+        guard case .object(let toolObject) = tool,
+              case .string(let name)? = toolObject["name"] else {
+            return nil
+        }
+        return name
+    }
+}
+
+private func documentationDescriptorDescription(in result: JSONValue) -> String? {
+    guard let descriptor = DocumentationToolCatalog.descriptor(in: result),
+          case .object(let object) = descriptor,
+          case .string(let description)? = object["description"] else {
+        return nil
+    }
+    return description
+}
+
+private func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": [
+                "name": DocumentationToolCatalog.toolName,
+                "arguments": [
+                    "query": query,
+                ],
+            ],
+        ],
+        options: []
+    )
+}
+
+private func makeJSONRPCResponse(id: Int64, result: [String: Any]) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        ],
+        options: []
+    )
+}
+
+private func toolContentText(in responseData: Data) throws -> String? {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+    )
+    let result = try #require(object["result"] as? [String: Any])
+    let content = try #require(result["content"] as? [[String: Any]])
+    return content.first?["text"] as? String
+}
+
+private func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
+    DocumentationProviderTarget(
+        processID: processID,
+        appPath: "/Applications/Xcode-\(processID).app",
+        developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
+        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge"
+    )
+}
+
+private struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
+    let targets: [DocumentationProviderTarget]
+
+    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+        targets
+    }
+}
+
+private enum ScriptedDocumentationResponse: Sendable {
+    case success
+    case successText(String)
+    case notEnabled
+}
+
+private struct ScriptedDocumentationSessionPlan: Sendable {
+    let serverVersion: String
+    let toolCount: Int
+    let includesDocumentationSearch: Bool
+    let probeResponse: ScriptedDocumentationResponse
+    let userCallResponses: [ScriptedDocumentationResponse]
+
+    init(
+        serverVersion: String,
+        toolCount: Int,
+        includesDocumentationSearch: Bool,
+        probeResponse: ScriptedDocumentationResponse,
+        userCallResponses: [ScriptedDocumentationResponse] = []
+    ) {
+        self.serverVersion = serverVersion
+        self.toolCount = toolCount
+        self.includesDocumentationSearch = includesDocumentationSearch
+        self.probeResponse = probeResponse
+        self.userCallResponses = userCallResponses
+    }
+}
+
+private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
+    private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
+    private var startedProcessIDs: [pid_t] = []
+
+    init(plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]) {
+        self.plansByPID = plansByPID
+    }
+
+    func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
+        guard var plans = plansByPID[target.processID],
+              plans.isEmpty == false else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        let plan = plans.removeFirst()
+        plansByPID[target.processID] = plans
+        startedProcessIDs.append(target.processID)
+        return ScriptedDocumentationSession(plan: plan)
+    }
+
+    func startedPIDs() -> [pid_t] {
+        startedProcessIDs
+    }
+}
+
+private actor ScriptedDocumentationSession: UpstreamSession {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private let plan: ScriptedDocumentationSessionPlan
+    private var documentationCallCount = 0
+    private var remainingUserCallResponses: [ScriptedDocumentationResponse]
+
+    init(plan: ScriptedDocumentationSessionPlan) {
+        self.plan = plan
+        self.remainingUserCallResponses = plan.userCallResponses
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
+            as? [String: Any],
+            let method = object["method"] as? String else {
+            return .accepted
+        }
+        guard let requestID = object["id"] else {
+            return .accepted
+        }
+
+        switch method {
+        case "initialize":
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "serverInfo": [
+                        "name": "mcpbridge",
+                        "version": plan.serverVersion,
+                    ],
+                ]
+            )
+        case "tools/list":
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "tools": toolsList(),
+                ]
+            )
+        case "tools/call":
+            documentationCallCount += 1
+            let response: ScriptedDocumentationResponse
+            if documentationCallCount == 1 {
+                response = plan.probeResponse
+            } else if remainingUserCallResponses.isEmpty == false {
+                response = remainingUserCallResponses.removeFirst()
+            } else {
+                response = .success
+            }
+            yieldDocumentationResponse(id: requestID, response: response)
+        default:
+            break
+        }
+        return .accepted
+    }
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    private func toolsList() -> [[String: Any]] {
+        let fillerCount = max(0, plan.toolCount - (plan.includesDocumentationSearch ? 1 : 0))
+        var tools: [[String: Any]] = (0..<fillerCount).map { index in
+            [
+                "name": "Tool\(index)",
+                "description": "tool-\(index)",
+            ]
+        }
+        if plan.includesDocumentationSearch {
+            if let descriptor = documentationDescriptor(version: plan.serverVersion).foundationObject
+                as? [String: Any] {
+                tools.append(descriptor)
+            }
+        }
+        return tools
+    }
+
+    private func yieldDocumentationResponse(id: Any, response: ScriptedDocumentationResponse) {
+        switch response {
+        case .success:
+            yieldToolResponse(id: id, text: "{\"ok\":true}", isError: false)
+        case .successText(let text):
+            yieldToolResponse(id: id, text: text, isError: false)
+        case .notEnabled:
+            yieldToolResponse(
+                id: id,
+                text: "Tool 'DocumentationSearch' is not enabled.",
+                isError: true
+            )
+        }
+    }
+
+    private func yieldToolResponse(id: Any, text: String, isError: Bool) {
+        yieldResponse(
+            id: id,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": text,
+                    ],
+                ],
+                "isError": isError,
+            ]
+        )
+    }
+
+    private func yieldResponse(id: Any, result: [String: Any]) {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        ]
+        guard JSONSerialization.isValidJSONObject(response),
+              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            return
+        }
+        continuation.yield(.message(data))
+    }
+}
+
+private actor StubDocumentationProviderManager: DocumentationProviderManaging {
+    private var update: DocumentationToolListUpdate
+    private var callResults: [DocumentationProviderCallResult]
+    private var callCountValue = 0
+    private var invalidateReasons: [String] = []
+
+    init(
+        toolListUpdate: DocumentationToolListUpdate,
+        callResults: [DocumentationProviderCallResult] = []
+    ) {
+        self.update = toolListUpdate
+        self.callResults = callResults
+    }
+
+    func toolListUpdate() async -> DocumentationToolListUpdate {
+        update
+    }
+
+    func callDocumentationSearch(
+        requestData _: Data,
+        requestTimeoutOverride _: TimeAmount?
+    ) async throws -> DocumentationProviderCallResult {
+        callCountValue += 1
+        guard callResults.isEmpty == false else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        return callResults.removeFirst()
+    }
+
+    func invalidate(reason: String) async {
+        invalidateReasons.append(reason)
+        update = .unavailable
+    }
+
+    func shutdown() async {
+        invalidateReasons.append("shutdown")
+    }
+
+    func callCount() -> Int {
+        callCountValue
+    }
 }
 
 private func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {

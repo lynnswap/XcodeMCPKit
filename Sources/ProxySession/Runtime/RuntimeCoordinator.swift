@@ -60,6 +60,11 @@ package protocol RuntimeCoordinating: Sendable {
         route: ControlPlaneRoute,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue
+    func callDocumentationSearch(
+        requestData: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> Data
+    func invalidateDocumentationProvider(reason: String) async
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: RequestLeaseID,
@@ -137,6 +142,15 @@ extension RuntimeCoordinating {
             requestTimeoutOverride: requestTimeoutOverride
         )
     }
+
+    package func callDocumentationSearch(
+        requestData _: Data,
+        requestTimeoutOverride _: TimeAmount?
+    ) async throws -> Data {
+        throw UpstreamSlotAcquisitionError.unavailable
+    }
+
+    package func invalidateDocumentationProvider(reason _: String) async {}
 }
 
 extension RuntimeCoordinator {
@@ -196,6 +210,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
         RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
+    package let documentationProviderManager: (any DocumentationProviderManaging)?
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
@@ -210,7 +225,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             upstreamReadinessGate: Self.defaultUpstreamReadinessGate(
                 config: config,
                 clock: clock
-            )
+            ),
+            documentationProviderManager: DocumentationProviderManager()
         )
     }
 
@@ -222,7 +238,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
         nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
         scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
-            RuntimeScheduledTimeout)? = nil
+            RuntimeScheduledTimeout)? = nil,
+        documentationProviderManager: (any DocumentationProviderManaging)? = nil
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
@@ -253,6 +270,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
+        self.documentationProviderManager = documentationProviderManager
         let resolvedReadinessGate = upstreamReadinessGate
             ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
         self.upstreamReadinessGate = resolvedReadinessGate
@@ -466,6 +484,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             for upstream in upstreams {
                 group.addTask {
                     await upstream.stop()
+                }
+            }
+            if let documentationProviderManager {
+                group.addTask {
+                    await documentationProviderManager.shutdown()
                 }
             }
         }
@@ -682,11 +705,16 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = timeoutDeadline(for: timeout)
-        return try await awaitControlPlaneOperation {
+        let baseResult = try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.toolsCatalog(
                 deadlineUptimeNs: deadline
             )
         }
+        guard let documentationProviderManager else {
+            return baseResult
+        }
+        let update = await documentationProviderManager.toolListUpdate()
+        return DocumentationToolCatalog.applying(update, to: baseResult)
     }
 
     package func sharedXcodeListWindowsResult(
@@ -719,6 +747,38 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 deadlineUptimeNs: deadline
             )
         }
+    }
+
+    package func callDocumentationSearch(
+        requestData: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> Data {
+        guard let documentationProviderManager else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        let result = try await documentationProviderManager.callDocumentationSearch(
+            requestData: requestData,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+        if result.didInvalidateProvider
+            || DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
+        {
+            invalidateControlPlaneSynchronously(
+                reason: "documentation_provider_invalidated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
+        }
+        return result.data
+    }
+
+    package func invalidateDocumentationProvider(reason: String) async {
+        await documentationProviderManager?.invalidate(reason: reason)
+        invalidateControlPlaneSynchronously(
+            reason: "documentation_provider_\(reason)",
+            clearInitialize: false,
+            clearToolsCatalog: true
+        )
     }
 
     func encodeJSONRPCResultBuffer(

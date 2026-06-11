@@ -1609,41 +1609,24 @@ struct HTTPHandlerTests {
 
     @Test func httpToolCallNormalizesColdSchemaWithoutCatalogPrewarm() async throws {
         let config = makeConfig(requestTimeout: 2)
+        let documentationRequests = NIOLockedValueBox<[String]>([])
         let sessionManager = TestRuntimeCoordinator(
             config: config,
-            upstreamRequestResponder: { method, toolName, originalID in
-                switch (method, toolName) {
-                case ("tools/list", nil):
-                    return .immediate(
-                        try makeToolResultResponse(
-                            id: originalID,
-                            result: [
-                                "tools": [
-                                    [
-                                        "name": "DocumentationSearch",
-                                        "outputSchema": [
-                                            "type": "object",
-                                        ],
-                                    ],
-                                ],
-                            ]
-                        )
-                    )
-                case ("tools/call", "DocumentationSearch"):
-                    return .immediate(
-                        try makeToolSuccessResponse(
-                            id: originalID,
-                            text: "{\"answer\":\"ok\"}"
-                        )
-                    )
-                default:
-                    return .immediate(
-                        try makeToolErrorResponse(
-                            id: originalID,
-                            text: "unexpected request"
-                        )
-                    )
+            documentationSearchResponder: { requestData in
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let params = try #require(object["params"] as? [String: Any])
+                let arguments = try #require(params["arguments"] as? [String: Any])
+                documentationRequests.withLockedValue { requests in
+                    requests.append(arguments["query"] as? String ?? "")
                 }
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"ok\"}"
+                )
             }
         )
         sessionManager.setInitialized(true)
@@ -1670,8 +1653,9 @@ struct HTTPHandlerTests {
             let structuredContent = result?["structuredContent"] as? [String: Any]
             #expect(structuredContent?["answer"] as? String == "ok")
             #expect(sessionManager.cachedToolsListResult() == nil)
-            #expect(sessionManager.sentMethods() == ["tools/call"])
-            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+            #expect(sessionManager.sentMethods() == [])
+            #expect(sessionManager.sentToolNames() == [])
+            #expect(documentationRequests.withLockedValue { $0 } == ["hello"])
         } catch {
             try? await server.shutdown()
             throw error
@@ -5451,42 +5435,53 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
+    private let documentationSearchResponder:
+        (@Sendable (_ requestData: Data) throws -> Data)?
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = RequestLeaseRegistry()
 
     init(
         config: ProxyConfig,
         upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
+        documentationSearchResponder:
+            (@Sendable (_ requestData: Data) throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = nil
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
+        self.documentationSearchResponder = documentationSearchResponder
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: ProxyConfig,
         upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        documentationSearchResponder:
+            (@Sendable (_ requestData: Data) throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = nil
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
+        self.documentationSearchResponder = documentationSearchResponder
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: ProxyConfig,
         upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        documentationSearchResponder:
+            (@Sendable (_ requestData: Data) throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
         self.upstreamRequestResponder = upstreamRequestResponder
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
+        self.documentationSearchResponder = documentationSearchResponder
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
@@ -5632,6 +5627,17 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
             throw NSError(domain: "TestRuntimeCoordinator", code: 3)
         }
         return result
+    }
+
+    func callDocumentationSearch(
+        requestData: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> Data {
+        _ = requestTimeoutOverride
+        guard let documentationSearchResponder else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        return try documentationSearchResponder(requestData)
     }
 
     func chooseUpstreamIndex() -> Int? {
