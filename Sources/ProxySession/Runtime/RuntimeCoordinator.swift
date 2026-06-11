@@ -879,7 +879,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
                 ]
             )
-            await manager.invalidate(reason: "tools_list_timeout")
             return .unavailable
         }
     }

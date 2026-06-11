@@ -232,6 +232,44 @@ struct RuntimeCoordinatorTests {
         #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
     }
 
+    @Test func sharedToolsListTimeoutDoesNotInvalidateDocumentationProvider() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            toolListDelayNanoseconds: 50_000_000
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "26.6").foundationObject,
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-docs-timeout",
+            requestTimeoutOverride: .milliseconds(1)
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
+    }
+
     @Test func documentationSearchInvalidatesCanonicalToolsCatalogWhenProviderStales() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -6114,15 +6152,18 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var toolListTimeouts: [TimeAmount?] = []
     private var callTimeouts: [TimeAmount?] = []
     private let prewarmDelayNanoseconds: UInt64?
+    private let toolListDelayNanoseconds: UInt64?
 
     init(
         toolListUpdate: DocumentationToolListUpdate,
         callResults: [DocumentationProviderCallResult] = [],
-        prewarmDelayNanoseconds: UInt64? = nil
+        prewarmDelayNanoseconds: UInt64? = nil,
+        toolListDelayNanoseconds: UInt64? = nil
     ) {
         self.update = toolListUpdate
         self.callResults = callResults
         self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
+        self.toolListDelayNanoseconds = toolListDelayNanoseconds
     }
 
     func prewarm(requestTimeout: TimeAmount?) async {
@@ -6136,6 +6177,10 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
         toolListTimeouts.append(requestTimeout)
+        if let toolListDelayNanoseconds {
+            try? await Task.sleep(nanoseconds: toolListDelayNanoseconds)
+            guard !Task.isCancelled else { return .unavailable }
+        }
         return update
     }
 
@@ -6178,6 +6223,10 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     func shutdownCount() -> Int {
         invalidateReasons.filter { $0 == "shutdown" }.count
+    }
+
+    func recordedInvalidateReasons() -> [String] {
+        invalidateReasons
     }
 
     func lastToolListTimeout() -> TimeAmount? {
