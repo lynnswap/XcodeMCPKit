@@ -515,6 +515,7 @@ extension HTTPPostService {
             return false
         }
         guard object["method"] as? String == "tools/call",
+              object["id"] != nil,
               let params = object["params"] as? [String: Any],
               params["name"] as? String == DocumentationToolCatalog.toolName,
               disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {

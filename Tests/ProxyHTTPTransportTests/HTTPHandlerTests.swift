@@ -1851,6 +1851,88 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpBatchForwardsDocumentationSearchNotificationWithProvider() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let documentationRequests = NIOLockedValueBox<[String]>([])
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "OtherAllowedTool")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "other-tool-result"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let params = try #require(object["params"] as? [String: Any])
+                let arguments = try #require(params["arguments"] as? [String: Any])
+                documentationRequests.withLockedValue { requests in
+                    requests.append(arguments["query"] as? String ?? "")
+                }
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"docs\"}"
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-docs-batch-notification",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": [
+                            "name": "DocumentationSearch",
+                            "arguments": [
+                                "query": "UIView notification",
+                            ],
+                        ],
+                    ],
+                    toolsCallPayload(
+                        id: 703,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 1)
+
+            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 703 }
+            let otherResult = other?["result"] as? [String: Any]
+            let otherContent = otherResult?["content"] as? [[String: Any]]
+            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+
+            #expect(sessionManager.sentToolNames() == [
+                "DocumentationSearch",
+                "OtherAllowedTool",
+            ])
+            #expect(documentationRequests.withLockedValue { $0 }.isEmpty)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpBatchForwardsOtherCallsWhileDocumentationSearchIsStillResolving() async throws {
         let config = makeConfig(requestTimeout: 2)
         let documentationStarted = NIOLockedValueBox(false)
