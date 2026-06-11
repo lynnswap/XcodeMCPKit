@@ -540,10 +540,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationProviderCallResult {
-        guard requestTimeoutOverride?.nanoseconds != 0 else {
+        let requestDeadline = Self.requestDeadline(for: requestTimeoutOverride)
+        let initialTimeout = Self.requestTimeout(until: requestDeadline)
+        guard initialTimeout?.nanoseconds != 0 else {
             throw TimeoutError()
         }
-        guard let provider = await providerIfAvailable(requestTimeout: requestTimeoutOverride) else {
+        guard let provider = await providerIfAvailable(requestTimeout: initialTimeout) else {
             throw UpstreamSlotAcquisitionError.unavailable
         }
 
@@ -551,16 +553,20 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         do {
             response = try await provider.profile.connection.call(
                 requestData,
-                timeout: requestTimeoutOverride
+                timeout: initialTimeout
             )
         } catch {
             await invalidate(reason: "documentation_provider_call_failed")
-            guard let replacement = await providerIfAvailable(requestTimeout: requestTimeoutOverride) else {
+            let retryTimeout = Self.requestTimeout(until: requestDeadline)
+            guard retryTimeout?.nanoseconds != 0 else {
+                throw error
+            }
+            guard let replacement = await providerIfAvailable(requestTimeout: retryTimeout) else {
                 throw error
             }
             let retryResponse = try await replacement.profile.connection.call(
                 requestData,
-                timeout: requestTimeoutOverride
+                timeout: retryTimeout
             )
             return DocumentationProviderCallResult(
                 data: retryResponse,
@@ -572,13 +578,15 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
 
         await invalidate(reason: "documentation_search_not_enabled")
-        guard let replacement = await providerIfAvailable(requestTimeout: requestTimeoutOverride) else {
+        let retryTimeout = Self.requestTimeout(until: requestDeadline)
+        guard retryTimeout?.nanoseconds != 0,
+              let replacement = await providerIfAvailable(requestTimeout: retryTimeout) else {
             return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
         }
         do {
             let retryResponse = try await replacement.profile.connection.call(
                 requestData,
-                timeout: requestTimeoutOverride
+                timeout: retryTimeout
             )
             if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
                 await invalidate(reason: "documentation_search_retry_not_enabled")
@@ -790,5 +798,27 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 !character.isNumber
             }
             .compactMap { Int($0) }
+    }
+
+    private static func requestDeadline(for requestTimeout: TimeAmount?) -> UInt64? {
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return nil
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remainingToMax = UInt64.max &- now
+        let clamped = min(UInt64(requestTimeout.nanoseconds), remainingToMax)
+        return now &+ clamped
+    }
+
+    private static func requestTimeout(until deadlineUptimeNs: UInt64?) -> TimeAmount? {
+        guard let deadlineUptimeNs else {
+            return nil
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard deadlineUptimeNs > now else {
+            return .nanoseconds(0)
+        }
+        let remaining = deadlineUptimeNs - now
+        return .nanoseconds(Int64(min(remaining, UInt64(Int64.max))))
     }
 }

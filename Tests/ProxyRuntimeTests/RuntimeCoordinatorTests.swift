@@ -368,6 +368,46 @@ struct RuntimeCoordinatorTests {
         ])
     }
 
+    @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
+        let xcode = documentationProviderTarget(processID: 301)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.hang]
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.successText("{\"answer\":\"late\"}")]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
+            sessionFactory: factory
+        )
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
+                requestTimeoutOverride: .milliseconds(1)
+            )
+            Issue.record("DocumentationSearch should time out without retrying")
+        } catch {
+            #expect(error is TimeoutError)
+        }
+
+        #expect(await factory.startedPIDs() == [xcode.processID])
+    }
+
     @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -5531,6 +5571,7 @@ private struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
 private enum ScriptedDocumentationResponse: Sendable {
     case success
     case successText(String)
+    case hang
     case notEnabled
 }
 
@@ -5669,6 +5710,8 @@ private actor ScriptedDocumentationSession: UpstreamSession {
             yieldToolResponse(id: id, text: "{\"ok\":true}", isError: false)
         case .successText(let text):
             yieldToolResponse(id: id, text: text, isError: false)
+        case .hang:
+            break
         case .notEnabled:
             yieldToolResponse(
                 id: id,
