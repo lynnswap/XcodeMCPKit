@@ -15,8 +15,13 @@ package final class HTTPPostService: Sendable {
         let forceBatchArray: Bool
     }
 
+    package struct LocalToolBatchResult: Sendable {
+        let responseData: Data?
+        let fallbackForwardedRequest: FilteredToolCallRequest?
+    }
+
     package struct LocalToolFilterOperation {
-        let localResponseFuture: EventLoopFuture<Data?>
+        let localResponseFuture: EventLoopFuture<LocalToolBatchResult>
         let forwardedRequest: FilteredToolCallRequest
         let cancellationHandle: HTTPPostCancellationHandle
         let deadline: Date?
@@ -234,17 +239,64 @@ package final class HTTPPostService: Sendable {
                     parentCancellationHandle: localToolFilter.cancellationHandle
                 ).future
             }
-            let future = forwardingFuture.and(localToolFilter.localResponseFuture).map {
+            let future = forwardingFuture.and(localToolFilter.localResponseFuture).flatMap {
                 forwardingResolution,
-                localResponseData in
-                Self.mergeLocalToolResponseData(
-                    localResponseData,
+                localBatchResult in
+                let initialResolution = Self.mergeLocalToolResponseData(
+                    localBatchResult.responseData,
                     into: forwardingResolution,
                     fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
                     forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray,
                     sessionID: sessionID,
                     prefersEventStream: prefersEventStream
                 )
+                guard let fallbackRequest = localBatchResult.fallbackForwardedRequest else {
+                    return eventLoop.makeSucceededFuture(initialResolution)
+                }
+                let fallbackTimeout = Self.remainingRequestTimeout(until: localToolFilter.deadline)
+                let fallbackForwardingFuture: EventLoopFuture<HTTPPostResolution>
+                if localToolFilter.deadline != nil,
+                    fallbackTimeout == nil,
+                    fallbackRequest.bodyData != nil
+                {
+                    fallbackForwardingFuture = eventLoop.makeSucceededFuture(
+                        .mcpError(
+                            id: nil,
+                            ids: fallbackRequest.forwardedResponseIDs,
+                            code: -32000,
+                            message: "upstream timeout",
+                            forceBatchArray: fallbackRequest.forceBatchArray,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    )
+                } else {
+                    fallbackForwardingFuture = self.makeForwardingOperation(
+                        filteredRequest: fallbackRequest,
+                        sessionID: sessionID,
+                        headerSessionID: headerSessionID,
+                        requestIsBatch: requestIsBatch,
+                        prefersEventStream: prefersEventStream,
+                        eventLoop: eventLoop,
+                        requestTimeoutOverride: fallbackTimeout,
+                        parentCancellationHandle: localToolFilter.cancellationHandle
+                    ).future
+                }
+                return fallbackForwardingFuture.map { fallbackResolution in
+                    let initialData = Self.responseDataForBatchResolution(
+                        initialResolution,
+                        fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
+                        forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray
+                    )
+                    return Self.mergeLocalToolResponseData(
+                        initialData,
+                        into: fallbackResolution,
+                        fallbackRequestIDs: fallbackRequest.forwardedResponseIDs,
+                        forceBatchArray: fallbackRequest.forceBatchArray,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                }
             }
             future.whenComplete { result in
                 guard (try? result.get()) != nil else { return }

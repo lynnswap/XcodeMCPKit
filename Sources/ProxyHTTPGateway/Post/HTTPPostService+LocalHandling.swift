@@ -247,6 +247,8 @@ extension HTTPPostService {
         toolsListRequests.reserveCapacity(requestItems.count)
         var documentationRequests: [[String: Any]] = []
         documentationRequests.reserveCapacity(requestItems.count)
+        var deferredDocumentationRequests: [[String: Any]] = []
+        deferredDocumentationRequests.reserveCapacity(requestItems.count)
         var forwardedObjects: [Any] = []
         forwardedObjects.reserveCapacity(requestItems.count)
 
@@ -257,11 +259,11 @@ extension HTTPPostService {
             }
             if isToolsListRequest(object) {
                 toolsListRequests.append(object)
-            } else if isDocumentationSearchRequest(
-                object,
-                allowInactiveProvider: hasLocalToolsListRequest
-            ) {
+            } else if isDocumentationSearchRequest(object) {
                 documentationRequests.append(object)
+            } else if hasLocalToolsListRequest,
+                      isDocumentationSearchRequest(object, allowInactiveProvider: true) {
+                deferredDocumentationRequests.append(object)
             } else {
                 forwardedObjects.append(item)
             }
@@ -295,7 +297,7 @@ extension HTTPPostService {
             forwardedObjects: forwardedObjects,
             forceBatchArray: filteredRequest.forceBatchArray
         )
-        let promise = eventLoop.makePromise(of: Data?.self)
+        let promise = eventLoop.makePromise(of: LocalToolBatchResult.self)
         let task = Task { [self] in
             guard !Task.isCancelled else {
                 eventLoop.execute {
@@ -303,10 +305,11 @@ extension HTTPPostService {
                 }
                 return
             }
-            let localResponseData = await makeLocalToolBatchResponseData(
+            let localBatchResult = await makeLocalToolBatchResult(
                 initialLocalResponseData: filteredRequest.localResponseData,
                 toolsListRequests: toolsListRequests,
                 documentationRequests: documentationRequests,
+                deferredDocumentationRequests: deferredDocumentationRequests,
                 sessionID: sessionID,
                 deadline: deadline
             )
@@ -316,7 +319,7 @@ extension HTTPPostService {
                     promise.fail(CancellationError())
                     return
                 }
-                promise.succeed(localResponseData)
+                promise.succeed(localBatchResult)
             }
         }
         cancellationHandle.bindRefreshTask(task)
@@ -355,20 +358,31 @@ extension HTTPPostService {
         )
     }
 
-    private func makeLocalToolBatchResponseData(
+    private func makeLocalToolBatchResult(
         initialLocalResponseData: Data?,
         toolsListRequests: [[String: Any]],
         documentationRequests: [[String: Any]],
+        deferredDocumentationRequests: [[String: Any]],
         sessionID: String,
         deadline: Date?
-    ) async -> Data? {
+    ) async -> LocalToolBatchResult {
         let toolsListResponseData = await makeToolsListBatchResponseData(
             requests: toolsListRequests,
             sessionID: sessionID,
             deadline: deadline
         )
+        var localDocumentationRequests = documentationRequests
+        let fallbackDocumentationRequests: [[String: Any]]
+        if deferredDocumentationRequests.isEmpty {
+            fallbackDocumentationRequests = []
+        } else if sessionManager.hasActiveDocumentationProvider() {
+            localDocumentationRequests.append(contentsOf: deferredDocumentationRequests)
+            fallbackDocumentationRequests = []
+        } else {
+            fallbackDocumentationRequests = deferredDocumentationRequests
+        }
         let documentationResponseData = await makeDocumentationSearchBatchResponseData(
-            requests: documentationRequests,
+            requests: localDocumentationRequests,
             deadline: deadline
         )
         let localResponseData = Self.mergeBatchResponsePayloads(
@@ -379,7 +393,16 @@ extension HTTPPostService {
             ],
             forceBatchArray: true
         )
-        return localResponseData
+        let fallbackForwardedRequest = fallbackDocumentationRequests.isEmpty
+            ? nil
+            : makeForwardedLocalToolRequest(
+                forwardedObjects: fallbackDocumentationRequests,
+                forceBatchArray: true
+            )
+        return LocalToolBatchResult(
+            responseData: localResponseData,
+            fallbackForwardedRequest: fallbackForwardedRequest
+        )
     }
 
     private func makeToolsListBatchResponseData(

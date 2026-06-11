@@ -2188,7 +2188,8 @@ struct HTTPHandlerTests {
                     text: "{\"answer\":\"docs\"}"
                 )
             },
-            documentationProviderIsActive: false
+            documentationProviderIsActive: false,
+            activatesDocumentationProviderOnSharedToolsList: true
         )
         sessionManager.setInitialized(true)
         sessionManager.setCachedToolsListResult(
@@ -2256,6 +2257,89 @@ struct HTTPHandlerTests {
 
             #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
             #expect(documentationRequests.withLockedValue { $0 } == ["UIView same batch"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func httpBatchFallsBackDocumentationSearchWhenSameBatchToolsListDoesNotActivateProvider()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 2)
+        let localDocumentationRequests = NIOLockedValueBox(0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "DocumentationSearch")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "{\"answer\":\"upstream-docs\"}"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                _ = requestData
+                localDocumentationRequests.withLockedValue { $0 += 1 }
+                throw UpstreamSlotAcquisitionError.unavailable
+            },
+            documentationProviderIsActive: false
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setCachedToolsListResult(
+            JSONValue(any: [
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])!
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-tools-list-docs-fallback",
+                payload: [
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 751,
+                        "method": "tools/list",
+                    ],
+                    toolsCallPayload(
+                        id: 752,
+                        name: "DocumentationSearch",
+                        arguments: [
+                            "query": "UIView same batch fallback",
+                        ]
+                    ),
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let bodyArray = try #require(bodyData as? [[String: Any]])
+            #expect(bodyArray.count == 2)
+
+            let toolsList = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 751 }
+            let toolsResult = toolsList?["result"] as? [String: Any]
+            let tools = try #require(toolsResult?["tools"] as? [[String: Any]])
+            #expect(tools.map { $0["name"] as? String }.contains("DocumentationSearch") == false)
+
+            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 752 }
+            let docsResult = docs?["result"] as? [String: Any]
+            let docsContent = docsResult?["content"] as? [[String: Any]]
+            #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+
+            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 0)
         } catch {
             try? await server.shutdown()
             throw error
@@ -6258,6 +6342,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentRequests: [SentRequest] = []
         var availableUpstreamIndices: [Int?] = []
         var requeuedLeaseCount = 0
+        var documentationProviderIsActive = false
     }
 
     private let state = NIOLockedValueBox(State())
@@ -6270,7 +6355,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
     private let documentationSearchResponder:
         (@Sendable (_ requestData: Data) throws -> Data)?
-    private let documentationProviderIsActive: Bool
+    private let activatesDocumentationProviderOnSharedToolsList: Bool
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = RequestLeaseRegistry()
 
@@ -6280,6 +6365,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
         documentationProviderIsActive: Bool? = nil,
+        activatesDocumentationProviderOnSharedToolsList: Bool = false,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6287,8 +6373,13 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
         self.documentationSearchResponder = documentationSearchResponder
-        self.documentationProviderIsActive = documentationProviderIsActive ?? (documentationSearchResponder != nil)
+        self.activatesDocumentationProviderOnSharedToolsList =
+            activatesDocumentationProviderOnSharedToolsList
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
+        state.withLockedValue { state in
+            state.documentationProviderIsActive =
+                documentationProviderIsActive ?? (documentationSearchResponder != nil)
+        }
     }
 
     init(
@@ -6297,6 +6388,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
         documentationProviderIsActive: Bool? = nil,
+        activatesDocumentationProviderOnSharedToolsList: Bool = false,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6304,8 +6396,13 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
         self.documentationSearchResponder = documentationSearchResponder
-        self.documentationProviderIsActive = documentationProviderIsActive ?? (documentationSearchResponder != nil)
+        self.activatesDocumentationProviderOnSharedToolsList =
+            activatesDocumentationProviderOnSharedToolsList
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
+        state.withLockedValue { state in
+            state.documentationProviderIsActive =
+                documentationProviderIsActive ?? (documentationSearchResponder != nil)
+        }
     }
 
     init(
@@ -6314,6 +6411,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
         documentationProviderIsActive: Bool? = nil,
+        activatesDocumentationProviderOnSharedToolsList: Bool = false,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6321,8 +6419,13 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
         self.documentationSearchResponder = documentationSearchResponder
-        self.documentationProviderIsActive = documentationProviderIsActive ?? (documentationSearchResponder != nil)
+        self.activatesDocumentationProviderOnSharedToolsList =
+            activatesDocumentationProviderOnSharedToolsList
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
+        state.withLockedValue { state in
+            state.documentationProviderIsActive =
+                documentationProviderIsActive ?? (documentationSearchResponder != nil)
+        }
     }
 
     func session(id: String) -> SessionContext {
@@ -6411,6 +6514,12 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
         _ = requestTimeoutOverride
+        if activatesDocumentationProviderOnSharedToolsList,
+           documentationSearchResponder != nil {
+            state.withLockedValue { state in
+                state.documentationProviderIsActive = true
+            }
+        }
         if let cached = state.withLockedValue({ $0.cachedToolsList }) {
             return cached
         }
@@ -6485,7 +6594,9 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func hasActiveDocumentationProvider() -> Bool {
-        documentationProviderIsActive
+        state.withLockedValue { state in
+            state.documentationProviderIsActive
+        }
     }
 
     func chooseUpstreamIndex() -> Int? {
