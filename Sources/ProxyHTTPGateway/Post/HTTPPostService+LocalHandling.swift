@@ -213,6 +213,152 @@ extension HTTPPostService {
         )
     }
 
+    package func filterDocumentationSearchToolCalls(
+        filteredRequest: FilteredToolCallRequest,
+        sessionID: String,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?
+    ) -> EventLoopFuture<FilteredToolCallRequest>? {
+        guard let bodyData = filteredRequest.bodyData,
+              let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
+        else {
+            return nil
+        }
+
+        let requestItems: [Any]
+        if let object = parsedRequestJSON as? [String: Any] {
+            requestItems = [object]
+        } else if let array = parsedRequestJSON as? [Any] {
+            requestItems = array
+        } else {
+            return nil
+        }
+
+        var documentationRequests: [[String: Any]] = []
+        documentationRequests.reserveCapacity(requestItems.count)
+        var forwardedObjects: [Any] = []
+        forwardedObjects.reserveCapacity(requestItems.count)
+
+        for item in requestItems {
+            guard let object = item as? [String: Any],
+                  isDocumentationSearchRequest(object) else {
+                forwardedObjects.append(item)
+                continue
+            }
+            documentationRequests.append(object)
+        }
+
+        guard documentationRequests.isEmpty == false else {
+            return nil
+        }
+
+        let promise = eventLoop.makePromise(of: FilteredToolCallRequest.self)
+        Task {
+            let documentationResponseData = await makeDocumentationSearchBatchResponseData(
+                requests: documentationRequests,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+            let localResponseData = Self.mergeBatchResponsePayloads(
+                [
+                    filteredRequest.localResponseData,
+                    documentationResponseData,
+                ],
+                forceBatchArray: true
+            )
+
+            let forwardedPayload: Any?
+            if forwardedObjects.isEmpty {
+                forwardedPayload = nil
+            } else if filteredRequest.forceBatchArray || forwardedObjects.count > 1 {
+                forwardedPayload = forwardedObjects
+            } else {
+                forwardedPayload = forwardedObjects[0]
+            }
+            let forwardedBodyData = forwardedPayload.flatMap {
+                try? JSONSerialization.data(withJSONObject: $0, options: [])
+            }
+            let forwardedResponseIDs = forwardedPayload.map {
+                Self.extractResponseIDs(from: $0)
+            } ?? []
+
+            let rewritten = FilteredToolCallRequest(
+                bodyData: forwardedBodyData,
+                localResponseData: localResponseData,
+                forwardedResponseIDs: forwardedResponseIDs,
+                forceBatchArray: filteredRequest.forceBatchArray
+            )
+            eventLoop.execute {
+                promise.succeed(rewritten)
+            }
+        }
+        return promise.futureResult
+    }
+
+    private func makeDocumentationSearchBatchResponseData(
+        requests: [[String: Any]],
+        requestTimeoutOverride: TimeAmount?
+    ) async -> Data? {
+        var responseObjects: [[String: Any]] = []
+        responseObjects.reserveCapacity(requests.count)
+        let normalizer = ToolCallNormalizer(sessionManager: sessionManager)
+
+        for request in requests {
+            guard let idValue = request["id"],
+                  let originalID = RPCID(any: idValue) else {
+                continue
+            }
+            guard JSONSerialization.isValidJSONObject(request),
+                  let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
+                responseObjects.append(
+                    Self.makeJSONRPCErrorResponseObject(
+                        id: originalID,
+                        code: -32600,
+                        message: "invalid request"
+                    )
+                )
+                continue
+            }
+            do {
+                let responseData = try await sessionManager.callDocumentationSearch(
+                    requestData: requestData,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+                let normalizedData = normalizer.normalizeResponseDataIfNeeded(
+                    method: "tools/call",
+                    toolName: DocumentationToolCatalog.toolName,
+                    upstreamData: responseData
+                )
+                responseObjects.append(
+                    contentsOf: Self.responseObjects(from: normalizedData)
+                )
+            } catch {
+                let mapped = Self.mapDocumentationSearchError(error)
+                responseObjects.append(
+                    Self.makeJSONRPCErrorResponseObject(
+                        id: originalID,
+                        code: mapped.code,
+                        message: mapped.message
+                    )
+                )
+            }
+        }
+
+        return Self.makeToolResponseData(
+            from: responseObjects,
+            forceBatchArray: true
+        )
+    }
+
+    private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
+        guard object["method"] as? String == "tools/call",
+              let params = object["params"] as? [String: Any],
+              params["name"] as? String == DocumentationToolCatalog.toolName,
+              disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+            return false
+        }
+        return true
+    }
+
     package func blockedToolName(from requestObject: [String: Any]) -> String? {
         guard let method = requestObject["method"] as? String,
             method == "tools/call",

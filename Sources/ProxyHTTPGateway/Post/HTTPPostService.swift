@@ -180,6 +180,51 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        if let documentationFilterFuture = filterDocumentationSearchToolCalls(
+            filteredRequest: filteredRequest,
+            sessionID: sessionID,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
+            return HTTPPostOperation(
+                future: documentationFilterFuture.flatMap { rewrittenRequest in
+                    self.makeForwardingOperation(
+                        filteredRequest: rewrittenRequest,
+                        sessionID: sessionID,
+                        headerSessionID: headerSessionID,
+                        requestIsBatch: requestIsBatch,
+                        prefersEventStream: prefersEventStream,
+                        eventLoop: eventLoop,
+                        requestTimeoutOverride: requestTimeoutOverride,
+                        parentCancellationHandle: parentCancellationHandle
+                    ).future
+                },
+                cancellationHandle: nil
+            )
+        }
+
+        return makeForwardingOperation(
+            filteredRequest: filteredRequest,
+            sessionID: sessionID,
+            headerSessionID: headerSessionID,
+            requestIsBatch: requestIsBatch,
+            prefersEventStream: prefersEventStream,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride,
+            parentCancellationHandle: parentCancellationHandle
+        )
+    }
+
+    package func makeForwardingOperation(
+        filteredRequest: FilteredToolCallRequest,
+        sessionID: String,
+        headerSessionID: String?,
+        requestIsBatch: Bool,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?,
+        parentCancellationHandle: HTTPPostCancellationHandle?
+    ) -> HTTPPostOperation {
         guard let forwardedBodyData = filteredRequest.bodyData else {
             return HTTPPostOperation(
                 future: eventLoop.makeSucceededFuture(

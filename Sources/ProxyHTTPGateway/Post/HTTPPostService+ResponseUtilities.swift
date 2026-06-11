@@ -395,6 +395,37 @@ extension HTTPPostService {
         return try? JSONSerialization.data(withJSONObject: payload, options: [])
     }
 
+    package static func responseObjects(from responseData: Data) -> [[String: Any]] {
+        guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
+            return []
+        }
+        if let array = payload as? [[String: Any]] {
+            return array
+        }
+        if let object = payload as? [String: Any] {
+            return [object]
+        }
+        return []
+    }
+
+    package static func mapDocumentationSearchError(_ error: Error) -> (code: Int, message: String) {
+        if error is UpstreamSlotAcquisitionError {
+            return (-32001, "upstream unavailable")
+        }
+        if let error = error as? ControlPlaneRequestError {
+            return mapDocumentationSearchError(error.underlying)
+        }
+        if let error = error as? ControlPlaneError {
+            switch error {
+            case .invalidResponse:
+                return (-32000, "upstream timeout")
+            case .upstreamRPC(let code, let message):
+                return (code, message)
+            }
+        }
+        return (-32000, "upstream timeout")
+    }
+
     package static func extractResponseIDs(from requestJSON: Any) -> [RPCID] {
         if let object = requestJSON as? [String: Any] {
             guard let rawID = object["id"], let rpcID = RPCID(any: rawID) else {
