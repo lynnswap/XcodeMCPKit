@@ -297,6 +297,30 @@ struct RuntimeCoordinatorTests {
         #expect(await documentationProvider.toolListUpdateCount() == 1)
     }
 
+    @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            prewarmDelayNanoseconds: 300_000_000
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 300),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+
+        await manager.shutdown()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        #expect(await documentationProvider.prewarmCount() == 0)
+        #expect(await documentationProvider.shutdownCount() == 1)
+    }
+
     @Test func documentationProviderManagerRejectsDescriptorWhenProbeCallIsNotEnabled() async throws {
         let target = documentationProviderTarget(processID: 101)
         let factory = ScriptedDocumentationSessionFactory(
@@ -428,6 +452,42 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
+    @Test func documentationProviderManagerKeepsSelectionAfterStartingCallerTimesOut() async throws {
+        let target = documentationProviderTarget(processID: 123)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 100_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        async let shortUpdate = manager.toolListUpdate(requestTimeout: .milliseconds(1))
+        try await spinUntil("waiting for provider selection to start") {
+            await factory.startAttempts() == [target.processID]
+        }
+
+        let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
+        if case .unavailable = await shortUpdate {
+        } else {
+            Issue.record("short tools/list should time out without cancelling provider selection")
+        }
+
+        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
     @Test func documentationProviderManagerChecksAllRunningXcodeTargetsBeforePublishingDescriptor() async throws {
         let xcode26 = documentationProviderTarget(processID: 201)
         let xcode27 = documentationProviderTarget(processID: 202)
@@ -439,6 +499,41 @@ struct RuntimeCoordinatorTests {
                         toolCount: 20,
                         includesDocumentationSearch: true,
                         probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
+    }
+
+    @Test func documentationProviderManagerPrefersNewerServerVersionWhenToolCountsTie() async throws {
+        let xcode26 = documentationProviderTarget(processID: 211)
+        let xcode27 = documentationProviderTarget(processID: 212)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
                     ),
                 ],
                 xcode27.processID: [
@@ -5800,7 +5895,7 @@ private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionM
     func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
         startAttemptProcessIDs.append(target.processID)
         if let startDelayNanoseconds {
-            try? await Task.sleep(nanoseconds: startDelayNanoseconds)
+            try await Task.sleep(nanoseconds: startDelayNanoseconds)
         }
         guard var plans = plansByPID[target.processID],
               plans.isEmpty == false else {
@@ -5961,16 +6056,23 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var prewarmTimeouts: [TimeAmount?] = []
     private var toolListTimeouts: [TimeAmount?] = []
     private var callTimeouts: [TimeAmount?] = []
+    private let prewarmDelayNanoseconds: UInt64?
 
     init(
         toolListUpdate: DocumentationToolListUpdate,
-        callResults: [DocumentationProviderCallResult] = []
+        callResults: [DocumentationProviderCallResult] = [],
+        prewarmDelayNanoseconds: UInt64? = nil
     ) {
         self.update = toolListUpdate
         self.callResults = callResults
+        self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
     }
 
     func prewarm(requestTimeout: TimeAmount?) async {
+        if let prewarmDelayNanoseconds {
+            try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+        }
         prewarmTimeouts.append(requestTimeout)
         _ = await toolListUpdate(requestTimeout: requestTimeout)
     }
@@ -6015,6 +6117,10 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     func lastPrewarmTimeout() -> TimeAmount? {
         prewarmTimeouts.last ?? nil
+    }
+
+    func shutdownCount() -> Int {
+        invalidateReasons.filter { $0 == "shutdown" }.count
     }
 
     func lastToolListTimeout() -> TimeAmount? {

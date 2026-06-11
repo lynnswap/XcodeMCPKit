@@ -550,25 +550,33 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private let discovery: any XcodeTargetDiscovering
     private let sessionFactory: any DocumentationProviderSessionMaking
+    private let providerSelectionTimeout: TimeAmount?
     private let logger: Logger
     private var activeProvider: ActiveProvider?
     private var providerSelection: ProviderSelection?
+    private var isShutdown = false
 
     package init(
         discovery: any XcodeTargetDiscovering = LiveXcodeTargetDiscovery(),
         sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
+        providerSelectionTimeout: TimeAmount? = .seconds(30),
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
         self.sessionFactory = sessionFactory
+        self.providerSelectionTimeout = providerSelectionTimeout
         self.logger = logger
     }
 
     package func prewarm(requestTimeout: TimeAmount?) async {
+        guard !isShutdown else { return }
         _ = await toolListUpdate(requestTimeout: requestTimeout)
     }
 
     package func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        guard !isShutdown else {
+            return .unavailable
+        }
         guard requestTimeout?.nanoseconds != 0 else {
             return .unavailable
         }
@@ -585,6 +593,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationProviderCallResult {
+        guard !isShutdown else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
         let requestDeadline = Self.requestDeadline(for: requestTimeoutOverride)
         let initialTimeout = Self.requestTimeout(until: requestDeadline)
         guard initialTimeout?.nanoseconds != 0 else {
@@ -659,35 +670,40 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     package func invalidate(reason _: String) async {
-        providerSelection?.task.cancel()
+        let selection = providerSelection
         providerSelection = nil
-        guard let provider = activeProvider else {
-            return
-        }
+        selection?.task.cancel()
+        let provider = activeProvider
         activeProvider = nil
-        await provider.profile.connection.stop()
+        if let selected = await selection?.task.value,
+           selected.id != provider?.profile.id {
+            await selected.connection.stop()
+        }
+        await provider?.profile.connection.stop()
     }
 
     package func shutdown() async {
+        isShutdown = true
         await invalidate(reason: "shutdown")
     }
 
     private func providerIfAvailable(requestTimeout: TimeAmount?) async -> ActiveProvider? {
+        guard !isShutdown else {
+            return nil
+        }
         if let activeProvider {
             return activeProvider
         }
         let selection: ProviderSelection
-        let didStartSelection: Bool
         if let providerSelection {
             selection = providerSelection
-            didStartSelection = false
         } else {
+            let selectionTimeout = providerSelectionTimeout
             selection = ProviderSelection(
                 id: UUID(),
-                task: Task { await self.selectProvider(requestTimeout: requestTimeout) }
+                task: Task { await self.selectProvider(requestTimeout: selectionTimeout) }
             )
             providerSelection = selection
-            didStartSelection = true
         }
 
         let waitResult = await waitForSelection(selection, requestTimeout: requestTimeout)
@@ -696,17 +712,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case .completed(let profile):
             selected = profile
         case .timedOut:
-            if didStartSelection,
-                providerSelection?.id == selection.id
-            {
-                providerSelection = nil
-                selection.task.cancel()
-            }
             return nil
         }
         let selectionIsCurrent = providerSelection?.id == selection.id
         if selectionIsCurrent {
             providerSelection = nil
+        }
+
+        if isShutdown {
+            if let selected {
+                await selected.connection.stop()
+            }
+            return nil
         }
 
         if let activeProvider {
@@ -764,6 +781,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
+        guard !isShutdown else {
+            return nil
+        }
         let selectionDeadline = Self.requestDeadline(for: requestTimeout)
         let targets = discovery.runningXcodeTargets()
         logger.debug(
@@ -775,7 +795,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         )
         var profiles: [CandidateProfile] = []
         for target in targets {
-            guard !Task.isCancelled else {
+            guard !Task.isCancelled, !isShutdown else {
                 break
             }
             let candidateTimeout = Self.requestTimeout(until: selectionDeadline)
@@ -784,6 +804,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             do {
                 let profile = try await probe(target: target, requestTimeout: candidateTimeout)
+                guard !Task.isCancelled, !isShutdown else {
+                    await profile.connection.stop()
+                    break
+                }
                 profiles.append(profile)
             } catch is CancellationError {
                 break
@@ -800,7 +824,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
         }
 
-        if Task.isCancelled {
+        if Task.isCancelled || isShutdown {
             for profile in profiles {
                 await profile.connection.stop()
             }
@@ -836,10 +860,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         requestTimeout: TimeAmount?
     ) async throws -> CandidateProfile {
         let probeDeadline = Self.requestDeadline(for: requestTimeout ?? .seconds(30))
+        try Task.checkCancellation()
         let session = try await sessionFactory.startSession(for: target)
         let connection = DocumentationProviderConnection(session: session)
-        await connection.start()
         do {
+            try Task.checkCancellation()
+            await connection.start()
             let initializeTimeout = Self.requestTimeout(until: probeDeadline)
             guard initializeTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()

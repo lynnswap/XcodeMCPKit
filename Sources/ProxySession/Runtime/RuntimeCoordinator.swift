@@ -189,6 +189,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     package let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
+    package let documentationPrewarmTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
     package let upstreamReadinessGenerationBox = NIOLockedValueBox<UInt64>(0)
     package let debugRecorder: ProxyDebugRecorder
     package let leaseManager: LeaseManager
@@ -468,6 +469,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for timeout in upstreamTimeouts {
             timeout?.cancel()
         }
+        let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue { taskBox in
+            let task = taskBox
+            taskBox = nil
+            return task
+        }
+        documentationPrewarmTask?.cancel()
         await upstreamReadinessCoordinator.shutdown()
 
         invalidateControlPlaneSynchronously(
@@ -494,6 +501,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             if let documentationProviderManager {
                 group.addTask {
                     await documentationProviderManager.shutdown()
+                }
+            }
+            if let documentationPrewarmTask {
+                group.addTask {
+                    await documentationPrewarmTask.value
                 }
             }
         }
@@ -547,7 +559,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? min(config.requestTimeout, 30)
             : 30
         let timeout = MCPMethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
-        Task { [documentationProviderManager, logger] in
+        let task = Task { [documentationProviderManager, logger] in
+            guard !Task.isCancelled else { return }
             logger.debug(
                 "Prewarming documentation provider",
                 metadata: [
@@ -555,8 +568,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 ]
             )
             await documentationProviderManager.prewarm(requestTimeout: timeout)
+            guard !Task.isCancelled else { return }
             logger.debug("Documentation provider prewarm completed")
         }
+        let previous = documentationPrewarmTaskBox.withLockedValue { taskBox in
+            let previous = taskBox
+            taskBox = task
+            return previous
+        }
+        previous?.cancel()
     }
 
     package func chooseUpstreamIndex() -> Int? {
