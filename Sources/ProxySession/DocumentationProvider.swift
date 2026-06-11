@@ -22,6 +22,16 @@ package struct DocumentationProviderCallResult: Sendable {
     }
 }
 
+package struct DocumentationProviderCallFailure: Error {
+    package let underlying: any Error
+    package let providerIsActive: Bool
+
+    package init(underlying: any Error, providerIsActive: Bool) {
+        self.underlying = underlying
+        self.providerIsActive = providerIsActive
+    }
+}
+
 package protocol DocumentationProviderManaging: Sendable {
     func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
@@ -648,20 +658,28 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             await invalidate(provider, reason: "documentation_provider_call_failed")
             let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
             guard replacementSelectionTimeout?.nanoseconds != 0 else {
-                throw error
+                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
             }
             guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
                 try Task.checkCancellation()
-                throw error
+                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
             }
             let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
             guard retryCallTimeout?.nanoseconds != 0 else {
-                throw error
+                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: true)
             }
-            let retryResponse = try await replacement.profile.connection.call(
-                requestData,
-                timeout: retryCallTimeout
-            )
+            let retryResponse: Data
+            do {
+                retryResponse = try await replacement.profile.connection.call(
+                    requestData,
+                    timeout: retryCallTimeout
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: true)
+            }
             if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
                 await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
             }

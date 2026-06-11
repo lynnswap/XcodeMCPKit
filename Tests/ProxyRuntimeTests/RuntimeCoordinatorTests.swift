@@ -391,6 +391,56 @@ struct RuntimeCoordinatorTests {
         #expect(await documentationProvider.callCount() == 1)
     }
 
+    @Test func documentationSearchClearsProviderStateWhenRecoveryFailsAfterInvalidation() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callFailures: [
+                DocumentationProviderCallFailure(
+                    underlying: UpstreamSlotAcquisitionError.unavailable,
+                    providerIsActive: false
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+        _ = try await manager.sharedToolsList(
+            sessionID: "session-docs-recovery-failed",
+            requestTimeoutOverride: nil
+        )
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(manager.cachedToolsListResult() != nil)
+
+        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 43, query: "UIView"),
+                requestTimeoutOverride: nil
+            )
+        }
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.hasActiveDocumentationProvider() == false)
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
     @Test func startupPrewarmsDocumentationProviderWhenEnabled() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -955,6 +1005,50 @@ struct RuntimeCoordinatorTests {
         ])
     }
 
+    @Test func documentationProviderManagerReportsInactiveProviderWhenRecoveryFindsNoReplacement() async throws {
+        let xcode = documentationProviderTarget(processID: 231)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-27.0")
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 76, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+            Issue.record("DocumentationSearch should report an invalidated provider failure")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.providerIsActive == false)
+            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        }
+
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+    }
+
     @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
         let xcode = documentationProviderTarget(processID: 301)
         let factory = ScriptedDocumentationSessionFactory(
@@ -988,8 +1082,11 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .milliseconds(1)
             )
             Issue.record("DocumentationSearch should time out without retrying")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.underlying is TimeoutError)
+            #expect(failure.providerIsActive == false)
         } catch {
-            #expect(error is TimeoutError)
+            Issue.record("expected DocumentationProviderCallFailure, got \(error)")
         }
 
         #expect(await factory.startedPIDs() == [xcode.processID])
@@ -6452,6 +6549,7 @@ private actor ScriptedDocumentationSession: UpstreamSession {
 private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var update: DocumentationToolListUpdate
     private var callResults: [DocumentationProviderCallResult]
+    private var callFailures: [DocumentationProviderCallFailure]
     private var callCountValue = 0
     private var invalidateReasons: [String] = []
     private var prewarmTimeouts: [TimeAmount?] = []
@@ -6463,11 +6561,13 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     init(
         toolListUpdate: DocumentationToolListUpdate,
         callResults: [DocumentationProviderCallResult] = [],
+        callFailures: [DocumentationProviderCallFailure] = [],
         prewarmDelayNanoseconds: UInt64? = nil,
         toolListDelayNanoseconds: UInt64? = nil
     ) {
         self.update = toolListUpdate
         self.callResults = callResults
+        self.callFailures = callFailures
         self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
         self.toolListDelayNanoseconds = toolListDelayNanoseconds
     }
@@ -6496,6 +6596,9 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     ) async throws -> DocumentationProviderCallResult {
         callCountValue += 1
         callTimeouts.append(requestTimeoutOverride)
+        if callFailures.isEmpty == false {
+            throw callFailures.removeFirst()
+        }
         guard callResults.isEmpty == false else {
             throw UpstreamSlotAcquisitionError.unavailable
         }

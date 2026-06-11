@@ -840,10 +840,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 "tools/call",
                 defaultSeconds: config.requestTimeout
             )
-        let result = try await documentationProviderManager.callDocumentationSearch(
-            requestData: requestData,
-            requestTimeoutOverride: timeout
-        )
+        let result: DocumentationProviderCallResult
+        do {
+            result = try await documentationProviderManager.callDocumentationSearch(
+                requestData: requestData,
+                requestTimeoutOverride: timeout
+            )
+        } catch let failure as DocumentationProviderCallFailure {
+            setDocumentationProviderActive(failure.providerIsActive)
+            invalidateControlPlaneSynchronously(
+                reason: "documentation_provider_invalidated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
+            throw failure.underlying
+        }
         let responseIsDocumentationNotEnabled =
             DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
         setDocumentationProviderActive(responseIsDocumentationNotEnabled == false)
