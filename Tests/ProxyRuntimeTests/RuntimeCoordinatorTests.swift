@@ -143,6 +143,18 @@ struct RuntimeCoordinatorTests {
         #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
     }
 
+    @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
+        var config = makeConfig(requestTimeout: 5)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) != nil)
+
+        config.upstreamArgs = ["--sdk", "macosx", "swift"]
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+
+        config.upstreamCommand = "/bin/echo"
+        config.upstreamArgs = ["xcrun", "mcpbridge"]
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+    }
+
     @Test func sharedToolsListMergesDocumentationProviderDescriptor() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

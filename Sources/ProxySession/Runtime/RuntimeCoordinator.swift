@@ -218,6 +218,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let upstreams = Self.makeDefaultUpstreams(
             config: config, sharedSessionID: config.upstreamSessionID, count: count)
         let clock = ClockClient.liveValue
+        let documentationProviderManager = Self.makeDefaultDocumentationProviderManager(config: config)
         self.init(
             config: config,
             eventLoop: eventLoop,
@@ -227,9 +228,18 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 config: config,
                 clock: clock
             ),
-            documentationProviderManager: DocumentationProviderManager(),
-            prewarmDocumentationProviderOnStartup: true
+            documentationProviderManager: documentationProviderManager,
+            prewarmDocumentationProviderOnStartup: documentationProviderManager != nil
         )
+    }
+
+    package static func makeDefaultDocumentationProviderManager(
+        config: ProxyConfig
+    ) -> (any DocumentationProviderManaging)? {
+        guard isDefaultXcrunMCPBridgeInvocation(config: config) else {
+            return nil
+        }
+        return DocumentationProviderManager()
     }
 
     package init(
