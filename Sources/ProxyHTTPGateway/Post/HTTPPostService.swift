@@ -15,6 +15,23 @@ package final class HTTPPostService: Sendable {
         let forceBatchArray: Bool
     }
 
+    package struct LocalToolBatchResult: Sendable {
+        let responseData: Data?
+        let fallbackForwardedRequest: FilteredToolCallRequest?
+    }
+
+    private struct LocalToolFallbackForwardingResult {
+        let request: FilteredToolCallRequest
+        let resolution: HTTPPostResolution
+    }
+
+    package struct LocalToolFilterOperation {
+        let localResponseFuture: EventLoopFuture<LocalToolBatchResult>
+        let forwardedRequest: FilteredToolCallRequest
+        let cancellationHandle: HTTPPostCancellationHandle
+        let deadline: Date?
+    }
+
     package let sessionManager: any RuntimeCoordinating
     package let disabledToolNames: Set<String>
     package let localResponder: LocalMCPResponder
@@ -180,6 +197,162 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        if let localToolFilter = filterLocalToolCalls(
+            filteredRequest: filteredRequest,
+            sessionID: sessionID,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
+            if let parentCancellationHandle,
+                parentCancellationHandle.bindChildHandle(localToolFilter.cancellationHandle) == false
+            {
+                localToolFilter.cancellationHandle.cancel(using: sessionManager)
+                return HTTPPostOperation(
+                    future: eventLoop.makeSucceededFuture(
+                        .empty(status: .accepted, sessionID: sessionID)
+                    ),
+                    cancellationHandle: nil
+                )
+            }
+
+            let forwardingFuture = makeLocalToolForwardingFuture(
+                request: localToolFilter.forwardedRequest,
+                sessionID: sessionID,
+                headerSessionID: headerSessionID,
+                requestIsBatch: requestIsBatch,
+                prefersEventStream: prefersEventStream,
+                eventLoop: eventLoop,
+                deadline: localToolFilter.deadline,
+                cancellationHandle: localToolFilter.cancellationHandle
+            )
+            let localAndFallbackFuture = localToolFilter.localResponseFuture.flatMap {
+                localBatchResult -> EventLoopFuture<(
+                    LocalToolBatchResult,
+                    LocalToolFallbackForwardingResult?
+                )> in
+                guard let fallbackRequest = localBatchResult.fallbackForwardedRequest else {
+                    return eventLoop.makeSucceededFuture((localBatchResult, nil))
+                }
+                return self.makeLocalToolForwardingFuture(
+                    request: fallbackRequest,
+                    sessionID: sessionID,
+                    headerSessionID: headerSessionID,
+                    requestIsBatch: requestIsBatch,
+                    prefersEventStream: prefersEventStream,
+                    eventLoop: eventLoop,
+                    deadline: localToolFilter.deadline,
+                    cancellationHandle: localToolFilter.cancellationHandle
+                ).map { fallbackResolution in
+                    (
+                        localBatchResult,
+                        LocalToolFallbackForwardingResult(
+                            request: fallbackRequest,
+                            resolution: fallbackResolution
+                        )
+                    )
+                }
+            }
+            let future = forwardingFuture.and(localAndFallbackFuture).map {
+                forwardingResolution,
+                localAndFallback in
+                let (localBatchResult, fallbackForwarding) = localAndFallback
+                let initialResolution = Self.mergeLocalToolResponseData(
+                    localBatchResult.responseData,
+                    into: forwardingResolution,
+                    fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
+                    forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                )
+                guard let fallbackForwarding else {
+                    return initialResolution
+                }
+                let initialData = Self.responseDataForBatchResolution(
+                    initialResolution,
+                    fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
+                    forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray
+                )
+                return Self.mergeLocalToolResponseData(
+                    initialData,
+                    into: fallbackForwarding.resolution,
+                    fallbackRequestIDs: fallbackForwarding.request.forwardedResponseIDs,
+                    forceBatchArray: fallbackForwarding.request.forceBatchArray,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                )
+            }
+            future.whenComplete { result in
+                guard (try? result.get()) != nil else { return }
+                localToolFilter.cancellationHandle.markCompleted()
+                self.sessionManager.completeRequestLease(localToolFilter.cancellationHandle.leaseID)
+            }
+            return HTTPPostOperation(
+                future: future,
+                cancellationHandle: localToolFilter.cancellationHandle
+            )
+        }
+
+        return makeForwardingOperation(
+            filteredRequest: filteredRequest,
+            sessionID: sessionID,
+            headerSessionID: headerSessionID,
+            requestIsBatch: requestIsBatch,
+            prefersEventStream: prefersEventStream,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride,
+            parentCancellationHandle: parentCancellationHandle
+        )
+    }
+
+    private func makeLocalToolForwardingFuture(
+        request: FilteredToolCallRequest,
+        sessionID: String,
+        headerSessionID: String?,
+        requestIsBatch: Bool,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        deadline: Date?,
+        cancellationHandle: HTTPPostCancellationHandle
+    ) -> EventLoopFuture<HTTPPostResolution> {
+        let forwardingTimeout = Self.remainingRequestTimeout(until: deadline)
+        if deadline != nil,
+            forwardingTimeout == nil,
+            request.bodyData != nil
+        {
+            return eventLoop.makeSucceededFuture(
+                .mcpError(
+                    id: nil,
+                    ids: request.forwardedResponseIDs,
+                    code: -32000,
+                    message: "upstream timeout",
+                    forceBatchArray: request.forceBatchArray,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                )
+            )
+        }
+        return makeForwardingOperation(
+            filteredRequest: request,
+            sessionID: sessionID,
+            headerSessionID: headerSessionID,
+            requestIsBatch: requestIsBatch,
+            prefersEventStream: prefersEventStream,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: forwardingTimeout,
+            parentCancellationHandle: cancellationHandle
+        ).future
+    }
+
+    package func makeForwardingOperation(
+        filteredRequest: FilteredToolCallRequest,
+        sessionID: String,
+        headerSessionID: String?,
+        requestIsBatch: Bool,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?,
+        parentCancellationHandle: HTTPPostCancellationHandle?
+    ) -> HTTPPostOperation {
         guard let forwardedBodyData = filteredRequest.bodyData else {
             return HTTPPostOperation(
                 future: eventLoop.makeSucceededFuture(

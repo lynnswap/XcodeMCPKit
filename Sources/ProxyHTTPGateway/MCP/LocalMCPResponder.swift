@@ -37,6 +37,31 @@ package struct LocalMCPResponder {
         self.logger = logger
     }
 
+    package func toolsListResponseData(
+        object: [String: Any],
+        sessionID: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> Data {
+        guard let originalIDValue = object["id"],
+              let originalID = RPCID(any: originalIDValue) else {
+            throw ControlPlaneError.invalidResponse("missing id")
+        }
+        let result = try await sessionManager.sharedToolsList(
+            sessionID: sessionID,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+        let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+            result,
+            mode: refreshCodeIssuesMode,
+            hiddenToolNames: disabledToolNames
+        )
+        var buffer = try Self.encodeResultBuffer(
+            id: originalID,
+            result: rewrittenResult
+        )
+        return buffer.readData(length: buffer.readableBytes) ?? Data()
+    }
+
     package func handle(
         object: [String: Any],
         headerSessionID: String?,

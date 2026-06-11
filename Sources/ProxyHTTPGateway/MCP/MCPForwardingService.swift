@@ -86,6 +86,7 @@ package struct MCPForwardingService: Sendable {
             registration = session.router.registerBatchPending(
                 on: eventLoop,
                 timeout: requestTimeout,
+                responseIDKeys: prepared.transform.responseIDs.map(\.key),
                 onTimeout: onTimeout
             )
         } else if let idKey = prepared.transform.idKey {

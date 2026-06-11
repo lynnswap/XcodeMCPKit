@@ -143,6 +143,1235 @@ struct RuntimeCoordinatorTests {
         #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
     }
 
+    @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
+        var config = makeConfig(requestTimeout: 5)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) != nil)
+
+        config.disabledToolNames = [DocumentationToolCatalog.toolName]
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+
+        config.disabledToolNames = []
+        config.upstreamArgs = ["--sdk", "macosx", "swift"]
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+
+        config.upstreamCommand = "/bin/echo"
+        config.upstreamArgs = ["xcrun", "mcpbridge"]
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+    }
+
+    @Test func sharedToolsListMergesDocumentationProviderDescriptor() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-docs-tools",
+            requestTimeoutOverride: nil
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(manager.hasActiveDocumentationProvider())
+        let observedTimeout = try #require(await documentationProvider.lastToolListTimeout())
+        #expect(observedTimeout.nanoseconds > 0)
+    }
+
+    @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "26.6").foundationObject,
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-docs-unavailable",
+            requestTimeoutOverride: nil
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(manager.hasActiveDocumentationProvider() == false)
+    }
+
+    @Test func sharedToolsListTimeoutDoesNotInvalidateDocumentationProvider() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            toolListDelayNanoseconds: 50_000_000
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "26.6").foundationObject,
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-docs-timeout",
+            requestTimeoutOverride: .milliseconds(1)
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(manager.hasActiveDocumentationProvider() == false)
+        #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
+    }
+
+    @Test func documentationSearchInvalidatesCanonicalToolsCatalogWhenProviderStales() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let providerResponse = try makeJSONRPCResponse(
+            id: 41,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "Tool 'DocumentationSearch' is not enabled.",
+                    ],
+                ],
+                "isError": true,
+            ]
+        )
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callResults: [
+                DocumentationProviderCallResult(
+                    data: providerResponse,
+                    didInvalidateProvider: true
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "27.0").foundationObject,
+                ],
+            ])
+        )
+        #expect(manager.cachedToolsListResult() != nil)
+
+        let responseData = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 41, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(responseData == providerResponse)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.hasActiveDocumentationProvider() == false)
+        #expect(await documentationProvider.callCount() == 1)
+        let observedTimeout = try #require(await documentationProvider.lastCallTimeout())
+        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
+    }
+
+    @Test func documentationSearchDoesNotInvalidateWhenSuccessfulAnswerMentionsNotEnabled()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let providerResponse = try makeJSONRPCResponse(
+            id: 43,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "A user may see: Tool 'DocumentationSearch' is not enabled.",
+                    ],
+                ],
+                "isError": false,
+            ]
+        )
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callResults: [
+                DocumentationProviderCallResult(
+                    data: providerResponse,
+                    didInvalidateProvider: false
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        let cachedTools = try jsonValue([
+            "tools": [
+                documentationDescriptor(version: "27.0").foundationObject,
+            ],
+        ])
+        manager.setCachedToolsListResult(cachedTools)
+
+        let responseData = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
+        #expect(responseData == providerResponse)
+        let cachedResult = try #require(manager.cachedToolsListResult())
+        #expect(DocumentationToolCatalog.descriptor(in: cachedResult) != nil)
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
+    @Test func documentationSearchKeepsProviderActiveAfterSuccessfulRetryInvalidatesCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let providerResponse = try makeJSONRPCResponse(
+            id: 42,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "{\"answer\":\"retry\"}",
+                    ],
+                ],
+                "isError": false,
+            ]
+        )
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callResults: [
+                DocumentationProviderCallResult(
+                    data: providerResponse,
+                    didInvalidateProvider: true
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+        _ = try await manager.sharedToolsList(
+            sessionID: "session-docs-retry-active",
+            requestTimeoutOverride: nil
+        )
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(manager.cachedToolsListResult() != nil)
+
+        let responseData = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 42, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(responseData == providerResponse)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
+    @Test func documentationSearchClearsProviderStateWhenRecoveryFailsAfterInvalidation() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            callFailures: [
+                DocumentationProviderCallFailure(
+                    underlying: UpstreamSlotAcquisitionError.unavailable,
+                    providerIsActive: false
+                ),
+            ]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+        _ = try await manager.sharedToolsList(
+            sessionID: "session-docs-recovery-failed",
+            requestTimeoutOverride: nil
+        )
+        #expect(manager.hasActiveDocumentationProvider())
+        #expect(manager.cachedToolsListResult() != nil)
+
+        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 43, query: "UIView"),
+                requestTimeoutOverride: nil
+            )
+        }
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.hasActiveDocumentationProvider() == false)
+        #expect(await documentationProvider.callCount() == 1)
+    }
+
+    @Test func startupPrewarmsDocumentationProviderWhenEnabled() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 300),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+        defer { manager.shutdownAndWait() }
+
+        try await spinUntil("waiting for documentation provider startup prewarm") {
+            await documentationProvider.prewarmCount() == 1
+        }
+
+        let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
+        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(30).nanoseconds)
+        #expect(await documentationProvider.toolListUpdateCount() == 1)
+        #expect(manager.hasActiveDocumentationProvider())
+    }
+
+    @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            prewarmDelayNanoseconds: 300_000_000
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 300),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+
+        await manager.shutdown()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        #expect(await documentationProvider.prewarmCount() == 0)
+        #expect(await documentationProvider.shutdownCount() == 1)
+    }
+
+    @Test func documentationProviderManagerRejectsDescriptorWhenProbeCallIsNotEnabled() async throws {
+        let target = documentationProviderTarget(processID: 101)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: nil)
+        let result = DocumentationToolCatalog.applying(
+            update,
+            to: try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "stale").foundationObject,
+                ],
+            ])
+        )
+
+        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerUsesNumericIDsForMCPBridgeProbe() async throws {
+        let target = documentationProviderTarget(processID: 111)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        requiresNumericRequestIDs: true
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerUsesConfiguredInitializeParamsForProbe() async throws {
+        let target = documentationProviderTarget(processID: 112)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let initializeParams = try jsonValue([
+            "protocolVersion": "2025-03-26",
+            "capabilities": [
+                "roots": [
+                    "listChanged": true,
+                ],
+            ],
+            "clientInfo": [
+                "name": "ConfiguredAssistant",
+                "version": "9.9.9",
+            ],
+        ])
+        guard case .object(let initializeObject) = initializeParams else {
+            Issue.record("expected initialize params object")
+            return
+        }
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            initializeParams: initializeObject
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        let observedParams = try #require(await factory.initializeParams(for: target.processID).first)
+        guard case .object(let observedObject) = observedParams else {
+            Issue.record("expected initialize params object")
+            return
+        }
+        guard case .string("2025-03-26")? = observedObject["protocolVersion"] else {
+            Issue.record("expected configured protocol version")
+            return
+        }
+        guard case .object(let capabilities)? = observedObject["capabilities"],
+              case .object(let roots)? = capabilities["roots"],
+              case .bool(true)? = roots["listChanged"] else {
+            Issue.record("expected configured capabilities")
+            return
+        }
+        guard case .object(let clientInfo)? = observedObject["clientInfo"],
+              case .string("ConfiguredAssistant")? = clientInfo["name"],
+              case .string("9.9.9")? = clientInfo["version"] else {
+            Issue.record("expected configured client info")
+            return
+        }
+    }
+
+    @Test func documentationProviderManagerCoalescesConcurrentProviderSelection() async throws {
+        let target = documentationProviderTarget(processID: 121)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 100_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        async let firstUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
+        async let secondUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
+        let results = await [firstUpdate, secondUpdate]
+
+        for update in results {
+            let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+            #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        }
+        #expect(await factory.startAttempts() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerBoundsReusedProviderSelectionByCallerTimeout() async throws {
+        let target = documentationProviderTarget(processID: 122)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 500_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        async let longUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
+        try await spinUntil("waiting for provider selection to start") {
+            await factory.startAttempts() == [target.processID]
+        }
+
+        let shortStart = Date()
+        let shortUpdate = await manager.toolListUpdate(requestTimeout: .milliseconds(1))
+        #expect(Date().timeIntervalSince(shortStart) < 0.1)
+        if case .unavailable = shortUpdate {
+        } else {
+            Issue.record("short tools/list should time out while reusing provider selection")
+        }
+
+        let finalUpdate = await longUpdate
+        let result = DocumentationToolCatalog.applying(finalUpdate, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerKeepsSelectionAfterStartingCallerTimesOut() async throws {
+        let target = documentationProviderTarget(processID: 123)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 100_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        async let shortUpdate = manager.toolListUpdate(requestTimeout: .milliseconds(1))
+        try await spinUntil("waiting for provider selection to start") {
+            await factory.startAttempts() == [target.processID]
+        }
+
+        let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
+        if case .unavailable = await shortUpdate {
+        } else {
+            Issue.record("short tools/list should time out without cancelling provider selection")
+        }
+
+        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerCancelsSelectionWaitForCancelledCaller() async throws {
+        let target = documentationProviderTarget(processID: 124)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 500_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let task = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 74, query: "UIView"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await spinUntil("waiting for provider selection to start") {
+            await factory.startAttempts() == [target.processID]
+        }
+
+        let cancelStart = Date()
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(Date().timeIntervalSince(cancelStart) < 0.25)
+
+        let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
+        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderManagerChecksAllRunningXcodeTargetsBeforePublishingDescriptor() async throws {
+        let xcode26 = documentationProviderTarget(processID: 201)
+        let xcode27 = documentationProviderTarget(processID: 202)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
+    }
+
+    @Test func documentationProviderManagerContinuesAfterCandidateProbeTimesOut() async throws {
+        let hung = documentationProviderTarget(processID: 205)
+        let working = documentationProviderTarget(processID: 206)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                hung.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .hang
+                    ),
+                ],
+                working.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [hung, working]),
+            sessionFactory: factory,
+            providerSelectionTimeout: .milliseconds(50)
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [hung.processID, working.processID])
+    }
+
+    @Test func documentationProviderManagerHonorsPinnedProcessID() async throws {
+        let pinned = documentationProviderTarget(processID: 203)
+        let other = documentationProviderTarget(processID: 204)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                pinned.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+                other.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [pinned, other]),
+            sessionFactory: factory,
+            pinnedProcessID: pinned.processID
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
+        #expect(await factory.startedPIDs() == [pinned.processID])
+    }
+
+    @Test func documentationProviderManagerPrefersNewerServerVersionWhenToolCountsTie() async throws {
+        let xcode26 = documentationProviderTarget(processID: 211)
+        let xcode27 = documentationProviderTarget(processID: 212)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
+    }
+
+    @Test func documentationProviderManagerRetriesDocumentationSearchOnAlternateCandidate() async throws {
+        let xcode26 = documentationProviderTarget(processID: 201)
+        let xcode27 = documentationProviderTarget(processID: 202)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.notEnabled]
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.successText("{\"answer\":\"retry\"}")]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        let result = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 73, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+
+        #expect(result.didInvalidateProvider)
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data) == false)
+        #expect(try toolContentText(in: result.data) == "{\"answer\":\"retry\"}")
+        #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerInvalidatesReplacementWhenRetryReturnsNotEnabled() async throws {
+        let xcode26 = documentationProviderTarget(processID: 221)
+        let xcode27 = documentationProviderTarget(processID: 222)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.notEnabled]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        let result = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        #expect(result.didInvalidateProvider)
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data))
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startAttempts() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerInvalidatesReplacementWhenRetryTransportFails() async throws {
+        let xcode26 = documentationProviderTarget(processID: 225)
+        let xcode27 = documentationProviderTarget(processID: 226)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+            Issue.record("DocumentationSearch should report an invalidated retry failure")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.providerIsActive == false)
+            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        }
+
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerInvalidatesReplacementWhenNotEnabledRetryTransportFails()
+        async throws
+    {
+        let xcode26 = documentationProviderTarget(processID: 227)
+        let xcode27 = documentationProviderTarget(processID: 228)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.notEnabled]
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 50,
+                        includesDocumentationSearch: true,
+                        probeResponse: .notEnabled
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 78, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+            Issue.record("DocumentationSearch should report an invalidated not-enabled retry failure")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.providerIsActive == false)
+            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        }
+
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(await factory.startedPIDs() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+        #expect(await factory.startAttempts() == [
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+            xcode26.processID,
+            xcode27.processID,
+        ])
+    }
+
+    @Test func documentationProviderManagerReportsInactiveProviderWhenRecoveryFindsNoReplacement() async throws {
+        let xcode = documentationProviderTarget(processID: 231)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.exit]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
+            sessionFactory: factory
+        )
+
+        let initialTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: nil),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: initialTools) == "docs-27.0")
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 76, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+            Issue.record("DocumentationSearch should report an invalidated provider failure")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.providerIsActive == false)
+            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        }
+
+        let followUpTools = DocumentationToolCatalog.applying(
+            await manager.toolListUpdate(requestTimeout: .seconds(1)),
+            to: try jsonValue(["tools": []])
+        )
+        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+    }
+
+    @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
+        let xcode = documentationProviderTarget(processID: 301)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.hang]
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.successText("{\"answer\":\"late\"}")]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
+            sessionFactory: factory
+        )
+
+        do {
+            _ = try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
+                requestTimeoutOverride: .milliseconds(1)
+            )
+            Issue.record("DocumentationSearch should time out without retrying")
+        } catch let failure as DocumentationProviderCallFailure {
+            #expect(failure.underlying is TimeoutError)
+            #expect(failure.providerIsActive == false)
+        } catch {
+            Issue.record("expected DocumentationProviderCallFailure, got \(error)")
+        }
+
+        #expect(await factory.startedPIDs() == [xcode.processID])
+    }
+
+    @Test func documentationProviderManagerKeepsProviderWhenDocumentationCallIsCancelled() async throws {
+        let xcode = documentationProviderTarget(processID: 302)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success,
+                        userCallResponses: [.hang]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
+            sessionFactory: factory
+        )
+        let task = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 92, query: "UIView"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let didStart = await waitUntil(timeout: .seconds(1)) {
+            await factory.startedPIDs() == [xcode.processID]
+        }
+        #expect(didStart)
+
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [xcode.processID])
+    }
+
     @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -167,6 +1396,30 @@ struct RuntimeCoordinatorTests {
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: sent) == "initialize")
         #expect(await upstream.startCount() > 0)
+    }
+
+    @Test func readinessGateStartsOnlyPrimaryUpstreamBeforePrimaryAttachCompletes() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+        )
+        defer { manager.shutdownAndWait() }
+
+        await readiness.setReady(true)
+        let sent = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: sent) == "initialize")
+        #expect(await upstream0.startCount() > 0)
+        #expect(await upstream1.startCount() == 0)
+        #expect(await upstream1.sentCount() == 0)
     }
 
     @Test func readinessGateLaunchesXcodeWhenUnavailable() async throws {
@@ -5204,6 +6457,433 @@ private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {
         requestTimeout: requestTimeout,
         prewarmToolsList: false
     )
+}
+
+private func jsonValue(_ object: [String: Any]) throws -> JSONValue {
+    try #require(JSONValue(any: object))
+}
+
+private func documentationDescriptor(version: String) -> JSONValue {
+    JSONValue(any: [
+        "name": DocumentationToolCatalog.toolName,
+        "description": "docs-\(version)",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": [
+                    "type": "string",
+                ],
+            ],
+            "required": ["query"],
+        ],
+    ])!
+}
+
+private func toolNames(in result: JSONValue) -> [String] {
+    guard case .object(let object) = result,
+          case .array(let tools)? = object["tools"] else {
+        return []
+    }
+    return tools.compactMap { tool in
+        guard case .object(let toolObject) = tool,
+              case .string(let name)? = toolObject["name"] else {
+            return nil
+        }
+        return name
+    }
+}
+
+private func documentationDescriptorDescription(in result: JSONValue) -> String? {
+    guard let descriptor = DocumentationToolCatalog.descriptor(in: result),
+          case .object(let object) = descriptor,
+          case .string(let description)? = object["description"] else {
+        return nil
+    }
+    return description
+}
+
+private func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": [
+                "name": DocumentationToolCatalog.toolName,
+                "arguments": [
+                    "query": query,
+                ],
+            ],
+        ],
+        options: []
+    )
+}
+
+private func makeJSONRPCResponse(id: Int64, result: [String: Any]) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        ],
+        options: []
+    )
+}
+
+private func toolContentText(in responseData: Data) throws -> String? {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+    )
+    let result = try #require(object["result"] as? [String: Any])
+    let content = try #require(result["content"] as? [[String: Any]])
+    return content.first?["text"] as? String
+}
+
+private func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
+    DocumentationProviderTarget(
+        processID: processID,
+        appPath: "/Applications/Xcode-\(processID).app",
+        developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
+        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge"
+    )
+}
+
+private struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
+    let targets: [DocumentationProviderTarget]
+
+    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+        targets
+    }
+}
+
+private enum ScriptedDocumentationResponse: Sendable {
+    case success
+    case successText(String)
+    case hang
+    case notEnabled
+    case exit
+}
+
+private struct ScriptedDocumentationSessionPlan: Sendable {
+    let serverVersion: String
+    let toolCount: Int
+    let includesDocumentationSearch: Bool
+    let probeResponse: ScriptedDocumentationResponse
+    let userCallResponses: [ScriptedDocumentationResponse]
+    let requiresNumericRequestIDs: Bool
+
+    init(
+        serverVersion: String,
+        toolCount: Int,
+        includesDocumentationSearch: Bool,
+        probeResponse: ScriptedDocumentationResponse,
+        userCallResponses: [ScriptedDocumentationResponse] = [],
+        requiresNumericRequestIDs: Bool = false
+    ) {
+        self.serverVersion = serverVersion
+        self.toolCount = toolCount
+        self.includesDocumentationSearch = includesDocumentationSearch
+        self.probeResponse = probeResponse
+        self.userCallResponses = userCallResponses
+        self.requiresNumericRequestIDs = requiresNumericRequestIDs
+    }
+}
+
+private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
+    private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
+    private var startAttemptProcessIDs: [pid_t] = []
+    private var startedProcessIDs: [pid_t] = []
+    private var initializeParamsByPID: [pid_t: [JSONValue]] = [:]
+    private let startDelayNanoseconds: UInt64?
+
+    init(
+        plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]],
+        startDelayNanoseconds: UInt64? = nil
+    ) {
+        self.plansByPID = plansByPID
+        self.startDelayNanoseconds = startDelayNanoseconds
+    }
+
+    func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
+        startAttemptProcessIDs.append(target.processID)
+        if let startDelayNanoseconds {
+            try await Task.sleep(nanoseconds: startDelayNanoseconds)
+        }
+        guard var plans = plansByPID[target.processID],
+              plans.isEmpty == false else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        let plan = plans.removeFirst()
+        plansByPID[target.processID] = plans
+        startedProcessIDs.append(target.processID)
+        return ScriptedDocumentationSession(
+            processID: target.processID,
+            plan: plan,
+            recorder: self
+        )
+    }
+
+    func startedPIDs() -> [pid_t] {
+        startedProcessIDs
+    }
+
+    func startAttempts() -> [pid_t] {
+        startAttemptProcessIDs
+    }
+
+    func recordInitializeParams(_ params: JSONValue, for processID: pid_t) {
+        initializeParamsByPID[processID, default: []].append(params)
+    }
+
+    func initializeParams(for processID: pid_t) -> [JSONValue] {
+        initializeParamsByPID[processID] ?? []
+    }
+}
+
+private actor ScriptedDocumentationSession: UpstreamSession {
+    nonisolated let events: AsyncStream<UpstreamEvent>
+    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private let processID: pid_t
+    private let plan: ScriptedDocumentationSessionPlan
+    private let recorder: ScriptedDocumentationSessionFactory
+    private var documentationCallCount = 0
+    private var remainingUserCallResponses: [ScriptedDocumentationResponse]
+
+    init(
+        processID: pid_t,
+        plan: ScriptedDocumentationSessionPlan,
+        recorder: ScriptedDocumentationSessionFactory
+    ) {
+        self.processID = processID
+        self.plan = plan
+        self.recorder = recorder
+        self.remainingUserCallResponses = plan.userCallResponses
+        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
+            as? [String: Any],
+            let method = object["method"] as? String else {
+            return .accepted
+        }
+        guard let requestID = object["id"] else {
+            return .accepted
+        }
+        if plan.requiresNumericRequestIDs, !(requestID is NSNumber) {
+            return .accepted
+        }
+
+        switch method {
+        case "initialize":
+            if let params = object["params"], let value = JSONValue(any: params) {
+                await recorder.recordInitializeParams(value, for: processID)
+            }
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "serverInfo": [
+                        "name": "mcpbridge",
+                        "version": plan.serverVersion,
+                    ],
+                ]
+            )
+        case "tools/list":
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "tools": toolsList(),
+                ]
+            )
+        case "tools/call":
+            documentationCallCount += 1
+            let response: ScriptedDocumentationResponse
+            if documentationCallCount == 1 {
+                response = plan.probeResponse
+            } else if remainingUserCallResponses.isEmpty == false {
+                response = remainingUserCallResponses.removeFirst()
+            } else {
+                response = .success
+            }
+            yieldDocumentationResponse(id: requestID, response: response)
+        default:
+            break
+        }
+        return .accepted
+    }
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    private func toolsList() -> [[String: Any]] {
+        let fillerCount = max(0, plan.toolCount - (plan.includesDocumentationSearch ? 1 : 0))
+        var tools: [[String: Any]] = (0..<fillerCount).map { index in
+            [
+                "name": "Tool\(index)",
+                "description": "tool-\(index)",
+            ]
+        }
+        if plan.includesDocumentationSearch {
+            if let descriptor = documentationDescriptor(version: plan.serverVersion).foundationObject
+                as? [String: Any] {
+                tools.append(descriptor)
+            }
+        }
+        return tools
+    }
+
+    private func yieldDocumentationResponse(id: Any, response: ScriptedDocumentationResponse) {
+        switch response {
+        case .success:
+            yieldToolResponse(id: id, text: "{\"ok\":true}", isError: false)
+        case .successText(let text):
+            yieldToolResponse(id: id, text: text, isError: false)
+        case .hang:
+            break
+        case .notEnabled:
+            yieldToolResponse(
+                id: id,
+                text: "Tool 'DocumentationSearch' is not enabled.",
+                isError: true
+            )
+        case .exit:
+            continuation.yield(.exit(1))
+        }
+    }
+
+    private func yieldToolResponse(id: Any, text: String, isError: Bool) {
+        yieldResponse(
+            id: id,
+            result: [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": text,
+                    ],
+                ],
+                "isError": isError,
+            ]
+        )
+    }
+
+    private func yieldResponse(id: Any, result: [String: Any]) {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        ]
+        guard JSONSerialization.isValidJSONObject(response),
+              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            return
+        }
+        continuation.yield(.message(data))
+    }
+}
+
+private actor StubDocumentationProviderManager: DocumentationProviderManaging {
+    private var update: DocumentationToolListUpdate
+    private var callResults: [DocumentationProviderCallResult]
+    private var callFailures: [DocumentationProviderCallFailure]
+    private var callCountValue = 0
+    private var invalidateReasons: [String] = []
+    private var prewarmTimeouts: [TimeAmount?] = []
+    private var toolListTimeouts: [TimeAmount?] = []
+    private var callTimeouts: [TimeAmount?] = []
+    private let prewarmDelayNanoseconds: UInt64?
+    private let toolListDelayNanoseconds: UInt64?
+
+    init(
+        toolListUpdate: DocumentationToolListUpdate,
+        callResults: [DocumentationProviderCallResult] = [],
+        callFailures: [DocumentationProviderCallFailure] = [],
+        prewarmDelayNanoseconds: UInt64? = nil,
+        toolListDelayNanoseconds: UInt64? = nil
+    ) {
+        self.update = toolListUpdate
+        self.callResults = callResults
+        self.callFailures = callFailures
+        self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
+        self.toolListDelayNanoseconds = toolListDelayNanoseconds
+    }
+
+    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        if let prewarmDelayNanoseconds {
+            try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
+            guard !Task.isCancelled else { return .unavailable }
+        }
+        prewarmTimeouts.append(requestTimeout)
+        return await toolListUpdate(requestTimeout: requestTimeout)
+    }
+
+    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        toolListTimeouts.append(requestTimeout)
+        if let toolListDelayNanoseconds {
+            try? await Task.sleep(nanoseconds: toolListDelayNanoseconds)
+            guard !Task.isCancelled else { return .unavailable }
+        }
+        return update
+    }
+
+    func callDocumentationSearch(
+        requestData _: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> DocumentationProviderCallResult {
+        callCountValue += 1
+        callTimeouts.append(requestTimeoutOverride)
+        if callFailures.isEmpty == false {
+            throw callFailures.removeFirst()
+        }
+        guard callResults.isEmpty == false else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        return callResults.removeFirst()
+    }
+
+    func invalidate(reason: String) async {
+        invalidateReasons.append(reason)
+        update = .unavailable
+    }
+
+    func shutdown() async {
+        invalidateReasons.append("shutdown")
+    }
+
+    func callCount() -> Int {
+        callCountValue
+    }
+
+    func prewarmCount() -> Int {
+        prewarmTimeouts.count
+    }
+
+    func toolListUpdateCount() -> Int {
+        toolListTimeouts.count
+    }
+
+    func lastPrewarmTimeout() -> TimeAmount? {
+        prewarmTimeouts.last ?? nil
+    }
+
+    func shutdownCount() -> Int {
+        invalidateReasons.filter { $0 == "shutdown" }.count
+    }
+
+    func recordedInvalidateReasons() -> [String] {
+        invalidateReasons
+    }
+
+    func lastToolListTimeout() -> TimeAmount? {
+        toolListTimeouts.last ?? nil
+    }
+
+    func lastCallTimeout() -> TimeAmount? {
+        callTimeouts.last ?? nil
+    }
 }
 
 private func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {

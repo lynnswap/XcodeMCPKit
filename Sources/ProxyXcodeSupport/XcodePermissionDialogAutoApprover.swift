@@ -91,6 +91,7 @@ package enum XcodePermissionDialogMatcher {
     private static let allowedProcessBundleIdentifiers = normalizedCandidates([
         "com.apple.dt.Xcode",
         "com.apple.dt.ExternalViewService",
+        "com.apple.dt.Xcode.DeveloperSystemPolicyService",
     ])
     private static let allowedWindowRoles = normalizedCandidates([
         "AXWindow"
@@ -409,6 +410,7 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
         let bundleIdentifiers: Set<String> = [
             "com.apple.dt.Xcode",
             "com.apple.dt.ExternalViewService",
+            "com.apple.dt.Xcode.DeveloperSystemPolicyService",
         ]
         var processIDs = Set(NSWorkspace.shared.runningApplications.compactMap { application -> pid_t? in
             guard let bundleIdentifier = application.bundleIdentifier else {

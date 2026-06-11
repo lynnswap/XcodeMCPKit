@@ -13,6 +13,7 @@ package final class ProxyRouter: Sendable {
         var promise: EventLoopPromise<ByteBuffer>
         var timeout: Scheduled<Void>?
         var onTimeout: (@Sendable () -> Void)?
+        var responseIDKeys: Set<String>?
     }
 
     private struct State: Sendable {
@@ -73,7 +74,8 @@ package final class ProxyRouter: Sendable {
                 token: token,
                 promise: promise,
                 timeout: timeout,
-                onTimeout: onTimeout
+                onTimeout: onTimeout,
+                responseIDKeys: nil
             )
         }
         return PendingRegistration(token: token, future: promise.futureResult)
@@ -94,6 +96,7 @@ package final class ProxyRouter: Sendable {
     package func registerBatchPending(
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil,
+        responseIDKeys: [String] = [],
         onTimeout: (@Sendable () -> Void)? = nil
     ) -> PendingRegistration {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
@@ -102,16 +105,18 @@ package final class ProxyRouter: Sendable {
         let timeout = effectiveTimeout.map { timeout in
             eventLoop.scheduleTask(in: timeout) { [weak self] in
                 guard let self else { return }
-                self.failBatchTimeout()
+                self.failBatchTimeout(token: token)
             }
         }
+        let responseIDKeySet = Set(responseIDKeys)
         state.withLockedValue { state in
             state.pendingBatches.append(
                 Pending(
                     token: token,
                     promise: promise,
                     timeout: timeout,
-                    onTimeout: onTimeout
+                    onTimeout: onTimeout,
+                    responseIDKeys: responseIDKeySet.isEmpty ? nil : responseIDKeySet
                 )
             )
         }
@@ -140,8 +145,9 @@ package final class ProxyRouter: Sendable {
             return
         }
 
-        if (json as? [Any]) != nil {
-            if let pending = popBatch() {
+        if let array = json as? [Any] {
+            let responseIDKeys = Self.idKeys(from: array)
+            if let pending = popBatch(matching: responseIDKeys) {
                 complete(pending: pending, data: data)
             } else {
                 notify(data)
@@ -177,23 +183,40 @@ package final class ProxyRouter: Sendable {
         pending?.promise.fail(TimeoutError())
     }
 
-    private func failBatchTimeout() {
-        let pending = state.withLockedValue { state in
-            state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
+    private func failBatchTimeout(token: UUID) {
+        let pending = state.withLockedValue { state -> Pending? in
+            guard let index = state.pendingBatches.firstIndex(where: { $0.token == token }) else {
+                return nil
+            }
+            return state.pendingBatches.remove(at: index)
         }
         pending?.onTimeout?()
         pending?.promise.fail(TimeoutError())
     }
 
     private func pop(idKey: String) -> Pending? {
-        state.withLockedValue { state in
+        state.withLockedValue { state -> Pending? in
             state.pendingByID.removeValue(forKey: idKey)
         }
     }
 
-    private func popBatch() -> Pending? {
+    private func popBatch(matching responseIDKeys: Set<String>) -> Pending? {
         state.withLockedValue { state in
-            state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
+            if responseIDKeys.isEmpty == false {
+                if let index = state.pendingBatches.firstIndex(where: { pending in
+                    guard let expected = pending.responseIDKeys else {
+                        return false
+                    }
+                    return expected.isDisjoint(with: responseIDKeys) == false
+                }) {
+                    return state.pendingBatches.remove(at: index)
+                }
+                if let index = state.pendingBatches.firstIndex(where: { $0.responseIDKeys == nil }) {
+                    return state.pendingBatches.remove(at: index)
+                }
+                return nil
+            }
+            return state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
         }
     }
 
@@ -230,6 +253,17 @@ package final class ProxyRouter: Sendable {
             return numberID.stringValue
         }
         return String(describing: id)
+    }
+
+    private static func idKeys(from array: [Any]) -> Set<String> {
+        Set(
+            array.compactMap { item -> String? in
+                guard let object = item as? [String: Any] else {
+                    return nil
+                }
+                return idKey(from: object)
+            }
+        )
     }
 }
 

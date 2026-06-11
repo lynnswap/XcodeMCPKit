@@ -60,6 +60,13 @@ package protocol RuntimeCoordinating: Sendable {
         route: ControlPlaneRoute,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue
+    func callDocumentationSearch(
+        requestData: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> Data
+    func hasDocumentationProvider() -> Bool
+    func hasActiveDocumentationProvider() -> Bool
+    func invalidateDocumentationProvider(reason: String) async
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: RequestLeaseID,
@@ -104,6 +111,14 @@ package protocol RuntimeCoordinating: Sendable {
 }
 
 extension RuntimeCoordinating {
+    package func hasDocumentationProvider() -> Bool {
+        false
+    }
+
+    package func hasActiveDocumentationProvider() -> Bool {
+        false
+    }
+
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
@@ -137,6 +152,15 @@ extension RuntimeCoordinating {
             requestTimeoutOverride: requestTimeoutOverride
         )
     }
+
+    package func callDocumentationSearch(
+        requestData _: Data,
+        requestTimeoutOverride _: TimeAmount?
+    ) async throws -> Data {
+        throw UpstreamSlotAcquisitionError.unavailable
+    }
+
+    package func invalidateDocumentationProvider(reason _: String) async {}
 }
 
 extension RuntimeCoordinator {
@@ -175,6 +199,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     package let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
+    package let documentationPrewarmTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
     package let upstreamReadinessGenerationBox = NIOLockedValueBox<UInt64>(0)
     package let debugRecorder: ProxyDebugRecorder
     package let leaseManager: LeaseManager
@@ -196,12 +221,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
         RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
+    package let documentationProviderManager: (any DocumentationProviderManaging)?
+    private let documentationProviderActiveBox = NIOLockedValueBox(false)
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
         let upstreams = Self.makeDefaultUpstreams(
             config: config, sharedSessionID: config.upstreamSessionID, count: count)
         let clock = ClockClient.liveValue
+        let documentationProviderManager = Self.makeDefaultDocumentationProviderManager(config: config)
         self.init(
             config: config,
             eventLoop: eventLoop,
@@ -210,7 +238,27 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             upstreamReadinessGate: Self.defaultUpstreamReadinessGate(
                 config: config,
                 clock: clock
-            )
+            ),
+            documentationProviderManager: documentationProviderManager,
+            prewarmDocumentationProviderOnStartup: documentationProviderManager != nil
+        )
+    }
+
+    package static func makeDefaultDocumentationProviderManager(
+        config: ProxyConfig
+    ) -> (any DocumentationProviderManaging)? {
+        guard config.disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+            return nil
+        }
+        guard isDefaultXcrunMCPBridgeInvocation(config: config) else {
+            return nil
+        }
+        let environment = ProcessInfo.processInfo.environment
+        let pinnedProcessID = environment["MCP_XCODE_PID"].flatMap(pid_t.init)
+        return DocumentationProviderManager(
+            sessionFactory: LiveDocumentationProviderSessionFactory(baseEnvironment: environment),
+            pinnedProcessID: pinnedProcessID,
+            initializeParams: Self.resolvedInitializeParams(config: config)
         )
     }
 
@@ -222,7 +270,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
         nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
         scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
-            RuntimeScheduledTimeout)? = nil
+            RuntimeScheduledTimeout)? = nil,
+        documentationProviderManager: (any DocumentationProviderManaging)? = nil,
+        prewarmDocumentationProviderOnStartup: Bool = false
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
@@ -253,6 +303,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
+        self.documentationProviderManager = documentationProviderManager
         let resolvedReadinessGate = upstreamReadinessGate
             ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
         self.upstreamReadinessGate = resolvedReadinessGate
@@ -381,6 +432,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         startEagerInitializePrimary()
+        if prewarmDocumentationProviderOnStartup {
+            prewarmDocumentationProvider()
+        }
     }
 
     package func session(id: String) -> SessionContext {
@@ -445,6 +499,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for timeout in upstreamTimeouts {
             timeout?.cancel()
         }
+        let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue { taskBox in
+            let task = taskBox
+            taskBox = nil
+            return task
+        }
+        documentationPrewarmTask?.cancel()
         await upstreamReadinessCoordinator.shutdown()
 
         invalidateControlPlaneSynchronously(
@@ -466,6 +526,16 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             for upstream in upstreams {
                 group.addTask {
                     await upstream.stop()
+                }
+            }
+            if let documentationProviderManager {
+                group.addTask {
+                    await documentationProviderManager.shutdown()
+                }
+            }
+            if let documentationPrewarmTask {
+                group.addTask {
+                    await documentationPrewarmTask.value
                 }
             }
         }
@@ -511,6 +581,33 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 deadlineUptimeNs: deadline
             )
         }
+    }
+
+    package func prewarmDocumentationProvider() {
+        guard let documentationProviderManager else { return }
+        let timeoutSeconds = config.requestTimeout > 0
+            ? min(config.requestTimeout, 30)
+            : 30
+        let timeout = MCPMethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
+        let task = Task { [weak self, documentationProviderManager, logger] in
+            guard !Task.isCancelled else { return }
+            logger.debug(
+                "Prewarming documentation provider",
+                metadata: [
+                    "timeout_seconds": .string("\(timeoutSeconds)"),
+                ]
+            )
+            let update = await documentationProviderManager.prewarm(requestTimeout: timeout)
+            self?.recordDocumentationToolListUpdate(update)
+            guard !Task.isCancelled else { return }
+            logger.debug("Documentation provider prewarm completed")
+        }
+        let previous = documentationPrewarmTaskBox.withLockedValue { taskBox in
+            let previous = taskBox
+            taskBox = task
+            return previous
+        }
+        previous?.cancel()
     }
 
     package func chooseUpstreamIndex() -> Int? {
@@ -682,11 +779,20 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = timeoutDeadline(for: timeout)
-        return try await awaitControlPlaneOperation {
+        let baseResult = try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.toolsCatalog(
                 deadlineUptimeNs: deadline
             )
         }
+        guard let documentationProviderManager else {
+            return baseResult
+        }
+        let update = await documentationToolListUpdate(
+            manager: documentationProviderManager,
+            requestTimeout: timeAmount(until: deadline)
+        )
+        recordDocumentationToolListUpdate(update)
+        return DocumentationToolCatalog.applying(update, to: baseResult)
     }
 
     package func sharedXcodeListWindowsResult(
@@ -719,6 +825,117 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 deadlineUptimeNs: deadline
             )
         }
+    }
+
+    package func callDocumentationSearch(
+        requestData: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> Data {
+        guard let documentationProviderManager else {
+            throw UpstreamSlotAcquisitionError.unavailable
+        }
+        let timeout =
+            requestTimeoutOverride
+            ?? MCPMethodDispatcher.timeoutForMethod(
+                "tools/call",
+                defaultSeconds: config.requestTimeout
+            )
+        let result: DocumentationProviderCallResult
+        do {
+            result = try await documentationProviderManager.callDocumentationSearch(
+                requestData: requestData,
+                requestTimeoutOverride: timeout
+            )
+        } catch let failure as DocumentationProviderCallFailure {
+            setDocumentationProviderActive(failure.providerIsActive)
+            invalidateControlPlaneSynchronously(
+                reason: "documentation_provider_invalidated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
+            throw failure.underlying
+        }
+        let responseIsDocumentationNotEnabled =
+            DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
+        setDocumentationProviderActive(responseIsDocumentationNotEnabled == false)
+        if result.didInvalidateProvider || responseIsDocumentationNotEnabled {
+            invalidateControlPlaneSynchronously(
+                reason: "documentation_provider_invalidated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
+        }
+        return result.data
+    }
+
+    package func hasDocumentationProvider() -> Bool {
+        documentationProviderManager != nil
+    }
+
+    package func hasActiveDocumentationProvider() -> Bool {
+        documentationProviderActiveBox.withLockedValue { $0 }
+    }
+
+    private func recordDocumentationToolListUpdate(_ update: DocumentationToolListUpdate) {
+        switch update {
+        case .available:
+            setDocumentationProviderActive(true)
+        case .unavailable:
+            setDocumentationProviderActive(false)
+        case .unchanged:
+            break
+        }
+    }
+
+    private func setDocumentationProviderActive(_ isActive: Bool) {
+        documentationProviderActiveBox.withLockedValue { $0 = isActive }
+    }
+
+    private func documentationToolListUpdate(
+        manager: any DocumentationProviderManaging,
+        requestTimeout: TimeAmount?
+    ) async -> DocumentationToolListUpdate {
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return await manager.toolListUpdate(requestTimeout: requestTimeout)
+        }
+        do {
+            return try await withThrowingTaskGroup(of: DocumentationToolListUpdate.self) { group in
+                group.addTask {
+                    await manager.toolListUpdate(requestTimeout: requestTimeout)
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                    throw TimeoutError()
+                }
+                guard let update = try await group.next() else {
+                    throw TimeoutError()
+                }
+                group.cancelAll()
+                return update
+            }
+        } catch {
+            logger.debug(
+                "documentation provider tools/list update failed",
+                metadata: [
+                    "error": .string(String(describing: error)),
+                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
+                ]
+            )
+            return .unavailable
+        }
+    }
+
+    package func invalidateDocumentationProvider(reason: String) async {
+        await documentationProviderManager?.invalidate(reason: reason)
+        setDocumentationProviderActive(false)
+        invalidateControlPlaneSynchronously(
+            reason: "documentation_provider_\(reason)",
+            clearInitialize: false,
+            clearToolsCatalog: true
+        )
     }
 
     func encodeJSONRPCResultBuffer(

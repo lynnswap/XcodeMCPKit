@@ -75,6 +75,89 @@ struct ProxyRouterTests {
         #expect(string == response)
     }
 
+    @Test func proxyRouterMatchesOutOfOrderBatchResponseByID() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = ProxyRouter(
+            requestTimeout: .seconds(5),
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+        let completions = NIOLockedValueBox<[String]>([])
+
+        let first = router.registerBatchPending(
+            on: eventLoop,
+            responseIDKeys: ["1"]
+        ).future
+        let second = router.registerBatchPending(
+            on: eventLoop,
+            responseIDKeys: ["2"]
+        ).future
+        first.whenSuccess { buffer in
+            completions.withLockedValue { values in
+                values.append("first:\(bufferString(buffer))")
+            }
+        }
+        second.whenSuccess { buffer in
+            completions.withLockedValue { values in
+                values.append("second:\(bufferString(buffer))")
+            }
+        }
+
+        let secondResponse = "[{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}]"
+        router.handleIncoming(Data(secondResponse.utf8))
+        eventLoop.run()
+        #expect(completions.withLockedValue { $0 } == ["second:\(secondResponse)"])
+
+        let firstResponse = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
+        router.handleIncoming(Data(firstResponse.utf8))
+        eventLoop.run()
+        #expect(completions.withLockedValue { $0 } == [
+            "second:\(secondResponse)",
+            "first:\(firstResponse)",
+        ])
+    }
+
+    @Test func proxyRouterTimesOutMatchingBatchByToken() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = ProxyRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+        let firstFailed = NIOLockedValueBox(false)
+        let secondFailed = NIOLockedValueBox(false)
+        let firstSucceeded = NIOLockedValueBox<String?>(nil)
+
+        let first = router.registerBatchPending(
+            on: eventLoop,
+            timeout: .seconds(2),
+            responseIDKeys: ["1"]
+        ).future
+        let second = router.registerBatchPending(
+            on: eventLoop,
+            timeout: .seconds(1),
+            responseIDKeys: ["2"]
+        ).future
+        first.whenFailure { _ in firstFailed.withLockedValue { $0 = true } }
+        second.whenFailure { _ in secondFailed.withLockedValue { $0 = true } }
+        first.whenSuccess { buffer in
+            firstSucceeded.withLockedValue { $0 = bufferString(buffer) }
+        }
+
+        eventLoop.advanceTime(by: .seconds(1))
+        eventLoop.run()
+
+        #expect(secondFailed.withLockedValue { $0 } == true)
+        #expect(firstFailed.withLockedValue { $0 } == false)
+
+        let firstResponse = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
+        router.handleIncoming(Data(firstResponse.utf8))
+        eventLoop.run()
+
+        #expect(firstSucceeded.withLockedValue { $0 } == firstResponse)
+        #expect(firstFailed.withLockedValue { $0 } == false)
+    }
+
     @Test func proxyRouterTimesOutRequests() async throws {
         let eventLoop = EmbeddedEventLoop()
         let router = ProxyRouter(
@@ -136,5 +219,9 @@ struct ProxyRouterTests {
         #expect(buffered.count == 2)
         #expect(String(data: buffered[0], encoding: .utf8)?.contains("n2") == true)
         #expect(String(data: buffered[1], encoding: .utf8)?.contains("n3") == true)
+    }
+
+    private func bufferString(_ buffer: ByteBuffer) -> String {
+        buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes) ?? ""
     }
 }

@@ -1,12 +1,86 @@
+import Darwin
 import Foundation
 import NIO
 import ProxyCore
 import Testing
 
 @testable import XcodeMCPProxy
+@testable import ProxyXcodeSupport
 
 @Suite(.serialized, .enabled(if: LiveMCPBridgeTestEnvironment.isEnabled))
 struct LiveMCPBridgeTests {
+    @Test(.enabled(if: DirectMCPBridgeTestEnvironment.isEnabled))
+    func directMCPBridgeToolsListCanAutoApprovePermissionDialog() async throws {
+        let xcrunResult = try runProcess("/usr/bin/xcrun", ["--find", "mcpbridge"])
+        guard xcrunResult.terminationStatus == 0 else {
+            Issue.record("mcpbridge is not available in the selected Xcode toolchain")
+            throw LiveMCPBridgeTestError.mcpbridgeNotFound
+        }
+        let mcpbridgePath = xcrunResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard mcpbridgePath.isEmpty == false else {
+            Issue.record("xcrun --find mcpbridge returned an empty path")
+            throw LiveMCPBridgeTestError.mcpbridgeNotFound
+        }
+
+        let session = try DirectMCPBridgeSession(executablePath: mcpbridgePath)
+        defer { session.stop() }
+
+        let assistantName = "XcodeMCPKitLiveDirectTest"
+        let directMCPBridgeProcessID = session.processIdentifier
+        let approver = XcodePermissionDialogAutoApprover(
+            dependencies: .live(
+                agentPathCandidates: {
+                    XcodePermissionDialogAutoApprover.defaultAgentPathCandidates(
+                        additionalExecutableCandidates: [mcpbridgePath]
+                    )
+                },
+                assistantNameCandidates: {
+                    ["XcodeMCPKit", assistantName]
+                },
+                serverProcessIDCandidates: {
+                    XcodePermissionDialogAutoApprover.defaultServerProcessIDCandidates()
+                        .union([directMCPBridgeProcessID])
+                }
+            )
+        )
+        approver.start()
+        defer { approver.stop() }
+
+        let initialize = try session.request(
+            [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": [
+                    "protocolVersion": "2025-03-26",
+                    "clientInfo": [
+                        "name": assistantName,
+                        "version": "dev",
+                    ],
+                    "capabilities": [:],
+                ],
+            ],
+            timeout: 20
+        )
+        #expect((initialize["result"] as? [String: Any])?["serverInfo"] != nil)
+
+        try session.notify([
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        ])
+
+        let tools = try session.request(
+            [
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+            ],
+            timeout: 30
+        )
+        let toolList = ((tools["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
+        #expect(toolList.isEmpty == false)
+    }
+
     @Test func proxyServerTalksToLiveMCPBridge() async throws {
         let xcrunResult = try runProcess("/usr/bin/xcrun", ["--find", "mcpbridge"])
         guard xcrunResult.terminationStatus == 0,
@@ -163,6 +237,11 @@ struct LiveMCPBridgeTests {
 private enum LiveMCPBridgeTestEnvironment {
     static let isEnabled =
         ProcessInfo.processInfo.environment["XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS"] == "1"
+}
+
+private enum DirectMCPBridgeTestEnvironment {
+    static let isEnabled =
+        ProcessInfo.processInfo.environment["XCODE_MCP_RUN_DIRECT_MCPBRIDGE_TESTS"] == "1"
 }
 
 private struct CommandResult {
@@ -341,4 +420,117 @@ private enum LiveMCPBridgeTestError: Error {
     case httpServerNotReady
     case refreshToolNotFound
     case windowSelectionNotFound
+    case directMCPBridgeResponseTimedOut
+    case directMCPBridgeTerminated(String)
+    case directMCPBridgeInvalidResponse
+}
+
+private final class DirectMCPBridgeSession {
+    let processIdentifier: pid_t
+
+    private let process: Process
+    private let stdin: FileHandle
+    private let stdout: FileHandle
+    private let stderr: FileHandle
+    private var stdoutBuffer = Data()
+    private var stderrBuffer = Data()
+
+    init(executablePath: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+
+        self.process = process
+        self.processIdentifier = process.processIdentifier
+        self.stdin = stdinPipe.fileHandleForWriting
+        self.stdout = stdoutPipe.fileHandleForReading
+        self.stderr = stderrPipe.fileHandleForReading
+
+        setNonBlocking(stdout.fileDescriptor)
+        setNonBlocking(stderr.fileDescriptor)
+    }
+
+    func request(_ object: [String: Any], timeout: TimeInterval) throws -> [String: Any] {
+        try send(object)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !process.isRunning {
+                throw LiveMCPBridgeTestError.directMCPBridgeTerminated(stderrText())
+            }
+            drain(stderr, into: &stderrBuffer)
+            drain(stdout, into: &stdoutBuffer)
+            if let line = nextStdoutLine() {
+                guard let data = line.data(using: .utf8),
+                      let response = try JSONSerialization.jsonObject(with: data, options: [])
+                        as? [String: Any] else {
+                    throw LiveMCPBridgeTestError.directMCPBridgeInvalidResponse
+                }
+                return response
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        throw LiveMCPBridgeTestError.directMCPBridgeResponseTimedOut
+    }
+
+    func notify(_ object: [String: Any]) throws {
+        try send(object)
+    }
+
+    func stop() {
+        try? stdin.close()
+        if process.isRunning {
+            process.terminate()
+        }
+        process.waitUntilExit()
+        try? stdout.close()
+        try? stderr.close()
+    }
+
+    private func send(_ object: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [])
+        try stdin.write(contentsOf: data + Data([0x0A]))
+    }
+
+    private func nextStdoutLine() -> String? {
+        guard let newlineIndex = stdoutBuffer.firstIndex(of: 0x0A) else {
+            return nil
+        }
+        let lineData = stdoutBuffer[..<newlineIndex]
+        stdoutBuffer.removeSubrange(...newlineIndex)
+        return String(data: lineData, encoding: .utf8)
+    }
+
+    private func stderrText() -> String {
+        drain(stderr, into: &stderrBuffer)
+        return String(data: stderrBuffer, encoding: .utf8) ?? ""
+    }
+
+    private func drain(_ handle: FileHandle, into buffer: inout Data) {
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = unsafe Darwin.read(handle.fileDescriptor, &chunk, chunk.count)
+            if count > 0 {
+                buffer.append(contentsOf: chunk.prefix(count))
+                continue
+            }
+            if count == 0 || errno == EAGAIN || errno == EWOULDBLOCK {
+                return
+            }
+            return
+        }
+    }
+
+    private func setNonBlocking(_ fileDescriptor: Int32) {
+        let flags = fcntl(fileDescriptor, F_GETFL, 0)
+        guard flags >= 0 else { return }
+        _ = fcntl(fileDescriptor, F_SETFL, flags | O_NONBLOCK)
+    }
 }

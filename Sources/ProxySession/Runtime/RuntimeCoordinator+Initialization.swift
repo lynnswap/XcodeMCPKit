@@ -10,7 +10,7 @@ extension RuntimeCoordinator {
             applyBackoff: applyBackoff
         ) { [weak self] in
             guard let self else { return }
-            self.startAllUpstreamSlots()
+            self.startPrimaryUpstreamSlot()
             self.startEagerInitializePrimaryWhenReady()
         }
     }
@@ -42,7 +42,7 @@ extension RuntimeCoordinator {
                 self.clearPrimaryInitializeReadinessWaiter(token)
                 guard !token.isCancelled else { return }
             }
-            self.startAllUpstreamSlots()
+            self.startPrimaryUpstreamSlot()
             self.sendPrimaryInitializeRequestIfStillPending()
         }
     }
@@ -395,17 +395,35 @@ extension RuntimeCoordinator {
     }
 
     func resolvedInitializeParams() -> [String: JSONValue] {
+        Self.resolvedInitializeParams(initializeParamsOverride: initializeParamsOverride)
+    }
+
+    package static func resolvedInitializeParams(config: ProxyConfig) -> [String: JSONValue] {
+        let override = ProxyFileConfigLoader.loadInitializeParamsOverride(
+            configPath: config.configPath,
+            logger: ProxyLogging.make("config")
+        )
+        return resolvedInitializeParams(initializeParamsOverride: override)
+    }
+
+    package static func resolvedInitializeParams(
+        initializeParamsOverride: [String: JSONValue]?
+    ) -> [String: JSONValue] {
         let mergedParams = ProxyFileConfigLoader.mergeJSONObjects(
             defaultInitializeParams(),
             overriding: initializeParamsOverride ?? [:]
         )
-        guard hasExplicitClientVersionOverride() == false else {
+        guard hasExplicitClientVersionOverride(initializeParamsOverride: initializeParamsOverride) == false else {
             return mergedParams
         }
         return applyingAutomaticClientVersion(to: mergedParams)
     }
 
     func defaultInitializeParams() -> [String: JSONValue] {
+        Self.defaultInitializeParams()
+    }
+
+    package static func defaultInitializeParams() -> [String: JSONValue] {
         [
             "protocolVersion": .string("2025-03-26"),
             "capabilities": .object([:]),
@@ -417,6 +435,12 @@ extension RuntimeCoordinator {
     }
 
     func hasExplicitClientVersionOverride() -> Bool {
+        Self.hasExplicitClientVersionOverride(initializeParamsOverride: initializeParamsOverride)
+    }
+
+    package static func hasExplicitClientVersionOverride(
+        initializeParamsOverride: [String: JSONValue]?
+    ) -> Bool {
         guard case .object(let clientInfo)? = initializeParamsOverride?["clientInfo"] else {
             return false
         }
@@ -424,6 +448,10 @@ extension RuntimeCoordinator {
     }
 
     func applyingAutomaticClientVersion(to params: [String: JSONValue]) -> [String: JSONValue] {
+        Self.applyingAutomaticClientVersion(to: params)
+    }
+
+    package static func applyingAutomaticClientVersion(to params: [String: JSONValue]) -> [String: JSONValue] {
         guard case .object(var clientInfo)? = params["clientInfo"],
               case .string(let clientName)? = clientInfo["name"] else {
             return params
@@ -440,23 +468,43 @@ extension RuntimeCoordinator {
     }
 
     func defaultClientVersion(for clientName: String) -> String {
+        Self.defaultClientVersion(for: clientName)
+    }
+
+    package static func defaultClientVersion(for clientName: String) -> String {
         xcodeChatClientVersion(for: clientName) ?? defaultProxyClientVersion()
     }
 
     func defaultProxyClientName() -> String {
+        Self.defaultProxyClientName()
+    }
+
+    package static func defaultProxyClientName() -> String {
         "XcodeMCPKit"
     }
 
     func defaultProxyClientVersion() -> String {
+        Self.defaultProxyClientVersion()
+    }
+
+    package static func defaultProxyClientVersion() -> String {
         "dev"
     }
 
     func xcodeChatClientVersion(for clientName: String) -> String? {
+        Self.xcodeChatClientVersion(for: clientName)
+    }
+
+    package static func xcodeChatClientVersion(for clientName: String) -> String? {
         let defaults = UserDefaults(suiteName: "com.apple.dt.Xcode")?.dictionaryRepresentation() ?? [:]
         return xcodeChatClientVersion(for: clientName, defaults: defaults)
     }
 
     func xcodeChatClientVersion(for clientName: String, defaults: [String: Any]) -> String? {
+        Self.xcodeChatClientVersion(for: clientName, defaults: defaults)
+    }
+
+    package static func xcodeChatClientVersion(for clientName: String, defaults: [String: Any]) -> String? {
         let normalizedName = normalizedChatClientName(clientName)
         guard !normalizedName.isEmpty else { return nil }
 
@@ -500,6 +548,10 @@ extension RuntimeCoordinator {
     }
 
     func xcodeChatVersionValue(forDefaultsKey defaultsKey: String) -> String? {
+        Self.xcodeChatVersionValue(forDefaultsKey: defaultsKey)
+    }
+
+    package static func xcodeChatVersionValue(forDefaultsKey defaultsKey: String) -> String? {
         guard let raw = UserDefaults(suiteName: "com.apple.dt.Xcode")?.string(forKey: defaultsKey) else {
             return nil
         }
@@ -507,6 +559,10 @@ extension RuntimeCoordinator {
     }
 
     func xcodeChatVersionValue(from raw: String) -> String? {
+        Self.xcodeChatVersionValue(from: raw)
+    }
+
+    package static func xcodeChatVersionValue(from raw: String) -> String? {
         guard
             let data = raw.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
@@ -519,6 +575,10 @@ extension RuntimeCoordinator {
     }
 
     func chatClientAliases(forVersionStem stem: String) -> Set<String> {
+        Self.chatClientAliases(forVersionStem: stem)
+    }
+
+    package static func chatClientAliases(forVersionStem stem: String) -> Set<String> {
         var aliases: Set<String> = []
         let normalizedStem = normalizedChatClientName(stem)
         if !normalizedStem.isEmpty {
@@ -537,6 +597,10 @@ extension RuntimeCoordinator {
     }
 
     func normalizedChatClientName(_ name: String) -> String {
+        Self.normalizedChatClientName(name)
+    }
+
+    package static func normalizedChatClientName(_ name: String) -> String {
         let scalars = name.unicodeScalars.filter(CharacterSet.alphanumerics.contains)
         return String(String.UnicodeScalarView(scalars)).lowercased()
     }
