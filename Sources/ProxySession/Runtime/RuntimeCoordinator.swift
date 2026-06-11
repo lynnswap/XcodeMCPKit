@@ -713,7 +713,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         guard let documentationProviderManager else {
             return baseResult
         }
-        let update = await documentationProviderManager.toolListUpdate()
+        let update = await documentationToolListUpdate(
+            manager: documentationProviderManager,
+            requestTimeout: timeAmount(until: deadline)
+        )
         return DocumentationToolCatalog.applying(update, to: baseResult)
     }
 
@@ -756,9 +759,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         guard let documentationProviderManager else {
             throw UpstreamSlotAcquisitionError.unavailable
         }
+        let timeout =
+            requestTimeoutOverride
+            ?? MCPMethodDispatcher.timeoutForMethod(
+                "tools/call",
+                defaultSeconds: config.requestTimeout
+            )
         let result = try await documentationProviderManager.callDocumentationSearch(
             requestData: requestData,
-            requestTimeoutOverride: requestTimeoutOverride
+            requestTimeoutOverride: timeout
         )
         if result.didInvalidateProvider
             || DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
@@ -770,6 +779,37 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
         }
         return result.data
+    }
+
+    private func documentationToolListUpdate(
+        manager: any DocumentationProviderManaging,
+        requestTimeout: TimeAmount?
+    ) async -> DocumentationToolListUpdate {
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return await manager.toolListUpdate(requestTimeout: requestTimeout)
+        }
+        do {
+            return try await withThrowingTaskGroup(of: DocumentationToolListUpdate.self) { group in
+                group.addTask {
+                    await manager.toolListUpdate(requestTimeout: requestTimeout)
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                    throw TimeoutError()
+                }
+                guard let update = try await group.next() else {
+                    throw TimeoutError()
+                }
+                group.cancelAll()
+                return update
+            }
+        } catch {
+            await manager.invalidate(reason: "tools_list_timeout")
+            return .unavailable
+        }
     }
 
     package func invalidateDocumentationProvider(reason: String) async {

@@ -22,7 +22,7 @@ package struct DocumentationProviderCallResult: Sendable {
 }
 
 package protocol DocumentationProviderManaging: Sendable {
-    func toolListUpdate() async -> DocumentationToolListUpdate
+    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
     func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
@@ -34,7 +34,7 @@ package protocol DocumentationProviderManaging: Sendable {
 package struct DisabledDocumentationProviderManager: DocumentationProviderManaging {
     package init() {}
 
-    package func toolListUpdate() async -> DocumentationToolListUpdate {
+    package func toolListUpdate(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
         .unchanged
     }
 
@@ -526,8 +526,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.sessionFactory = sessionFactory
     }
 
-    package func toolListUpdate() async -> DocumentationToolListUpdate {
-        guard let provider = await providerIfAvailable() else {
+    package func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        guard let provider = await providerIfAvailable(requestTimeout: requestTimeout) else {
             return .unavailable
         }
         return .available(provider.profile.descriptor)
@@ -537,7 +540,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationProviderCallResult {
-        guard let provider = await providerIfAvailable() else {
+        guard requestTimeoutOverride?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+        guard let provider = await providerIfAvailable(requestTimeout: requestTimeoutOverride) else {
             throw UpstreamSlotAcquisitionError.unavailable
         }
 
@@ -549,7 +555,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
         } catch {
             await invalidate(reason: "documentation_provider_call_failed")
-            guard let replacement = await providerIfAvailable() else {
+            guard let replacement = await providerIfAvailable(requestTimeout: requestTimeoutOverride) else {
                 throw error
             }
             let retryResponse = try await replacement.profile.connection.call(
@@ -566,7 +572,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
 
         await invalidate(reason: "documentation_search_not_enabled")
-        guard let replacement = await providerIfAvailable() else {
+        guard let replacement = await providerIfAvailable(requestTimeout: requestTimeoutOverride) else {
             return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
         }
         do {
@@ -598,11 +604,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         await invalidate(reason: "shutdown")
     }
 
-    private func providerIfAvailable() async -> ActiveProvider? {
+    private func providerIfAvailable(requestTimeout: TimeAmount?) async -> ActiveProvider? {
         if let activeProvider {
             return activeProvider
         }
-        guard let selected = await selectProvider() else {
+        guard let selected = await selectProvider(requestTimeout: requestTimeout) else {
             return nil
         }
         let provider = ActiveProvider(profile: selected)
@@ -610,11 +616,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return provider
     }
 
-    private func selectProvider() async -> CandidateProfile? {
+    private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
         var profiles: [CandidateProfile] = []
         for target in discovery.runningXcodeTargets() {
+            if requestTimeout?.nanoseconds == 0 {
+                break
+            }
             do {
-                let profile = try await probe(target: target)
+                let profile = try await probe(target: target, requestTimeout: requestTimeout)
                 profiles.append(profile)
             } catch {
                 continue
@@ -636,14 +645,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return selected
     }
 
-    private func probe(target: DocumentationProviderTarget) async throws -> CandidateProfile {
+    private func probe(
+        target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?
+    ) async throws -> CandidateProfile {
+        let probeTimeout = requestTimeout ?? .seconds(30)
         let session = try await sessionFactory.startSession(for: target)
         let connection = DocumentationProviderConnection(session: session)
         await connection.start()
         do {
             let initialize = try await connection.call(
                 try Self.makeInitializeRequestData(),
-                timeout: .seconds(30)
+                timeout: probeTimeout
             )
             let serverVersion = Self.serverVersion(fromInitializeResponse: initialize) ?? ""
             try await connection.sendNotification([
@@ -652,7 +665,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             ])
             let toolsList = try await connection.call(
                 try Self.makeToolsListRequestData(),
-                timeout: .seconds(30)
+                timeout: probeTimeout
             )
             let toolsResult = try Self.resultValue(from: toolsList)
             guard let descriptor = DocumentationToolCatalog.descriptor(in: toolsResult) else {
@@ -660,7 +673,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             let probeResponse = try await connection.call(
                 try Self.makeDocumentationProbeRequestData(),
-                timeout: .seconds(30)
+                timeout: probeTimeout
             )
             guard !DocumentationToolCatalog.responseIsDocumentationNotEnabled(probeResponse),
                   !DocumentationToolCatalog.responseIsToolError(probeResponse) else {

@@ -177,6 +177,8 @@ struct RuntimeCoordinatorTests {
 
         #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        let observedTimeout = try #require(await documentationProvider.lastToolListTimeout())
+        #expect(observedTimeout.nanoseconds > 0)
     }
 
     @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
@@ -265,6 +267,8 @@ struct RuntimeCoordinatorTests {
         #expect(responseData == providerResponse)
         #expect(manager.cachedToolsListResult() == nil)
         #expect(await documentationProvider.callCount() == 1)
+        let observedTimeout = try #require(await documentationProvider.lastCallTimeout())
+        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
     }
 
     @Test func documentationProviderManagerRejectsDescriptorWhenProbeCallIsNotEnabled() async throws {
@@ -286,7 +290,7 @@ struct RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        let update = await manager.toolListUpdate()
+        let update = await manager.toolListUpdate(requestTimeout: nil)
         let result = DocumentationToolCatalog.applying(
             update,
             to: try jsonValue([
@@ -343,7 +347,7 @@ struct RuntimeCoordinatorTests {
         )
 
         let initialTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(),
+            await manager.toolListUpdate(requestTimeout: nil),
             to: try jsonValue(["tools": []])
         )
         #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
@@ -5708,6 +5712,8 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var callResults: [DocumentationProviderCallResult]
     private var callCountValue = 0
     private var invalidateReasons: [String] = []
+    private var toolListTimeouts: [TimeAmount?] = []
+    private var callTimeouts: [TimeAmount?] = []
 
     init(
         toolListUpdate: DocumentationToolListUpdate,
@@ -5717,15 +5723,17 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
         self.callResults = callResults
     }
 
-    func toolListUpdate() async -> DocumentationToolListUpdate {
-        update
+    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        toolListTimeouts.append(requestTimeout)
+        return update
     }
 
     func callDocumentationSearch(
         requestData _: Data,
-        requestTimeoutOverride _: TimeAmount?
+        requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationProviderCallResult {
         callCountValue += 1
+        callTimeouts.append(requestTimeoutOverride)
         guard callResults.isEmpty == false else {
             throw UpstreamSlotAcquisitionError.unavailable
         }
@@ -5743,6 +5751,14 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     func callCount() -> Int {
         callCountValue
+    }
+
+    func lastToolListTimeout() -> TimeAmount? {
+        toolListTimeouts.last ?? nil
+    }
+
+    func lastCallTimeout() -> TimeAmount? {
+        callTimeouts.last ?? nil
     }
 }
 
