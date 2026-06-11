@@ -213,85 +213,6 @@ package struct LocalMCPResponder {
             let originalID = RPCID(any: originalIDValue),
             let params = object["params"] as? [String: Any],
             let toolName = params["name"] as? String,
-            toolName == DocumentationToolCatalog.toolName,
-            sessionManager.hasDocumentationProvider(),
-            disabledToolNames.contains(toolName) == false
-        {
-            if headerSessionExists == false {
-                _ = sessionManager.session(id: headerSessionID)
-            }
-            guard JSONSerialization.isValidJSONObject(object),
-                  let requestData = try? JSONSerialization.data(withJSONObject: object, options: [])
-            else {
-                return Self.fallbackLocalError(
-                    id: originalID,
-                    sessionID: headerSessionID
-                )
-            }
-            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
-                do {
-                    let responseData = try Self.waitForAsyncResult {
-                        try await sessionManager.callDocumentationSearch(
-                            requestData: requestData,
-                            requestTimeoutOverride: requestTimeoutOverride
-                        )
-                    }
-                    return .immediateResponse(
-                        data: normalizeDocumentationSearchResponseData(responseData),
-                        sessionID: headerSessionID
-                    )
-                } catch {
-                    let data = try? Self.encodeErrorData(id: originalID, error: error)
-                    if let data {
-                        return .immediateResponse(data: data, sessionID: headerSessionID)
-                    }
-                    return Self.fallbackLocalError(
-                        id: originalID,
-                        sessionID: headerSessionID
-                    )
-                }
-            }
-            let promise = eventLoop.makePromise(of: ByteBuffer.self)
-            Task {
-                do {
-                    let responseData = try await sessionManager.callDocumentationSearch(
-                        requestData: requestData,
-                        requestTimeoutOverride: requestTimeoutOverride
-                    )
-                    let normalizedData = normalizeDocumentationSearchResponseData(responseData)
-                    var responseBuffer = ByteBufferAllocator().buffer(capacity: normalizedData.count)
-                    responseBuffer.writeBytes(normalizedData)
-                    let buffer = responseBuffer
-                    eventLoop.execute {
-                        promise.succeed(buffer)
-                    }
-                } catch {
-                    do {
-                        let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
-                        eventLoop.execute {
-                            promise.succeed(buffer)
-                        }
-                    } catch {
-                        eventLoop.execute {
-                            promise.fail(error)
-                        }
-                    }
-                }
-            }
-            return .pendingResponse(
-                future: promise.futureResult,
-                sessionID: headerSessionID,
-                originalID: originalID
-            )
-        }
-
-        if method == "tools/call",
-            let headerSessionID,
-            sessionManager.isInitialized(),
-            let originalIDValue = object["id"],
-            let originalID = RPCID(any: originalIDValue),
-            let params = object["params"] as? [String: Any],
-            let toolName = params["name"] as? String,
             toolName == "XcodeListWindows",
             disabledToolNames.contains(toolName) == false
         {
@@ -358,14 +279,6 @@ package struct LocalMCPResponder {
         }
 
         return nil
-    }
-
-    private func normalizeDocumentationSearchResponseData(_ data: Data) -> Data {
-        ToolCallNormalizer(sessionManager: sessionManager).normalizeResponseDataIfNeeded(
-            method: "tools/call",
-            toolName: DocumentationToolCatalog.toolName,
-            upstreamData: data
-        )
     }
 
     private static func encodeResultBuffer(

@@ -2175,6 +2175,78 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpSingleDocumentationSearchCancellationAbandonsPrefilterLease() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let documentationStarted = DispatchSemaphore(value: 0)
+        let documentationRelease = DispatchSemaphore(value: 0)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            documentationSearchResponder: { requestData in
+                documentationStarted.signal()
+                _ = documentationRelease.wait(timeout: .now() + 2)
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"cancelled\"}"
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let service = HTTPPostService(
+                config: config,
+                sessionManager: sessionManager,
+                refreshCodeIssuesCoordinator: .makeDefault(),
+                refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState(
+                    defaultRequestTimeoutSeconds: config.requestTimeout
+                )
+            )
+            let payload = toolsCallPayload(
+                id: 720,
+                name: "DocumentationSearch",
+                arguments: [
+                    "query": "UIView",
+                ]
+            )
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.handle(
+                bodyData: bodyData,
+                headerSessionID: "session-docs-single-cancel",
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: group.next()
+            )
+            let cancellationHandle = try #require(operation.cancellationHandle)
+
+            try #require(await waitForHTTPTestSemaphore(documentationStarted, timeoutSeconds: 1) == .success)
+            service.cancel(cancellationHandle)
+            documentationRelease.signal()
+
+            do {
+                _ = try await operation.future.get()
+                Issue.record("cancelled documentation request should not complete successfully")
+            } catch {
+                #expect(error is CancellationError)
+            }
+            let abandonedLease = try #require(
+                sessionManager.leaseDebugSnapshots().first { $0.state == .abandoned }
+            )
+            #expect(abandonedLease.releaseReason == "clientDisconnected")
+            #expect(sessionManager.sentToolNames().isEmpty)
+            try await group.shutdownGracefully()
+        } catch {
+            documentationRelease.signal()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
     @Test func httpBatchDocumentationSearchCancellationAbandonsPrefilterLease() async throws {
         let config = makeConfig(requestTimeout: 2)
         let documentationStarted = DispatchSemaphore(value: 0)

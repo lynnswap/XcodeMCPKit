@@ -532,19 +532,31 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private final class ProviderSelectionWaitState: @unchecked Sendable {
         private let lock = NSLock()
-        private var didResume = false
+        private var continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>?
+        private var resolvedResult: ProviderSelectionWaitResult?
 
-        func resume(
-            _ result: ProviderSelectionWaitResult,
-            continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>
-        ) {
+        func setContinuation(_ continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>) {
             lock.lock()
-            defer { lock.unlock() }
-            guard !didResume else {
+            if let resolvedResult {
+                lock.unlock()
+                continuation.resume(returning: resolvedResult)
                 return
             }
-            didResume = true
-            continuation.resume(returning: result)
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        func resume(_ result: ProviderSelectionWaitResult) {
+            lock.lock()
+            guard resolvedResult == nil else {
+                lock.unlock()
+                return
+            }
+            resolvedResult = result
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: result)
         }
     }
 
@@ -602,6 +614,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             throw TimeoutError()
         }
         guard let provider = await providerIfAvailable(requestTimeout: initialTimeout) else {
+            try Task.checkCancellation()
             throw UpstreamSlotAcquisitionError.unavailable
         }
 
@@ -626,6 +639,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 throw error
             }
             guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+                try Task.checkCancellation()
                 throw error
             }
             let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
@@ -648,8 +662,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         await invalidate(provider, reason: "documentation_search_not_enabled")
         try Task.checkCancellation()
         let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
-        guard replacementSelectionTimeout?.nanoseconds != 0,
-              let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+        guard replacementSelectionTimeout?.nanoseconds != 0 else {
+            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
+        }
+        guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+            try Task.checkCancellation()
             return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
         }
         let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
@@ -758,24 +775,35 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         _ selection: ProviderSelection,
         requestTimeout: TimeAmount?
     ) async -> ProviderSelectionWaitResult {
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return .completed(await selection.task.value)
+        guard !Task.isCancelled else {
+            return .timedOut
         }
 
-        return await withCheckedContinuation { continuation in
-            let state = ProviderSelectionWaitState()
-            Task.detached {
-                let profile = await selection.task.value
-                state.resume(
-                    .completed(profile),
-                    continuation: continuation
-                )
-            }
-            Task.detached {
-                try? await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
-                state.resume(.timedOut, continuation: continuation)
-            }
+        let state = ProviderSelectionWaitState()
+        let selectionWaitTask = Task {
+            let profile = await selection.task.value
+            state.resume(.completed(profile))
         }
+        let timeoutTask: Task<Void, Never>?
+        if let requestTimeout, requestTimeout.nanoseconds > 0 {
+            timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                state.resume(.timedOut)
+            }
+        } else {
+            timeoutTask = nil
+        }
+
+        let result = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                state.setContinuation(continuation)
+            }
+        } onCancel: {
+            state.resume(.timedOut)
+        }
+        selectionWaitTask.cancel()
+        timeoutTask?.cancel()
+        return result
     }
 
     private func invalidate(_ provider: ActiveProvider, reason _: String) async {

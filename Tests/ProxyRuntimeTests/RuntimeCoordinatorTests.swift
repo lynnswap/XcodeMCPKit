@@ -542,6 +542,49 @@ struct RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
+    @Test func documentationProviderManagerCancelsSelectionWaitForCancelledCaller() async throws {
+        let target = documentationProviderTarget(processID: 124)
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        probeResponse: .success
+                    ),
+                ],
+            ],
+            startDelayNanoseconds: 500_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let task = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 74, query: "UIView"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await spinUntil("waiting for provider selection to start") {
+            await factory.startAttempts() == [target.processID]
+        }
+
+        let cancelStart = Date()
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(Date().timeIntervalSince(cancelStart) < 0.25)
+
+        let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
+        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
     @Test func documentationProviderManagerChecksAllRunningXcodeTargetsBeforePublishingDescriptor() async throws {
         let xcode26 = documentationProviderTarget(processID: 201)
         let xcode27 = documentationProviderTarget(processID: 202)
