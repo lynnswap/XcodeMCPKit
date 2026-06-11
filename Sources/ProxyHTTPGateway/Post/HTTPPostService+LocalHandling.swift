@@ -237,18 +237,10 @@ extension HTTPPostService {
             return nil
         }
 
-        let hasLocalToolsListRequest = requestItems.contains { item in
-            guard let object = item as? [String: Any] else {
-                return false
-            }
-            return isToolsListRequest(object)
-        }
         var toolsListRequests: [[String: Any]] = []
         toolsListRequests.reserveCapacity(requestItems.count)
         var documentationRequests: [[String: Any]] = []
         documentationRequests.reserveCapacity(requestItems.count)
-        var deferredDocumentationRequests: [[String: Any]] = []
-        deferredDocumentationRequests.reserveCapacity(requestItems.count)
         var forwardedObjects: [Any] = []
         forwardedObjects.reserveCapacity(requestItems.count)
 
@@ -259,11 +251,8 @@ extension HTTPPostService {
             }
             if isToolsListRequest(object) {
                 toolsListRequests.append(object)
-            } else if isDocumentationSearchRequest(object) {
+            } else if isDocumentationSearchRequest(object, allowInactiveProvider: true) {
                 documentationRequests.append(object)
-            } else if hasLocalToolsListRequest,
-                      isDocumentationSearchRequest(object, allowInactiveProvider: true) {
-                deferredDocumentationRequests.append(object)
             } else {
                 forwardedObjects.append(item)
             }
@@ -309,8 +298,8 @@ extension HTTPPostService {
                 initialLocalResponseData: filteredRequest.localResponseData,
                 toolsListRequests: toolsListRequests,
                 documentationRequests: documentationRequests,
-                deferredDocumentationRequests: deferredDocumentationRequests,
                 sessionID: sessionID,
+                forceBatchArray: filteredRequest.forceBatchArray,
                 deadline: deadline
             )
             let wasCancelled = Task.isCancelled
@@ -362,8 +351,8 @@ extension HTTPPostService {
         initialLocalResponseData: Data?,
         toolsListRequests: [[String: Any]],
         documentationRequests: [[String: Any]],
-        deferredDocumentationRequests: [[String: Any]],
         sessionID: String,
+        forceBatchArray: Bool,
         deadline: Date?
     ) async -> LocalToolBatchResult {
         let toolsListResponseData = await makeToolsListBatchResponseData(
@@ -371,33 +360,23 @@ extension HTTPPostService {
             sessionID: sessionID,
             deadline: deadline
         )
-        var localDocumentationRequests = documentationRequests
-        let fallbackDocumentationRequests: [[String: Any]]
-        if deferredDocumentationRequests.isEmpty {
-            fallbackDocumentationRequests = []
-        } else if sessionManager.hasActiveDocumentationProvider() {
-            localDocumentationRequests.append(contentsOf: deferredDocumentationRequests)
-            fallbackDocumentationRequests = []
-        } else {
-            fallbackDocumentationRequests = deferredDocumentationRequests
-        }
-        let documentationResponseData = await makeDocumentationSearchBatchResponseData(
-            requests: localDocumentationRequests,
+        let documentationResult = await makeDocumentationSearchBatchResult(
+            requests: documentationRequests,
             deadline: deadline
         )
         let localResponseData = Self.mergeBatchResponsePayloads(
             [
                 initialLocalResponseData,
                 toolsListResponseData,
-                documentationResponseData,
+                documentationResult.responseData,
             ],
             forceBatchArray: true
         )
-        let fallbackForwardedRequest = fallbackDocumentationRequests.isEmpty
+        let fallbackForwardedRequest = documentationResult.fallbackRequests.isEmpty
             ? nil
             : makeForwardedLocalToolRequest(
-                forwardedObjects: fallbackDocumentationRequests,
-                forceBatchArray: true
+                forwardedObjects: documentationResult.fallbackRequests,
+                forceBatchArray: forceBatchArray
             )
         return LocalToolBatchResult(
             responseData: localResponseData,
@@ -471,12 +450,14 @@ extension HTTPPostService {
         )
     }
 
-    private func makeDocumentationSearchBatchResponseData(
+    private func makeDocumentationSearchBatchResult(
         requests: [[String: Any]],
         deadline: Date?
-    ) async -> Data? {
+    ) async -> (responseData: Data?, fallbackRequests: [[String: Any]]) {
         var responseObjects: [[String: Any]] = []
         responseObjects.reserveCapacity(requests.count)
+        var fallbackRequests: [[String: Any]] = []
+        fallbackRequests.reserveCapacity(requests.count)
         let normalizer = ToolCallNormalizer(sessionManager: sessionManager)
 
         for request in requests {
@@ -525,6 +506,10 @@ extension HTTPPostService {
                     contentsOf: Self.responseObjects(from: normalizedData)
                 )
             } catch {
+                if Self.shouldFallbackDocumentationSearchToUpstream(error) {
+                    fallbackRequests.append(request)
+                    continue
+                }
                 let mapped = Self.mapDocumentationSearchError(error)
                 responseObjects.append(
                     Self.makeJSONRPCErrorResponseObject(
@@ -536,10 +521,23 @@ extension HTTPPostService {
             }
         }
 
-        return Self.makeToolResponseData(
-            from: responseObjects,
-            forceBatchArray: true
+        return (
+            Self.makeToolResponseData(
+                from: responseObjects,
+                forceBatchArray: true
+            ),
+            fallbackRequests
         )
+    }
+
+    private static func shouldFallbackDocumentationSearchToUpstream(_ error: Error) -> Bool {
+        if error is UpstreamSlotAcquisitionError {
+            return true
+        }
+        if let error = error as? ControlPlaneRequestError {
+            return shouldFallbackDocumentationSearchToUpstream(error.underlying)
+        }
+        return false
     }
 
     private func isDocumentationSearchRequest(

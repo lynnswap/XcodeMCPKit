@@ -1709,7 +1709,71 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpDocumentationSearchFallsThroughWhenDocumentationProviderIsInactive() async throws {
+    @Test func httpDocumentationSearchRoutesThroughInactiveDocumentationProvider() async throws {
+        let config = makeConfig(requestTimeout: 2)
+        let documentationRequests = NIOLockedValueBox<[String]>([])
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { _, _, originalID in
+                Issue.record("DocumentationSearch should not be forwarded upstream")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "{\"answer\":\"upstream-docs\"}"
+                    )
+                )
+            },
+            documentationSearchResponder: { requestData in
+                let object = try #require(
+                    JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
+                )
+                let params = try #require(object["params"] as? [String: Any])
+                let arguments = try #require(params["arguments"] as? [String: Any])
+                documentationRequests.withLockedValue { requests in
+                    requests.append(arguments["query"] as? String ?? "")
+                }
+                let originalIDValue = try #require(object["id"])
+                let originalID = try #require(RPCID(any: originalIDValue))
+                return try makeToolSuccessResponse(
+                    id: originalID,
+                    text: "{\"answer\":\"cold-docs\"}"
+                )
+            },
+            documentationProviderIsActive: false
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-docs-inactive-local",
+                payload: toolsCallPayload(
+                    id: 65,
+                    name: "DocumentationSearch",
+                    arguments: [
+                        "query": "hello",
+                    ]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            let structuredContent = result?["structuredContent"] as? [String: Any]
+            #expect(structuredContent?["answer"] as? String == "cold-docs")
+            #expect(sessionManager.sentToolNames() == [])
+            #expect(documentationRequests.withLockedValue { $0 } == ["hello"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func httpDocumentationSearchFallsBackWhenInactiveProviderIsUnavailable() async throws {
         let config = makeConfig(requestTimeout: 2)
         let localDocumentationRequests = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
@@ -1740,9 +1804,9 @@ struct HTTPHandlerTests {
         do {
             let (response, body) = try await postHTTPJSON(
                 url: server.url,
-                sessionID: "session-docs-inactive-fallthrough",
+                sessionID: "session-docs-inactive-fallback",
                 payload: toolsCallPayload(
-                    id: 65,
+                    id: 66,
                     name: "DocumentationSearch",
                     arguments: [
                         "query": "hello",
@@ -1755,7 +1819,7 @@ struct HTTPHandlerTests {
             let content = result?["content"] as? [[String: Any]]
             #expect(content?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
             #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
-            #expect(localDocumentationRequests.withLockedValue { $0 } == 0)
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
         } catch {
             try? await server.shutdown()
             throw error
@@ -2339,7 +2403,7 @@ struct HTTPHandlerTests {
             #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
 
             #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
-            #expect(localDocumentationRequests.withLockedValue { $0 } == 0)
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
         } catch {
             try? await server.shutdown()
             throw error
