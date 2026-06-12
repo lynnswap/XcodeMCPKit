@@ -27,16 +27,16 @@ package struct ProxyServerCommandRuntime {
             }
             try XcodeMCPProxyServerCommand.applyDefaults(from: environment, to: &options)
 
-            let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])
-            if isDryRun {
-                let command = (["xcode-mcp-proxy-server"] + options.forwardedArgs)
-                    .joined(separator: " ")
-                dependencies.stdout(command)
-                return 0
-            }
-
             let proxyArgs = ["xcode-mcp-proxy"] + options.forwardedArgs
             let config = try CLIParser.parse(args: proxyArgs, environment: environment)
+
+            let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])
+            if isDryRun {
+                dependencies.stdout(
+                    XcodeMCPProxyServerCommand.dryRunCommandLine(options: options, config: config)
+                )
+                return 0
+            }
             if options.forceRestart, config.listenPort > 0 {
                 _ = dependencies.existingProxyServerClient.terminateExistingServer(
                     config.listenHost,

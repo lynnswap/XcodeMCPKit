@@ -44,21 +44,30 @@ extension XcodeMCPProxyServerCommand {
             options.forwardedArgs += ["--port", "8765"]
         }
 
-        if !options.hasConfigFlag,
-           let configPath = nonEmpty(environment[CLIParser.configPathEnv])
-        {
-            options.forwardedArgs += ["--config", configPath]
-        }
-
         if isTruthy(environment["LAZY_INIT"]) {
             throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
         }
 
-        if !options.hasRefreshCodeIssuesModeFlag,
-            let mode = nonEmpty(environment["MCP_XCODE_REFRESH_CODE_ISSUES_MODE"])
-        {
-            options.forwardedArgs += ["--refresh-code-issues-mode", mode]
+        // MCP_XCODE_CONFIG and MCP_XCODE_REFRESH_CODE_ISSUES_MODE are
+        // resolved by CLIParser itself; synthesizing flags here would handle
+        // the same variables in two layers.
+    }
+
+    /// The dry-run echo reflects the resolved configuration, so values the
+    /// parser pulled from the environment stay visible even though they
+    /// never existed as argv flags.
+    package static func dryRunCommandLine(
+        options: ProxyServerOptions,
+        config: ProxyConfig
+    ) -> String {
+        var parts = ["xcode-mcp-proxy-server"] + options.forwardedArgs
+        if options.hasConfigFlag == false, let configPath = config.configPath {
+            parts += ["--config", configPath]
         }
+        if options.hasRefreshCodeIssuesModeFlag == false, config.refreshCodeIssuesMode != .proxy {
+            parts += ["--refresh-code-issues-mode", config.refreshCodeIssuesMode.rawValue]
+        }
+        return parts.joined(separator: " ")
     }
 
     package static func serverUsage() -> String {

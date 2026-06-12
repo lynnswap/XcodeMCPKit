@@ -180,8 +180,6 @@ struct ServerCommandTests {
 
         #expect(options.forwardedArgs == [
             "--listen", "127.0.0.1:9999",
-            "--config", "/tmp/proxy-config.toml",
-            "--refresh-code-issues-mode", "upstream",
         ])
     }
 
@@ -207,9 +205,10 @@ struct ServerCommandTests {
             to: &options
         )
 
-        #expect(options.forwardedArgs.contains("--config"))
-        #expect(options.forwardedArgs.contains("/tmp/explicit.toml"))
-        #expect(options.forwardedArgs.contains("/tmp/environment.toml") == false)
+        #expect(options.forwardedArgs == [
+            "--config", "/tmp/explicit.toml",
+            "--listen", "localhost:8765",
+        ])
     }
 
     @Test func serverCommandIgnoresRemovedXcodePIDEnvironment() throws {
