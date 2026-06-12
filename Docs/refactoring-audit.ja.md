@@ -285,11 +285,9 @@ churn を生んでいる構造欠陥は 3 つに集約される:
 
 実施済み: 死蔵コード削除・rename 完遂・テスト target 整合(Phase 1)/ DocumentationSearch 単一 owner 化・Deadline 型・libproc 化(Phase 2)/ generation 導入による semaphore 全廃・initialize キャッシュ一本化・source 必須化(Phase 3)/ ProxyRouter の相関厳密化(重複 id・popBatch 推測排除)・エラー写像一本化・initialize ゲート一本化・metadata 二重パース解消(Phase 4 部分)/ handshake params 抽出・config 1 回読込・@_exported 排除と境界実体化・XcodeMCPKit target 削除・ExistingProxyServerClient 移動・xcrun 文法統合(Phase 5 部分)/ UpstreamSendResult 原因付き 3 値化(Phase 6 部分)/ refresh fallback 7 連コピー統合・lease 終端単一 owner 化・認識ロジック feature 集約・pgrep 全廃・auto-approver 4 ファイル分割(Phase 7 部分)。
 
-未実施(それぞれ独立セッション推奨):
-1. **typed Sendable envelope + batch 単一パイプライン**(Phase 4 中核)— 残る再パースは @Sendable 境界由来のため、JSONValue ベースの envelope 導入が前提。最大の構造変更。
-2. **EmbeddedEventLoop 型名 sniff の除去** — 上記とテスト移行(NIOAsyncTestingEventLoop)が前提。
-3. **ControlPlaneCoordinator の SharedLoad 統合**(toolsCatalog/windows、promotion セマンティクス維持)。
-4. **CLI 3 重文法の単一 parse 化**。
-5. **AX/Xcode discovery の ProxyXcodeSupport 移設**(UpstreamReadinessGate 構造体の ProxyCore 降格と注入配線、テスト churn 大)。
-6. **auto-approver matcher の evidence + rule table 化**、debug step/state/outcome の enum 化。
-7. **Phase 8: テスト再編**(god file 分割・共有ハーネス・決定的 clock・shutdownAndWait 整理)。
+第 2 ラウンド(同ブランチ continued)で追加実施: ProxyRouter 相関の厳密化(重複 id の token 照合・popBatch 推測排除)/ UpstreamSendResult の原因付き 3 値化 / エラー写像・initialize ゲート・upstream-unavailable 応答の単一ビルダー化 / refresh の lease 終端単一 owner 化(usedDirectForwarding 削除)・fallback 7 連コピー統合・認識ロジック feature 集約・outcome の enum 化 / handshake params・xcrun 文法・TOML 読込・env 解決の単一所有化 / @_exported 排除と ProxyCLI 境界実体化(ArchitectureTests は属性付き import も検査)/ XcodeMCPKit target 削除・ExistingProxyServerClient 移動 / pgrep・ps の subprocess 全廃(共有 ProcessEnumeration)/ auto-approver 4 ファイル分割 + matcher の evidence+順序ルール化 / **AppKit・ApplicationServices の ProxySession 完全排除**(ProcessRunner・OrderedPipeReader・UpstreamReadinessGate・XcodeTargetDiscovering を ProxyCore へ、XcodeReadinessProbe・LiveXcodeTargetDiscovery・live gate factory を ProxyXcodeSupport へ移し、composition root から注入。Architecture ルールで再発防止)/ shutdownAndWait をテストサポートへ移動(本番の DispatchSemaphore は EmbeddedEventLoop 互換パスの 1 箇所のみに)/ ControlPlaneCoordinator の waiter 除去 4 関数 → 2 関数(toolsCatalog/windows の完全汎用化は、ポリシー差が実在する 2 インスタンスのための投機的抽象になるため見送り)/ flaky だった refresh coordinator テストの決定化 / dry-run 出力を解決済み config 由来に変更。
+
+未実施(残り 3 件、それぞれ独立セッション推奨):
+1. **typed Sendable envelope + batch 単一パイプライン**(Phase 4 中核)— 残る再パース・forceBatchArray 貫通・merge 4 ヘルパー・再帰 handle() は、JSONValue ベースの Sendable envelope の導入が前提(再パースは @Sendable 境界対策のため)。lease トポロジ(混在 batch の入れ子 lease)・cancellation 木・SSE 形状が絡む最大の構造変更。
+2. **EmbeddedEventLoop 型名 sniff + waitForAsyncResult の除去** — EmbeddedEventLoop はスレッド間の promise 完了を許さないため同期パスが存在する。テストの NIOAsyncTestingEventLoop / 実 ELG への移行とワンセット。
+3. **Phase 8: テスト再編** — god file 2 つの unit 分割(共有 private ヘルパーの再配置を伴う)、handshake 儀式 約 59 箇所の fixture 化、共有 HTTP ハーネス統合、wall-clock 待ちの決定化。
