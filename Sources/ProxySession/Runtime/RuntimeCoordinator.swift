@@ -521,15 +521,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func shutdownAndWait() {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) { [self] in
-            await shutdown()
-            semaphore.signal()
-        }
-        semaphore.wait()
-    }
-
     package func isInitialized() -> Bool {
         initializeManager.isInitialized()
     }

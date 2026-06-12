@@ -154,6 +154,7 @@ let package = Package(
         .target(
             name: "XcodeMCPTestSupport",
             dependencies: [
+                "ProxySession",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
