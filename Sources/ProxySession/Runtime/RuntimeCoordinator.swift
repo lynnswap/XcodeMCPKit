@@ -48,7 +48,7 @@ package protocol RuntimeCoordinating: Sendable {
     func shutdown() async
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
-    func setCachedToolsListResult(_ result: JSONValue)
+    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
     func registerInitialize(
         sessionID: String,
         originalID: RPCID,
@@ -527,11 +527,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         canonicalBrokerState.toolsCatalogRaw()
     }
 
-    package func setCachedToolsListResult(_ result: JSONValue) {
+    package func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int) {
         guard isValidToolsListResult(result) else { return }
         canonicalBrokerState.syncCanonicalToolsCatalog(
             result,
-            sourceUpstream: canonicalBrokerState.toolsSourceUpstream() ?? 0
+            sourceUpstream: sourceUpstream
         )
     }
 

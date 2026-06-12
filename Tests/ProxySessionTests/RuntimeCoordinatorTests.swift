@@ -183,7 +183,8 @@ struct RuntimeCoordinatorTests {
                         "description": "read",
                     ],
                 ],
-            ])
+            ]),
+            sourceUpstream: 0
         )
 
         let result = try await manager.sharedToolsList(
@@ -220,7 +221,8 @@ struct RuntimeCoordinatorTests {
                         "description": "read",
                     ],
                 ],
-            ])
+            ]),
+            sourceUpstream: 0
         )
 
         let result = try await manager.sharedToolsList(
@@ -258,7 +260,8 @@ struct RuntimeCoordinatorTests {
                         "description": "read",
                     ],
                 ],
-            ])
+            ]),
+            sourceUpstream: 0
         )
 
         let result = try await manager.sharedToolsList(
@@ -304,7 +307,8 @@ struct RuntimeCoordinatorTests {
                 "tools": [
                     documentationDescriptor(version: "27.0").foundationObject,
                 ],
-            ])
+            ]),
+            sourceUpstream: 0
         )
         #expect(manager.cachedToolsListResult() != nil)
 
@@ -360,7 +364,7 @@ struct RuntimeCoordinatorTests {
                 documentationDescriptor(version: "27.0").foundationObject,
             ],
         ])
-        manager.setCachedToolsListResult(cachedTools)
+        manager.setCachedToolsListResult(cachedTools, sourceUpstream: 0)
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
@@ -403,7 +407,8 @@ struct RuntimeCoordinatorTests {
                         "description": "read",
                     ],
                 ],
-            ])
+            ]),
+            sourceUpstream: 0
         )
         _ = try await manager.sharedToolsList(
             sessionID: "session-docs-recovery-failed",
@@ -3518,7 +3523,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.startPrimaryEagerRetry()
@@ -4868,7 +4873,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
-        manager.setCachedToolsListResult(cachedToolsList)
+        manager.setCachedToolsListResult(cachedToolsList, sourceUpstream: 0)
 
         let initialInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
@@ -4904,7 +4909,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
-        manager.setCachedToolsListResult(cachedToolsList)
+        manager.setCachedToolsListResult(cachedToolsList, sourceUpstream: 0)
 
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
@@ -5025,7 +5030,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
-        manager.setCachedToolsListResult(cachedToolsList)
+        manager.setCachedToolsListResult(cachedToolsList, sourceUpstream: 0)
 
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
@@ -5496,7 +5501,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.handleUpstreamExit(1, upstreamIndex: 0)
@@ -5526,7 +5531,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.handleUpstreamProtocolViolation(
@@ -5832,7 +5837,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         _ = manager.session(id: "session-debug-reset")
-        manager.setCachedToolsListResult(.object(["tools": .array([])]))
+        manager.setCachedToolsListResult(.object(["tools": .array([])]), sourceUpstream: 0)
 
         let leaseID = manager.createRequestLease(
             descriptor: SessionPipelineRequestDescriptor(

@@ -104,7 +104,7 @@ struct HTTPHandlerTests {
     @Test func httpDebugResetResetsRuntimeOnLoopback() async throws {
         let config = makeConfig()
         let sessionManager = TestRuntimeCoordinator(config: config)
-        sessionManager.setCachedToolsListResult(.object(["tools": .array([])]))
+        sessionManager.setCachedToolsListResult(.object(["tools": .array([])]), sourceUpstream: 0)
         _ = sessionManager.session(id: "debug-reset-session")
         let server = try TestHTTPHandlerServer.start(
             config: config,
@@ -968,7 +968,8 @@ struct HTTPHandlerTests {
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         sessionManager.setCachedToolsListResult(
-            JSONValue(any: ["tools": [Any]()])!
+            JSONValue(any: ["tools": [Any]()])!,
+            sourceUpstream: 0
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1039,7 +1040,8 @@ struct HTTPHandlerTests {
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         sessionManager.setCachedToolsListResult(
-            JSONValue(any: ["tools": [Any]()])!
+            JSONValue(any: ["tools": [Any]()])!,
+            sourceUpstream: 0
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1114,7 +1116,8 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         sessionManager.setInitialized(true)
         sessionManager.setCachedToolsListResult(
-            JSONValue(any: ["tools": [Any]()])!
+            JSONValue(any: ["tools": [Any]()])!,
+            sourceUpstream: 0
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1390,7 +1393,8 @@ struct HTTPHandlerTests {
                         "description": "original description",
                     ]
                 ]
-            ])!
+            ])!,
+            sourceUpstream: 0
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1525,7 +1529,8 @@ struct HTTPHandlerTests {
                         "description": "original description",
                     ],
                 ]
-            ])!
+            ])!,
+            sourceUpstream: 0
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1557,7 +1562,8 @@ struct HTTPHandlerTests {
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         sessionManager.setCachedToolsListResult(
-            JSONValue(any: ["tools": [Any]()])!
+            JSONValue(any: ["tools": [Any]()])!,
+            sourceUpstream: 0
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -2171,7 +2177,8 @@ struct HTTPHandlerTests {
                         "description": "read",
                     ],
                 ],
-            ])!
+            ])!,
+            sourceUpstream: 0
         )
         let server = try TestHTTPHandlerServer.start(
             config: config,
@@ -2264,7 +2271,8 @@ struct HTTPHandlerTests {
                         "description": "read",
                     ],
                 ],
-            ])!
+            ])!,
+            sourceUpstream: 0
         )
         let server = try TestHTTPHandlerServer.start(
             config: config,
@@ -2356,7 +2364,8 @@ struct HTTPHandlerTests {
                         "description": "read",
                     ],
                 ],
-            ])!
+            ])!,
+            sourceUpstream: 0
         )
         let server = try TestHTTPHandlerServer.start(
             config: config,
@@ -6593,7 +6602,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.cachedToolsList }
     }
 
-    func setCachedToolsListResult(_ result: JSONValue) {
+    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream _: Int) {
         state.withLockedValue { state in
             state.cachedToolsList = result
         }

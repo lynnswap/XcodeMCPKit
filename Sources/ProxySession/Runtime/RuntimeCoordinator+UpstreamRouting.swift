@@ -139,6 +139,14 @@ extension RuntimeCoordinator {
         routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
     }
 
+    /// The staleness rule for the canonical tools catalog: it must not
+    /// survive losing the upstream it came from unless another initialized
+    /// upstream can still vouch for an equivalent catalog.
+    func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
+        canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
+            && !upstreamHealthManager.anyInitialized()
+    }
+
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
@@ -170,9 +178,7 @@ extension RuntimeCoordinator {
         } else {
             shouldResetGlobalInit = false
         }
-        let shouldClearToolsCatalog =
-            canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !upstreamHealthManager.anyInitialized()
+        let shouldClearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if shouldResetGlobalInit || shouldClearToolsCatalog {
             if shouldResetGlobalInit {
                 initializeManager.resetCachedInitializeResult()
@@ -640,9 +646,7 @@ extension RuntimeCoordinator {
             )
         }
         let clearInitialize = upstreamIndex == 0 && initSnapshot.hasInitResult == false
-        let clearToolsCatalog =
-            canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !upstreamHealthManager.anyInitialized()
+        let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if clearInitialize || clearToolsCatalog {
             invalidateControlPlane(
                 reason: "protocol_violation_\(upstreamIndex)",

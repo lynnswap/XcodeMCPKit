@@ -152,7 +152,10 @@ package struct MCPForwardingService: Sendable {
             )
             let responseData = rewritten.responseData
             if let result = rewritten.cacheableToolsListResult {
-                sessionManager.setCachedToolsListResult(result)
+                sessionManager.setCachedToolsListResult(
+                    result,
+                    sourceUpstream: started.upstreamIndex
+                )
             }
             if accountSuccess, toolSurface.shouldNotifyUpstreamSuccess(for: responseData) {
                 for responseID in started.transform.responseIDs {

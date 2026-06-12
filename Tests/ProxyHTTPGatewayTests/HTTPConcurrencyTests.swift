@@ -243,7 +243,8 @@ struct HTTPConcurrencyTests {
                             ],
                         ],
                     ],
-                ])!
+                ])!,
+                sourceUpstream: 0
             )
             await upstream.clearRecordedRequests()
 
