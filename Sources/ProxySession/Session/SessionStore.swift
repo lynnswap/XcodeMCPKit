@@ -101,11 +101,7 @@ package final class SessionRegistry: Sendable {
         state.withLockedValue { state in
             guard let record = state.sessions[id] else { return nil }
             return RuntimeCoordinator.TestSnapshot.Session(
-                generation: record.generation,
-                pinnedUpstreamIndex: nil,
-                initializeUpstreamIndex: nil,
-                preferInitializeUpstreamOnNextPin: false,
-                didReceiveInitializeUpstreamMessage: false
+                generation: record.generation
             )
         }
     }

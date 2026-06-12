@@ -6694,18 +6694,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         return result
     }
 
-    func sharedXcodeListWindowsResult(
-        sessionID: String,
-        maxAge: TimeInterval,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        _ = sessionID
-        _ = maxAge
-        return try await liveXcodeListWindowsResult(
-            route: .anyHealthy,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
-    }
 
     func liveXcodeListWindowsResult(
         route _: ControlPlaneRoute,

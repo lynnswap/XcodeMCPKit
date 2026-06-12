@@ -399,13 +399,6 @@ extension RuntimeCoordinator {
         sessionRegistry.testSnapshot(id: id)
     }
 
-    func testSetInitializeRoutingState(
-        sessionID _: String,
-        upstreamIndex _: Int,
-        preferOnNextPin _: Bool,
-        didReceiveInitializeUpstreamMessage _: Bool = false
-    ) {}
-
     func handleOverloadedUpstreamSend(
         originalRequestData: Data,
         upstreamIndex: Int

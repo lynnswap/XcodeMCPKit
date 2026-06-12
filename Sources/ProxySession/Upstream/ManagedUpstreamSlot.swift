@@ -25,10 +25,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
     private var current: RunningSessionBox?
     private var isShutdown = false
 
-    package init(
-        factory: any UpstreamSessionFactory,
-        startImmediately: Bool = false
-    ) {
+    package init(factory: any UpstreamSessionFactory) {
         self.factory = factory
 
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
@@ -36,12 +33,6 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
             streamContinuation = continuation
         }
         self.continuation = streamContinuation
-
-        if startImmediately {
-            Task { [weak self] in
-                await self?.start()
-            }
-        }
     }
 
     package func start() async {

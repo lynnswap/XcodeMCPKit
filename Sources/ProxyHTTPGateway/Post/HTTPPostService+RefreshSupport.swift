@@ -11,26 +11,6 @@ import ProxyXcodeSupport
 import ProxySession
 
 extension HTTPPostService {
-    package func callInternalTool(
-        name: String,
-        arguments: [String: Any],
-        sessionID: String,
-        eventLoop: EventLoop,
-        cancellationHandle: HTTPPostCancellationHandle? = nil,
-        upstreamIndexOverride: Int? = nil,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshInternalToolResult {
-        await forwardingService.callInternalTool(
-            name: name,
-            arguments: arguments,
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            cancellationHandle: cancellationHandle,
-            upstreamIndexOverride: upstreamIndexOverride,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
-    }
-
     package func listXcodeWindows(
         sessionID: String,
         eventLoop: EventLoop,
@@ -310,7 +290,7 @@ extension HTTPPostService {
             },
             internalToolCaller: {
                 name, arguments, sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
-                await self.callInternalTool(
+                await self.forwardingService.callInternalTool(
                     name: name,
                     arguments: arguments,
                     sessionID: sessionID,

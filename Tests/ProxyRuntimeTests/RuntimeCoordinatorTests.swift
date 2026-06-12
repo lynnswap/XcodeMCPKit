@@ -2477,12 +2477,6 @@ struct RuntimeCoordinatorTests {
 
         manager.removeSession(id: sessionID)
         _ = manager.session(id: sessionID)
-        manager.testSetInitializeRoutingState(
-            sessionID: sessionID,
-            upstreamIndex: 0,
-            preferOnNextPin: true,
-            didReceiveInitializeUpstreamMessage: true
-        )
         let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
 
         await #expect(throws: TimeoutError.self) {
@@ -2519,12 +2513,6 @@ struct RuntimeCoordinatorTests {
 
         manager.removeSession(id: sessionID)
         _ = manager.session(id: sessionID)
-        manager.testSetInitializeRoutingState(
-            sessionID: sessionID,
-            upstreamIndex: 0,
-            preferOnNextPin: true,
-            didReceiveInitializeUpstreamMessage: true
-        )
         let replacementSnapshotBeforeError = try #require(manager.testSessionSnapshot(id: sessionID))
 
         await upstream.yield(
@@ -4014,9 +4002,9 @@ struct RuntimeCoordinatorTests {
         let originalB = RPCID(any: NSNumber(value: 101))!
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
+            manager.chooseUpstreamIndex())
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(upstreamIndexA != upstreamIndexB)
 
         let futureA = sessionA.router.registerRequest(idKey: originalA.key, on: eventLoop)
@@ -4170,7 +4158,7 @@ struct RuntimeCoordinatorTests {
 
         let sessionID = "session-A"
         let session = manager.session(id: sessionID)
-        _ = manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true)
+        _ = manager.chooseUpstreamIndex()
 
         _ = session.router.drainBufferedNotifications()
 
@@ -4202,7 +4190,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-debug"
         let session = manager.session(id: sessionID)
         let upstreamIndex = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         let original = RPCID(any: NSNumber(value: 301))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(1))
@@ -4360,11 +4348,11 @@ struct RuntimeCoordinatorTests {
             .message(try JSONSerialization.data(withJSONObject: warmup1Response, options: [])))
         #expect(
             await waitUntil(timeout: .seconds(2)) {
-                manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil
+                manager.chooseUpstreamIndex() == nil
             }
         )
 
-        let chosen = manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true)
+        let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == nil)
     }
 
@@ -4725,9 +4713,9 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionIDB)
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
+            manager.chooseUpstreamIndex())
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(upstreamIndexA != upstreamIndexB)
 
         await upstream1.yield(.exit(1))
@@ -4738,7 +4726,7 @@ struct RuntimeCoordinatorTests {
         )
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(repinned == 0)
     }
 
@@ -4769,7 +4757,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-timeout-repin"
         _ = manager.session(id: sessionID)
         let pinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
 
         manager.onRequestTimeout(
             sessionID: sessionID, requestIDKey: "dummy-1", upstreamIndex: pinned)
@@ -4779,7 +4767,7 @@ struct RuntimeCoordinatorTests {
             sessionID: sessionID, requestIDKey: "dummy-3", upstreamIndex: pinned)
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(repinned != pinned)
     }
 
@@ -4829,7 +4817,7 @@ struct RuntimeCoordinatorTests {
         let originalB = RPCID(any: NSNumber(value: 201))!
         let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(upstreamIndexB == 0)
         let upstreamIDB = manager.assignUpstreamID(
             sessionID: sessionID, originalID: originalB, upstreamIndex: upstreamIndexB)
@@ -4950,7 +4938,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-overload-repin"
         let session = manager.session(id: sessionID)
         let pinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(pinned == 0)
 
         await upstream0.setOverloaded(true)
@@ -4975,7 +4963,7 @@ struct RuntimeCoordinatorTests {
         #expect((error?["message"] as? String) == "upstream overloaded")
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(repinned == 1)
 
         let original2 = RPCID(any: NSNumber(value: 921))!
@@ -5102,7 +5090,7 @@ struct RuntimeCoordinatorTests {
                 manager.testStateSnapshot().upstreams[1].isInitialized
             }
         )
-        let chosen = manager.chooseUpstreamIndex(sessionID: "session-secondary", shouldPin: true)
+        let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == 1)
     }
 
@@ -5642,7 +5630,7 @@ struct RuntimeCoordinatorTests {
             isQuarantined = false
         }
         #expect(isQuarantined)
-        #expect(manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil)
+        #expect(manager.chooseUpstreamIndex() == nil)
     }
 
     @Test func sessionManagerUpstreamExitClearsCanonicalToolsCatalogImmediately() async throws {
@@ -6437,8 +6425,6 @@ struct RuntimeCoordinatorTests {
 
 private func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
     UpstreamSlotScheduler(
-        upstreamCount: upstreamCount,
-        defaultCapacity: 1,
         canUseUpstream: { _ in true },
         selectUpstream: { occupied in
             (0..<upstreamCount).first { occupied.contains($0) == false }

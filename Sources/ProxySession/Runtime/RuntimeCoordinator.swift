@@ -51,11 +51,6 @@ package protocol RuntimeCoordinating: Sendable {
         sessionID: String,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue
-    func sharedXcodeListWindowsResult(
-        sessionID: String,
-        maxAge: TimeInterval,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue
     func liveXcodeListWindowsResult(
         route: ControlPlaneRoute,
         requestTimeoutOverride: TimeAmount?
@@ -142,17 +137,6 @@ extension RuntimeCoordinating {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
 
-    func sharedXcodeListWindowsResult(
-        sessionID _: String,
-        maxAge _: TimeInterval,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        try await liveXcodeListWindowsResult(
-            route: .anyHealthy,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
-    }
-
     package func callDocumentationSearch(
         requestData _: Data,
         requestTimeoutOverride _: TimeAmount?
@@ -180,10 +164,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         struct Session: Sendable {
             let generation: UInt64
-            let pinnedUpstreamIndex: Int?
-            let initializeUpstreamIndex: Int?
-            let preferInitializeUpstreamOnNextPin: Bool
-            let didReceiveInitializeUpstreamMessage: Bool
         }
 
         let hasInitResult: Bool
@@ -312,8 +292,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             logger: ProxyLogging.make("upstream.readiness")
         )
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
-            upstreamCount: upstreams.count,
-            defaultCapacity: 1,
             canUseUpstream: { [weak upstreamHealthManager = self.upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
                 guard let upstreamHealthManager else { return false }
@@ -675,10 +653,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return promise.futureResult
     }
 
-    func chooseUpstreamIndex(sessionID _: String, shouldPin _: Bool) -> Int? {
-        chooseUpstreamIndex()
-    }
-
     func sessionStillMatchesPendingInitialize(
         sessionID: String,
         sessionGeneration: UInt64
@@ -793,19 +767,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         recordDocumentationToolListUpdate(update)
         return DocumentationToolCatalog.applying(update, to: baseResult)
-    }
-
-    package func sharedXcodeListWindowsResult(
-        sessionID: String,
-        maxAge: TimeInterval = 1,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        _ = session(id: sessionID)
-        _ = maxAge
-        return try await liveXcodeListWindowsResult(
-            route: .anyHealthy,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
     }
 
     package func liveXcodeListWindowsResult(

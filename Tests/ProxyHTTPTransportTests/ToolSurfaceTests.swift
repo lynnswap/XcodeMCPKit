@@ -421,13 +421,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func sharedXcodeListWindowsResult(
-        sessionID: String,
-        maxAge: TimeInterval,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        fatalError("unused in ToolSurfaceTests")
-    }
 
     func liveXcodeListWindowsResult(
         route: ControlPlaneRoute,

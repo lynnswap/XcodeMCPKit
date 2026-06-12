@@ -39,7 +39,6 @@ package final class UpstreamSlotScheduler: Sendable {
         var activeLeaseIDsByUpstream: [Int: RequestLeaseID] = [:]
         var activeTopLevelLeaseIDsBySession: [String: RequestLeaseID] = [:]
         var reservationsByLeaseID: [RequestLeaseID: Reservation] = [:]
-        var capacityByUpstream: [Int: Int] = [:]
     }
 
     private let logger: Logger
@@ -48,8 +47,6 @@ package final class UpstreamSlotScheduler: Sendable {
     private let selectUpstream: @Sendable (Set<Int>) -> Int?
 
     package init(
-        upstreamCount: Int,
-        defaultCapacity: Int,
         logger: Logger = ProxyLogging.make("upstream.scheduler"),
         canUseUpstream: @escaping @Sendable (Int) -> Bool,
         selectUpstream: @escaping @Sendable (Set<Int>) -> Int?
@@ -60,10 +57,7 @@ package final class UpstreamSlotScheduler: Sendable {
         self.state = NIOLockedValueBox(
             State(
                 pendingRequests: [],
-                activeLeaseIDsByUpstream: [:],
-                capacityByUpstream: Dictionary(
-                    uniqueKeysWithValues: (0..<upstreamCount).map { ($0, defaultCapacity) }
-                )
+                activeLeaseIDsByUpstream: [:]
             )
         )
     }
