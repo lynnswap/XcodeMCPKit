@@ -4,17 +4,6 @@ import NIO
 extension ControlPlaneCoordinator {
     private var sharedLoadPromotionGraceNanoseconds: UInt64 { 100_000_000 }
 
-    func cancelInitializeLoad(
-        _ load: InitializeLoadState,
-        error: Error
-    ) {
-        load.task.cancel()
-        for waiter in load.waiters.values {
-            waiter.timeoutTask?.cancel()
-            waiter.continuation.resume(throwing: error)
-        }
-    }
-
     func cancelToolsCatalogLoad(
         _ load: ToolsCatalogLoadState,
         error: Error

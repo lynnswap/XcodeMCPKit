@@ -21,37 +21,6 @@ package struct ControlPlaneRPCResponse: Sendable {
 }
 
 extension RuntimeCoordinator {
-    func awaitCanonicalInitializeSnapshot(
-        deadlineUptimeNs: UInt64?
-    ) async throws -> CanonicalInitializeLoadResult {
-        if let cached = canonicalBrokerState.initializeResult() {
-            return CanonicalInitializeLoadResult(
-                result: cached,
-                sourceUpstream: canonicalBrokerState.initializeSourceUpstream()
-            )
-        }
-
-        let internalSessionID = controlPlaneSessionID(for: "initialize", route: nil)
-        let originalID = RPCID(any: "__control-plane-init-\(UUID().uuidString)")!
-        let future = registerInitializeWaiter(
-            sessionID: internalSessionID,
-            originalID: originalID,
-            requestObject: makeInternalInitializeRequest(id: 0),
-            on: eventLoop
-        )
-        var buffer = try await waitForEventLoopFuture(
-            future,
-            deadlineUptimeNs: deadlineUptimeNs
-        )
-        guard let responseData = buffer.readData(length: buffer.readableBytes) else {
-            throw ControlPlaneError.invalidResponse("missing initialize payload")
-        }
-        return CanonicalInitializeLoadResult(
-            result: try extractJSONRPCResult(from: responseData),
-            sourceUpstream: canonicalBrokerState.initializeSourceUpstream()
-        )
-    }
-
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlaneRPCHandle

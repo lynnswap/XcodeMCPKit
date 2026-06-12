@@ -327,12 +327,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.controlPlaneCoordinator = ControlPlaneCoordinator(
             brokerState: self.canonicalBrokerState,
             debugMirror: self.controlPlaneDebugMirror,
-            initializeLoader: { [runtimeBox] in
-                guard let runtime = runtimeBox.value else {
-                    throw CancellationError()
-                }
-                return try await runtime.awaitCanonicalInitializeSnapshot(deadlineUptimeNs: nil)
-            },
             toolsCatalogLoader: { [runtimeBox] requestTimeout, rpcHandle in
                 guard let runtime = runtimeBox.value else {
                     throw CancellationError()

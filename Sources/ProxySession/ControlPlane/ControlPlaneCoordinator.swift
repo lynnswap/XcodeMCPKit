@@ -5,8 +5,6 @@ import ProxyCore
 import ProxyMCP
 
 package actor ControlPlaneCoordinator {
-    package typealias InitializeLoader =
-        @Sendable () async throws -> CanonicalInitializeLoadResult
     package typealias ToolsCatalogLoader =
         @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlaneRPCHandle) async throws
             -> CanonicalToolsCatalogLoadResult
@@ -20,7 +18,6 @@ package actor ControlPlaneCoordinator {
 
     enum Phase: String, Sendable {
         case idle
-        case loadingInitialize = "loading_initialize"
         case loadingToolsCatalog = "loading_tools_catalog"
         case listingWindows = "listing_windows"
     }
@@ -37,12 +34,6 @@ package actor ControlPlaneCoordinator {
 
     typealias WaiterID = UUID
 
-    struct InitializeWaiterRecord {
-        let continuation: CheckedContinuation<JSONValue, Error>
-        let deadlineUptimeNs: UInt64?
-        let timeoutTask: Task<Void, Never>?
-    }
-
     struct ToolsCatalogWaiterRecord {
         let continuation: CheckedContinuation<JSONValue, Error>
         let kind: ToolsCatalogWaiterKind
@@ -54,12 +45,6 @@ package actor ControlPlaneCoordinator {
         let continuation: CheckedContinuation<JSONValue, Error>
         let deadlineUptimeNs: UInt64?
         let timeoutTask: Task<Void, Never>?
-    }
-
-    struct InitializeLoadState {
-        let loadID: UUID
-        let task: Task<CanonicalInitializeLoadResult, Error>
-        var waiters: [WaiterID: InitializeWaiterRecord] = [:]
     }
 
     struct ToolsCatalogLoadState {
@@ -85,7 +70,6 @@ package actor ControlPlaneCoordinator {
 
     let brokerState: CanonicalBrokerState
     let debugMirror: ControlPlaneDebugMirror
-    let initializeLoader: InitializeLoader
     let toolsCatalogLoader: ToolsCatalogLoader
     let windowsLoader: WindowsLoader
     let upstreamHandshakeStates: UpstreamHandshakeStatesProvider
@@ -93,7 +77,6 @@ package actor ControlPlaneCoordinator {
     let controlPlaneDefaultTimeout: TimeAmount?
     let clock: ClockClient
 
-    var initializeLoad: InitializeLoadState?
     var toolsCatalogLoad: ToolsCatalogLoadState?
     var prewarmToolsCatalogLoad: ToolsCatalogLoadState?
     var windowLoads: [ControlPlaneRoute: WindowLoadState] = [:]
@@ -101,7 +84,6 @@ package actor ControlPlaneCoordinator {
     package init(
         brokerState: CanonicalBrokerState,
         debugMirror: ControlPlaneDebugMirror,
-        initializeLoader: @escaping InitializeLoader,
         toolsCatalogLoader: @escaping ToolsCatalogLoader,
         windowsLoader: @escaping WindowsLoader,
         upstreamHandshakeStates: @escaping UpstreamHandshakeStatesProvider,
@@ -111,37 +93,12 @@ package actor ControlPlaneCoordinator {
     ) {
         self.brokerState = brokerState
         self.debugMirror = debugMirror
-        self.initializeLoader = initializeLoader
         self.toolsCatalogLoader = toolsCatalogLoader
         self.windowsLoader = windowsLoader
         self.upstreamHandshakeStates = upstreamHandshakeStates
         self.logger = logger
         self.controlPlaneDefaultTimeout = controlPlaneDefaultTimeout
         self.clock = clock
-    }
-
-    package func clientInitialize(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
-        if let result = brokerState.initializeResult() {
-            return result
-        }
-
-        let loadID = initializeLoad?.loadID ?? startInitializeLoad()
-        let waiterID = WaiterID()
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                registerInitializeWaiter(
-                    loadID: loadID,
-                    waiterID: waiterID,
-                    deadlineUptimeNs: deadlineUptimeNs,
-                    continuation: continuation
-                )
-            }
-        } onCancel: {
-            Task {
-                await self.cancelInitializeWaiter(loadID: loadID, waiterID: waiterID)
-            }
-        }
     }
 
     package func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
@@ -248,10 +205,6 @@ package actor ControlPlaneCoordinator {
         clearInitialize: Bool = false,
         clearToolsCatalog: Bool = true
     ) {
-        if let load = initializeLoad {
-            initializeLoad = nil
-            cancelInitializeLoad(load, error: CancellationError())
-        }
         if let load = toolsCatalogLoad {
             toolsCatalogLoad = nil
             cancelToolsCatalogLoad(load, error: CancellationError())
@@ -273,25 +226,6 @@ package actor ControlPlaneCoordinator {
             brokerState.clearToolsCatalog()
         }
         syncDebug()
-    }
-
-    func startInitializeLoad() -> UUID {
-        let loadID = UUID()
-        let task = Task.detached {
-            try await self.initializeLoader()
-        }
-        initializeLoad = InitializeLoadState(loadID: loadID, task: task)
-        Task { [loadID] in
-            let result: Result<CanonicalInitializeLoadResult, Error>
-            do {
-                result = .success(try await task.value)
-            } catch {
-                result = .failure(error)
-            }
-            self.completeInitializeLoad(loadID: loadID, result: result)
-        }
-        syncDebug()
-        return loadID
     }
 
     func startToolsCatalogLoad(
@@ -408,31 +342,6 @@ package actor ControlPlaneCoordinator {
         return startWindowLoad(route: route, requestTimeout: requestTimeout)
     }
 
-    func registerInitializeWaiter(
-        loadID: UUID,
-        waiterID: WaiterID,
-        deadlineUptimeNs: UInt64?,
-        continuation: CheckedContinuation<JSONValue, Error>
-    ) {
-        guard initializeLoad?.loadID == loadID else {
-            continuation.resume(throwing: CancellationError())
-            return
-        }
-        if deadlineExceeded(deadlineUptimeNs) {
-            continuation.resume(throwing: TimeoutError())
-            return
-        }
-        let timeoutTask = makeTimeoutTask(deadlineUptimeNs: deadlineUptimeNs) {
-            await self.timeoutInitializeWaiter(loadID: loadID, waiterID: waiterID)
-        }
-        initializeLoad?.waiters[waiterID] = InitializeWaiterRecord(
-            continuation: continuation,
-            deadlineUptimeNs: deadlineUptimeNs,
-            timeoutTask: timeoutTask
-        )
-        syncDebug()
-    }
-
     func registerToolsCatalogWaiter(
         loadID: UUID,
         waiterID: WaiterID,
@@ -488,22 +397,6 @@ package actor ControlPlaneCoordinator {
             timeoutTask: timeoutTask
         )
         windowLoads[route] = load
-        syncDebug()
-    }
-
-    func timeoutInitializeWaiter(loadID: UUID, waiterID: WaiterID) {
-        guard initializeLoad?.loadID == loadID else { return }
-        guard let waiter = initializeLoad?.waiters.removeValue(forKey: waiterID) else { return }
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(throwing: TimeoutError())
-        syncDebug()
-    }
-
-    func cancelInitializeWaiter(loadID: UUID, waiterID: WaiterID) {
-        guard initializeLoad?.loadID == loadID else { return }
-        guard let waiter = initializeLoad?.waiters.removeValue(forKey: waiterID) else { return }
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(throwing: CancellationError())
         syncDebug()
     }
 
@@ -595,31 +488,6 @@ package actor ControlPlaneCoordinator {
     ) {
         guard let load = windowLoads[route], load.waiters[waiterID] != nil else { return }
         cancelWindowWaiter(route: route, loadID: load.loadID, waiterID: waiterID)
-    }
-
-    func completeInitializeLoad(
-        loadID: UUID,
-        result: Result<CanonicalInitializeLoadResult, Error>
-    ) {
-        guard let load = initializeLoad, load.loadID == loadID else { return }
-        initializeLoad = nil
-        if case .success(let loaded) = result, let sourceUpstream = loaded.sourceUpstream {
-            brokerState.syncCanonicalInitialize(
-                loaded.result,
-                sourceUpstream: sourceUpstream
-            )
-        }
-        let waiters = Array(load.waiters.values)
-        for waiter in waiters {
-            waiter.timeoutTask?.cancel()
-            switch result {
-            case .success(let loaded):
-                waiter.continuation.resume(returning: loaded.result)
-            case .failure(let error):
-                waiter.continuation.resume(throwing: error)
-            }
-        }
-        syncDebug()
     }
 
     func completeToolsCatalogLoad(
