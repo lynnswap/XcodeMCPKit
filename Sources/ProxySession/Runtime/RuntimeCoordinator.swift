@@ -866,7 +866,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         id: RPCID,
         error: Error
     ) throws -> ByteBuffer {
-        let mapped = Self.mapControlPlaneError(error)
+        let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,
@@ -949,24 +949,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 clearToolsCatalog: clearToolsCatalog
             )
         }
-    }
-
-    static func mapControlPlaneError(_ error: Error) -> (code: Int, message: String) {
-        if error is UpstreamSlotAcquisitionError {
-            return (-32001, "upstream unavailable")
-        }
-        if let error = error as? ControlPlaneRequestError {
-            return mapControlPlaneError(error.underlying)
-        }
-        if let error = error as? ControlPlaneError {
-            switch error {
-            case .invalidResponse:
-                return (-32000, "upstream timeout")
-            case .upstreamRPC(let code, let message):
-                return (code, message)
-            }
-        }
-        return (-32000, "upstream timeout")
     }
 
 }

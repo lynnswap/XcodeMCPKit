@@ -423,7 +423,7 @@ extension HTTPPostService {
                     contentsOf: Self.responseObjects(from: responseData)
                 )
             } catch {
-                let mapped = Self.mapDocumentationSearchError(error)
+                let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
                 if let responseData = Self.responseDataForBatchResolution(
                     .mcpError(
                         id: originalID,
@@ -510,7 +510,7 @@ extension HTTPPostService {
                     fallbackRequests.append(request)
                 }
             } catch {
-                let mapped = Self.mapDocumentationSearchError(error)
+                let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
                 responseObjects.append(
                     Self.makeJSONRPCErrorResponseObject(
                         id: originalID,

@@ -20,6 +20,28 @@ package struct ControlPlaneRPCResponse: Sendable {
     package let upstreamIndex: Int
 }
 
+/// The one place that decides which JSON-RPC error a control-plane or
+/// upstream-acquisition failure surfaces as.
+package enum ControlPlaneErrorMapper {
+    package static func jsonRPCError(for error: Error) -> (code: Int, message: String) {
+        if error is UpstreamSlotAcquisitionError {
+            return (-32001, "upstream unavailable")
+        }
+        if let error = error as? ControlPlaneRequestError {
+            return jsonRPCError(for: error.underlying)
+        }
+        if let error = error as? ControlPlaneError {
+            switch error {
+            case .invalidResponse:
+                return (-32000, "upstream timeout")
+            case .upstreamRPC(let code, let message):
+                return (code, message)
+            }
+        }
+        return (-32000, "upstream timeout")
+    }
+}
+
 extension RuntimeCoordinator {
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
