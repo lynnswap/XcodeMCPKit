@@ -3149,6 +3149,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -3179,6 +3180,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -3247,6 +3249,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -3278,6 +3281,7 @@ struct RuntimeCoordinatorTests {
         let timeoutClock = TestClock()
         var config = makeConfig(requestTimeout: 0.1)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,

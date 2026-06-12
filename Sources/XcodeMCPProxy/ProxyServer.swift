@@ -382,11 +382,7 @@ public final class ProxyServer {
 
     private static func permissionDialogAssistantNameCandidates(config: ProxyConfig) -> [String] {
         var candidates = Set<String>(["XcodeMCPKit"])
-        let override = ProxyFileConfigLoader.loadInitializeParamsOverride(
-            configPath: config.configPath,
-            logger: ProxyLogging.make("config")
-        )
-        if case .object(let clientInfo)? = override?["clientInfo"],
+        if case .object(let clientInfo)? = config.initializeParamsOverride?["clientInfo"],
            case .string(let name)? = clientInfo["name"],
            name.isEmpty == false {
             candidates.insert(name)

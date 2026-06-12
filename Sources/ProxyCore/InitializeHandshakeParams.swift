@@ -6,14 +6,6 @@ import ProxyMCP
 /// version auto-detected from Xcode's IDEChat*Version defaults unless the
 /// override pins one explicitly.
 package enum InitializeHandshakeParams {
-    package static func resolved(config: ProxyConfig) -> [String: JSONValue] {
-        let override = ProxyFileConfigLoader.loadInitializeParamsOverride(
-            configPath: config.configPath,
-            logger: ProxyLogging.make("config")
-        )
-        return resolved(initializeParamsOverride: override)
-    }
-
     package static func resolved(
         initializeParamsOverride: [String: JSONValue]?
     ) -> [String: JSONValue] {

@@ -232,7 +232,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return DocumentationProviderManager(
             sessionFactory: LiveDocumentationProviderSessionFactory(baseEnvironment: environment),
             pinnedProcessID: pinnedProcessID,
-            initializeParams: InitializeHandshakeParams.resolved(config: config)
+            initializeParams: InitializeHandshakeParams.resolved(
+                initializeParamsOverride: config.initializeParamsOverride
+            )
         )
     }
 
@@ -317,10 +319,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 return chooseResult?.0
             }
         )
-        self.initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
-            configPath: config.configPath,
-            logger: ProxyLogging.make("config")
-        )
+        self.initializeParamsOverride = config.initializeParamsOverride
         self.controlPlaneCoordinator = ControlPlaneCoordinator(
             brokerState: self.canonicalBrokerState,
             debugMirror: self.controlPlaneDebugMirror,

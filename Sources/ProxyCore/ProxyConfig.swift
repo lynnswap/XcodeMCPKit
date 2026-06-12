@@ -1,4 +1,5 @@
 import Foundation
+import ProxyMCP
 
 public enum ProxyTransport: String, CaseIterable, Sendable {
     case http
@@ -26,14 +27,7 @@ public struct ProxyConfig: Sendable {
     public var upstreamSessionID: String?
     public var maxBodyBytes: Int
     public var requestTimeout: TimeInterval
-    public var configPath: String? {
-        didSet {
-            disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
-                configPath: configPath,
-                logger: ProxyLogging.make("config")
-            )
-        }
-    }
+    public var configPath: String?
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
@@ -42,6 +36,7 @@ public struct ProxyConfig: Sendable {
     public var autoApproveXcodeDialog: Bool
     public var refreshCodeIssuesMode: RefreshCodeIssuesMode
     public var disabledToolNames: Set<String>
+    package var initializeParamsOverride: [String: JSONValue]?
 
     public init(
         listenHost: String,
@@ -78,11 +73,25 @@ public struct ProxyConfig: Sendable {
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
-        self.disabledToolNames = disabledToolNames
-            ?? ProxyFileConfigLoader.loadDisabledToolNames(
-                configPath: configPath,
-                logger: ProxyLogging.make("config")
-            )
+        self.disabledToolNames = disabledToolNames ?? []
+        if disabledToolNames == nil, configPath != nil {
+            loadFileConfig()
+        }
+    }
+
+    /// Reads the TOML file config (disabled tools, initialize-params
+    /// override) from `configPath` and stores the decoded values. This is
+    /// the only place the file is read; consumers use the stored values.
+    public mutating func loadFileConfig() {
+        let logger = ProxyLogging.make("config")
+        disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
+            configPath: configPath,
+            logger: logger
+        )
+        initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
+            configPath: configPath,
+            logger: logger
+        )
     }
 }
 
