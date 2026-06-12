@@ -81,10 +81,10 @@ package final class HTTPPostService: Sendable {
         requestTimeoutOverride: TimeAmount? = nil,
         parentCancellationHandle: HTTPPostCancellationHandle? = nil
     ) -> HTTPPostOperation {
-        let requestMetadata = MCPErrorResponder.requestMetadata(from: bodyData)
+        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
+        let requestMetadata = MCPErrorResponder.requestMetadata(fromParsed: parsedRequestJSON)
         let requestIDs = requestMetadata.ids
         let requestIsBatch = requestMetadata.isBatch
-        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
 
         if let localRequest = Self.localHandlingRequest(from: parsedRequestJSON),
             let localHandling = localResponder.handle(
