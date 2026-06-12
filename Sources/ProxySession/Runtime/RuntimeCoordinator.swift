@@ -142,11 +142,6 @@ extension RuntimeCoordinating {
     package func invalidateDocumentationProvider(reason _: String) async {}
 }
 
-extension RuntimeCoordinator {
-    package var initializeGate: InitializeManager { initializeManager }
-    package var upstreamSelectionPolicy: UpstreamHealthManager { upstreamHealthManager }
-}
-
 package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     static let redactedDebugText = "<redacted>"
 

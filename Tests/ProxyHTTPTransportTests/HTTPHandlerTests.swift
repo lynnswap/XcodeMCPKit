@@ -6500,7 +6500,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     private let documentationSearchResponder:
         (@Sendable (_ requestData: Data) throws -> Data)?
     private let cancelAfterStartingEnqueueRequest: Bool
-    private let requestLeaseRegistry = RequestLeaseRegistry()
+    private let requestLeaseRegistry = LeaseManager()
 
     init(
         config: ProxyConfig,

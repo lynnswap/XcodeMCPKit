@@ -4302,9 +4302,9 @@ struct RuntimeCoordinatorTests {
             description: "waiting for initialized notification"
         )
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
 
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-quarantine-recovery",
@@ -4412,9 +4412,9 @@ struct RuntimeCoordinatorTests {
         let initializedNotification = try #require(await upstream1.sentValue(at: 1))
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         let queuedRequestData = try JSONSerialization.data(
             withJSONObject: [
@@ -5036,12 +5036,12 @@ struct RuntimeCoordinatorTests {
         let warmRetry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
         let warmRetryID = try extractUpstreamID(from: warmRetry)
 
-        manager.initializeGate.resetCachedInitializeResult()
+        manager.initializeManager.resetCachedInitializeResult()
         let cachedHandshake = try #require(JSONValue(any: [
             "capabilities": [String: Any](),
             "serverInfo": ["name": "cached-handshake"],
         ]))
-        manager.initializeGate.restoreCachedInitializeResultForTests(cachedHandshake)
+        manager.initializeManager.restoreCachedInitializeResultForTests(cachedHandshake)
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 77))!,
             requestObject: makeInitializeRequest(id: 77),
@@ -5106,9 +5106,9 @@ struct RuntimeCoordinatorTests {
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
         _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         try await waitForCondition(timeoutSeconds: 2) {
             if case .quarantined = manager.testStateSnapshot().upstreams[1].healthState {
@@ -5192,9 +5192,9 @@ struct RuntimeCoordinatorTests {
                 && snapshot.upstreams[0].initInFlight == false
         }
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-recovery-trigger",
@@ -5756,9 +5756,9 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
         _ = manager.chooseUpstreamIndex()
 
         let descriptor = SessionPipelineRequestDescriptor(
@@ -6001,7 +6001,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func requestLeaseRegistryKeepsOnlyBoundedReleasedHistory() async throws {
-        let registry = RequestLeaseRegistry(releasedHistoryLimit: 2)
+        let registry = LeaseManager(releasedHistoryLimit: 2)
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-bounded-history",
             label: "tools/call:DocumentationSearch",
@@ -6033,7 +6033,7 @@ struct RuntimeCoordinatorTests {
     @Test func requestLeaseRegistryRequeueLeaseReleasesActiveSlotAndKeepsLeaseQueued()
         async throws
     {
-        let registry = RequestLeaseRegistry()
+        let registry = LeaseManager()
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-requeue",
             label: "tools/call:XcodeRefreshCodeIssuesInFile",
@@ -6065,7 +6065,7 @@ struct RuntimeCoordinatorTests {
     @Test func requestLeaseRegistryAbandonActiveLeasesUsesBoundedReleasedHistory()
         async throws
     {
-        let registry = RequestLeaseRegistry(releasedHistoryLimit: 1)
+        let registry = LeaseManager(releasedHistoryLimit: 1)
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-abandon-history",
             label: "tools/call:DocumentationSearch",
