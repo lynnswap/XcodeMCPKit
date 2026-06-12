@@ -23,6 +23,32 @@ package struct RefreshCodeIssuesQueueDebugSnapshot: Codable, Sendable {
     }
 }
 
+/// A refresh request's terminal outcome. The diagnostic final state is
+/// derived here, so the outcome-to-state mapping cannot drift between the
+/// workflow and the debug snapshot.
+package enum RefreshCodeIssuesOutcome: String, Sendable {
+    case success
+    case timeout
+    case queueWaitTimedOut = "queue_wait_timed_out"
+    case cancelled
+    case invalidRequest = "invalid_request"
+    case upstreamUnavailable = "upstream_unavailable"
+    case invalidUpstreamResponse = "invalid_upstream_response"
+
+    package var finalState: String {
+        switch self {
+        case .success:
+            return "completed"
+        case .timeout, .queueWaitTimedOut:
+            return "timed_out"
+        case .cancelled:
+            return "cancelled"
+        case .invalidRequest, .upstreamUnavailable, .invalidUpstreamResponse:
+            return "failed"
+        }
+    }
+}
+
 package struct RefreshCodeIssuesRequestDebugSnapshot: Codable, Sendable {
     package let id: String
     package let sessionID: String
@@ -230,7 +256,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
 
     package func finishRequest(
         requestID: String,
-        outcome: String,
+        outcome: RefreshCodeIssuesOutcome,
         metadata: [String: String] = [:]
     ) {
         let now = clock.now()
@@ -240,7 +266,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             return
         }
         record.lastUpdatedAt = now
-        record.state = Self.finalState(for: outcome)
+        record.state = outcome.finalState
         for (key, value) in metadata {
             record.metadata[key] = value
         }
@@ -256,7 +282,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             startedAt: record.startedAt,
             completedAt: now,
             lastQueuePosition: record.lastQueuePosition,
-            outcome: outcome,
+            outcome: outcome.rawValue,
             metadata: record.metadata
         )
         state.recentCompletedRequests.append(completed)
@@ -266,19 +292,6 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             )
         }
         lock.unlock()
-    }
-
-    private static func finalState(for outcome: String) -> String {
-        switch outcome {
-        case "success":
-            return "completed"
-        case "timeout", "queue_wait_timed_out":
-            return "timed_out"
-        case "cancelled":
-            return "cancelled"
-        default:
-            return "failed"
-        }
     }
 
     package func snapshot() -> RefreshCodeIssuesDebugSnapshot {

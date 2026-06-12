@@ -105,20 +105,22 @@ extension RefreshCodeIssuesWorkflow {
         return "\(timeout.nanoseconds / 1_000_000)"
     }
 
-    package static func debugOutcome(for result: RefreshForwardAttemptResult) -> String {
+    package static func debugOutcome(
+        for result: RefreshForwardAttemptResult
+    ) -> RefreshCodeIssuesOutcome {
         switch result {
         case .success:
-            return "success"
+            return .success
         case .timeout:
-            return "timeout"
+            return .timeout
         case .upstreamUnavailable:
-            return "upstream_unavailable"
+            return .upstreamUnavailable
         case .cancelled:
-            return "cancelled"
+            return .cancelled
         case .invalidRequest:
-            return "invalid_request"
+            return .invalidRequest
         case .invalidUpstreamResponse:
-            return "invalid_upstream_response"
+            return .invalidUpstreamResponse
         }
     }
 

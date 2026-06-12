@@ -273,7 +273,7 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "timeout"
+                outcome: .timeout
             )
             return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
         }
@@ -326,7 +326,7 @@ package struct RefreshCodeIssuesWorkflow {
                     )
                     debugState.finishRequest(
                         requestID: debugRequestID,
-                        outcome: "timeout"
+                        outcome: .timeout
                     )
                     return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
                 }
@@ -401,7 +401,7 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "timeout"
+                outcome: .timeout
             )
             return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch is CancellationError {
@@ -421,7 +421,7 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "cancelled"
+                outcome: .cancelled
             )
             return .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch {
@@ -432,7 +432,7 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "invalid_request"
+                outcome: .invalidRequest
             )
             return .invalidRequest
         }
