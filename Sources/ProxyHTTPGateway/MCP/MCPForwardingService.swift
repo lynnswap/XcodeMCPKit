@@ -81,12 +81,17 @@ package struct MCPForwardingService: Sendable {
                 prepared.transform.method,
                 defaultSeconds: config.requestTimeout
             )
+        struct MissingRequestIDError: Error {}
         let registration: ProxyRouter.PendingRegistration
         if prepared.transform.isBatch {
+            let responseIDKeys = prepared.transform.responseIDs.map(\.key)
+            guard responseIDKeys.isEmpty == false else {
+                throw MissingRequestIDError()
+            }
             registration = session.router.registerBatchPending(
                 on: eventLoop,
                 timeout: requestTimeout,
-                responseIDKeys: prepared.transform.responseIDs.map(\.key),
+                responseIDKeys: responseIDKeys,
                 onTimeout: onTimeout
             )
         } else if let idKey = prepared.transform.idKey {
@@ -97,7 +102,6 @@ package struct MCPForwardingService: Sendable {
                 onTimeout: onTimeout
             )
         } else {
-            struct MissingRequestIDError: Error {}
             throw MissingRequestIDError()
         }
 
