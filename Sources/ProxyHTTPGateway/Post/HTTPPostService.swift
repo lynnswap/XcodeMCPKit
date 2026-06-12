@@ -113,26 +113,11 @@ package final class HTTPPostService: Sendable {
         let sessionID = headerSessionID ?? UUID().uuidString
 
         if sessionManager.isInitialized() == false {
-            if requestIDs.isEmpty {
-                return HTTPPostOperation(
-                    future: eventLoop.makeSucceededFuture(
-                        .plain(
-                            status: .unprocessableEntity,
-                            body: "expected initialize request",
-                            sessionID: sessionID
-                        )
-                    ),
-                    cancellationHandle: nil
-                )
-            }
             return HTTPPostOperation(
                 future: eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: requestIDs,
-                        code: -32000,
-                        message: "expected initialize request",
-                        forceBatchArray: requestIsBatch,
+                    Self.makeExpectedInitializeResolution(
+                        requestIDs: requestIDs,
+                        requestIsBatch: requestIsBatch,
                         sessionID: sessionID,
                         prefersEventStream: prefersEventStream
                     )

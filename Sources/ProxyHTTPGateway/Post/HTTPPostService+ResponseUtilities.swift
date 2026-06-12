@@ -68,7 +68,21 @@ extension HTTPPostService {
         guard requestRequiresInitialize(parsedRequestJSON) else {
             return nil
         }
+        return makeExpectedInitializeResolution(
+            requestIDs: requestIDs,
+            requestIsBatch: requestIsBatch,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
+        )
+    }
 
+    /// The one canonical "expected initialize request" rejection shape.
+    package static func makeExpectedInitializeResolution(
+        requestIDs: [RPCID],
+        requestIsBatch: Bool,
+        sessionID: String,
+        prefersEventStream: Bool
+    ) -> HTTPPostResolution {
         if requestIDs.isEmpty {
             return .plain(
                 status: .unprocessableEntity,
@@ -76,7 +90,6 @@ extension HTTPPostService {
                 sessionID: sessionID
             )
         }
-
         return .mcpError(
             id: nil,
             ids: requestIDs,

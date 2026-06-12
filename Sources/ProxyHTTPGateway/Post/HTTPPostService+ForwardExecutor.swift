@@ -64,14 +64,11 @@ extension HTTPPostService {
         if let refreshRouting, filteredRequest.forwardedResponseIDs.isEmpty == false {
             if headerSessionID == nil {
                 return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: filteredRequest.forwardedResponseIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    Self.makeExpectedInitializeResolution(
+                        requestIDs: filteredRequest.forwardedResponseIDs,
+                        requestIsBatch: requestIsBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
                     eventLoop: eventLoop,
@@ -320,27 +317,12 @@ extension HTTPPostService {
             if prepared.transform.isBatch || prepared.transform.method != "initialize"
                 || !prepared.transform.expectsResponse
             {
-                if prepared.transform.responseIDs.isEmpty {
-                    return makeImmediateLeaseResolution(
-                        .plain(
-                        status: .unprocessableEntity,
-                        body: "expected initialize request",
-                        sessionID: sessionID
-                        ),
-                        leaseID: leaseID,
-                        eventLoop: eventLoop,
-                        cancellationHandle: cancellationHandle
-                    )
-                }
                 return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: prepared.transform.responseIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: prepared.transform.isBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    Self.makeExpectedInitializeResolution(
+                        requestIDs: prepared.transform.responseIDs,
+                        requestIsBatch: prepared.transform.isBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
                     eventLoop: eventLoop,
