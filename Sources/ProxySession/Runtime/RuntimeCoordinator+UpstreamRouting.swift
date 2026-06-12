@@ -177,7 +177,7 @@ extension RuntimeCoordinator {
             if shouldResetGlobalInit {
                 initializeManager.resetCachedInitializeResult()
             }
-            invalidateControlPlaneSynchronously(
+            invalidateControlPlane(
                 reason: "upstream_exit_\(upstreamIndex)",
                 clearInitialize: shouldResetGlobalInit,
                 clearToolsCatalog: shouldClearToolsCatalog
@@ -644,7 +644,7 @@ extension RuntimeCoordinator {
             canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
             && !upstreamHealthManager.anyInitialized()
         if clearInitialize || clearToolsCatalog {
-            invalidateControlPlaneSynchronously(
+            invalidateControlPlane(
                 reason: "protocol_violation_\(upstreamIndex)",
                 clearInitialize: clearInitialize,
                 clearToolsCatalog: clearToolsCatalog

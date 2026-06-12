@@ -263,7 +263,7 @@ extension RuntimeCoordinator {
         clearUpstreamState(upstreamIndex: upstreamIndex)
         let hasHealthySecondary = upstreamIndex == 0 && hasUsableInitializedSecondaryUpstreams()
         if canonicalBrokerState.toolsSourceUpstream() == upstreamIndex && !hasHealthySecondary {
-            invalidateControlPlaneSynchronously(
+            invalidateControlPlane(
                 reason: "initialized_notification_overload_\(upstreamIndex)",
                 clearInitialize: false,
                 clearToolsCatalog: true
@@ -364,7 +364,7 @@ extension RuntimeCoordinator {
     func startPrimaryEagerRetry() {
         clearUpstreamState(upstreamIndex: 0)
         initializeManager.resetCachedInitializeResult()
-        invalidateControlPlaneSynchronously(
+        invalidateControlPlane(
             reason: "primary_eager_retry",
             clearInitialize: true,
             clearToolsCatalog: true

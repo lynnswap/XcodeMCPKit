@@ -54,6 +54,11 @@ package final class CanonicalBrokerState: Sendable {
         var toolsCatalogRaw: JSONValue?
         var toolsSourceUpstream: Int?
         var lastIncompatibility: CanonicalBrokerIncompatibility?
+        /// Bumped on every clear/reset. Asynchronous load completions
+        /// captured under an older generation must not write back, which
+        /// is what allows invalidation to clear synchronously without
+        /// waiting for in-flight loads to be cancelled.
+        var generation: UInt64 = 0
     }
 
     private let state = NIOLockedValueBox(State())
@@ -88,6 +93,10 @@ package final class CanonicalBrokerState: Sendable {
         state.withLockedValue { $0.toolsSourceUpstream }
     }
 
+    package func generation() -> UInt64 {
+        state.withLockedValue { $0.generation }
+    }
+
     package func syncCanonicalInitialize(
         _ result: JSONValue,
         sourceUpstream: Int
@@ -100,9 +109,13 @@ package final class CanonicalBrokerState: Sendable {
 
     package func syncCanonicalToolsCatalog(
         _ rawResult: JSONValue,
-        sourceUpstream: Int
+        sourceUpstream: Int,
+        onlyIfGeneration expectedGeneration: UInt64? = nil
     ) {
         state.withLockedValue { state in
+            if let expectedGeneration, state.generation != expectedGeneration {
+                return
+            }
             state.toolsCatalogRaw = rawResult
             state.toolsSourceUpstream = sourceUpstream
         }
@@ -112,6 +125,7 @@ package final class CanonicalBrokerState: Sendable {
         state.withLockedValue { state in
             state.initializeResult = nil
             state.initializeSourceUpstream = nil
+            state.generation += 1
         }
     }
 
@@ -119,6 +133,7 @@ package final class CanonicalBrokerState: Sendable {
         state.withLockedValue { state in
             state.toolsCatalogRaw = nil
             state.toolsSourceUpstream = nil
+            state.generation += 1
         }
     }
 
@@ -129,6 +144,7 @@ package final class CanonicalBrokerState: Sendable {
             state.toolsCatalogRaw = nil
             state.toolsSourceUpstream = nil
             state.lastIncompatibility = nil
+            state.generation += 1
         }
     }
 

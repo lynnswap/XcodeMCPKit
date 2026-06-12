@@ -54,6 +54,7 @@ package actor ControlPlaneCoordinator {
         let requestDeadlineUptimeNs: UInt64?
         let rpcHandle: ControlPlaneRPCHandle
         let task: Task<CanonicalToolsCatalogLoadResult, Error>
+        let startGeneration: UInt64
         var waiters: [WaiterID: ToolsCatalogWaiterRecord] = [:]
         var foregroundWaiterCount = 0
     }
@@ -244,7 +245,8 @@ package actor ControlPlaneCoordinator {
             requestTimeout: requestTimeout,
             requestDeadlineUptimeNs: requestDeadlineUptimeNs,
             rpcHandle: rpcHandle,
-            task: task
+            task: task,
+            startGeneration: brokerState.generation()
         )
         switch origin {
         case .request:
@@ -498,7 +500,8 @@ package actor ControlPlaneCoordinator {
         if case .success(let loaded) = result, let sourceUpstream = loaded.sourceUpstream {
             brokerState.syncCanonicalToolsCatalog(
                 loaded.rawResult,
-                sourceUpstream: sourceUpstream
+                sourceUpstream: sourceUpstream,
+                onlyIfGeneration: load.startGeneration
             )
         }
         let waiters = Array(load.waiters.values)

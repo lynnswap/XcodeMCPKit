@@ -443,7 +443,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
-        invalidateControlPlaneSynchronously(
+        invalidateControlPlane(
             reason: "debug_reset",
             clearInitialize: true,
             clearToolsCatalog: true
@@ -473,12 +473,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         documentationPrewarmTask?.cancel()
         await upstreamReadinessCoordinator.shutdown()
 
-        invalidateControlPlaneSynchronously(
+        canonicalBrokerState.reset()
+        await controlPlaneCoordinator.invalidate(
             reason: "shutdown",
             clearInitialize: true,
             clearToolsCatalog: true
         )
-        canonicalBrokerState.reset()
 
         let tasks = upstreamTaskBox.withLockedValue { taskBox -> [Task<Void, Never>] in
             let current = taskBox
@@ -923,27 +923,29 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    func invalidateControlPlaneSynchronously(
+    func invalidateControlPlane(
         reason: String,
         clearInitialize: Bool,
         clearToolsCatalog: Bool
     ) {
+        // The synchronous cache clear bumps the broker generation, which is
+        // what keeps stale fast paths from serving or re-populating the
+        // cache; the coordinator's waiter/load cleanup can therefore run
+        // asynchronously instead of blocking the caller on a semaphore.
         if clearInitialize {
             canonicalBrokerState.clearInitialize()
         }
         if clearToolsCatalog {
             canonicalBrokerState.clearToolsCatalog()
         }
-        let semaphore = DispatchSemaphore(value: 0)
+        let coordinator = controlPlaneCoordinator
         Task {
-            await controlPlaneCoordinator.invalidate(
+            await coordinator.invalidate(
                 reason: reason,
                 clearInitialize: clearInitialize,
                 clearToolsCatalog: clearToolsCatalog
             )
-            semaphore.signal()
         }
-        semaphore.wait()
     }
 
     static func mapControlPlaneError(_ error: Error) -> (code: Int, message: String) {
