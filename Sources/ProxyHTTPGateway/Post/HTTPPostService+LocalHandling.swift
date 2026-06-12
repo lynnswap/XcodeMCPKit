@@ -146,7 +146,7 @@ extension HTTPPostService {
             )
         }
 
-        let allowLocalToolRoutes = !Self.shouldUseEmbeddedTestSynchronousResolution(on: eventLoop)
+        let allowLocalToolRoutes = !usesSynchronousLocalResolution
         var didBlockItem = false
         var blockedResponseObjects: [[String: Any]] = []
         var toolsListRequests: [[String: Any]] = []
@@ -508,10 +508,6 @@ extension HTTPPostService {
         object["method"] as? String == "tools/list"
             && object["id"] != nil
             && sessionManager.isInitialized()
-    }
-
-    private static func shouldUseEmbeddedTestSynchronousResolution(on eventLoop: EventLoop) -> Bool {
-        String(describing: type(of: eventLoop)).contains("EmbeddedEventLoop")
     }
 
     package func blockedToolName(from requestObject: [String: Any]) -> String? {

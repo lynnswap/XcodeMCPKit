@@ -1455,7 +1455,8 @@ private func addEmbeddedHTTPHandler(
 ) throws {
     let handler = HTTPHandler(
         config: config,
-        sessionManager: sessionManager
+        sessionManager: sessionManager,
+        usesSynchronousLocalResolution: true
     )
     try channel.pipeline.addHandler(handler).wait()
 }

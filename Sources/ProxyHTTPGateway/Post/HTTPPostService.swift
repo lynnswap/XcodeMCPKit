@@ -34,6 +34,7 @@ package final class HTTPPostService: Sendable {
 
     package let sessionManager: any RuntimeCoordinating
     package let disabledToolNames: Set<String>
+    package let usesSynchronousLocalResolution: Bool
     package let localResponder: LocalMCPResponder
     package let forwardingService: MCPForwardingService
     package let refreshWorkflow: RefreshCodeIssuesWorkflow
@@ -46,15 +47,18 @@ package final class HTTPPostService: Sendable {
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
+        usesSynchronousLocalResolution: Bool = false,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.requestTimeoutSeconds = config.requestTimeout
         self.sessionManager = sessionManager
         self.disabledToolNames = config.disabledToolNames
+        self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
             refreshCodeIssuesMode: config.refreshCodeIssuesMode,
             disabledToolNames: config.disabledToolNames,
+            usesSynchronousLocalResolution: usesSynchronousLocalResolution,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(

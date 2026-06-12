@@ -7254,7 +7254,8 @@ private func addHTTPHandler(
         sessionManager: sessionManager,
         refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-        refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
+        refreshCodeIssuesDebugState: refreshCodeIssuesDebugState,
+        usesSynchronousLocalResolution: true
     )
     try channel.pipeline.addHandler(handler).wait()
 }

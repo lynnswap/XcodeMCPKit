@@ -23,17 +23,23 @@ package struct LocalMCPResponder {
     private let sessionManager: any RuntimeCoordinating
     private let refreshCodeIssuesMode: RefreshCodeIssuesMode
     private let disabledToolNames: Set<String>
+    /// EmbeddedChannel-based tests cannot complete promises from another
+    /// thread, so they opt in to a synchronous resolution path explicitly
+    /// instead of production code sniffing the event-loop type.
+    private let usesSynchronousLocalResolution: Bool
     private let logger: Logger
 
     package init(
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesMode: RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
+        usesSynchronousLocalResolution: Bool = false,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = disabledToolNames
+        self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
         self.logger = logger
     }
 
@@ -137,7 +143,7 @@ package struct LocalMCPResponder {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }
-            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
+            if usesSynchronousLocalResolution {
                 do {
                     let result = try Self.waitForAsyncResult {
                         try await sessionManager.sharedToolsList(
@@ -219,7 +225,7 @@ package struct LocalMCPResponder {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }
-            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
+            if usesSynchronousLocalResolution {
                 do {
                     let result = try Self.waitForAsyncResult {
                         try await sessionManager.liveXcodeListWindowsResult(
@@ -340,10 +346,6 @@ package struct LocalMCPResponder {
             message: "upstream timeout",
             sessionID: sessionID
         )
-    }
-
-    private func shouldUseEmbeddedTestSynchronousResolution(on eventLoop: EventLoop) -> Bool {
-        String(describing: type(of: eventLoop)).contains("EmbeddedEventLoop")
     }
 
     private static func waitForAsyncResult<Output: Sendable>(
