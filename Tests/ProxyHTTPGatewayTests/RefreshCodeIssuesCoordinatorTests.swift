@@ -193,6 +193,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         let clock = TestClock()
         let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
+        let firstAcquired = AsyncGate()
         let outcomes = RecordedValues<String>()
 
         let firstTask = Task<Void, Never> {
@@ -200,9 +201,11 @@ struct RefreshCodeIssuesCoordinatorTests {
                 key: "windowtab-unbounded",
                 requestTimeout: nil
             ) { _ in
+                await firstAcquired.signal()
                 await releaseFirst.wait()
             }
         }
+        await firstAcquired.wait()
 
         let secondTask = Task<Void, Never> {
             do {

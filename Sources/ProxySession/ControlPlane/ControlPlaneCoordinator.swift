@@ -403,24 +403,18 @@ package actor ControlPlaneCoordinator {
     }
 
     func timeoutToolsCatalogWaiter(loadID: UUID, waiterID: WaiterID) {
-        guard var load = currentToolsCatalogLoadState(loadID: loadID) else { return }
-        guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
-        waiter.timeoutTask?.cancel()
-        if waiter.kind == .foreground {
-            load.foregroundWaiterCount = max(0, load.foregroundWaiterCount - 1)
-        }
-        let shouldCancel = shouldCancelToolsCatalogLoadAfterWaiterRemoval(load)
-        waiter.continuation.resume(throwing: TimeoutError())
-        if shouldCancel {
-            clearToolsCatalogLoadState(loadID: loadID)
-            cancelToolsCatalogLoad(load, error: CancellationError())
-        } else {
-            setToolsCatalogLoadState(load)
-        }
-        syncDebug()
+        removeToolsCatalogWaiter(loadID: loadID, waiterID: waiterID, failingWith: TimeoutError())
     }
 
     func cancelToolsCatalogWaiter(loadID: UUID, waiterID: WaiterID) {
+        removeToolsCatalogWaiter(loadID: loadID, waiterID: waiterID, failingWith: CancellationError())
+    }
+
+    private func removeToolsCatalogWaiter(
+        loadID: UUID,
+        waiterID: WaiterID,
+        failingWith error: any Error
+    ) {
         guard var load = currentToolsCatalogLoadState(loadID: loadID) else { return }
         guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
         waiter.timeoutTask?.cancel()
@@ -428,7 +422,7 @@ package actor ControlPlaneCoordinator {
             load.foregroundWaiterCount = max(0, load.foregroundWaiterCount - 1)
         }
         let shouldCancel = shouldCancelToolsCatalogLoadAfterWaiterRemoval(load)
-        waiter.continuation.resume(throwing: CancellationError())
+        waiter.continuation.resume(throwing: error)
         if shouldCancel {
             clearToolsCatalogLoadState(loadID: loadID)
             cancelToolsCatalogLoad(load, error: CancellationError())
@@ -453,17 +447,7 @@ package actor ControlPlaneCoordinator {
         loadID: UUID,
         waiterID: WaiterID
     ) {
-        guard var load = windowLoads[route], load.loadID == loadID else { return }
-        guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(throwing: TimeoutError())
-        if load.waiters.isEmpty {
-            windowLoads.removeValue(forKey: route)
-            cancelWindowLoad(load, error: CancellationError())
-        } else {
-            windowLoads[route] = load
-        }
-        syncDebug()
+        removeWindowWaiter(route: route, loadID: loadID, waiterID: waiterID, failingWith: TimeoutError())
     }
 
     func cancelWindowWaiter(
@@ -471,10 +455,24 @@ package actor ControlPlaneCoordinator {
         loadID: UUID,
         waiterID: WaiterID
     ) {
+        removeWindowWaiter(
+            route: route,
+            loadID: loadID,
+            waiterID: waiterID,
+            failingWith: CancellationError()
+        )
+    }
+
+    private func removeWindowWaiter(
+        route: ControlPlaneRoute,
+        loadID: UUID,
+        waiterID: WaiterID,
+        failingWith error: any Error
+    ) {
         guard var load = windowLoads[route], load.loadID == loadID else { return }
         guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
         waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(throwing: CancellationError())
+        waiter.continuation.resume(throwing: error)
         if load.waiters.isEmpty {
             windowLoads.removeValue(forKey: route)
             cancelWindowLoad(load, error: CancellationError())
