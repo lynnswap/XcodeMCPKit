@@ -289,6 +289,8 @@ churn を生んでいる構造欠陥は 3 つに集約される:
 
 第 3 ラウンドで追加実施: **batch 分類の単一パス化**(`routeToolCalls` — disabled / tools-list / documentation / forward を 1 ループで分類。filterDisabledToolCalls→filterLocalToolCalls の 2 パスと中間 serialize→reparse を削除し、無加工リクエストは原文バイトのまま forward = parse-once 規約の回復。本体をパラメータ渡しでなく関数内パースにすることで、派生グループが disconnected region となり strict concurrency 下で Task へ転送可能 — これが歴史的な再パースの正体だった)/ **EmbeddedEventLoop 型名 sniff の全廃**(同期解決は呼び出し側の制約なので `usesSynchronousLocalResolution` の明示 opt-in に変更。Embedded テストヘルパー 2 箇所だけが true を渡し、Sources/ から EmbeddedEventLoop への言及が消えた)。
 
-未実施(残り 2 件、それぞれ独立セッション推奨):
-1. **refresh 再帰の除去 + slot ベース組み立て**(Stage B/C)— refresh を分類パスへ統合するだけでは「複雑さの移転」になるため、merge ヘルパー 4 つと forceBatchArray 貫通を置き換える slot 組み立てとワンセットで実施すべき。直列 deadline 分割・route ごとの lease・invalid-item 合成の差異が挙動契約。
-2. **Phase 8: テスト再編** — god file 2 つの unit 分割(ファイル内共有 private ヘルパーの再配置を伴う)、handshake 儀式 約 59 箇所の fixture 化、共有 HTTP ハーネス統合、wall-clock 待ちの決定化。
+第 4 ラウンドで追加実施: **refresh 再帰の除去**(`executeRefreshRoute` — 分類済みの pure refresh 呼び出しに対する handle() 再入はゲート再実行がすべて no-op のため、lease/cancellation の振り付けを直接実行に置換。remainder の単一再入は refresh 抽出済みのため構造的に深さ 1 で有界、コメントで明文化)/ **god テストファイル 2 つの分割**(RuntimeCoordinatorTests 7,279 行 → 4,639 + DocumentationProviderTests 1,168 + UpstreamReadinessTests 495 + 共有 TestSupport 1,011。HTTPHandlerTests 7,575 行 → 2,244 + RefreshCodeIssuesHTTPTests 2,593 + DocumentationSearchRoutingTests 1,158 + DisabledToolHTTPTests 488 + TestSupport 1,157。いずれも同一 @Suite の extension 分割のため .serialized 実行意味論は完全保存)。
+
+意図的に見送り(判断記録):
+1. **slot ベースの応答組み立て**(merge ヘルパー群と forceBatchArray の全面置換)— 単一分類パスと再帰除去が着地した時点で、元指摘の構造問題(3 重分割・無制限再帰・多段 merge)は実質解消。残る merge は「並列 fallback 波」という本質的に並行な合流のみで、slot 化は応答の並び順を変えるため exact-wire テスト群と衝突する。並び順変更込みの全面リライトはリスクが利得を上回ると判断。
+2. **handshake 儀式 約 59 箇所の fixture 化** — 各儀式はヘッダ・Accept・session id・payload が微妙に異なり機械変換が安全にできない。既存ヘルパー(initializeHTTPChannel / postJSON)は TestSupport に公開済みで、新規テストはそれを使えばよい。既存テストの一括書き換えは挙動検証価値ゼロの大量 churn のため見送り。
