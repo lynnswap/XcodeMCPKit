@@ -557,7 +557,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
-        initializeParams: [String: JSONValue] = DocumentationProviderManager.defaultInitializeParams(),
+        initializeParams: [String: JSONValue] = InitializeHandshakeParams.defaultParams(),
         clock: ClockClient = .liveValue,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
@@ -949,17 +949,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             await connection.stop()
             throw error
         }
-    }
-
-    package static func defaultInitializeParams() -> [String: JSONValue] {
-        [
-            "protocolVersion": .string("2025-03-26"),
-            "capabilities": .object([:]),
-            "clientInfo": .object([
-                "name": .string("XcodeMCPKit"),
-                "version": .string("dev"),
-            ]),
-        ]
     }
 
     private func makeInitializeRequestData() throws -> Data {

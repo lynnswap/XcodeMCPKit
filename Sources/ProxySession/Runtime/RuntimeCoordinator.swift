@@ -232,7 +232,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return DocumentationProviderManager(
             sessionFactory: LiveDocumentationProviderSessionFactory(baseEnvironment: environment),
             pinnedProcessID: pinnedProcessID,
-            initializeParams: Self.resolvedInitializeParams(config: config)
+            initializeParams: InitializeHandshakeParams.resolved(config: config)
         )
     }
 

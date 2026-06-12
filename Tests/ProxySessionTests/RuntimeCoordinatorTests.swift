@@ -3160,7 +3160,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "custom-proxy")
-        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
         #expect(capabilities["roots"] as? Bool == true)
     }
 
@@ -3188,7 +3188,7 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
         #expect(clientInfo["name"] as? String == "Claude")
-        #expect(clientInfo["version"] as? String == manager.defaultClientVersion(for: "Claude"))
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultClientVersion(for: "Claude"))
     }
 
     @Test func xcodeChatClientVersionFallsBackToCodeAliasWhenExactStemMissing() async throws {
@@ -3200,7 +3200,7 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
-        let version = manager.xcodeChatClientVersion(
+        let version = InitializeHandshakeParams.xcodeChatClientVersion(
             for: "Claude",
             defaults: [
                 "IDEChatClaudeCodeVersion": #"{"version":"9.9.9"}"#,
@@ -3219,7 +3219,7 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
-        let version = manager.xcodeChatClientVersion(
+        let version = InitializeHandshakeParams.xcodeChatClientVersion(
             for: "Claude",
             defaults: [
                 "IDEChatClaudeVersion": #"{"version":"1.2.3"}"#,
@@ -3256,8 +3256,8 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
-        #expect(clientInfo["name"] as? String == manager.defaultProxyClientName())
-        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(clientInfo["name"] as? String == InitializeHandshakeParams.defaultProxyClientName())
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
 
     @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
@@ -3326,7 +3326,7 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.hasInitResult == false)
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "configured-proxy")
-        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
 
     @Test func sessionManagerSendsInitializedOnce() async throws {
