@@ -104,176 +104,136 @@ extension HTTPPostService {
         return (try? JSONSerialization.data(withJSONObject: [payload], options: [])) ?? data
     }
 
-    package func filterDisabledToolCalls(
+    package struct ToolCallRouting {
+        /// The remainder to forward. When no local tool routes exist this
+        /// also carries the blocked-tool responses as localResponseData.
+        let forwardedRequest: FilteredToolCallRequest
+        let localOperation: LocalToolFilterOperation?
+    }
+
+    /// The single classification pass over an incoming POST body: disabled
+    /// tools are answered locally, tools/list and DocumentationSearch items
+    /// run on the local path (with the remainder forwarded in parallel), and
+    /// everything else forwards. The body is parsed here, not handed in, so
+    /// the derived groups form a disconnected region that can transfer into
+    /// the local-execution task under strict concurrency.
+    package func routeToolCalls(
         bodyData: Data,
-        parsedRequestJSON: Any,
-        forceBatchArray: Bool
-    ) throws -> FilteredToolCallRequest {
-        guard disabledToolNames.isEmpty == false else {
-            return FilteredToolCallRequest(
-                bodyData: bodyData,
-                localResponseData: nil,
-                forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
-                forceBatchArray: forceBatchArray
+        sessionID: String,
+        forceBatchArray: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?
+    ) throws -> ToolCallRouting {
+        let parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
+
+        let items: [Any]
+        if let object = parsedRequestJSON as? [String: Any] {
+            items = [object]
+        } else if let array = parsedRequestJSON as? [Any] {
+            items = array
+        } else {
+            items = []
+        }
+        guard items.isEmpty == false else {
+            return ToolCallRouting(
+                forwardedRequest: FilteredToolCallRequest(
+                    bodyData: bodyData,
+                    localResponseData: nil,
+                    forwardedResponseIDs: [],
+                    forceBatchArray: forceBatchArray
+                ),
+                localOperation: nil
             )
         }
 
-        if let object = parsedRequestJSON as? [String: Any] {
-            guard let toolName = blockedToolName(from: object) else {
-                return FilteredToolCallRequest(
+        let allowLocalToolRoutes = !Self.shouldUseEmbeddedTestSynchronousResolution(on: eventLoop)
+        var didBlockItem = false
+        var blockedResponseObjects: [[String: Any]] = []
+        var toolsListRequests: [[String: Any]] = []
+        var documentationRequests: [[String: Any]] = []
+        var forwardedObjects: [Any] = []
+        var routedObjects: [Any] = []
+
+        for item in items {
+            guard let object = item as? [String: Any] else {
+                forwardedObjects.append(item)
+                routedObjects.append(item)
+                continue
+            }
+            if let toolName = blockedToolName(from: object) {
+                didBlockItem = true
+                blockedResponseObjects.append(
+                    contentsOf: Self.makeBlockedToolResponseObjects(
+                        requestObject: object,
+                        toolName: toolName
+                    )
+                )
+            } else if allowLocalToolRoutes, isToolsListRequest(object) {
+                toolsListRequests.append(object)
+                routedObjects.append(object)
+            } else if allowLocalToolRoutes, isDocumentationSearchRequest(object) {
+                documentationRequests.append(object)
+                routedObjects.append(object)
+            } else {
+                forwardedObjects.append(item)
+                routedObjects.append(item)
+            }
+        }
+
+        let hasLocalToolRoutes =
+            toolsListRequests.isEmpty == false || documentationRequests.isEmpty == false
+
+        // Untouched requests forward with their original bytes. A blocked
+        // notification produces no response object but must still be dropped.
+        if didBlockItem == false, hasLocalToolRoutes == false {
+            return ToolCallRouting(
+                forwardedRequest: FilteredToolCallRequest(
                     bodyData: bodyData,
                     localResponseData: nil,
                     forwardedResponseIDs: Self.extractResponseIDs(from: parsedRequestJSON),
                     forceBatchArray: forceBatchArray
-                )
-            }
+                ),
+                localOperation: nil
+            )
+        }
 
-            return FilteredToolCallRequest(
-                bodyData: nil,
-                localResponseData: Self.makeToolResponseData(
-                    from: Self.makeBlockedToolResponseObjects(
-                        requestObject: object,
-                        toolName: toolName
-                    ),
+        let blockedResponseData = Self.makeToolResponseData(
+            from: blockedResponseObjects,
+            forceBatchArray: forceBatchArray
+        )
+        let forwardRemainder = makeForwardedLocalToolRequest(
+            forwardedObjects: forwardedObjects,
+            forceBatchArray: forceBatchArray
+        )
+
+        guard hasLocalToolRoutes else {
+            return ToolCallRouting(
+                forwardedRequest: FilteredToolCallRequest(
+                    bodyData: forwardRemainder.bodyData,
+                    localResponseData: blockedResponseData,
+                    forwardedResponseIDs: forwardRemainder.forwardedResponseIDs,
                     forceBatchArray: forceBatchArray
                 ),
-                forwardedResponseIDs: [],
-                forceBatchArray: forceBatchArray
+                localOperation: nil
             )
         }
 
-        guard let array = parsedRequestJSON as? [Any] else {
-            return FilteredToolCallRequest(
-                bodyData: bodyData,
-                localResponseData: nil,
-                forwardedResponseIDs: [],
-                forceBatchArray: forceBatchArray
-            )
-        }
-
-        var forwardedObjects: [Any] = []
-        forwardedObjects.reserveCapacity(array.count)
-        var localResponseObjects: [[String: Any]] = []
-        localResponseObjects.reserveCapacity(array.count)
-
-        for item in array {
-            guard let object = item as? [String: Any],
-                let toolName = blockedToolName(from: object)
-            else {
-                forwardedObjects.append(item)
-                continue
-            }
-            localResponseObjects.append(
-                contentsOf: Self.makeBlockedToolResponseObjects(
-                    requestObject: object,
-                    toolName: toolName
-                )
-            )
-        }
-
-        let localResponseData = Self.makeToolResponseData(
-            from: localResponseObjects,
-            forceBatchArray: forceBatchArray
-        )
-
-        guard forwardedObjects.isEmpty == false else {
-            return FilteredToolCallRequest(
-                bodyData: nil,
-                localResponseData: localResponseData,
-                forwardedResponseIDs: [],
-                forceBatchArray: forceBatchArray
-            )
-        }
-
-        if localResponseData == nil {
-            let filteredPayload: Any = (forceBatchArray || forwardedObjects.count > 1)
-                ? forwardedObjects
-                : forwardedObjects[0]
-            let filteredBodyData = try JSONSerialization.data(
-                withJSONObject: filteredPayload,
-                options: []
-            )
-            return FilteredToolCallRequest(
-                bodyData: filteredBodyData,
-                localResponseData: nil,
-                forwardedResponseIDs: Self.extractResponseIDs(from: filteredPayload),
-                forceBatchArray: forceBatchArray
-            )
-        }
-
-        let filteredBodyData = try JSONSerialization.data(
-            withJSONObject: forwardedObjects,
-            options: []
-        )
-        return FilteredToolCallRequest(
-            bodyData: filteredBodyData,
-            localResponseData: localResponseData,
-            forwardedResponseIDs: Self.extractResponseIDs(from: forwardedObjects),
-            forceBatchArray: forceBatchArray
-        )
-    }
-
-    package func filterLocalToolCalls(
-        filteredRequest: FilteredToolCallRequest,
-        sessionID: String,
-        eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount?
-    ) -> LocalToolFilterOperation? {
-        guard let bodyData = filteredRequest.bodyData,
-              let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
-        else {
-            return nil
-        }
-        guard !Self.shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) else {
-            return nil
-        }
-
-        let requestItems: [Any]
-        if let object = parsedRequestJSON as? [String: Any] {
-            requestItems = [object]
-        } else if let array = parsedRequestJSON as? [Any] {
-            requestItems = array
-        } else {
-            return nil
-        }
-
-        var toolsListRequests: [[String: Any]] = []
-        toolsListRequests.reserveCapacity(requestItems.count)
-        var documentationRequests: [[String: Any]] = []
-        documentationRequests.reserveCapacity(requestItems.count)
-        var forwardedObjects: [Any] = []
-        forwardedObjects.reserveCapacity(requestItems.count)
-
-        for item in requestItems {
-            guard let object = item as? [String: Any] else {
-                forwardedObjects.append(item)
-                continue
-            }
-            if isToolsListRequest(object) {
-                toolsListRequests.append(object)
-            } else if isDocumentationSearchRequest(object) {
-                documentationRequests.append(object)
-            } else {
-                forwardedObjects.append(item)
-            }
-        }
-
-        guard toolsListRequests.isEmpty == false || documentationRequests.isEmpty == false else {
-            return nil
-        }
-
-        let requestIDs = Self.extractResponseIDs(from: parsedRequestJSON)
+        // One lease and cancellation scope covers every non-blocked item.
+        let routedPayload: Any = (forceBatchArray || routedObjects.count > 1)
+            ? routedObjects
+            : routedObjects[0]
+        let routedResponseIDs = Self.extractResponseIDs(from: routedPayload)
         let descriptor = Self.topLevelRequestDescriptor(
             sessionID: sessionID,
-            parsedRequestJSON: parsedRequestJSON,
-            requestIsBatch: filteredRequest.forceBatchArray,
-            requestIDs: requestIDs
+            parsedRequestJSON: routedPayload,
+            requestIsBatch: forceBatchArray,
+            requestIDs: routedResponseIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
         let cancellationHandle = HTTPPostCancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
-            requestIDKeys: requestIDs.map(\.key)
+            requestIDKeys: routedResponseIDs.map(\.key)
         )
         let deadline = Self.timeoutDeadline(
             for: requestTimeoutOverride
@@ -282,10 +242,7 @@ extension HTTPPostService {
                     defaultSeconds: requestTimeoutSeconds
                 )
         )
-        let forwardedRequest = makeForwardedLocalToolRequest(
-            forwardedObjects: forwardedObjects,
-            forceBatchArray: filteredRequest.forceBatchArray
-        )
+        let initialLocalResponseData = blockedResponseData
         let promise = eventLoop.makePromise(of: LocalToolBatchResult.self)
         let task = Task { [self] in
             guard !Task.isCancelled else {
@@ -295,11 +252,11 @@ extension HTTPPostService {
                 return
             }
             let localBatchResult = await makeLocalToolBatchResult(
-                initialLocalResponseData: filteredRequest.localResponseData,
+                initialLocalResponseData: initialLocalResponseData,
                 toolsListRequests: toolsListRequests,
                 documentationRequests: documentationRequests,
                 sessionID: sessionID,
-                forceBatchArray: filteredRequest.forceBatchArray,
+                forceBatchArray: forceBatchArray,
                 deadline: deadline
             )
             let wasCancelled = Task.isCancelled
@@ -312,11 +269,14 @@ extension HTTPPostService {
             }
         }
         cancellationHandle.bindRefreshTask(task)
-        return LocalToolFilterOperation(
-            localResponseFuture: promise.futureResult,
-            forwardedRequest: forwardedRequest,
-            cancellationHandle: cancellationHandle,
-            deadline: deadline
+        return ToolCallRouting(
+            forwardedRequest: forwardRemainder,
+            localOperation: LocalToolFilterOperation(
+                localResponseFuture: promise.futureResult,
+                forwardedRequest: forwardRemainder,
+                cancellationHandle: cancellationHandle,
+                deadline: deadline
+            )
         )
     }
 

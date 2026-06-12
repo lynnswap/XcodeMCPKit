@@ -158,12 +158,14 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        let filteredRequest: FilteredToolCallRequest
+        let routing: ToolCallRouting
         do {
-            filteredRequest = try filterDisabledToolCalls(
+            routing = try routeToolCalls(
                 bodyData: bodyData,
-                parsedRequestJSON: parsedRequestJSON,
-                forceBatchArray: requestIsBatch
+                sessionID: sessionID,
+                forceBatchArray: requestIsBatch,
+                eventLoop: eventLoop,
+                requestTimeoutOverride: requestTimeoutOverride
             )
         } catch {
             return HTTPPostOperation(
@@ -182,12 +184,7 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let localToolFilter = filterLocalToolCalls(
-            filteredRequest: filteredRequest,
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            requestTimeoutOverride: requestTimeoutOverride
-        ) {
+        if let localToolFilter = routing.localOperation {
             if let parentCancellationHandle,
                 parentCancellationHandle.bindChildHandle(localToolFilter.cancellationHandle) == false
             {
@@ -278,7 +275,7 @@ package final class HTTPPostService: Sendable {
         }
 
         return makeForwardingOperation(
-            filteredRequest: filteredRequest,
+            filteredRequest: routing.forwardedRequest,
             sessionID: sessionID,
             headerSessionID: headerSessionID,
             requestIsBatch: requestIsBatch,
