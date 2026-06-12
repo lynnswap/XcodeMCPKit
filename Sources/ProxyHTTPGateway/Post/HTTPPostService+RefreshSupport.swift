@@ -322,6 +322,74 @@ extension HTTPPostService {
         )
     }
 
+    /// Runs one already-classified refresh route directly. A route is a
+    /// pure XcodeRefreshCodeIssuesInFile call extracted by the routing pass,
+    /// so re-entering handle() for it would only replay request gates that
+    /// are no-ops; this performs exactly the lease/cancellation choreography
+    /// the re-entry used to produce.
+    package func executeRefreshRoute(
+        _ route: RefreshRequestRoute,
+        sessionID: String,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?,
+        parentCancellationHandle: HTTPPostCancellationHandle?
+    ) async -> HTTPPostResolution {
+        let parsedRoutePayload =
+            (try? JSONSerialization.jsonObject(with: route.bodyData, options: []))
+            ?? [String: Any]()
+        let descriptor = Self.topLevelRequestDescriptor(
+            sessionID: sessionID,
+            parsedRequestJSON: parsedRoutePayload,
+            requestIsBatch: route.requestIsBatch,
+            requestIDs: route.requestIDs
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
+        let cancellationHandle = HTTPPostCancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: route.requestIDs.map(\.key)
+        )
+        if let parentCancellationHandle,
+            parentCancellationHandle.bindChildHandle(cancellationHandle) == false
+        {
+            cancellationHandle.cancel(using: sessionManager)
+            return .empty(status: .accepted, sessionID: sessionID)
+        }
+        sessionManager.activateRequestLease(
+            leaseID,
+            requestIDKey: route.requestIDs.first?.key,
+            upstreamIndex: nil,
+            timeout: requestTimeoutOverride
+                ?? Self.topLevelRequestTimeoutOverride(
+                    method: nil,
+                    defaultSeconds: requestTimeoutSeconds
+                )
+        )
+        let result = await forwardRefreshCodeIssuesRequest(
+            route.request,
+            bodyData: route.bodyData,
+            sessionID: sessionID,
+            requestIDs: route.requestIDs,
+            requestIsBatch: route.requestIsBatch,
+            requestTimeoutOverride: requestTimeoutOverride,
+            eventLoop: eventLoop,
+            leaseID: leaseID,
+            cancellationHandle: cancellationHandle
+        )
+        if Task.isCancelled {
+            cancellationHandle.markCompleted()
+            return .empty(status: .accepted, sessionID: sessionID)
+        }
+        cancellationHandle.markCompleted()
+        finishRefreshLease(leaseID, result: result)
+        return makeResolution(
+            from: result,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
+        )
+    }
+
     package func makeResolution(
         from result: RefreshForwardAttemptResult,
         sessionID: String,

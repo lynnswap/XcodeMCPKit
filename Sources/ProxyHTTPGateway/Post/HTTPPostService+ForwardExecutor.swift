@@ -157,16 +157,14 @@ extension HTTPPostService {
                         )
                         continue
                     }
-                    let operation = self.handle(
-                        bodyData: route.bodyData,
-                        headerSessionID: sessionID,
-                        headerSessionExists: true,
+                    let resolution = await self.executeRefreshRoute(
+                        route,
+                        sessionID: sessionID,
                         prefersEventStream: prefersEventStream,
                         eventLoop: eventLoop,
                         requestTimeoutOverride: remainingTimeout,
                         parentCancellationHandle: cancellationHandle
                     )
-                    let resolution = try? await operation.future.get()
                     payloads.append(
                         Self.responseDataForBatchResolution(
                             resolution,
@@ -194,6 +192,9 @@ extension HTTPPostService {
                             )
                         )
                     } else {
+                        // Bounded single re-entry: the routing pass removed
+                        // every refresh item, so the remainder cannot reach
+                        // this branch again (depth <= 1 structurally).
                         let operation = self.handle(
                             bodyData: remainingBodyData,
                             headerSessionID: sessionID,
