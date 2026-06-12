@@ -421,46 +421,10 @@ package struct LiveXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
             }
             return application.processIdentifier
         })
-        processIDs.formUnion(Self.runningProcessIDs(named: "Xcode"))
+        processIDs.formUnion(ProcessEnumeration.processIDs(named: "Xcode"))
         return processIDs.sorted()
     }
 
-    package static func parseProcessIDLines(_ output: String) -> [pid_t] {
-        output
-            .split(whereSeparator: \.isNewline)
-            .compactMap { line -> pid_t? in
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let value = Int32(trimmed), value > 0 else {
-                    return nil
-                }
-                return pid_t(value)
-            }
-    }
-
-    private static func runningProcessIDs(named processName: String) -> [pid_t] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-x", processName]
-
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            return []
-        }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
-            return []
-        }
-        return parseProcessIDLines(output)
-    }
 
     package func openWindows(for processID: pid_t) throws -> [XcodePermissionDialogAXWindow] {
         let app = AXUIElementCreateApplication(processID)
