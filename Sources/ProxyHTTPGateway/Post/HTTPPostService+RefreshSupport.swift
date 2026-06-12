@@ -235,7 +235,7 @@ extension HTTPPostService {
 
     package static func isRetryScopedRefreshLeaseRequest(_ requestJSON: Any) -> Bool {
         if let object = requestJSON as? [String: Any] {
-            return isRefreshCodeIssuesRequestObject(object)
+            return RefreshCodeIssuesRequest(requestObject: object) != nil
         }
         guard let array = requestJSON as? [Any],
             array.count == 1,
@@ -243,17 +243,9 @@ extension HTTPPostService {
         else {
             return false
         }
-        return isRefreshCodeIssuesRequestObject(object)
+        return RefreshCodeIssuesRequest(requestObject: object) != nil
     }
 
-    package static func isRefreshCodeIssuesRequestObject(_ object: [String: Any]) -> Bool {
-        guard object["method"] as? String == "tools/call",
-            let params = object["params"] as? [String: Any]
-        else {
-            return false
-        }
-        return params["name"] as? String == "XcodeRefreshCodeIssuesInFile"
-    }
 
     package static func topLevelRequestDescriptor(
         sessionID: String,

@@ -567,39 +567,15 @@ extension HTTPPostService {
     }
 
     package func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssuesRequest? {
-        if let object = requestJSON as? [String: Any] {
-            return refreshCodeIssuesRequest(from: object)
-        }
-
-        guard let requests = requestJSON as? [Any],
-            requests.count == 1,
-            let object = requests.first as? [String: Any]
-        else {
+        guard let object = RefreshCodeIssuesRequest.singleRequestObject(from: requestJSON) else {
             return nil
         }
-        return refreshCodeIssuesRequest(from: object)
-    }
-
-    package func refreshCodeIssuesRequest(from object: [String: Any]) -> RefreshCodeIssuesRequest? {
-        guard
-            let method = object["method"] as? String,
-            method == "tools/call",
-            let params = object["params"] as? [String: Any],
-            let toolName = params["name"] as? String,
-            toolName == RefreshCodeIssuesRequest.toolName
-        else {
-            return nil
-        }
-
-        let arguments = params["arguments"] as? [String: Any]
-        let tabIdentifier = arguments?["tabIdentifier"] as? String
-        let filePath = arguments?["filePath"] as? String
-        return RefreshCodeIssuesRequest(tabIdentifier: tabIdentifier, filePath: filePath)
+        return RefreshCodeIssuesRequest(requestObject: object)
     }
 
     package func refreshRequestRouting(from requestJSON: Any) -> RefreshRequestRouting? {
         if let object = requestJSON as? [String: Any],
-            let refreshRequest = refreshCodeIssuesRequest(from: object),
+            let refreshRequest = RefreshCodeIssuesRequest(requestObject: object),
             let bodyData = try? JSONSerialization.data(withJSONObject: object, options: [])
         {
             return RefreshRequestRouting(
@@ -634,7 +610,7 @@ extension HTTPPostService {
                 )
                 continue
             }
-            guard let candidate = refreshCodeIssuesRequest(from: object) else {
+            guard let candidate = RefreshCodeIssuesRequest(requestObject: object) else {
                 remainingRequestObjects.append(object)
                 continue
             }

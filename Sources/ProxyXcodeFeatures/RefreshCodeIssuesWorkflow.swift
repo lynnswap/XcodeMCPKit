@@ -17,6 +17,36 @@ package struct RefreshCodeIssuesRequest: Sendable {
         self.filePath = filePath
     }
 
+    /// The one place that recognizes this feature's tools/call shape.
+    package init?(requestObject object: [String: Any]) {
+        guard
+            object["method"] as? String == "tools/call",
+            let params = object["params"] as? [String: Any],
+            params["name"] as? String == Self.toolName
+        else {
+            return nil
+        }
+        let arguments = params["arguments"] as? [String: Any]
+        self.init(
+            tabIdentifier: arguments?["tabIdentifier"] as? String,
+            filePath: arguments?["filePath"] as? String
+        )
+    }
+
+    /// Unwraps a single request object, accepting a batch of exactly one.
+    package static func singleRequestObject(from requestJSON: Any) -> [String: Any]? {
+        if let object = requestJSON as? [String: Any] {
+            return object
+        }
+        guard let requests = requestJSON as? [Any],
+            requests.count == 1,
+            let object = requests.first as? [String: Any]
+        else {
+            return nil
+        }
+        return object
+    }
+
     package var queueKey: String {
         guard let tabIdentifier, tabIdentifier.isEmpty == false else {
             return Self.globalQueueKey
