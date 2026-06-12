@@ -6,7 +6,7 @@ import Testing
 
 struct ProxyServerTests {
     @Test func firstXcrunToolSelectionTreatsLogAsFlagWithoutValue() {
-        let selection = ProxyServer.firstXcrunToolSelection(
+        let selection = XcrunArguments.firstToolSelection(
             from: ["--sdk", "macosx", "--log", "mcpbridge", "--some-flag"]
         )
 

@@ -130,37 +130,11 @@ extension RuntimeCoordinator {
     }
 
     package static func isDefaultXcrunMCPBridgeInvocation(config: ProxyConfig) -> Bool {
-        guard isXcrunCommand(config.upstreamCommand),
-              let toolName = firstXcrunToolName(from: config.upstreamArgs) else {
+        guard XcrunArguments.isXcrunCommand(config.upstreamCommand),
+              let toolName = XcrunArguments.firstToolSelection(from: config.upstreamArgs)?.toolName
+        else {
             return false
         }
         return URL(fileURLWithPath: toolName).lastPathComponent == "mcpbridge"
-    }
-
-    private static func isXcrunCommand(_ command: String) -> Bool {
-        command == "xcrun" || URL(fileURLWithPath: command).lastPathComponent == "xcrun"
-    }
-
-    private static func firstXcrunToolName(from args: [String]) -> String? {
-        let flagsWithValues: Set<String> = [
-            "-sdk", "--sdk",
-            "-toolchain", "--toolchain",
-        ]
-
-        var index = 0
-        while index < args.count {
-            let argument = args[index]
-            if flagsWithValues.contains(argument) {
-                index += 2
-                continue
-            }
-            if argument.hasPrefix("-") {
-                index += 1
-                continue
-            }
-            return argument
-        }
-
-        return nil
     }
 }

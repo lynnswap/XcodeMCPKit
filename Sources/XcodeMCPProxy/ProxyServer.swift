@@ -347,7 +347,7 @@ public final class ProxyServer {
         xcrunCommandPath: String,
         executableLookupClient: ExecutableLookupClient
     ) -> String? {
-        guard let selection = firstXcrunToolSelection(from: upstreamArgs) else {
+        guard let selection = XcrunArguments.firstToolSelection(from: upstreamArgs) else {
             return nil
         }
         return executableLookupClient.resolveXcrunToolPath(
@@ -355,29 +355,6 @@ public final class ProxyServer {
             selection.toolName,
             selection.preToolArguments
         )
-    }
-
-    package static func firstXcrunToolSelection(from args: [String]) -> (toolName: String, preToolArguments: [String])? {
-        let flagsWithValues: Set<String> = [
-            "-sdk", "--sdk",
-            "-toolchain", "--toolchain",
-        ]
-
-        var index = 0
-        while index < args.count {
-            let argument = args[index]
-            if flagsWithValues.contains(argument) {
-                index += 2
-                continue
-            }
-            if argument.hasPrefix("-") {
-                index += 1
-                continue
-            }
-            return (argument, Array(args.prefix(index)))
-        }
-
-        return nil
     }
 
     private static func permissionDialogAssistantNameCandidates(config: ProxyConfig) -> [String] {
