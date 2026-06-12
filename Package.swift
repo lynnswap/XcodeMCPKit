@@ -15,10 +15,6 @@ let package = Package(
         .macOS(.v15)
     ],
     products: [
-        .library(
-            name: "XcodeMCPKit",
-            targets: ["XcodeMCPKit"]
-        ),
         .executable(
             name: "xcode-mcp-proxy",
             targets: ["XcodeMCPProxyCLI"]
@@ -40,14 +36,6 @@ let package = Package(
     targets: [
         .target(
             name: "ProxyBuildInfoSupport",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "XcodeMCPKit",
-            dependencies: [
-                "XcodeMCPProxy"
-            ],
-            path: "Sources/XcodeMCPKit",
             swiftSettings: strictSwiftSettings
         ),
         .target(
@@ -155,6 +143,8 @@ let package = Package(
         .target(
             name: "ProxyCLI",
             dependencies: [
+                "ProxyCore",
+                "ProxyStdioTransport",
                 "XcodeMCPProxy",
                 .product(name: "Logging", package: "swift-log"),
             ],

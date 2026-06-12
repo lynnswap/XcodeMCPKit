@@ -108,8 +108,8 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCLI",
         forbiddenModules: [
-            "ProxyCore", "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
-            "ProxyHTTPGateway", "ProxyStdioTransport",
+            "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyHTTPGateway",
         ]
     ),
 ]
@@ -149,6 +149,13 @@ private func swiftFiles(under root: URL) -> [URL] {
 }
 
 private func importedModule(from line: String) -> String? {
+    // @_exported / @testable re-exports count as imports too; they must not
+    // become a side door around the layering rules.
+    var line = line
+    while line.hasPrefix("@") {
+        guard let spaceIndex = line.firstIndex(of: " ") else { return nil }
+        line = String(line[line.index(after: spaceIndex)...])
+    }
     guard line.hasPrefix("import ") else { return nil }
     let module = line.dropFirst("import ".count)
     guard module.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else {

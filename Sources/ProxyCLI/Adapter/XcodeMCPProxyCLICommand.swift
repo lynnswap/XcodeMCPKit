@@ -1,3 +1,5 @@
+import ProxyStdioTransport
+import ProxyCore
 import Foundation
 import Logging
 import XcodeMCPProxy

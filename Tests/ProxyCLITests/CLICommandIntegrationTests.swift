@@ -1,3 +1,5 @@
+import ProxyCore
+import ProxyStdioTransport
 import Foundation
 import NIO
 import NIOHTTP1

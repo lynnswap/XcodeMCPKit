@@ -1,3 +1,4 @@
+import ProxyCore
 import XcodeMCPProxy
 
 extension XcodeMCPProxyServerCommand {
