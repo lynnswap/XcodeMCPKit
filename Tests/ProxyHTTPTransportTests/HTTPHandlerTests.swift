@@ -1738,8 +1738,7 @@ struct HTTPHandlerTests {
                     id: originalID,
                     text: "{\"answer\":\"cold-docs\"}"
                 )
-            },
-            documentationProviderIsActive: false
+            }
         )
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
@@ -1792,8 +1791,7 @@ struct HTTPHandlerTests {
                 _ = requestData
                 localDocumentationRequests.withLockedValue { $0 += 1 }
                 throw UpstreamSlotAcquisitionError.unavailable
-            },
-            documentationProviderIsActive: false
+            }
         )
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
@@ -2251,9 +2249,7 @@ struct HTTPHandlerTests {
                     id: originalID,
                     text: "{\"answer\":\"docs\"}"
                 )
-            },
-            documentationProviderIsActive: false,
-            activatesDocumentationProviderOnSharedToolsList: true
+            }
         )
         sessionManager.setInitialized(true)
         sessionManager.setCachedToolsListResult(
@@ -2349,8 +2345,7 @@ struct HTTPHandlerTests {
                 _ = requestData
                 localDocumentationRequests.withLockedValue { $0 += 1 }
                 throw UpstreamSlotAcquisitionError.unavailable
-            },
-            documentationProviderIsActive: false
+            }
         )
         sessionManager.setInitialized(true)
         sessionManager.setCachedToolsListResult(
@@ -2442,8 +2437,7 @@ struct HTTPHandlerTests {
                 _ = requestData
                 localDocumentationRequests.withLockedValue { $0 += 1 }
                 throw UpstreamSlotAcquisitionError.unavailable
-            },
-            documentationProviderIsActive: false
+            }
         )
         sessionManager.setAvailableUpstreamIndices([0, 1])
         sessionManager.setInitialized(true)
@@ -6493,7 +6487,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentRequests: [SentRequest] = []
         var availableUpstreamIndices: [Int?] = []
         var requeuedLeaseCount = 0
-        var documentationProviderIsActive = false
     }
 
     private let state = NIOLockedValueBox(State())
@@ -6506,7 +6499,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
     private let documentationSearchResponder:
         (@Sendable (_ requestData: Data) throws -> Data)?
-    private let activatesDocumentationProviderOnSharedToolsList: Bool
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = RequestLeaseRegistry()
 
@@ -6515,8 +6507,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
-        documentationProviderIsActive: Bool? = nil,
-        activatesDocumentationProviderOnSharedToolsList: Bool = false,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6524,13 +6514,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
         self.documentationSearchResponder = documentationSearchResponder
-        self.activatesDocumentationProviderOnSharedToolsList =
-            activatesDocumentationProviderOnSharedToolsList
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
-        state.withLockedValue { state in
-            state.documentationProviderIsActive =
-                documentationProviderIsActive ?? (documentationSearchResponder != nil)
-        }
     }
 
     init(
@@ -6538,8 +6522,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
-        documentationProviderIsActive: Bool? = nil,
-        activatesDocumentationProviderOnSharedToolsList: Bool = false,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6547,13 +6529,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
         self.documentationSearchResponder = documentationSearchResponder
-        self.activatesDocumentationProviderOnSharedToolsList =
-            activatesDocumentationProviderOnSharedToolsList
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
-        state.withLockedValue { state in
-            state.documentationProviderIsActive =
-                documentationProviderIsActive ?? (documentationSearchResponder != nil)
-        }
     }
 
     init(
@@ -6561,8 +6537,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) throws -> Data)? = nil,
-        documentationProviderIsActive: Bool? = nil,
-        activatesDocumentationProviderOnSharedToolsList: Bool = false,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -6570,13 +6544,7 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
         self.documentationSearchResponder = documentationSearchResponder
-        self.activatesDocumentationProviderOnSharedToolsList =
-            activatesDocumentationProviderOnSharedToolsList
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
-        state.withLockedValue { state in
-            state.documentationProviderIsActive =
-                documentationProviderIsActive ?? (documentationSearchResponder != nil)
-        }
     }
 
     func session(id: String) -> SessionContext {
@@ -6665,12 +6633,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
         _ = requestTimeoutOverride
-        if activatesDocumentationProviderOnSharedToolsList,
-           documentationSearchResponder != nil {
-            state.withLockedValue { state in
-                state.documentationProviderIsActive = true
-            }
-        }
         if let cached = state.withLockedValue({ $0.cachedToolsList }) {
             return cached
         }
@@ -6732,11 +6694,6 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
         documentationSearchResponder != nil
     }
 
-    func hasActiveDocumentationProvider() -> Bool {
-        state.withLockedValue { state in
-            state.documentationProviderIsActive
-        }
-    }
 
     func chooseUpstreamIndex() -> Int? {
         state.withLockedValue { state in

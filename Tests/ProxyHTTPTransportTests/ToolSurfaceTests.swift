@@ -430,7 +430,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     }
 
     func hasDocumentationProvider() -> Bool { false }
-    func hasActiveDocumentationProvider() -> Bool { false }
 
     func chooseUpstreamIndex() -> Int? { nil }
 

@@ -251,7 +251,7 @@ extension HTTPPostService {
             }
             if isToolsListRequest(object) {
                 toolsListRequests.append(object)
-            } else if isDocumentationSearchRequest(object, allowInactiveProvider: true) {
+            } else if isDocumentationSearchRequest(object) {
                 documentationRequests.append(object)
             } else {
                 forwardedObjects.append(item)
@@ -540,15 +540,8 @@ extension HTTPPostService {
         return false
     }
 
-    private func isDocumentationSearchRequest(
-        _ object: [String: Any],
-        allowInactiveProvider: Bool = false
-    ) -> Bool {
-        let hasRoute =
-            allowInactiveProvider
-            ? sessionManager.hasDocumentationProvider()
-            : sessionManager.hasActiveDocumentationProvider()
-        guard hasRoute else {
+    private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
+        guard sessionManager.hasDocumentationProvider() else {
             return false
         }
         guard object["method"] as? String == "tools/call",

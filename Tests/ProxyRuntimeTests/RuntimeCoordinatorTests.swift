@@ -193,7 +193,6 @@ struct RuntimeCoordinatorTests {
 
         #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(manager.hasActiveDocumentationProvider())
         let observedTimeout = try #require(await documentationProvider.lastToolListTimeout())
         #expect(observedTimeout.nanoseconds > 0)
     }
@@ -231,7 +230,6 @@ struct RuntimeCoordinatorTests {
 
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
-        #expect(manager.hasActiveDocumentationProvider() == false)
     }
 
     @Test func sharedToolsListTimeoutDoesNotInvalidateDocumentationProvider() async throws {
@@ -269,7 +267,6 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(toolNames(in: result) == ["XcodeRead"])
-        #expect(manager.hasActiveDocumentationProvider() == false)
         #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
     }
 
@@ -323,7 +320,6 @@ struct RuntimeCoordinatorTests {
 
         #expect(responseData == providerResponse)
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.hasActiveDocumentationProvider() == false)
         #expect(await documentationProvider.callCount() == 1)
         let observedTimeout = try #require(await documentationProvider.lastCallTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
@@ -381,7 +377,6 @@ struct RuntimeCoordinatorTests {
         #expect(responseData == providerResponse)
         let cachedResult = try #require(manager.cachedToolsListResult())
         #expect(DocumentationToolCatalog.descriptor(in: cachedResult) != nil)
-        #expect(manager.hasActiveDocumentationProvider())
         #expect(await documentationProvider.callCount() == 1)
     }
 
@@ -433,7 +428,6 @@ struct RuntimeCoordinatorTests {
             sessionID: "session-docs-retry-active",
             requestTimeoutOverride: nil
         )
-        #expect(manager.hasActiveDocumentationProvider())
         #expect(manager.cachedToolsListResult() != nil)
 
         let responseData = try await manager.callDocumentationSearch(
@@ -443,7 +437,6 @@ struct RuntimeCoordinatorTests {
 
         #expect(responseData == providerResponse)
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.hasActiveDocumentationProvider())
         #expect(await documentationProvider.callCount() == 1)
     }
 
@@ -483,7 +476,6 @@ struct RuntimeCoordinatorTests {
             sessionID: "session-docs-recovery-failed",
             requestTimeoutOverride: nil
         )
-        #expect(manager.hasActiveDocumentationProvider())
         #expect(manager.cachedToolsListResult() != nil)
 
         await #expect(throws: UpstreamSlotAcquisitionError.self) {
@@ -493,7 +485,6 @@ struct RuntimeCoordinatorTests {
             )
         }
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.hasActiveDocumentationProvider() == false)
         #expect(await documentationProvider.callCount() == 1)
     }
 
@@ -521,7 +512,6 @@ struct RuntimeCoordinatorTests {
         let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(30).nanoseconds)
         #expect(await documentationProvider.toolListUpdateCount() == 1)
-        #expect(manager.hasActiveDocumentationProvider())
     }
 
     @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {

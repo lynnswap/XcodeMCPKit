@@ -60,7 +60,6 @@ package protocol RuntimeCoordinating: Sendable {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> Data
     func hasDocumentationProvider() -> Bool
-    func hasActiveDocumentationProvider() -> Bool
     func invalidateDocumentationProvider(reason: String) async
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
@@ -107,10 +106,6 @@ package protocol RuntimeCoordinating: Sendable {
 
 extension RuntimeCoordinating {
     package func hasDocumentationProvider() -> Bool {
-        false
-    }
-
-    package func hasActiveDocumentationProvider() -> Bool {
         false
     }
 
@@ -202,7 +197,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
-    private let documentationProviderActiveBox = NIOLockedValueBox(false)
 
     package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
         let count = max(1, min(config.upstreamProcessCount, 10))
@@ -561,7 +555,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? min(config.requestTimeout, 30)
             : 30
         let timeout = MCPMethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
-        let task = Task { [weak self, documentationProviderManager, logger] in
+        let task = Task { [documentationProviderManager, logger] in
             guard !Task.isCancelled else { return }
             logger.debug(
                 "Prewarming documentation provider",
@@ -569,8 +563,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     "timeout_seconds": .string("\(timeoutSeconds)"),
                 ]
             )
-            let update = await documentationProviderManager.prewarm(requestTimeout: timeout)
-            self?.recordDocumentationToolListUpdate(update)
+            _ = await documentationProviderManager.prewarm(requestTimeout: timeout)
             guard !Task.isCancelled else { return }
             logger.debug("Documentation provider prewarm completed")
         }
@@ -759,7 +752,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             manager: documentationProviderManager,
             requestTimeout: timeAmount(until: deadline)
         )
-        recordDocumentationToolListUpdate(update)
         return DocumentationToolCatalog.applying(update, to: baseResult)
     }
 
@@ -802,7 +794,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 requestTimeoutOverride: timeout
             )
         } catch let failure as DocumentationProviderCallFailure {
-            setDocumentationProviderActive(failure.providerIsActive)
             invalidateControlPlaneSynchronously(
                 reason: "documentation_provider_invalidated",
                 clearInitialize: false,
@@ -812,7 +803,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         let responseIsDocumentationNotEnabled =
             DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
-        setDocumentationProviderActive(responseIsDocumentationNotEnabled == false)
         if result.didInvalidateProvider || responseIsDocumentationNotEnabled {
             invalidateControlPlaneSynchronously(
                 reason: "documentation_provider_invalidated",
@@ -825,25 +815,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func hasDocumentationProvider() -> Bool {
         documentationProviderManager != nil
-    }
-
-    package func hasActiveDocumentationProvider() -> Bool {
-        documentationProviderActiveBox.withLockedValue { $0 }
-    }
-
-    private func recordDocumentationToolListUpdate(_ update: DocumentationToolListUpdate) {
-        switch update {
-        case .available:
-            setDocumentationProviderActive(true)
-        case .unavailable:
-            setDocumentationProviderActive(false)
-        case .unchanged:
-            break
-        }
-    }
-
-    private func setDocumentationProviderActive(_ isActive: Bool) {
-        documentationProviderActiveBox.withLockedValue { $0 = isActive }
     }
 
     private func documentationToolListUpdate(
@@ -885,7 +856,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func invalidateDocumentationProvider(reason: String) async {
         await documentationProviderManager?.invalidate(reason: reason)
-        setDocumentationProviderActive(false)
         invalidateControlPlaneSynchronously(
             reason: "documentation_provider_\(reason)",
             clearInitialize: false,
