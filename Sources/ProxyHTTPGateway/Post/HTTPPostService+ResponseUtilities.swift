@@ -76,6 +76,47 @@ extension HTTPPostService {
         )
     }
 
+    /// The one canonical "upstream unavailable" resolution: a partial batch
+    /// keeps any locally-produced responses, a plain request degrades to 503.
+    package static func makeUpstreamUnavailableResolution(
+        localResponseData: Data?,
+        responseIDs: [RPCID],
+        forceBatchArray: Bool,
+        requestIsBatch: Bool,
+        sessionID: String,
+        prefersEventStream: Bool
+    ) -> HTTPPostResolution {
+        if localResponseData != nil {
+            return makePartialBatchErrorResolution(
+                localResponseData: localResponseData,
+                responseIDs: responseIDs,
+                code: -32001,
+                message: "upstream unavailable",
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream,
+                forceBatchArray: forceBatchArray,
+                fallbackStatus: .serviceUnavailable,
+                fallbackBody: "upstream unavailable"
+            )
+        }
+        if responseIDs.isEmpty {
+            return .plain(
+                status: .serviceUnavailable,
+                body: "upstream unavailable",
+                sessionID: sessionID
+            )
+        }
+        return .mcpError(
+            id: nil,
+            ids: responseIDs,
+            code: -32001,
+            message: "upstream unavailable",
+            forceBatchArray: requestIsBatch,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
+        )
+    }
+
     /// The one canonical "expected initialize request" rejection shape.
     package static func makeExpectedInitializeResolution(
         requestIDs: [RPCID],

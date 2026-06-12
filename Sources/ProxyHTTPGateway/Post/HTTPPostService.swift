@@ -463,37 +463,12 @@ package final class HTTPPostService: Sendable {
                 terminalState: .failed,
                 reason: .upstreamOverloaded
             )
-            if localResponseData != nil {
-                return eventLoop.makeSucceededFuture(
-                    Self.makePartialBatchErrorResolution(
-                        localResponseData: localResponseData,
-                        responseIDs: forwardedRequestIDs,
-                        code: -32001,
-                        message: "upstream unavailable",
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream,
-                        forceBatchArray: filteredRequest.forceBatchArray,
-                        fallbackStatus: .serviceUnavailable,
-                        fallbackBody: "upstream unavailable"
-                    )
-                )
-            }
-            if forwardedRequestIDs.isEmpty {
-                return eventLoop.makeSucceededFuture(
-                    .plain(
-                        status: .serviceUnavailable,
-                        body: "upstream unavailable",
-                        sessionID: sessionID
-                    )
-                )
-            }
             return eventLoop.makeSucceededFuture(
-                .mcpError(
-                    id: nil,
-                    ids: forwardedRequestIDs,
-                    code: -32001,
-                    message: "upstream unavailable",
-                    forceBatchArray: requestIsBatch,
+                Self.makeUpstreamUnavailableResolution(
+                    localResponseData: localResponseData,
+                    responseIDs: forwardedRequestIDs,
+                    forceBatchArray: filteredRequest.forceBatchArray,
+                    requestIsBatch: requestIsBatch,
                     sessionID: sessionID,
                     prefersEventStream: prefersEventStream
                 )

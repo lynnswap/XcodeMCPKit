@@ -250,45 +250,14 @@ extension HTTPPostService {
                 sessionID: sessionID,
                 upstreamIndexOverride: upstreamIndex
             ) else {
-                if localResponseData != nil {
-                    return makeImmediateLeaseResolution(
-                        Self.makePartialBatchErrorResolution(
-                            localResponseData: localResponseData,
-                            responseIDs: filteredRequest.forwardedResponseIDs,
-                            code: -32001,
-                            message: "upstream unavailable",
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream,
-                            forceBatchArray: filteredRequest.forceBatchArray,
-                            fallbackStatus: .serviceUnavailable,
-                            fallbackBody: "upstream unavailable"
-                        ),
-                        leaseID: leaseID,
-                        eventLoop: eventLoop,
-                        cancellationHandle: cancellationHandle
-                    )
-                }
-                if filteredRequest.forwardedResponseIDs.isEmpty {
-                    return makeImmediateLeaseResolution(
-                        .plain(
-                        status: .serviceUnavailable,
-                        body: "upstream unavailable",
-                        sessionID: sessionID
-                        ),
-                        leaseID: leaseID,
-                        eventLoop: eventLoop,
-                        cancellationHandle: cancellationHandle
-                    )
-                }
                 return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: filteredRequest.forwardedResponseIDs,
-                    code: -32001,
-                    message: "upstream unavailable",
-                    forceBatchArray: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    Self.makeUpstreamUnavailableResolution(
+                        localResponseData: localResponseData,
+                        responseIDs: filteredRequest.forwardedResponseIDs,
+                        forceBatchArray: filteredRequest.forceBatchArray,
+                        requestIsBatch: requestIsBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
                     eventLoop: eventLoop,
