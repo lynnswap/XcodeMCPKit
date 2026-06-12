@@ -55,11 +55,6 @@ extension HTTPPostService {
         do {
             parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
         } catch {
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .invalidUpstreamResponse
-            )
             return .invalidRequest
         }
 
@@ -156,31 +151,22 @@ extension HTTPPostService {
 
             switch resolution {
             case .success(let responseData):
+                // Releasing the slot between retry attempts is this
+                // function's job; the terminal lease transition belongs to
+                // the caller that owns the whole refresh request.
                 if allowsLeaseRetry,
                     RefreshCodeIssuesWorkflow.isRetryableRefreshCodeIssuesFailure(responseData),
                     shouldRequeueLeaseOnRetryableFailure()
                 {
                     sessionManager.requeueRequestLease(leaseID)
-                } else {
-                    sessionManager.completeRequestLease(leaseID)
                 }
                 return .success(responseData)
             case .timeout:
-                sessionManager.failRequestLease(
-                    leaseID,
-                    terminalState: .timedOut,
-                    reason: .timedOut
-                )
                 return .timeout(
                     responseIDs: requestIDs,
                     isBatch: requestIsBatch
                 )
             case .invalidUpstreamResponse:
-                sessionManager.failRequestLease(
-                    leaseID,
-                    terminalState: .failed,
-                    reason: .invalidUpstreamResponse
-                )
                 return .invalidUpstreamResponse
             }
         } catch is CancellationError {
@@ -190,15 +176,43 @@ extension HTTPPostService {
                 isBatch: requestIsBatch
             )
         } catch {
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
+        }
+    }
+
+    /// The single terminal lease transition for a refresh request,
+    /// regardless of whether the proxy answered locally or forwarded.
+    package func finishRefreshLease(
+        _ leaseID: RequestLeaseID,
+        result: RefreshForwardAttemptResult
+    ) {
+        switch result {
+        case .success:
+            sessionManager.completeRequestLease(leaseID)
+        case .timeout:
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .timedOut,
+                reason: .timedOut
+            )
+        case .invalidRequest, .invalidUpstreamResponse:
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .invalidUpstreamResponse
+            )
+        case .upstreamUnavailable:
             sessionManager.failRequestLease(
                 leaseID,
                 terminalState: .failed,
                 reason: .upstreamUnavailable
             )
-            return .upstreamUnavailable(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
+        case .cancelled:
+            // The cancellation handle owns lease teardown on this path.
+            break
         }
     }
 
@@ -266,9 +280,8 @@ extension HTTPPostService {
         eventLoop: EventLoop,
         leaseID: RequestLeaseID,
         cancellationHandle: HTTPPostCancellationHandle?
-    ) async -> RefreshWorkflowExecution {
-        let usedDirectForwarding = NIOLockedValueBox(false)
-        let result = await refreshWorkflow.run(
+    ) async -> RefreshForwardAttemptResult {
+        await refreshWorkflow.run(
             refreshRequest: refreshRequest,
             bodyData: bodyData,
             sessionID: sessionID,
@@ -302,8 +315,7 @@ extension HTTPPostService {
             },
             forwarder: {
                 bodyData, sessionID, requestIDs, requestIsBatch, shouldRequeueLeaseOnRetryableFailure, eventLoop, requestTimeoutOverride in
-                usedDirectForwarding.withLockedValue { $0 = true }
-                return await self.forwardOnce(
+                await self.forwardOnce(
                     bodyData: bodyData,
                     sessionID: sessionID,
                     requestIDs: requestIDs,
@@ -315,10 +327,6 @@ extension HTTPPostService {
                     requestTimeoutOverride: requestTimeoutOverride
                 )
             }
-        )
-        return RefreshWorkflowExecution(
-            result: result,
-            usedDirectForwarding: usedDirectForwarding.withLockedValue { $0 }
         )
     }
 

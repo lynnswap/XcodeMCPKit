@@ -86,7 +86,7 @@ extension HTTPPostService {
             {
                 let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
                 let refreshTask = Task { [self] in
-                    let execution = await forwardRefreshCodeIssuesRequest(
+                    let result = await forwardRefreshCodeIssuesRequest(
                         route.request,
                         bodyData: route.bodyData,
                         sessionID: sessionID,
@@ -105,8 +105,9 @@ extension HTTPPostService {
                             return
                         }
                         cancellationHandle?.markCompleted()
+                        self.finishRefreshLease(leaseID, result: result)
                         let resolution = self.makeResolution(
-                            from: execution.result,
+                            from: result,
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
@@ -128,9 +129,6 @@ extension HTTPPostService {
                                 emptyStatus: .accepted
                             )
                         )
-                        if execution.usedDirectForwarding == false {
-                            self.sessionManager.completeRequestLease(leaseID)
-                        }
                     }
                 }
                 cancellationHandle?.bindRefreshTask(refreshTask)
