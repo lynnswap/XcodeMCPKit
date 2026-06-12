@@ -56,7 +56,12 @@ public final class ProxyServer {
                     )
                 },
                 makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(config: config, eventLoop: eventLoop)
+                    RuntimeCoordinator(
+                        config: config,
+                        eventLoop: eventLoop,
+                        upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue),
+                        xcodeTargetDiscovery: LiveXcodeTargetDiscovery()
+                    )
                 }
             )
         }

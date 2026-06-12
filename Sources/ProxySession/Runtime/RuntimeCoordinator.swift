@@ -198,38 +198,47 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
 
-    package convenience init(config: ProxyConfig, eventLoop: EventLoop) {
+    /// Composition-root entry point: the Xcode-specific readiness gate and
+    /// target discovery are injected because their live implementations
+    /// live above this module (ProxyXcodeSupport).
+    package convenience init(
+        config: ProxyConfig,
+        eventLoop: EventLoop,
+        upstreamReadinessGate: UpstreamReadinessGate? = nil,
+        xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil
+    ) {
         let count = max(1, min(config.upstreamProcessCount, 10))
         let upstreams = Self.makeDefaultUpstreams(
             config: config, sharedSessionID: config.upstreamSessionID, count: count)
         let clock = ClockClient.liveValue
-        let documentationProviderManager = Self.makeDefaultDocumentationProviderManager(config: config)
+        let documentationProviderManager = xcodeTargetDiscovery.flatMap { discovery in
+            Self.makeDefaultDocumentationProviderManager(config: config, discovery: discovery)
+        }
         self.init(
             config: config,
             eventLoop: eventLoop,
             upstreams: upstreams,
             clock: clock,
-            upstreamReadinessGate: Self.defaultUpstreamReadinessGate(
-                config: config,
-                clock: clock
-            ),
+            upstreamReadinessGate: upstreamReadinessGate,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil
         )
     }
 
     package static func makeDefaultDocumentationProviderManager(
-        config: ProxyConfig
+        config: ProxyConfig,
+        discovery: any XcodeTargetDiscovering
     ) -> (any DocumentationProviderManaging)? {
         guard config.disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
             return nil
         }
-        guard isDefaultXcrunMCPBridgeInvocation(config: config) else {
+        guard XcrunArguments.isDefaultMCPBridgeInvocation(config: config) else {
             return nil
         }
         let environment = ProcessInfo.processInfo.environment
         let pinnedProcessID = environment["MCP_XCODE_PID"].flatMap(pid_t.init)
         return DocumentationProviderManager(
+            discovery: discovery,
             sessionFactory: LiveDocumentationProviderSessionFactory(baseEnvironment: environment),
             pinnedProcessID: pinnedProcessID,
             initializeParams: InitializeHandshakeParams.resolved(

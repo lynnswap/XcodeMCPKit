@@ -2,26 +2,6 @@ import Foundation
 import ProxyCore
 
 extension RuntimeCoordinator {
-    static func defaultUpstreamReadinessGate(
-        config: ProxyConfig,
-        clock: ClockClient
-    ) -> UpstreamReadinessGate {
-        guard isDefaultXcrunMCPBridgeInvocation(config: config) else {
-            return .alwaysReady(uptimeNanoseconds: clock.uptimeNanoseconds)
-        }
-
-        let processRunner = ProcessRunner()
-        return .xcodeMCPBridge(
-            uptimeNanoseconds: clock.uptimeNanoseconds,
-            sleepNanoseconds: { nanoseconds in
-                try? await Task.sleep(nanoseconds: nanoseconds)
-            },
-            runProcess: { request in
-                try await processRunner.run(request)
-            }
-        )
-    }
-
     func runWhenUpstreamReady(
         reason: String,
         applyBackoff: Bool = false,
@@ -129,12 +109,4 @@ extension RuntimeCoordinator {
         }
     }
 
-    package static func isDefaultXcrunMCPBridgeInvocation(config: ProxyConfig) -> Bool {
-        guard XcrunArguments.isXcrunCommand(config.upstreamCommand),
-              let toolName = XcrunArguments.firstToolSelection(from: config.upstreamArgs)?.toolName
-        else {
-            return false
-        }
-        return URL(fileURLWithPath: toolName).lastPathComponent == "mcpbridge"
-    }
 }

@@ -1,3 +1,4 @@
+import ProxyXcodeSupport
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
@@ -122,41 +123,41 @@ struct RuntimeCoordinatorTests {
     @Test func defaultReadinessGateRecognizesFlaggedXcrunMCPBridgeInvocation() {
         var config = makeConfig(requestTimeout: 5)
         config.upstreamArgs = ["--sdk", "macosx", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config))
+        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config))
 
         config.upstreamCommand = "/usr/bin/xcrun"
         config.upstreamArgs = ["--sdk=macosx", "--toolchain", "default", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config))
+        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config))
     }
 
     @Test func defaultReadinessGateIgnoresNonMCPBridgeAndCustomWrapperInvocations() {
         var config = makeConfig(requestTimeout: 5)
         config.upstreamArgs = ["--sdk", "macosx", "swift"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
+        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
 
         config.upstreamCommand = "/bin/echo"
         config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
+        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
 
         config.upstreamCommand = "xcrun"
         config.upstreamArgs = ["--sdk", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
+        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
     }
 
     @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
         var config = makeConfig(requestTimeout: 5)
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) != nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) != nil)
 
         config.disabledToolNames = [DocumentationToolCatalog.toolName]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
 
         config.disabledToolNames = []
         config.upstreamArgs = ["--sdk", "macosx", "swift"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
 
         config.upstreamCommand = "/bin/echo"
         config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
     }
 
     @Test func sharedToolsListMergesDocumentationProviderDescriptor() async throws {

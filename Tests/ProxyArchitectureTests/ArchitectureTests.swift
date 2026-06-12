@@ -81,6 +81,7 @@ private let forbiddenImportRules = [
         forbiddenModules: [
             "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
             "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI",
+            "AppKit", "ApplicationServices",
         ]
     ),
     ForbiddenImportRule(
