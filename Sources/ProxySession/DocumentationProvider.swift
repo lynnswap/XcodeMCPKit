@@ -551,6 +551,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let providerSelectionTimeout: TimeAmount?
     private let pinnedProcessID: pid_t?
     private let initializeParams: [String: JSONValue]
+    private let clock: ClockClient
     private let logger: Logger
     private var activeProvider: ActiveProvider?
     private var providerSelection: ProviderSelection?
@@ -562,6 +563,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = DocumentationProviderManager.defaultInitializeParams(),
+        clock: ClockClient = .liveValue,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
@@ -569,6 +571,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.providerSelectionTimeout = providerSelectionTimeout
         self.pinnedProcessID = pinnedProcessID
         self.initializeParams = initializeParams
+        self.clock = clock
         self.logger = logger
     }
 
@@ -600,7 +603,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard !isShutdown else {
             return .noProvider
         }
-        let requestDeadline = Self.requestDeadline(for: requestTimeoutOverride)
+        let deadline = Deadline.fromNow(requestTimeoutOverride, clock: clock)
         // Each attempt: acquire provider, call, classify. A failed call or a
         // "not enabled" response invalidates the provider and retries once
         // with a replacement; the most recent classification wins.
@@ -608,24 +611,22 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         var deadlineExpired = false
 
         for _ in 0..<2 {
-            let selectionTimeout = Self.requestTimeout(until: requestDeadline)
-            guard selectionTimeout?.nanoseconds != 0 else {
+            if let deadline, deadline.hasExpired {
                 deadlineExpired = true
                 break
             }
-            guard let provider = await providerIfAvailable(requestTimeout: selectionTimeout) else {
+            guard let provider = await providerIfAvailable(requestTimeout: deadline?.remaining()) else {
                 try Task.checkCancellation()
                 break
             }
-            let callTimeout = Self.requestTimeout(until: requestDeadline)
-            guard callTimeout?.nanoseconds != 0 else {
+            if let deadline, deadline.hasExpired {
                 deadlineExpired = true
                 break
             }
             do {
                 let response = try await provider.profile.connection.call(
                     requestData,
-                    timeout: callTimeout
+                    timeout: deadline?.remaining()
                 )
                 guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
                     return .handled(response)
@@ -782,7 +783,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard !isShutdown else {
             return nil
         }
-        let selectionDeadline = Self.requestDeadline(for: requestTimeout)
+        let selectionDeadline = Deadline.fromNow(requestTimeout, clock: clock)
         let discoveredTargets = discovery.runningXcodeTargets()
         let targets: [DocumentationProviderTarget]
         if let pinnedProcessID {
@@ -804,7 +805,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             guard !Task.isCancelled, !isShutdown else {
                 break
             }
-            let candidateTimeout = Self.candidateProbeTimeout(
+            let candidateTimeout = candidateProbeTimeout(
                 until: selectionDeadline,
                 remainingCandidateCount: targets.count - index
             )
@@ -896,14 +897,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         target: DocumentationProviderTarget,
         requestTimeout: TimeAmount?
     ) async throws -> CandidateProfile {
-        let probeDeadline = Self.requestDeadline(for: requestTimeout ?? .seconds(30))
+        let probeDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
         try Task.checkCancellation()
         let session = try await sessionFactory.startSession(for: target)
         let connection = DocumentationProviderConnection(session: session)
         do {
             try Task.checkCancellation()
             await connection.start()
-            let initializeTimeout = Self.requestTimeout(until: probeDeadline)
+            let initializeTimeout = remainingTimeout(until: probeDeadline)
             guard initializeTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
@@ -917,7 +918,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized",
             ])
-            let toolsListTimeout = Self.requestTimeout(until: probeDeadline)
+            let toolsListTimeout = remainingTimeout(until: probeDeadline)
             guard toolsListTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
@@ -929,7 +930,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             guard let descriptor = DocumentationToolCatalog.descriptor(in: toolsResult) else {
                 throw UpstreamSlotAcquisitionError.unavailable
             }
-            let documentationProbeTimeout = Self.requestTimeout(until: probeDeadline)
+            let documentationProbeTimeout = remainingTimeout(until: probeDeadline)
             guard documentationProbeTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
@@ -1059,33 +1060,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             .compactMap { Int($0) }
     }
 
-    private static func requestDeadline(for requestTimeout: TimeAmount?) -> UInt64? {
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+    private func remainingTimeout(until deadline: Deadline?) -> TimeAmount? {
+        guard let deadline else {
             return nil
         }
-        let now = DispatchTime.now().uptimeNanoseconds
-        let remainingToMax = UInt64.max &- now
-        let clamped = min(UInt64(requestTimeout.nanoseconds), remainingToMax)
-        return now &+ clamped
+        return deadline.remaining()
     }
 
-    private static func requestTimeout(until deadlineUptimeNs: UInt64?) -> TimeAmount? {
-        guard let deadlineUptimeNs else {
-            return nil
-        }
-        let now = DispatchTime.now().uptimeNanoseconds
-        guard deadlineUptimeNs > now else {
-            return .nanoseconds(0)
-        }
-        let remaining = deadlineUptimeNs - now
-        return .nanoseconds(Int64(min(remaining, UInt64(Int64.max))))
-    }
-
-    private static func candidateProbeTimeout(
-        until deadlineUptimeNs: UInt64?,
+    private func candidateProbeTimeout(
+        until deadline: Deadline?,
         remainingCandidateCount: Int
     ) -> TimeAmount? {
-        guard let remaining = requestTimeout(until: deadlineUptimeNs) else {
+        guard let remaining = remainingTimeout(until: deadline) else {
             return nil
         }
         guard remaining.nanoseconds > 0 else {
