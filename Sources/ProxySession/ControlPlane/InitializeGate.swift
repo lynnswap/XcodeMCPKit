@@ -81,10 +81,6 @@ package final class InitializeManager: Sendable {
         state.withLockedValue { $0.initResult != nil }
     }
 
-    package func cachedInitializeResult() -> JSONValue? {
-        state.withLockedValue { $0.initResult }
-    }
-
     package func beginEagerInitializePrimary() -> (
         shouldSendRequest: Bool,
         shouldScheduleTimeout: Bool
@@ -230,13 +226,6 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func restorePendingInitializes(_ pending: [PendingInitialize]) {
-        guard pending.isEmpty == false else { return }
-        state.withLockedValue { state in
-            state.initPending.insert(contentsOf: pending, at: 0)
-        }
-    }
-
     package func completePrimaryInitializeFailure() -> FailureResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
@@ -358,12 +347,6 @@ package final class InitializeManager: Sendable {
                     .shouldRetryEagerInitializePrimaryAfterWarmInitFailure,
                 isShuttingDown: state.isShuttingDown
             )
-        }
-    }
-
-    package func pendingSessionIDs() -> [String] {
-        state.withLockedValue { state in
-            Array(Set(state.initPending.map(\.sessionID))).sorted()
         }
     }
 

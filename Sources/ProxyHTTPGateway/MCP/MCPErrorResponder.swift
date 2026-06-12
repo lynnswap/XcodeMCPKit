@@ -85,10 +85,6 @@ enum MCPErrorResponder {
         return ([], false)
     }
 
-    static func requestIDs(from data: Data) -> [RPCID] {
-        requestMetadata(from: data).ids
-    }
-
     private static func makeErrorObject(
         code: Int,
         message: String,

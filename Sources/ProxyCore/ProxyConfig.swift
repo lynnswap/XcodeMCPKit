@@ -298,30 +298,6 @@ public struct CLIParser {
         )
     }
 
-    public static func usage() -> String {
-        """
-        Usage: xcode-mcp-proxy [options]
-
-        Options:
-          --listen host:port         Listen address (default: localhost:0)
-          --host host                Listen host (default: localhost)
-          --port port                Listen port (default: 0)
-          --upstream-command cmd     Upstream command (default: xcrun)
-          --upstream-args a,b,c      Upstream args (default: mcpbridge)
-          --upstream-arg value       Append a single upstream arg
-          --upstream-processes n     Upstream process count (default: 1, max: 10)
-          --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
-          --max-body-bytes n         Max request body size (default: 1048576)
-          --request-timeout seconds  Request timeout (default: 300, 0 disables non-initialize timeouts)
-          --config path              Path to proxy config TOML (env \(configPathEnv))
-          --auto-approve             Auto-approve the Xcode permission dialog
-          --refresh-code-issues-mode proxy|upstream
-                                     Refresh implementation (default: proxy; env \(refreshCodeIssuesModeEnv))
-          --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)
-          -h, --help                 Show help
-        """
-    }
-
     private static func parseListen(_ value: String) throws -> (host: String, port: Int) {
         guard let colonIndex = value.lastIndex(of: ":") else {
             throw CLIError.message("--listen expects host:port (got \(value))")

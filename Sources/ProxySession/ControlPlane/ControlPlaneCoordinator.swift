@@ -243,15 +243,6 @@ package actor ControlPlaneCoordinator {
         }
     }
 
-    package func seedToolsCatalog(
-        _ rawResult: JSONValue,
-        sourceUpstream: Int? = nil
-    ) {
-        let source = sourceUpstream ?? brokerState.toolsSourceUpstream() ?? 0
-        brokerState.syncCanonicalToolsCatalog(rawResult, sourceUpstream: source)
-        syncDebug()
-    }
-
     package func invalidate(
         reason _: String,
         clearInitialize: Bool = false,

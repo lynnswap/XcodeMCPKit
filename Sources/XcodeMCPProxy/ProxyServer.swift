@@ -92,11 +92,6 @@ public final class ProxyServer {
         )
     }
 
-    public func run() async throws {
-        _ = try startAndWriteDiscovery()
-        try await wait()
-    }
-
     public func startAndWriteDiscovery() throws -> (host: String, port: Int) {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)

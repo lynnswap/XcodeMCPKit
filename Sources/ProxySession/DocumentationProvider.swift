@@ -43,28 +43,6 @@ package protocol DocumentationProviderManaging: Sendable {
     func shutdown() async
 }
 
-package struct DisabledDocumentationProviderManager: DocumentationProviderManaging {
-    package init() {}
-
-    package func prewarm(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
-        .unchanged
-    }
-
-    package func toolListUpdate(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
-        .unchanged
-    }
-
-    package func callDocumentationSearch(
-        requestData _: Data,
-        requestTimeoutOverride _: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult {
-        throw UpstreamSlotAcquisitionError.unavailable
-    }
-
-    package func invalidate(reason _: String) async {}
-    package func shutdown() async {}
-}
-
 package enum DocumentationToolCatalog {
     package static let toolName = "DocumentationSearch"
 
