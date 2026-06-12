@@ -12,24 +12,13 @@ package enum DocumentationToolListUpdate: Sendable {
     case available(JSONValue)
 }
 
-package struct DocumentationProviderCallResult: Sendable {
-    package let data: Data
-    package let didInvalidateProvider: Bool
-
-    package init(data: Data, didInvalidateProvider: Bool) {
-        self.data = data
-        self.didInvalidateProvider = didInvalidateProvider
-    }
-}
-
-package struct DocumentationProviderCallFailure: Error {
-    package let underlying: any Error
-    package let providerIsActive: Bool
-
-    package init(underlying: any Error, providerIsActive: Bool) {
-        self.underlying = underlying
-        self.providerIsActive = providerIsActive
-    }
+/// The manager's classification of one DocumentationSearch attempt.
+/// `noProvider` means no live provider could serve the call and the
+/// request should be forwarded to the regular mcpbridge upstream.
+package enum DocumentationProviderCallOutcome: Sendable {
+    case handled(Data)
+    case noProvider
+    case failed(any Error)
 }
 
 package protocol DocumentationProviderManaging: Sendable {
@@ -38,7 +27,7 @@ package protocol DocumentationProviderManaging: Sendable {
     func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult
+    ) async throws -> DocumentationProviderCallOutcome
     func invalidate(reason: String) async
     func shutdown() async
 }
@@ -607,106 +596,64 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     package func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult {
+    ) async throws -> DocumentationProviderCallOutcome {
         guard !isShutdown else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            return .noProvider
         }
         let requestDeadline = Self.requestDeadline(for: requestTimeoutOverride)
-        let initialTimeout = Self.requestTimeout(until: requestDeadline)
-        guard initialTimeout?.nanoseconds != 0 else {
-            throw TimeoutError()
-        }
-        guard let provider = await providerIfAvailable(requestTimeout: initialTimeout) else {
-            try Task.checkCancellation()
-            throw UpstreamSlotAcquisitionError.unavailable
-        }
+        // Each attempt: acquire provider, call, classify. A failed call or a
+        // "not enabled" response invalidates the provider and retries once
+        // with a replacement; the most recent classification wins.
+        var lastOutcome: DocumentationProviderCallOutcome?
+        var deadlineExpired = false
 
-        let callTimeout = Self.requestTimeout(until: requestDeadline)
-        guard callTimeout?.nanoseconds != 0 else {
-            throw TimeoutError()
-        }
-
-        let response: Data
-        do {
-            response = try await provider.profile.connection.call(
-                requestData,
-                timeout: callTimeout
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            try Task.checkCancellation()
-            await invalidate(provider, reason: "documentation_provider_call_failed")
-            let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
-            guard replacementSelectionTimeout?.nanoseconds != 0 else {
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+        for _ in 0..<2 {
+            let selectionTimeout = Self.requestTimeout(until: requestDeadline)
+            guard selectionTimeout?.nanoseconds != 0 else {
+                deadlineExpired = true
+                break
             }
-            guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+            guard let provider = await providerIfAvailable(requestTimeout: selectionTimeout) else {
                 try Task.checkCancellation()
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+                break
             }
-            let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
-            guard retryCallTimeout?.nanoseconds != 0 else {
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: true)
+            let callTimeout = Self.requestTimeout(until: requestDeadline)
+            guard callTimeout?.nanoseconds != 0 else {
+                deadlineExpired = true
+                break
             }
-            let retryResponse: Data
             do {
-                retryResponse = try await replacement.profile.connection.call(
+                let response = try await provider.profile.connection.call(
                     requestData,
-                    timeout: retryCallTimeout
+                    timeout: callTimeout
                 )
+                guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
+                    return .handled(response)
+                }
+                await invalidate(provider, reason: "documentation_search_not_enabled")
+                try Task.checkCancellation()
+                lastOutcome = .handled(response)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 try Task.checkCancellation()
-                await invalidate(replacement, reason: "documentation_provider_retry_call_failed")
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+                await invalidate(provider, reason: "documentation_provider_call_failed")
+                lastOutcome = .failed(error)
             }
-            if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
-                await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
-            }
-            return DocumentationProviderCallResult(
-                data: retryResponse,
-                didInvalidateProvider: true
-            )
-        }
-        guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: false)
         }
 
-        await invalidate(provider, reason: "documentation_search_not_enabled")
-        try Task.checkCancellation()
-        let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
-        guard replacementSelectionTimeout?.nanoseconds != 0 else {
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
-        }
-        guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
-            try Task.checkCancellation()
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
-        }
-        let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
-        guard retryCallTimeout?.nanoseconds != 0 else {
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
-        }
-        do {
-            let retryResponse = try await replacement.profile.connection.call(
-                requestData,
-                timeout: retryCallTimeout
-            )
-            if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
-                await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
+        if let lastOutcome {
+            if case .failed(let error) = lastOutcome, error is UpstreamSlotAcquisitionError {
+                // The provider channel itself is gone; treat it like having
+                // no provider so the caller forwards to the regular upstream.
+                return .noProvider
             }
-            return DocumentationProviderCallResult(
-                data: retryResponse,
-                didInvalidateProvider: true
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            try Task.checkCancellation()
-            await invalidate(replacement, reason: "documentation_search_retry_call_failed")
-            throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+            return lastOutcome
         }
+        if deadlineExpired {
+            return .failed(TimeoutError())
+        }
+        return .noProvider
     }
 
     package func invalidate(reason _: String) async {

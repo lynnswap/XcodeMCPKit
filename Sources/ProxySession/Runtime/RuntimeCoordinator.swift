@@ -32,6 +32,14 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
     package init() {}
 }
 
+/// The single routing decision for a DocumentationSearch tools/call:
+/// either the provider produced the response, or the request must be
+/// forwarded to the regular mcpbridge upstream.
+package enum DocumentationSearchOutcome: Sendable {
+    case handled(Data)
+    case fallbackToUpstream
+}
+
 package protocol RuntimeCoordinating: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
@@ -58,9 +66,8 @@ package protocol RuntimeCoordinating: Sendable {
     func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> Data
+    ) async throws -> DocumentationSearchOutcome
     func hasDocumentationProvider() -> Bool
-    func invalidateDocumentationProvider(reason: String) async
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: RequestLeaseID,
@@ -135,11 +142,9 @@ extension RuntimeCoordinating {
     package func callDocumentationSearch(
         requestData _: Data,
         requestTimeoutOverride _: TimeAmount?
-    ) async throws -> Data {
-        throw UpstreamSlotAcquisitionError.unavailable
+    ) async throws -> DocumentationSearchOutcome {
+        .fallbackToUpstream
     }
-
-    package func invalidateDocumentationProvider(reason _: String) async {}
 }
 
 package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
@@ -772,9 +777,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> Data {
+    ) async throws -> DocumentationSearchOutcome {
         guard let documentationProviderManager else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            return .fallbackToUpstream
         }
         let timeout =
             requestTimeoutOverride
@@ -782,30 +787,17 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 "tools/call",
                 defaultSeconds: config.requestTimeout
             )
-        let result: DocumentationProviderCallResult
-        do {
-            result = try await documentationProviderManager.callDocumentationSearch(
-                requestData: requestData,
-                requestTimeoutOverride: timeout
-            )
-        } catch let failure as DocumentationProviderCallFailure {
-            invalidateControlPlaneSynchronously(
-                reason: "documentation_provider_invalidated",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
-            throw failure.underlying
+        switch try await documentationProviderManager.callDocumentationSearch(
+            requestData: requestData,
+            requestTimeoutOverride: timeout
+        ) {
+        case .handled(let data):
+            return .handled(data)
+        case .noProvider:
+            return .fallbackToUpstream
+        case .failed(let error):
+            throw error
         }
-        let responseIsDocumentationNotEnabled =
-            DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data)
-        if result.didInvalidateProvider || responseIsDocumentationNotEnabled {
-            invalidateControlPlaneSynchronously(
-                reason: "documentation_provider_invalidated",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
-        }
-        return result.data
     }
 
     package func hasDocumentationProvider() -> Bool {
@@ -847,15 +839,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
             return .unavailable
         }
-    }
-
-    package func invalidateDocumentationProvider(reason: String) async {
-        await documentationProviderManager?.invalidate(reason: reason)
-        invalidateControlPlaneSynchronously(
-            reason: "documentation_provider_\(reason)",
-            clearInitialize: false,
-            clearToolsCatalog: true
-        )
     }
 
     func encodeJSONRPCResultBuffer(

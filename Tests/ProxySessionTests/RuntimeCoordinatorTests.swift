@@ -270,7 +270,7 @@ struct RuntimeCoordinatorTests {
         #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
     }
 
-    @Test func documentationSearchInvalidatesCanonicalToolsCatalogWhenProviderStales() async throws {
+    @Test func documentationSearchKeepsCanonicalToolsCatalogWhenProviderStales() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -289,12 +289,7 @@ struct RuntimeCoordinatorTests {
         )
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callResults: [
-                DocumentationProviderCallResult(
-                    data: providerResponse,
-                    didInvalidateProvider: true
-                ),
-            ]
+            callOutcomes: [.handled(providerResponse)]
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -313,13 +308,17 @@ struct RuntimeCoordinatorTests {
         )
         #expect(manager.cachedToolsListResult() != nil)
 
-        let responseData = try await manager.callDocumentationSearch(
+        let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 41, query: "UIView"),
             requestTimeoutOverride: nil
         )
 
+        guard case .handled(let responseData) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
         #expect(responseData == providerResponse)
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.cachedToolsListResult() != nil)
         #expect(await documentationProvider.callCount() == 1)
         let observedTimeout = try #require(await documentationProvider.lastCallTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
@@ -346,12 +345,7 @@ struct RuntimeCoordinatorTests {
         )
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callResults: [
-                DocumentationProviderCallResult(
-                    data: providerResponse,
-                    didInvalidateProvider: false
-                ),
-            ]
+            callOutcomes: [.handled(providerResponse)]
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -368,11 +362,15 @@ struct RuntimeCoordinatorTests {
         ])
         manager.setCachedToolsListResult(cachedTools)
 
-        let responseData = try await manager.callDocumentationSearch(
+        let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
             requestTimeoutOverride: nil
         )
 
+        guard case .handled(let responseData) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
         #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
         #expect(responseData == providerResponse)
         let cachedResult = try #require(manager.cachedToolsListResult())
@@ -380,79 +378,14 @@ struct RuntimeCoordinatorTests {
         #expect(await documentationProvider.callCount() == 1)
     }
 
-    @Test func documentationSearchKeepsProviderActiveAfterSuccessfulRetryInvalidatesCatalog() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let providerResponse = try makeJSONRPCResponse(
-            id: 42,
-            result: [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "{\"answer\":\"retry\"}",
-                    ],
-                ],
-                "isError": false,
-            ]
-        )
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callResults: [
-                DocumentationProviderCallResult(
-                    data: providerResponse,
-                    didInvalidateProvider: true
-                ),
-            ]
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ])
-        )
-        _ = try await manager.sharedToolsList(
-            sessionID: "session-docs-retry-active",
-            requestTimeoutOverride: nil
-        )
-        #expect(manager.cachedToolsListResult() != nil)
-
-        let responseData = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 42, query: "UIView"),
-            requestTimeoutOverride: nil
-        )
-
-        #expect(responseData == providerResponse)
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(await documentationProvider.callCount() == 1)
-    }
-
-    @Test func documentationSearchClearsProviderStateWhenRecoveryFailsAfterInvalidation() async throws {
+    @Test func documentationSearchFallsBackToUpstreamWhenNoProviderAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callFailures: [
-                DocumentationProviderCallFailure(
-                    underlying: UpstreamSlotAcquisitionError.unavailable,
-                    providerIsActive: false
-                ),
-            ]
+            callOutcomes: [.noProvider]
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -478,13 +411,15 @@ struct RuntimeCoordinatorTests {
         )
         #expect(manager.cachedToolsListResult() != nil)
 
-        await #expect(throws: UpstreamSlotAcquisitionError.self) {
-            try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 43, query: "UIView"),
-                requestTimeoutOverride: nil
-            )
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 43, query: "UIView"),
+            requestTimeoutOverride: nil
+        )
+        guard case .fallbackToUpstream = outcome else {
+            Issue.record("expected fallbackToUpstream outcome, got \(outcome)")
+            return
         }
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.cachedToolsListResult() != nil)
         #expect(await documentationProvider.callCount() == 1)
     }
 
@@ -1001,14 +936,17 @@ struct RuntimeCoordinatorTests {
         )
         #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
 
-        let result = try await manager.callDocumentationSearch(
+        let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 73, query: "UIView"),
             requestTimeoutOverride: nil
         )
 
-        #expect(result.didInvalidateProvider)
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data) == false)
-        #expect(try toolContentText(in: result.data) == "{\"answer\":\"retry\"}")
+        guard case .handled(let responseData) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"retry\"}")
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
@@ -1065,13 +1003,16 @@ struct RuntimeCoordinatorTests {
         )
         #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
 
-        let result = try await manager.callDocumentationSearch(
+        let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
 
-        #expect(result.didInvalidateProvider)
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data))
+        guard case .handled(let responseData) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData))
         let followUpTools = DocumentationToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
             to: try jsonValue(["tools": []])
@@ -1129,15 +1070,13 @@ struct RuntimeCoordinatorTests {
         )
         #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
 
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
-                requestTimeoutOverride: .seconds(1)
-            )
-            Issue.record("DocumentationSearch should report an invalidated retry failure")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.providerIsActive == false)
-            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .noProvider = outcome else {
+            Issue.record("expected noProvider outcome, got \(outcome)")
+            return
         }
 
         let followUpTools = DocumentationToolCatalog.applying(
@@ -1202,15 +1141,13 @@ struct RuntimeCoordinatorTests {
         )
         #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
 
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 78, query: "UIView"),
-                requestTimeoutOverride: .seconds(1)
-            )
-            Issue.record("DocumentationSearch should report an invalidated not-enabled retry failure")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.providerIsActive == false)
-            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 78, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .noProvider = outcome else {
+            Issue.record("expected noProvider outcome, got \(outcome)")
+            return
         }
 
         let followUpTools = DocumentationToolCatalog.applying(
@@ -1260,15 +1197,13 @@ struct RuntimeCoordinatorTests {
         )
         #expect(documentationDescriptorDescription(in: initialTools) == "docs-27.0")
 
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 76, query: "UIView"),
-                requestTimeoutOverride: .seconds(1)
-            )
-            Issue.record("DocumentationSearch should report an invalidated provider failure")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.providerIsActive == false)
-            #expect(failure.underlying is UpstreamSlotAcquisitionError)
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 76, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .noProvider = outcome else {
+            Issue.record("expected noProvider outcome, got \(outcome)")
+            return
         }
 
         let followUpTools = DocumentationToolCatalog.applying(
@@ -1305,18 +1240,15 @@ struct RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
-                requestTimeoutOverride: .milliseconds(1)
-            )
-            Issue.record("DocumentationSearch should time out without retrying")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.underlying is TimeoutError)
-            #expect(failure.providerIsActive == false)
-        } catch {
-            Issue.record("expected DocumentationProviderCallFailure, got \(error)")
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
+            requestTimeoutOverride: .milliseconds(1)
+        )
+        guard case .failed(let error) = outcome else {
+            Issue.record("expected failed outcome, got \(outcome)")
+            return
         }
+        #expect(error is TimeoutError)
 
         #expect(await factory.startedPIDs() == [xcode.processID])
     }
@@ -6684,8 +6616,7 @@ private actor ScriptedDocumentationSession: UpstreamSession {
 
 private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var update: DocumentationToolListUpdate
-    private var callResults: [DocumentationProviderCallResult]
-    private var callFailures: [DocumentationProviderCallFailure]
+    private var callOutcomes: [DocumentationProviderCallOutcome]
     private var callCountValue = 0
     private var invalidateReasons: [String] = []
     private var prewarmTimeouts: [TimeAmount?] = []
@@ -6696,14 +6627,12 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     init(
         toolListUpdate: DocumentationToolListUpdate,
-        callResults: [DocumentationProviderCallResult] = [],
-        callFailures: [DocumentationProviderCallFailure] = [],
+        callOutcomes: [DocumentationProviderCallOutcome] = [],
         prewarmDelayNanoseconds: UInt64? = nil,
         toolListDelayNanoseconds: UInt64? = nil
     ) {
         self.update = toolListUpdate
-        self.callResults = callResults
-        self.callFailures = callFailures
+        self.callOutcomes = callOutcomes
         self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
         self.toolListDelayNanoseconds = toolListDelayNanoseconds
     }
@@ -6729,16 +6658,13 @@ private actor StubDocumentationProviderManager: DocumentationProviderManaging {
     func callDocumentationSearch(
         requestData _: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult {
+    ) async throws -> DocumentationProviderCallOutcome {
         callCountValue += 1
         callTimeouts.append(requestTimeoutOverride)
-        if callFailures.isEmpty == false {
-            throw callFailures.removeFirst()
+        guard callOutcomes.isEmpty == false else {
+            return .noProvider
         }
-        guard callResults.isEmpty == false else {
-            throw UpstreamSlotAcquisitionError.unavailable
-        }
-        return callResults.removeFirst()
+        return callOutcomes.removeFirst()
     }
 
     func invalidate(reason: String) async {

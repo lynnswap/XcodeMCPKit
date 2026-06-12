@@ -493,23 +493,23 @@ extension HTTPPostService {
                 continue
             }
             do {
-                let responseData = try await sessionManager.callDocumentationSearch(
+                switch try await sessionManager.callDocumentationSearch(
                     requestData: requestData,
                     requestTimeoutOverride: requestTimeout
-                )
-                let normalizedData = normalizer.normalizeResponseDataIfNeeded(
-                    method: "tools/call",
-                    toolName: DocumentationToolCatalog.toolName,
-                    upstreamData: responseData
-                )
-                responseObjects.append(
-                    contentsOf: Self.responseObjects(from: normalizedData)
-                )
-            } catch {
-                if Self.shouldFallbackDocumentationSearchToUpstream(error) {
+                ) {
+                case .handled(let responseData):
+                    let normalizedData = normalizer.normalizeResponseDataIfNeeded(
+                        method: "tools/call",
+                        toolName: DocumentationToolCatalog.toolName,
+                        upstreamData: responseData
+                    )
+                    responseObjects.append(
+                        contentsOf: Self.responseObjects(from: normalizedData)
+                    )
+                case .fallbackToUpstream:
                     fallbackRequests.append(request)
-                    continue
                 }
+            } catch {
                 let mapped = Self.mapDocumentationSearchError(error)
                 responseObjects.append(
                     Self.makeJSONRPCErrorResponseObject(
@@ -528,16 +528,6 @@ extension HTTPPostService {
             ),
             fallbackRequests
         )
-    }
-
-    private static func shouldFallbackDocumentationSearchToUpstream(_ error: Error) -> Bool {
-        if error is UpstreamSlotAcquisitionError {
-            return true
-        }
-        if let error = error as? ControlPlaneRequestError {
-            return shouldFallbackDocumentationSearchToUpstream(error.underlying)
-        }
-        return false
     }
 
     private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {

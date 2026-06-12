@@ -6682,12 +6682,16 @@ private final class TestRuntimeCoordinator: RuntimeCoordinating {
     func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> Data {
+    ) async throws -> DocumentationSearchOutcome {
         _ = requestTimeoutOverride
         guard let documentationSearchResponder else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            return .fallbackToUpstream
         }
-        return try documentationSearchResponder(requestData)
+        do {
+            return .handled(try documentationSearchResponder(requestData))
+        } catch is UpstreamSlotAcquisitionError {
+            return .fallbackToUpstream
+        }
     }
 
     func hasDocumentationProvider() -> Bool {
