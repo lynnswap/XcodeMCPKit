@@ -6796,7 +6796,7 @@ private actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
 
     func send(_ data: Data) async -> UpstreamSendResult {
         await sentMessages.append(data)
-        return .overloaded
+        return .backpressure
     }
 
     func sent() async -> [Data] {
@@ -6856,13 +6856,13 @@ private actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
             methodName(from: data) == "notifications/initialized"
         {
             overloadNextInitializedNotification = false
-            return .overloaded
+            return .backpressure
         }
         if overloadBudget > 0 {
             overloadBudget -= 1
-            return .overloaded
+            return .backpressure
         }
-        return overloaded ? .overloaded : .accepted
+        return overloaded ? .backpressure : .accepted
     }
 
     func yield(_ event: UpstreamEvent) async {

@@ -58,7 +58,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
 
     package func send(_ data: Data) async -> UpstreamSendResult {
         guard !isShutdown else {
-            return .overloaded
+            return .unavailable(.shuttingDown)
         }
 
         if let current {
@@ -66,7 +66,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
 
         guard let pendingStart else {
-            return .overloaded
+            return .unavailable(.notStarted)
         }
 
         do {
@@ -75,11 +75,11 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
                 session: session,
                 attempt: pendingStart
             ) else {
-                return .overloaded
+                return .unavailable(.notStarted)
             }
             return await running.session.send(data)
         } catch {
-            return .overloaded
+            return .unavailable(.startFailed)
         }
     }
 

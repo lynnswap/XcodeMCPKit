@@ -246,20 +246,31 @@ extension RuntimeCoordinator {
             if ensureRunning {
                 await upstreams[upstreamIndex].start()
             }
-            let result = await upstreams[upstreamIndex].send(data)
-            if result == .accepted {
+            switch await upstreams[upstreamIndex].send(data) {
+            case .accepted:
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
                     direction: "outbound",
                     data: data
                 )
-                return
+            case .backpressure:
+                self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+                self.failPendingSend(
+                    originalRequestData: data,
+                    upstreamIndex: upstreamIndex,
+                    code: -32002,
+                    message: "upstream overloaded"
+                )
+            case .unavailable:
+                // The exit/quarantine machinery owns health for a dead slot;
+                // a send into it must not be misdiagnosed as overload.
+                self.failPendingSend(
+                    originalRequestData: data,
+                    upstreamIndex: upstreamIndex,
+                    code: -32001,
+                    message: "upstream unavailable"
+                )
             }
-            self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
-            self.handleOverloadedUpstreamSend(
-                originalRequestData: data,
-                upstreamIndex: upstreamIndex
-            )
         }
     }
 
@@ -405,9 +416,13 @@ extension RuntimeCoordinator {
         sessionRegistry.testSnapshot(id: id)
     }
 
-    func handleOverloadedUpstreamSend(
+    /// Fails the requests pending on an undeliverable send by synthesizing
+    /// the matching JSON-RPC error responses back through the router.
+    func failPendingSend(
         originalRequestData: Data,
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        code: Int,
+        message: String
     ) {
         guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: [])
         else {
@@ -415,8 +430,8 @@ extension RuntimeCoordinator {
         }
 
         let overloadError: [String: Any] = [
-            "code": -32002,
-            "message": "upstream overloaded",
+            "code": code,
+            "message": message,
         ]
 
         let responseAny: Any? = {
