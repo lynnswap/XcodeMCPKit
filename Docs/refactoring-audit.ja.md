@@ -278,3 +278,18 @@ churn を生んでいる構造欠陥は 3 つに集約される:
 | 横断・基盤・CLI・テスト | (未検証 85 件の大半。本文に手動裏取り済みのもののみ採用) | | |
 
 低優先(low)23 件と未検証残件の全文は監査生データに残っている。再検証や個別の deep-dive が必要になったら指示してほしい。
+
+## 9. 実施状況(2026-06-13 更新)
+
+ブランチ `refactor/structural-cleanup` にて Phase 1〜3 完了、Phase 4〜7 の確定済み項目を実施済み(全コミットで `swift test` + process テスト green)。
+
+実施済み: 死蔵コード削除・rename 完遂・テスト target 整合(Phase 1)/ DocumentationSearch 単一 owner 化・Deadline 型・libproc 化(Phase 2)/ generation 導入による semaphore 全廃・initialize キャッシュ一本化・source 必須化(Phase 3)/ ProxyRouter の相関厳密化(重複 id・popBatch 推測排除)・エラー写像一本化・initialize ゲート一本化・metadata 二重パース解消(Phase 4 部分)/ handshake params 抽出・config 1 回読込・@_exported 排除と境界実体化・XcodeMCPKit target 削除・ExistingProxyServerClient 移動・xcrun 文法統合(Phase 5 部分)/ UpstreamSendResult 原因付き 3 値化(Phase 6 部分)/ refresh fallback 7 連コピー統合・lease 終端単一 owner 化・認識ロジック feature 集約・pgrep 全廃・auto-approver 4 ファイル分割(Phase 7 部分)。
+
+未実施(それぞれ独立セッション推奨):
+1. **typed Sendable envelope + batch 単一パイプライン**(Phase 4 中核)— 残る再パースは @Sendable 境界由来のため、JSONValue ベースの envelope 導入が前提。最大の構造変更。
+2. **EmbeddedEventLoop 型名 sniff の除去** — 上記とテスト移行(NIOAsyncTestingEventLoop)が前提。
+3. **ControlPlaneCoordinator の SharedLoad 統合**(toolsCatalog/windows、promotion セマンティクス維持)。
+4. **CLI 3 重文法の単一 parse 化**。
+5. **AX/Xcode discovery の ProxyXcodeSupport 移設**(UpstreamReadinessGate 構造体の ProxyCore 降格と注入配線、テスト churn 大)。
+6. **auto-approver matcher の evidence + rule table 化**、debug step/state/outcome の enum 化。
+7. **Phase 8: テスト再編**(god file 分割・共有ハーネス・決定的 clock・shutdownAndWait 整理)。
