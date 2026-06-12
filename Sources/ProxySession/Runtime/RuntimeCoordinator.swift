@@ -169,7 +169,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package let sessionRegistry: SessionRegistry
-    package let initializeManager = InitializeManager()
+    package let initializeManager: InitializeManager
     package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
     package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     package let primaryInitializeReadinessTokenBox =
@@ -184,7 +184,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamSlotControlling]
     package let initializeParamsOverride: [String: JSONValue]?
-    package let canonicalBrokerState = CanonicalBrokerState()
+    package let canonicalBrokerState: CanonicalBrokerState
     package let controlPlaneDebugMirror = ControlPlaneDebugMirror()
 
     package let upstreamHealthManager: UpstreamHealthManager
@@ -270,6 +270,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.eventLoop = eventLoop
         self.upstreams = upstreams
         self.clock = runtimeClock
+        let brokerState = CanonicalBrokerState()
+        self.canonicalBrokerState = brokerState
+        self.initializeManager = InitializeManager(brokerState: brokerState)
         self.sessionRegistry = SessionRegistry(config: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.leaseManager = LeaseManager()

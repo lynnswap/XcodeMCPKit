@@ -4973,12 +4973,13 @@ struct RuntimeCoordinatorTests {
         let warmRetry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
         let warmRetryID = try extractUpstreamID(from: warmRetry)
 
-        manager.initializeManager.resetCachedInitializeResult()
+        manager.canonicalBrokerState.clearInitialize()
+        manager.initializeManager.resetWarmSecondaryForRetry()
         let cachedHandshake = try #require(JSONValue(any: [
             "capabilities": [String: Any](),
             "serverInfo": ["name": "cached-handshake"],
         ]))
-        manager.initializeManager.restoreCachedInitializeResultForTests(cachedHandshake)
+        manager.canonicalBrokerState.syncCanonicalInitialize(cachedHandshake, sourceUpstream: 0)
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 77))!,
             requestObject: makeInitializeRequest(id: 77),

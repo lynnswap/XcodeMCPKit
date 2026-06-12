@@ -105,7 +105,6 @@ extension RuntimeCoordinator {
 
         sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
             guard let self else { return }
-            self.initializeManager.storeInitializeResultIfNeeded(result)
             self.canonicalBrokerState.syncCanonicalInitialize(
                 result,
                 sourceUpstream: upstreamIndex
@@ -363,7 +362,7 @@ extension RuntimeCoordinator {
 
     func startPrimaryEagerRetry() {
         clearUpstreamState(upstreamIndex: 0)
-        initializeManager.resetCachedInitializeResult()
+        initializeManager.resetWarmSecondaryForRetry()
         invalidateControlPlane(
             reason: "primary_eager_retry",
             clearInitialize: true,

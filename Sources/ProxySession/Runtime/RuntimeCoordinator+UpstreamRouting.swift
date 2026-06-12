@@ -181,7 +181,7 @@ extension RuntimeCoordinator {
         let shouldClearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if shouldResetGlobalInit || shouldClearToolsCatalog {
             if shouldResetGlobalInit {
-                initializeManager.resetCachedInitializeResult()
+                initializeManager.resetWarmSecondaryForRetry()
             }
             invalidateControlPlane(
                 reason: "upstream_exit_\(upstreamIndex)",

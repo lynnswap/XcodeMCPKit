@@ -51,7 +51,6 @@ package final class InitializeManager: Sendable {
     }
 
     private struct State: Sendable {
-        var initResult: JSONValue?
         var initPending: [PendingInitialize] = []
         var initInFlight = false
         var initTimeout: RuntimeScheduledTimeout?
@@ -62,8 +61,14 @@ package final class InitializeManager: Sendable {
     }
 
     private let state = NIOLockedValueBox(State())
+    /// Single owner of the cached initialize result. This manager only
+    /// tracks in-flight/pending handshake state; the cached result lives in
+    /// the canonical broker state so there is exactly one store to clear.
+    private let brokerState: CanonicalBrokerState
 
-    package init() {}
+    package init(brokerState: CanonicalBrokerState) {
+        self.brokerState = brokerState
+    }
 
     package func beginShutdown() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
         state.withLockedValue { state in
@@ -78,7 +83,7 @@ package final class InitializeManager: Sendable {
     }
 
     package func isInitialized() -> Bool {
-        state.withLockedValue { $0.initResult != nil }
+        brokerState.initializeResult() != nil
     }
 
     package func beginEagerInitializePrimary() -> (
@@ -86,7 +91,8 @@ package final class InitializeManager: Sendable {
         shouldScheduleTimeout: Bool
     ) {
         state.withLockedValue { state in
-            guard state.initResult == nil, !state.initInFlight, !state.isShuttingDown else {
+            guard brokerState.initializeResult() == nil, !state.initInFlight, !state.isShuttingDown
+            else {
                 return (false, false)
             }
             state.initInFlight = true
@@ -97,7 +103,7 @@ package final class InitializeManager: Sendable {
     package func beginPrimaryInitializeSend(upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard !state.isShuttingDown,
-                  state.initResult == nil,
+                  brokerState.initializeResult() == nil,
                   state.initInFlight,
                   state.primaryInitUpstreamID == nil
             else {
@@ -125,7 +131,7 @@ package final class InitializeManager: Sendable {
                 )
             }
 
-            if let initResult = state.initResult {
+            if let initResult = brokerState.initializeResult() {
                 return RegisterDecision(
                     promise: nil,
                     cachedResult: initResult,
@@ -173,20 +179,12 @@ package final class InitializeManager: Sendable {
             let timeout = state.initTimeout
             state.initTimeout = nil
             let shouldWarmSecondary = !state.didWarmSecondary
-            let cachedResult = state.initResult
+            let cachedResult = brokerState.initializeResult()
             return SuccessPreparation(
                 timeout: timeout,
                 shouldWarmSecondary: shouldWarmSecondary,
                 cachedResult: cachedResult
             )
-        }
-    }
-
-    package func storeInitializeResultIfNeeded(_ result: JSONValue) {
-        state.withLockedValue { state in
-            if state.initResult == nil {
-                state.initResult = result
-            }
         }
     }
 
@@ -204,7 +202,7 @@ package final class InitializeManager: Sendable {
 
     package func finishPrimaryInitializeUsingCachedResult() -> (pending: [PendingInitialize], result: JSONValue)? {
         state.withLockedValue { state in
-            guard !state.isShuttingDown, let result = state.initResult else { return nil }
+            guard !state.isShuttingDown, let result = brokerState.initializeResult() else { return nil }
             state.initInFlight = false
             let pending = state.initPending
             state.initPending.removeAll()
@@ -231,7 +229,7 @@ package final class InitializeManager: Sendable {
             guard !state.isShuttingDown else { return nil }
             let shouldRetryEagerInitialize =
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-                && state.initResult == nil
+                && brokerState.initializeResult() == nil
             if shouldRetryEagerInitialize {
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
@@ -265,7 +263,7 @@ package final class InitializeManager: Sendable {
             let result = ExitResult(
                 pending: state.initPending,
                 timeout: state.initTimeout,
-                hadGlobalInit: state.initResult != nil,
+                hadGlobalInit: brokerState.initializeResult() != nil,
                 wasInFlight: state.initInFlight,
                 primaryInitUpstreamID: state.primaryInitUpstreamID
             )
@@ -281,23 +279,15 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func resetCachedInitializeResult() {
+    package func resetWarmSecondaryForRetry() {
         state.withLockedValue { state in
-            state.initResult = nil
             state.didWarmSecondary = false
-        }
-    }
-
-    package func restoreCachedInitializeResultForTests(_ result: JSONValue) {
-        state.withLockedValue { state in
-            state.initResult = result
         }
     }
 
     package func resetForDebug() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
         state.withLockedValue { state in
             let result = (pending: state.initPending, timeout: state.initTimeout)
-            state.initResult = nil
             state.initPending.removeAll()
             state.initInFlight = false
             state.initTimeout = nil
@@ -319,7 +309,7 @@ package final class InitializeManager: Sendable {
         state.withLockedValue { state in
             let shouldRetry =
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-                && state.initResult == nil
+                && brokerState.initializeResult() == nil
             if shouldRetry {
                 state.shouldRetryEagerInitializePrimaryAfterWarmInitFailure = false
             }
@@ -340,7 +330,7 @@ package final class InitializeManager: Sendable {
     package func snapshot() -> Snapshot {
         state.withLockedValue { state in
             Snapshot(
-                hasInitResult: state.initResult != nil,
+                hasInitResult: brokerState.initializeResult() != nil,
                 initInFlight: state.initInFlight,
                 didWarmSecondary: state.didWarmSecondary,
                 shouldRetryEagerInitializePrimaryAfterWarmInitFailure: state
