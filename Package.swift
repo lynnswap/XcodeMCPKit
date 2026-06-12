@@ -167,6 +167,7 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
+            path: "Tests/XcodeMCPTestSupport",
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
@@ -223,7 +224,7 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "ProxyRuntimeTests",
+            name: "ProxySessionTests",
             dependencies: [
                 "XcodeMCPProxy",
                 "ProxyCore",
@@ -240,7 +241,7 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Tests/ProxyRuntimeTests",
+            path: "Tests/ProxySessionTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
@@ -270,7 +271,7 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "ProxyHTTPTransportTests",
+            name: "ProxyHTTPGatewayTests",
             dependencies: [
                 "XcodeMCPProxy",
                 "ProxyCore",
@@ -287,7 +288,7 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Tests/ProxyHTTPTransportTests",
+            path: "Tests/ProxyHTTPGatewayTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
