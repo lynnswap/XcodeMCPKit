@@ -6,21 +6,35 @@ extension ControlPlaneCoordinator {
 
     func cancelInvalidatedLoads() {
         let generation = brokerState.generation()
+        cancelLoads { startGeneration in
+            startGeneration != generation
+        }
+    }
+
+    func cancelLoadsStartedBeforeGeneration(_ generation: UInt64) {
+        cancelLoads { startGeneration in
+            startGeneration < generation
+        }
+    }
+
+    private func cancelLoads(
+        where shouldCancel: (UInt64) -> Bool
+    ) {
         var didCancel = false
 
-        if let load = toolsCatalogLoad, load.startGeneration != generation {
+        if let load = toolsCatalogLoad, shouldCancel(load.startGeneration) {
             toolsCatalogLoad = nil
             cancelToolsCatalogLoad(load, error: CancellationError())
             didCancel = true
         }
-        if let load = prewarmToolsCatalogLoad, load.startGeneration != generation {
+        if let load = prewarmToolsCatalogLoad, shouldCancel(load.startGeneration) {
             prewarmToolsCatalogLoad = nil
             cancelToolsCatalogLoad(load, error: CancellationError())
             didCancel = true
         }
 
         let staleWindowLoads = windowLoads.filter { _, load in
-            load.startGeneration != generation
+            shouldCancel(load.startGeneration)
         }
         for (route, load) in staleWindowLoads {
             windowLoads.removeValue(forKey: route)

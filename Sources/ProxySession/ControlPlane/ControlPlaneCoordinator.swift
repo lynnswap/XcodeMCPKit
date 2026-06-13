@@ -233,6 +233,13 @@ package actor ControlPlaneCoordinator {
         syncDebug()
     }
 
+    package func cancelLoadsStartedBeforeGeneration(
+        _ generation: UInt64,
+        reason _: String
+    ) {
+        cancelLoadsStartedBeforeGeneration(generation)
+    }
+
     func startToolsCatalogLoad(
         origin: ToolsCatalogLoadOrigin,
         requestTimeout: TimeAmount?

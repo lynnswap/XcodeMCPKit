@@ -956,20 +956,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) {
         // The synchronous cache clear bumps the broker generation, which is
         // what keeps stale fast paths from serving or re-populating the
-        // cache; the coordinator's waiter/load cleanup can therefore run
-        // asynchronously instead of blocking the caller on a semaphore.
+        // cache. The delayed actor cleanup must only cancel loads that
+        // started before this generation, because fresh requests may already
+        // have started by the time the actor receives the cleanup message.
         if clearInitialize {
             canonicalBrokerState.clearInitialize()
         }
         if clearToolsCatalog {
             canonicalBrokerState.clearToolsCatalog()
         }
+        let invalidatedGeneration = canonicalBrokerState.generation()
         let coordinator = controlPlaneCoordinator
         Task {
-            await coordinator.invalidate(
-                reason: reason,
-                clearInitialize: clearInitialize,
-                clearToolsCatalog: clearToolsCatalog
+            await coordinator.cancelLoadsStartedBeforeGeneration(
+                invalidatedGeneration,
+                reason: reason
             )
         }
     }

@@ -1597,6 +1597,80 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+    @Test func controlPlaneDelayedInvalidationDoesNotCancelFreshToolsCatalogLoad()
+        async throws
+    {
+        let brokerState = CanonicalBrokerState()
+        let debugMirror = ControlPlaneDebugMirror()
+        let loadIndexBox = NIOLockedValueBox(0)
+        let firstLoadStarted = TestSignal()
+        let secondLoadStarted = TestSignal()
+        let firstRelease = AsyncGate()
+        let secondRelease = AsyncGate()
+        let coordinator = ControlPlaneCoordinator(
+            brokerState: brokerState,
+            debugMirror: debugMirror,
+            toolsCatalogLoader: { _, _ in
+                let loadIndex = loadIndexBox.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if loadIndex == 1 {
+                    firstLoadStarted.signal()
+                    try await firstRelease.wait()
+                    return CanonicalToolsCatalogLoadResult(
+                        rawResult: .object(["fresh": .bool(false)]),
+                        sourceUpstream: 0,
+                        durationMilliseconds: 1
+                    )
+                }
+                secondLoadStarted.signal()
+                try await secondRelease.wait()
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: .object(["fresh": .bool(true)]),
+                    sourceUpstream: 0,
+                    durationMilliseconds: 1
+                )
+            },
+            windowsLoader: { _, _, _ in .object([:]) },
+            upstreamHandshakeStates: { [:] },
+            logger: ProxyLogging.make("control-plane-test"),
+            controlPlaneDefaultTimeout: nil
+        )
+
+        let staleTask = Task {
+            try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
+        }
+        try await firstLoadStarted.wait(description: "waiting for stale tools catalog load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
+        })
+
+        brokerState.clearToolsCatalog()
+        let invalidatedGeneration = brokerState.generation()
+        let freshTask = Task {
+            try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
+        }
+        try await secondLoadStarted.wait(description: "waiting for fresh tools catalog load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
+        })
+
+        await coordinator.cancelLoadsStartedBeforeGeneration(
+            invalidatedGeneration,
+            reason: "delayed_invalidation"
+        )
+        await secondRelease.signal()
+
+        let result = try await freshTask.value
+        let object = try #require(result.foundationObject as? [String: Any])
+        #expect(object["fresh"] as? Bool == true)
+        await #expect(throws: CancellationError.self) {
+            _ = try await staleTask.value
+        }
+        await firstRelease.signal()
+    }
+
     @Test func sessionManagerUsesInitializeParamsOverrideFromConfigFile() async throws {
         let configPath = try makeTempProxyConfigFile(
             """
