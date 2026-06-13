@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import NIOConcurrencyHelpers
 
 package actor RefreshCodeIssuesCoordinator {
     private enum WaiterState: Sendable {
@@ -25,7 +24,8 @@ package actor RefreshCodeIssuesCoordinator {
         let id: UInt64
         let permit: Permit
         let continuation: CheckedContinuation<Permit, Error>
-        let state: NIOLockedValueBox<WaiterState>
+        var state: WaiterState
+        var timeoutTask: Task<Void, Never>?
     }
 
     private struct ActiveExecution: Sendable {
@@ -67,18 +67,14 @@ package actor RefreshCodeIssuesCoordinator {
         for execution in activeExecutions {
             execution.cancel()
         }
-        for waiter in waiters {
-            let shouldResume = waiter.state.withLockedValue { state -> Bool in
-                switch state {
-                case .active, .cancelled, .timedOut:
-                    state = .removed
-                    return true
-                case .resumed, .removed:
-                    return false
-                }
-            }
-            if shouldResume {
+        for var waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            switch waiter.state {
+            case .active, .cancelled, .timedOut:
+                waiter.state = .removed
                 waiter.continuation.resume(throwing: CancellationError())
+            case .resumed, .removed:
+                break
             }
         }
         for execution in activeExecutions {
@@ -143,81 +139,52 @@ package actor RefreshCodeIssuesCoordinator {
             pendingForKey: waiterCountForKey + 1,
             pendingTotal: pendingWaiterCount + 1
         )
-        let waiterState = NIOLockedValueBox(WaiterState.active)
 
-        let timeoutTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
-
-        return try await withTaskCancellationHandler(
-            operation: {
-                defer {
-                    timeoutTaskBox.withLockedValue { task in
-                        task?.cancel()
-                        task = nil
-                    }
-                }
-
-                return try await withCheckedThrowingContinuation { continuation in
-                    waitersByKey[key, default: []].append(
-                        Waiter(
+        do {
+            let acquiredPermit = try await withTaskCancellationHandler(
+                operation: {
+                    try await withCheckedThrowingContinuation { continuation in
+                        var waiter = Waiter(
                             id: waiterID,
                             permit: permit,
                             continuation: continuation,
-                            state: waiterState
+                            state: .active,
+                            timeoutTask: nil
                         )
-                    )
-                    pendingWaiterCount += 1
-
-                    if let timeoutDuration = Self.duration(from: requestTimeout) {
-                        let timeoutTask = Task { [waitClock, waiterState] in
-                            do {
-                                try await waitClock.sleep(for: timeoutDuration)
-                                let shouldRemove = waiterState.withLockedValue { state -> Bool in
-                                    guard state == .active else { return false }
-                                    state = .timedOut
-                                    return true
+                        if let timeoutDuration = Self.duration(from: requestTimeout) {
+                            waiter.timeoutTask = Task { [waitClock] in
+                                do {
+                                    try await waitClock.sleep(for: timeoutDuration)
+                                    self.timeoutWaiter(key: key, waiterID: waiterID)
+                                } catch {
+                                    return
                                 }
-                                guard shouldRemove else { return }
-                                self.timeoutWaiter(key: key, waiterID: waiterID)
-                            } catch {
-                                return
                             }
                         }
-                        timeoutTaskBox.withLockedValue { task in
-                            task = timeoutTask
-                        }
-                    }
+                        waitersByKey[key, default: []].append(waiter)
+                        pendingWaiterCount += 1
 
-                    if Task.isCancelled {
-                        let shouldFail = waiterState.withLockedValue { state -> Bool in
-                            guard state == .active else { return false }
-                            state = .cancelled
-                            return true
+                        if Task.isCancelled {
+                            failWaiter(
+                                key: key,
+                                waiterID: waiterID,
+                                error: CancellationError()
+                            )
                         }
-                        guard shouldFail else { return }
-                        failWaiter(
-                            key: key,
-                            waiterID: waiterID,
-                            error: CancellationError()
-                        )
+                    }
+                },
+                onCancel: {
+                    Task {
+                        await self.cancelWaiter(key: key, waiterID: waiterID)
                     }
                 }
-            },
-            onCancel: {
-                timeoutTaskBox.withLockedValue { task in
-                    task?.cancel()
-                    task = nil
-                }
-                let shouldRemove = waiterState.withLockedValue { state -> Bool in
-                    guard state == .active else { return false }
-                    state = .cancelled
-                    return true
-                }
-                guard shouldRemove else { return }
-                Task {
-                    await self.cancelWaiter(key: key, waiterID: waiterID)
-                }
-            }
-        )
+            )
+            cancelTimeoutTask(key: key, waiterID: waiterID)
+            return acquiredPermit
+        } catch {
+            cancelTimeoutTask(key: key, waiterID: waiterID)
+            throw error
+        }
     }
 
     private func cancelWaiter(key: String, waiterID: UInt64) {
@@ -251,16 +218,19 @@ package actor RefreshCodeIssuesCoordinator {
             return
         }
 
-        let waiter = waiters.remove(at: index)
-        let shouldResume = waiter.state.withLockedValue { state -> Bool in
-            switch state {
-            case .active, .cancelled, .timedOut:
-                state = .removed
-                return true
-            case .resumed, .removed:
-                return false
-            }
+        var waiter = waiters.remove(at: index)
+        let shouldResume: Bool
+        switch waiter.state {
+        case .active:
+            waiter.state = error is CancellationError ? .cancelled : .timedOut
+            shouldResume = true
+        case .cancelled, .timedOut:
+            shouldResume = true
+        case .resumed, .removed:
+            shouldResume = false
         }
+        waiter.timeoutTask?.cancel()
+        waiter.state = .removed
         guard shouldResume else {
             if waiters.isEmpty {
                 waitersByKey.removeValue(forKey: key)
@@ -291,28 +261,38 @@ package actor RefreshCodeIssuesCoordinator {
 
         while let next = waiters.first {
             waiters.removeFirst()
-            let shouldResume = next.state.withLockedValue { state -> Bool in
-                guard state == .active else {
-                    state = .removed
-                    return false
-                }
-                state = .resumed
-                return true
+            var next = next
+            guard next.state == .active else {
+                next.state = .removed
+                pendingWaiterCount -= 1
+                next.timeoutTask?.cancel()
+                continue
             }
+            next.timeoutTask?.cancel()
+            next.state = .resumed
             pendingWaiterCount -= 1
-            if shouldResume {
-                if waiters.isEmpty {
-                    waitersByKey.removeValue(forKey: key)
-                } else {
-                    waitersByKey[key] = waiters
-                }
-                next.continuation.resume(returning: next.permit)
-                return
+            if waiters.isEmpty {
+                waitersByKey.removeValue(forKey: key)
+            } else {
+                waitersByKey[key] = waiters
             }
+            next.continuation.resume(returning: next.permit)
+            return
         }
 
         busyKeys.remove(key)
         waitersByKey.removeValue(forKey: key)
+    }
+
+    private func cancelTimeoutTask(key: String, waiterID: UInt64) {
+        guard var waiters = waitersByKey[key],
+              let index = waiters.firstIndex(where: { $0.id == waiterID })
+        else {
+            return
+        }
+        waiters[index].timeoutTask?.cancel()
+        waiters[index].timeoutTask = nil
+        waitersByKey[key] = waiters
     }
 
     private static func duration(from requestTimeout: TimeAmount?) -> Duration? {

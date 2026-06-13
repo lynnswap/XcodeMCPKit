@@ -126,7 +126,7 @@ extension RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        _ = try await readiness.nextCheck(at: 0)
         #expect(await upstream.startCount() == 0)
         #expect(await upstream.sentCount() == 0)
 
@@ -274,7 +274,7 @@ extension RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        _ = try await availability.nextCheck(at: 0)
         #expect(await launchRecorder.launchCount() == 0)
         #expect(await upstream.startCount() == 0)
 
@@ -310,7 +310,7 @@ extension RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        _ = try await readiness.nextCheck(at: 0)
         #expect(await upstream.sentCount() == 0)
 
         await readiness.setReady(true)
@@ -347,12 +347,17 @@ extension RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        _ = try await readiness.nextCheck(at: 0)
         #expect(await upstream.sentCount() == 0)
 
         manager.debugReset()
         await readiness.setReady(true)
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        try await waitWithTimeout(
+            "waiting for debug reset to drain readiness work",
+            timeout: .seconds(2)
+        ) {
+            try await eventLoop.submit { () }.get()
+        }
 
         #expect(await upstream.sentCount() == 0)
         #expect(await upstream.startCount() == 0)
@@ -431,7 +436,7 @@ extension RuntimeCoordinatorTests {
 
         await readiness.setReady(false)
         await upstream.yield(.exit(1))
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        _ = try await readiness.nextCheck(at: 1)
         #expect(await upstream.sentCount() == 2)
 
         await readiness.setReady(true)

@@ -175,7 +175,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
     package let documentationPrewarmTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
-    package let upstreamReadinessGenerationBox = NIOLockedValueBox<UInt64>(0)
     package let debugRecorder: ProxyDebugRecorder
     package let leaseManager: LeaseManager
     package let eventLoop: EventLoop
@@ -183,7 +182,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamSlotControlling]
-    package let initializeParamsOverride: [String: JSONValue]?
+    package let initializeParamsOverride: ProxyInitializeHandshakeOverride?
     package let canonicalBrokerState: CanonicalBrokerState
     package let controlPlaneDebugMirror = ControlPlaneDebugMirror()
 
@@ -241,7 +240,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             discovery: discovery,
             sessionFactory: LiveDocumentationProviderSessionFactory(baseEnvironment: environment),
             pinnedProcessID: pinnedProcessID,
-            initializeParams: InitializeHandshakeParams.resolved(
+            initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
             )
         )
@@ -260,7 +259,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         prewarmDocumentationProviderOnStartup: Bool = false
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
-        let schedulerProbeStarter = NIOLockedValueBox<(@Sendable ([HealthProbeRequest]) -> Void)?>(nil)
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let uptimeProvider = nowUptimeNanoseconds ?? clock.uptimeNanoseconds
         let runtimeClock = ClockClient(
@@ -302,30 +300,23 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             canUseUpstream: { [weak upstreamHealthManager = self.upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
-                guard let upstreamHealthManager else { return false }
-                let evaluation = upstreamHealthManager.evaluateUsableInitialized(
+                guard let upstreamHealthManager else {
+                    return UpstreamUseEvaluation(isUsable: false, effects: [])
+                }
+                return upstreamHealthManager.evaluateUsableInitialized(
                     index: upstreamIndex,
                     nowUptimeNs: nowUptimeNs
                 )
-                let probesToStart = evaluation.1
-                if probesToStart.isEmpty == false {
-                    let startProbes = schedulerProbeStarter.withLockedValue { $0 }
-                    startProbes?(probesToStart)
-                }
-                return evaluation.0
             },
             selectUpstream: { [weak upstreamHealthManager = self.upstreamHealthManager] occupied in
                 let nowUptimeNs = uptimeProvider()
-                let chooseResult = upstreamHealthManager?.chooseBestInitializedUpstream(
+                return upstreamHealthManager?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
                     occupiedUpstreams: occupied
-                )
-                let probesToStart = chooseResult?.1 ?? []
-                if probesToStart.isEmpty == false {
-                    let startProbes = schedulerProbeStarter.withLockedValue { $0 }
-                    startProbes?(probesToStart)
-                }
-                return chooseResult?.0
+                ) ?? UpstreamSelectionResult(upstreamIndex: nil, effects: [])
+            },
+            applyHealthEffects: { [runtimeBox] effects in
+                runtimeBox.value?.applyHealthEffects(effects)
             }
         )
         self.initializeParamsOverride = config.initializeParamsOverride
@@ -373,11 +364,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clock: runtimeClock
         )
         runtimeBox.value = self
-        schedulerProbeStarter.withLockedValue { startProbes in
-            startProbes = { [weak self] probes in
-                self?.startHealthProbes(probes)
-            }
-        }
 
         var tasks: [Task<Void, Never>] = []
         tasks.reserveCapacity(upstreams.count)
@@ -449,7 +435,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamRouter.resetAll()
         _ = leaseManager.resetAll(reason: .clientDisconnected)
         upstreamSlotScheduler.reset()
-        advanceUpstreamReadinessGeneration()
         resetUpstreamReadinessWaiters()
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
@@ -482,7 +467,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return task
         }
         documentationPrewarmTask?.cancel()
-        await upstreamReadinessCoordinator.shutdown()
+        upstreamReadinessCoordinator.shutdown()
 
         canonicalBrokerState.reset()
         await controlPlaneCoordinator.invalidate(
@@ -585,14 +570,32 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             nowUptimeNs: nowUptimeNs,
             occupiedUpstreams: occupiedUpstreams
         )
-        let chosen = chooseResult.0
-        startHealthProbes(chooseResult.1)
+        applyHealthEffects(chooseResult.effects)
+        let chosen = chooseResult.upstreamIndex
 
         guard let chosen else {
             return nil
         }
 
         return chosen
+    }
+
+    private func applyHealthEffects(_ effects: [UpstreamHealthEffect]) {
+        for effect in effects {
+            switch effect {
+            case .cancelInitTimeout(let timeout):
+                timeout.cancel()
+            case .startHealthProbe(let probe):
+                probeUpstreamHealth(
+                    upstreamIndex: probe.upstreamIndex,
+                    probeGeneration: probe.probeGeneration
+                )
+            case .clearPins:
+                break
+            case .failQueuedIfNoRecovery:
+                failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            }
+        }
     }
 
     private func startHealthProbes(_ probes: [HealthProbeRequest]) {
@@ -614,7 +617,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let hasHealthyUpstream = upstreamHealthManager.initializedHealthyishCount() > 0
         var recoveryInFlight = upstreamHealthManager.anyRecoveryInFlight()
         if hasHealthyUpstream == false, recoveryInFlight == false,
-            initializeManager.consumeRetryAfterWarmInitFailureRegardlessOfCachedInit()
+            initializeManager.consumeWarmInitRecoveryIntent(policy: .regardlessOfCachedInitialize)
         {
             startPrimaryEagerRetry()
             recoveryInFlight = upstreamHealthManager.anyRecoveryInFlight()

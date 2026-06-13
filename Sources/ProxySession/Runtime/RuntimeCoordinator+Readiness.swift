@@ -13,27 +13,17 @@ extension RuntimeCoordinator {
             return
         }
 
-        let generation = currentUpstreamReadinessGeneration()
-        let guardedOperation: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            guard self.currentUpstreamReadinessGeneration() == generation else { return }
-            operation()
-        }
-        Task { [upstreamReadinessCoordinator] in
-            await upstreamReadinessCoordinator.runWhenReady(
-                reason: reason,
-                applyBackoff: applyBackoff,
-                token: token,
-                operation: guardedOperation
-            )
-        }
+        upstreamReadinessCoordinator.runWhenReady(
+            reason: reason,
+            applyBackoff: applyBackoff,
+            token: token,
+            operation: operation
+        )
     }
 
     func cancelUpstreamReadinessWaiter(_ token: UpstreamReadinessWaiterToken) {
         guard upstreamReadinessGate.isEnabled else { return }
-        Task { [upstreamReadinessCoordinator] in
-            await upstreamReadinessCoordinator.cancelWaiter(token)
-        }
+        upstreamReadinessCoordinator.cancelWaiter(token)
     }
 
     func startAllUpstreamSlots() {
@@ -53,26 +43,12 @@ extension RuntimeCoordinator {
 
     func noteUpstreamInitializationSucceeded() {
         guard upstreamReadinessGate.isEnabled else { return }
-        Task { [upstreamReadinessCoordinator] in
-            await upstreamReadinessCoordinator.resetBackoff()
-        }
+        upstreamReadinessCoordinator.resetBackoff()
     }
 
     func resetUpstreamReadinessWaiters() {
         guard upstreamReadinessGate.isEnabled else { return }
-        Task { [upstreamReadinessCoordinator] in
-            await upstreamReadinessCoordinator.reset()
-        }
-    }
-
-    func advanceUpstreamReadinessGeneration() {
-        upstreamReadinessGenerationBox.withLockedValue { generation in
-            generation &+= 1
-        }
-    }
-
-    func currentUpstreamReadinessGeneration() -> UInt64 {
-        upstreamReadinessGenerationBox.withLockedValue { $0 }
+        upstreamReadinessCoordinator.reset()
     }
 
     func replacePrimaryInitializeReadinessWaiter(

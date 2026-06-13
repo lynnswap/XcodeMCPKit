@@ -159,8 +159,8 @@ extension RefreshCodeIssuesWorkflow {
         guard !Task.isCancelled else {
             debugState.updateStep(
                 requestID: requestID,
-                step: "cancelled",
-                state: "cancelled"
+                step: .cancelled,
+                state: .cancelled
             )
             throw CancellationError()
         }

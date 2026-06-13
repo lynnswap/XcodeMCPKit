@@ -11,7 +11,7 @@ extension RefreshCodeIssuesWorkflow {
     /// plain upstream refresh.
     private func fallBackToUpstream(
         reason: String,
-        state: String? = nil,
+        state: RefreshCodeIssuesDebugRequestState? = nil,
         extraMetadata: [String: String] = [:],
         debugRequestID: String,
         logMetadata: Logger.Metadata
@@ -20,7 +20,7 @@ extension RefreshCodeIssuesWorkflow {
         debugMetadata["fallback_reason"] = reason
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.fallback_to_upstream",
+            step: .proxyFallbackToUpstream,
             state: state,
             metadata: debugMetadata
         )
@@ -51,7 +51,7 @@ extension RefreshCodeIssuesWorkflow {
     ) async throws -> Data? {
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.select_internal_upstream"
+            step: .proxySelectInternalUpstream
         )
         try Self.throwIfCancelled(
             debugState: debugState,
@@ -84,15 +84,15 @@ extension RefreshCodeIssuesWorkflow {
                     self.debugState.updateStep(
                         requestID: debugRequestID,
                         step: executionBudget.isExhausted
-                            ? "proxy.execution_budget_exhausted"
-                            : "proxy.reserved_upstream_budget",
-                        state: executionBudget.isExhausted ? "timed_out" : nil
+                            ? .proxyExecutionBudgetExhausted
+                            : .proxyReservedUpstreamBudget,
+                        state: executionBudget.isExhausted ? .timedOut : nil
                     )
                     return nil
                 }
                 self.debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "proxy.list_windows",
+                    step: .proxyListWindows,
                     metadata: [
                         "internal_upstream": "\(internalUpstreamIndex)",
                         "timeout_ms": Self.timeoutDescription(timeout),
@@ -142,7 +142,7 @@ extension RefreshCodeIssuesWorkflow {
                 reason: executionBudget.isExhausted
                     ? "execution budget exhausted before navigator issues"
                     : "reserved upstream fallback budget before navigator issues",
-                state: executionBudget.isExhausted ? "timed_out" : nil,
+                state: executionBudget.isExhausted ? .timedOut : nil,
                 debugRequestID: debugRequestID,
                 logMetadata: metadata
             )
@@ -153,7 +153,7 @@ extension RefreshCodeIssuesWorkflow {
         )
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.list_navigator_issues",
+            step: .proxyListNavigatorIssues,
             metadata: [
                 "internal_upstream": "\(internalUpstreamIndex)",
                 "resolved_target": target.resolvedFilePath,
@@ -175,7 +175,7 @@ extension RefreshCodeIssuesWorkflow {
         case .timeout:
             return fallBackToUpstream(
                 reason: "navigator issues timed out",
-                state: "timed_out",
+                state: .timedOut,
                 extraMetadata: ["resolved_target": target.resolvedFilePath],
                 debugRequestID: debugRequestID,
                 logMetadata: metadata
@@ -193,7 +193,7 @@ extension RefreshCodeIssuesWorkflow {
 
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.filter_navigator_issues",
+            step: .proxyFilterNavigatorIssues,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
         guard let filteredNavigatorResult = Self.filterNavigatorIssuesResult(
@@ -210,7 +210,7 @@ extension RefreshCodeIssuesWorkflow {
 
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.encode_response",
+            step: .proxyEncodeResponse,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
         guard let responseID = requestIDs.first,
@@ -230,7 +230,7 @@ extension RefreshCodeIssuesWorkflow {
 
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.success",
+            step: .proxySuccess,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
         logger.debug(
@@ -262,8 +262,8 @@ extension RefreshCodeIssuesWorkflow {
             if executionBudget.isExhausted {
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.execution_budget_exhausted",
-                    state: "timed_out"
+                    step: .upstreamExecutionBudgetExhausted,
+                    state: .timedOut
                 )
                 finalResult = .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
                 break resultLoop
@@ -271,7 +271,7 @@ extension RefreshCodeIssuesWorkflow {
 
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "upstream.attempt_\(attempt)",
+                step: .upstreamAttempt(attempt),
                 metadata: ["timeout_ms": Self.timeoutDescription(attemptTimeout)]
             )
             let attemptMetadata = baseMetadata.merging(
@@ -300,14 +300,14 @@ extension RefreshCodeIssuesWorkflow {
                     if !executionBudget.canDelay(delayNanos) {
                         debugState.updateStep(
                             requestID: debugRequestID,
-                            step: "upstream.retry_budget_exhausted"
+                            step: .upstreamRetryBudgetExhausted
                         )
                         finalResult = .success(responseData)
                         break resultLoop
                     }
                     debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "upstream.retry_delay",
+                        step: .upstreamRetryDelay,
                         metadata: ["delay_ms": "\(delayNanos / 1_000_000)"]
                     )
                     logger.debug(
@@ -322,8 +322,8 @@ extension RefreshCodeIssuesWorkflow {
                     } catch is CancellationError {
                         debugState.updateStep(
                             requestID: debugRequestID,
-                            step: "cancelled",
-                            state: "cancelled"
+                            step: .cancelled,
+                            state: .cancelled
                         )
                         finalResult = .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
                         break resultLoop
@@ -340,39 +340,39 @@ extension RefreshCodeIssuesWorkflow {
                 }
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: retryable ? "upstream.retry_exhausted" : "upstream.success"
+                    step: retryable ? .upstreamRetryExhausted : .upstreamSuccess
                 )
                 finalResult = .success(responseData)
                 break resultLoop
             case .timeout:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.timeout",
-                    state: "timed_out"
+                    step: .upstreamTimeout,
+                    state: .timedOut
                 )
                 finalResult = result
                 break resultLoop
             case .upstreamUnavailable:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.unavailable",
-                    state: "failed"
+                    step: .upstreamUnavailable,
+                    state: .failed
                 )
                 finalResult = result
                 break resultLoop
             case .invalidRequest:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.invalid_request",
-                    state: "failed"
+                    step: .upstreamInvalidRequest,
+                    state: .failed
                 )
                 finalResult = result
                 break resultLoop
             case .invalidUpstreamResponse:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.invalid_response",
-                    state: "failed"
+                    step: .upstreamInvalidResponse,
+                    state: .failed
                 )
                 finalResult = result
                 break resultLoop

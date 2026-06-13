@@ -268,8 +268,8 @@ package struct RefreshCodeIssuesWorkflow {
         if executionBudget.isExhausted {
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "request_timeout_exhausted",
-                state: "timed_out"
+                step: .requestTimeoutExhausted,
+                state: .timedOut
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
@@ -321,8 +321,8 @@ package struct RefreshCodeIssuesWorkflow {
                 if executionBudget.isExhausted {
                     debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "queue_wait_timed_out",
-                        state: "timed_out"
+                        step: .queueWaitTimedOut,
+                        state: .timedOut
                     )
                     debugState.finishRequest(
                         requestID: debugRequestID,
@@ -332,7 +332,7 @@ package struct RefreshCodeIssuesWorkflow {
                 }
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "execution_budget_started",
+                    step: .executionBudgetStarted,
                     metadata: [
                         "execution_timeout_ms": Self.timeoutDescription(
                             executionBudget.remainingTimeout()
@@ -358,7 +358,7 @@ package struct RefreshCodeIssuesWorkflow {
                 {
                     debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "proxy.completed"
+                        step: .proxyCompleted
                     )
                     result = .success(proxyResponseData)
                 } else {
@@ -397,7 +397,7 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "queue_wait_timed_out"
+                step: .queueWaitTimedOut
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
@@ -416,8 +416,8 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "cancelled",
-                state: "cancelled"
+                step: .cancelled,
+                state: .cancelled
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
@@ -427,8 +427,8 @@ package struct RefreshCodeIssuesWorkflow {
         } catch {
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "invalid_request",
-                state: "failed"
+                step: .invalidRequest,
+                state: .failed
             )
             debugState.finishRequest(
                 requestID: debugRequestID,

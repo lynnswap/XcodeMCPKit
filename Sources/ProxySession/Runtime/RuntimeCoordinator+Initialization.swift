@@ -270,7 +270,7 @@ extension RuntimeCoordinator {
         }
         if upstreamIndex == 0 {
             if hasUsableInitializedSecondaryUpstreams() {
-                initializeManager.setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
+                initializeManager.setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
             } else {
                 resetSecondaryUpstreamsForPrimaryRetry()
@@ -383,7 +383,7 @@ extension RuntimeCoordinator {
         }
     }
     func makeInternalInitializeRequest(id: Int64) -> [String: Any] {
-        let mergedParams = InitializeHandshakeParams.resolved(
+        let mergedParams = InitializeHandshakeJSON.resolved(
             initializeParamsOverride: initializeParamsOverride
         ).mapValues(\.foundationObject)
 

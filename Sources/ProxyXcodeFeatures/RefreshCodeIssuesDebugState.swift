@@ -35,16 +35,114 @@ package enum RefreshCodeIssuesOutcome: String, Sendable {
     case upstreamUnavailable = "upstream_unavailable"
     case invalidUpstreamResponse = "invalid_upstream_response"
 
-    package var finalState: String {
+    package var finalState: RefreshCodeIssuesDebugRequestState {
         switch self {
         case .success:
-            return "completed"
+            return .completed
         case .timeout, .queueWaitTimedOut:
-            return "timed_out"
+            return .timedOut
+        case .cancelled:
+            return .cancelled
+        case .invalidRequest, .upstreamUnavailable, .invalidUpstreamResponse:
+            return .failed
+        }
+    }
+}
+
+package enum RefreshCodeIssuesDebugRequestState: String, Sendable {
+    case waitingForPermit = "waiting_for_permit"
+    case running
+    case completed
+    case timedOut = "timed_out"
+    case cancelled
+    case failed
+}
+
+package enum RefreshCodeIssuesDebugStep: Sendable, Equatable {
+    case waitingForPermit
+    case permitAcquired
+    case requestTimeoutExhausted
+    case queueWaitTimedOut
+    case executionBudgetStarted
+    case invalidRequest
+    case cancelled
+    case proxyFallbackToUpstream
+    case proxySelectInternalUpstream
+    case proxyExecutionBudgetExhausted
+    case proxyReservedUpstreamBudget
+    case proxyListWindows
+    case proxyListNavigatorIssues
+    case proxyFilterNavigatorIssues
+    case proxyEncodeResponse
+    case proxySuccess
+    case proxyCompleted
+    case upstreamExecutionBudgetExhausted
+    case upstreamAttempt(Int)
+    case upstreamRetryBudgetExhausted
+    case upstreamRetryDelay
+    case upstreamRetryExhausted
+    case upstreamSuccess
+    case upstreamTimeout
+    case upstreamUnavailable
+    case upstreamInvalidRequest
+    case upstreamInvalidResponse
+
+    package var rawValue: String {
+        switch self {
+        case .waitingForPermit:
+            return "waiting_for_permit"
+        case .permitAcquired:
+            return "permit_acquired"
+        case .requestTimeoutExhausted:
+            return "request_timeout_exhausted"
+        case .queueWaitTimedOut:
+            return "queue_wait_timed_out"
+        case .executionBudgetStarted:
+            return "execution_budget_started"
+        case .invalidRequest:
+            return "invalid_request"
         case .cancelled:
             return "cancelled"
-        case .invalidRequest, .upstreamUnavailable, .invalidUpstreamResponse:
-            return "failed"
+        case .proxyFallbackToUpstream:
+            return "proxy.fallback_to_upstream"
+        case .proxySelectInternalUpstream:
+            return "proxy.select_internal_upstream"
+        case .proxyExecutionBudgetExhausted:
+            return "proxy.execution_budget_exhausted"
+        case .proxyReservedUpstreamBudget:
+            return "proxy.reserved_upstream_budget"
+        case .proxyListWindows:
+            return "proxy.list_windows"
+        case .proxyListNavigatorIssues:
+            return "proxy.list_navigator_issues"
+        case .proxyFilterNavigatorIssues:
+            return "proxy.filter_navigator_issues"
+        case .proxyEncodeResponse:
+            return "proxy.encode_response"
+        case .proxySuccess:
+            return "proxy.success"
+        case .proxyCompleted:
+            return "proxy.completed"
+        case .upstreamExecutionBudgetExhausted:
+            return "upstream.execution_budget_exhausted"
+        case .upstreamAttempt(let attempt):
+            return "upstream.attempt_\(attempt)"
+        case .upstreamRetryBudgetExhausted:
+            return "upstream.retry_budget_exhausted"
+        case .upstreamRetryDelay:
+            return "upstream.retry_delay"
+        case .upstreamRetryExhausted:
+            return "upstream.retry_exhausted"
+        case .upstreamSuccess:
+            return "upstream.success"
+        case .upstreamTimeout:
+            return "upstream.timeout"
+        case .upstreamUnavailable:
+            return "upstream.unavailable"
+        case .upstreamInvalidRequest:
+            return "upstream.invalid_request"
+        case .upstreamInvalidResponse:
+            return "upstream.invalid_response"
         }
     }
 }
@@ -164,8 +262,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         let mode: String
         let startedAt: Date
         var lastUpdatedAt: Date
-        var state: String
-        var step: String
+        var state: RefreshCodeIssuesDebugRequestState
+        var step: RefreshCodeIssuesDebugStep
         var lastQueuePosition: Int?
         var metadata: [String: String]
     }
@@ -209,8 +307,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             mode: mode,
             startedAt: now,
             lastUpdatedAt: now,
-            state: "waiting_for_permit",
-            step: "waiting_for_permit",
+            state: .waitingForPermit,
+            step: .waitingForPermit,
             lastQueuePosition: nil,
             metadata: [:]
         )
@@ -227,8 +325,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         pendingTotal: Int
     ) {
         updateRequest(requestID: requestID) { record, now in
-            record.state = "running"
-            record.step = "permit_acquired"
+            record.state = .running
+            record.step = .permitAcquired
             record.lastQueuePosition = queuePosition
             record.lastUpdatedAt = now
             record.metadata["pending_for_key"] = "\(pendingForKey)"
@@ -238,8 +336,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
 
     package func updateStep(
         requestID: String,
-        step: String,
-        state overrideState: String? = nil,
+        step: RefreshCodeIssuesDebugStep,
+        state overrideState: RefreshCodeIssuesDebugRequestState? = nil,
         metadata: [String: String] = [:]
     ) {
         updateRequest(requestID: requestID) { record, now in
@@ -277,8 +375,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             tabIdentifier: record.tabIdentifier,
             filePath: record.filePath,
             mode: record.mode,
-            finalState: record.state,
-            finalStep: record.step,
+            finalState: record.state.rawValue,
+            finalStep: record.step.rawValue,
             startedAt: record.startedAt,
             completedAt: now,
             lastQueuePosition: record.lastQueuePosition,
@@ -303,7 +401,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         var activeByQueueKey: [String: Int] = [:]
         var waitingByQueueKey: [String: Int] = [:]
         for record in activeRecords {
-            if record.state == "running" {
+            if record.state == .running {
                 activeByQueueKey[record.queueKey, default: 0] += 1
             } else {
                 waitingByQueueKey[record.queueKey, default: 0] += 1
@@ -325,8 +423,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
                     tabIdentifier: record.tabIdentifier,
                     filePath: record.filePath,
                     mode: record.mode,
-                    state: record.state,
-                    step: record.step,
+                    state: record.state.rawValue,
+                    step: record.step.rawValue,
                     startedAt: record.startedAt,
                     lastUpdatedAt: record.lastUpdatedAt,
                     lastQueuePosition: record.lastQueuePosition,
@@ -337,8 +435,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
             defaultRequestTimeoutSeconds: defaultRequestTimeoutSeconds,
             activeByQueueKey: activeByQueueKey,
             waitingByQueueKey: waitingByQueueKey,
-            activeRequestCount: activeRequests.filter { $0.state == "running" }.count,
-            waitingRequestCount: activeRequests.filter { $0.state != "running" }.count
+            activeRequestCount: activeRequests.filter { $0.state == RefreshCodeIssuesDebugRequestState.running.rawValue }.count,
+            waitingRequestCount: activeRequests.filter { $0.state != RefreshCodeIssuesDebugRequestState.running.rawValue }.count
         )
         return RefreshCodeIssuesDebugSnapshot(
             queue: queue,

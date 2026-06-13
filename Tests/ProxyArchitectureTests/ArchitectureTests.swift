@@ -65,7 +65,7 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCore",
         forbiddenModules: [
-            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
             "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI",
         ]
     ),

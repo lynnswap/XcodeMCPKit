@@ -8,7 +8,7 @@ extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
         guard upstreamHealthManager.initializedHealthyishCount() == 0 else { return }
         guard upstreamHealthManager.anyRecoveryInFlight() == false else { return }
-        if initializeManager.consumeRetryAfterWarmInitFailureRegardlessOfCachedInit() {
+        if initializeManager.consumeWarmInitRecoveryIntent(policy: .regardlessOfCachedInitialize) {
             startPrimaryEagerRetry()
             if upstreamHealthManager.anyRecoveryInFlight() {
                 return
@@ -201,10 +201,10 @@ extension RuntimeCoordinator {
                 let primaryInitInFlight = upstreamHealthManager.primaryInitInFlight()
                 if primaryInitInFlight {
                     initializeManager
-                        .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
+                        .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 } else {
                     initializeManager
-                        .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(false)
+                        .setWarmInitRecoveryIntent(.none)
                     startEagerInitializePrimary(applyBackoff: true)
                 }
             }

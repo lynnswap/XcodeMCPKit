@@ -256,7 +256,7 @@ churn を生んでいる構造欠陥は 3 つに集約される:
 
 機械的検証では白黒つかず、**該当フェーズの実装着手時に検証するのが最も安い**項目。事前に個別エージェントを立てる必要はない:
 
-1. **StdioFramer の Content-Length 読み経路の削除可否**(§F)── 初回コミット由来の防御的実装で、fix 対応の追加ではない。削除前に mcpbridge の実 stdout を 1 回実測する(Phase 4 以降の任意時点)。
+1. **StdioFramer の Content-Length 読み経路の削除可否**(§F)── 初回コミット由来の防御的実装で、fix 対応の追加ではない。削除前に mcpbridge の実 stdout を 1 回実測する(Phase 4 以降の任意時点)。2026-06-13 の直接実測では `initialize` 応答は bare newline JSON(`content_length=false`)だったが、`tools/list` / representative `tools/call` は direct `mcpbridge` が応答せず、auto-approver 付き live direct test も `directMCPBridgeResponseTimedOut` で完走しなかった。このため削除根拠は不足しており、Content-Length 経路は維持する。
 2. **StdioFramer の再パース効率**(append ごとの全バッファ再走査疑い)── 性能計測してから判断。正しさの問題ではない。
 3. **RuntimeCoordinating の protocol 分割粒度**(消費者別 2〜3 protocol 案)── Phase 4 の scoped lease API 導入後に必要な表面が確定してから。
 4. **RefreshCodeIssuesCoordinator の二重同期層**(actor + per-waiter lock-box)の解消 ── Phase 7 で。
@@ -290,6 +290,8 @@ churn を生んでいる構造欠陥は 3 つに集約される:
 第 3 ラウンドで追加実施: **batch 分類の単一パス化**(`routeToolCalls` — disabled / tools-list / documentation / forward を 1 ループで分類。filterDisabledToolCalls→filterLocalToolCalls の 2 パスと中間 serialize→reparse を削除し、無加工リクエストは原文バイトのまま forward = parse-once 規約の回復。本体をパラメータ渡しでなく関数内パースにすることで、派生グループが disconnected region となり strict concurrency 下で Task へ転送可能 — これが歴史的な再パースの正体だった)/ **EmbeddedEventLoop 型名 sniff の全廃**(同期解決は呼び出し側の制約なので `usesSynchronousLocalResolution` の明示 opt-in に変更。Embedded テストヘルパー 2 箇所だけが true を渡し、Sources/ から EmbeddedEventLoop への言及が消えた)。
 
 第 4 ラウンドで追加実施: **refresh 再帰の除去**(`executeRefreshRoute` — 分類済みの pure refresh 呼び出しに対する handle() 再入はゲート再実行がすべて no-op のため、lease/cancellation の振り付けを直接実行に置換。remainder の単一再入は refresh 抽出済みのため構造的に深さ 1 で有界、コメントで明文化)/ **god テストファイル 2 つの分割**(RuntimeCoordinatorTests 7,279 行 → 4,639 + DocumentationProviderTests 1,168 + UpstreamReadinessTests 495 + 共有 TestSupport 1,011。HTTPHandlerTests 7,575 行 → 2,244 + RefreshCodeIssuesHTTPTests 2,593 + DocumentationSearchRoutingTests 1,158 + DisabledToolHTTPTests 488 + TestSupport 1,157。いずれも同一 @Suite の extension 分割のため .serialized 実行意味論は完全保存)。
+
+第 5 ラウンドで追加実施: InitializeManager の primary initialize phase / warm-init recovery intent 化、UpstreamHealthManager の InitPhase + event/effect facade 化、UpstreamSlotScheduler の query/effect 分離、UpstreamReadinessCoordinator の lock-based class 化と外部 generation 補償削除、ProxyServer.RuntimeHolder 削除、RefreshCodeIssuesCoordinator の actor isolation 一本化、refresh debug step/state enum 化、CLI flag table 導入、ProxyCore→ProxyMCP 依存解消(ProxyConfigValue + Decodable ProxyFileConfig、JSONValue shaping を ProxySession へ移動)。StdioFramer の Content-Length 経路は実 `mcpbridge` 測定が `initialize` 以外完走しなかったため削除せず維持。
 
 意図的に見送り(判断記録):
 1. **slot ベースの応答組み立て**(merge ヘルパー群と forceBatchArray の全面置換)— 単一分類パスと再帰除去が着地した時点で、元指摘の構造問題(3 重分割・無制限再帰・多段 merge)は実質解消。残る merge は「並列 fallback 波」という本質的に並行な合流のみで、slot 化は応答の並び順を変えるため exact-wire テスト群と衝突する。並び順変更込みの全面リライトはリスクが利得を上回ると判断。

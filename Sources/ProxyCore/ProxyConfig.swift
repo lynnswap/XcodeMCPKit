@@ -1,5 +1,4 @@
 import Foundation
-import ProxyMCP
 
 public enum ProxyTransport: String, CaseIterable, Sendable {
     case http
@@ -36,7 +35,7 @@ public struct ProxyConfig: Sendable {
     public var autoApproveXcodeDialog: Bool
     public var refreshCodeIssuesMode: RefreshCodeIssuesMode
     public var disabledToolNames: Set<String>
-    package var initializeParamsOverride: [String: JSONValue]?
+    package var initializeParamsOverride: ProxyInitializeHandshakeOverride?
 
     public init(
         listenHost: String,
@@ -149,8 +148,11 @@ public struct CLIParser {
         var index = 1
         while index < args.count {
             let arg = args[index]
-            switch arg {
-            case "--listen":
+            guard let flag = ProxyCLIFlag(rawValue: arg) else {
+                throw CLIError.message("Unknown argument: \(arg)")
+            }
+            switch flag {
+            case .listen:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--listen requires host:port")
                 }
@@ -165,25 +167,25 @@ public struct CLIParser {
                     listenHost = value
                 }
                 index += 2
-            case "--host":
+            case .host:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--host requires a value")
                 }
                 listenHost = args[index + 1]
                 index += 2
-            case "--port":
+            case .port:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--port requires a value")
                 }
                 listenPort = Int(args[index + 1]) ?? listenPort
                 index += 2
-            case "--upstream-command":
+            case .upstreamCommand:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-command requires a value")
                 }
                 upstreamCommand = args[index + 1]
                 index += 2
-            case "--upstream-args":
+            case .upstreamArgs:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-args requires a value")
                 }
@@ -191,13 +193,13 @@ public struct CLIParser {
                 let parts = value.split(separator: ",").map { String($0) }.filter { !$0.isEmpty }
                 upstreamArgs = parts.isEmpty ? [] : parts
                 index += 2
-            case "--upstream-arg":
+            case .upstreamArg:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-arg requires a value")
                 }
                 upstreamArgs.append(args[index + 1])
                 index += 2
-            case "--upstream-processes":
+            case .upstreamProcesses:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-processes requires a value")
                 }
@@ -206,36 +208,36 @@ public struct CLIParser {
                 }
                 upstreamProcessCount = parsed
                 index += 2
-            case "--xcode-pid":
+            case .xcodePID:
                 throw CLIError.message(Self.removedXcodePIDMessage)
-            case "--session-id":
+            case .sessionID:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--session-id requires a value")
                 }
                 upstreamSessionID = args[index + 1]
                 index += 2
-            case "--max-body-bytes":
+            case .maxBodyBytes:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--max-body-bytes requires a value")
                 }
                 maxBodyBytes = Int(args[index + 1]) ?? maxBodyBytes
                 index += 2
-            case "--request-timeout":
+            case .requestTimeout:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--request-timeout requires seconds")
                 }
                 requestTimeout = TimeInterval(args[index + 1]) ?? requestTimeout
                 index += 2
-            case "--config":
+            case .config:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--config requires a value")
                 }
                 configPath = args[index + 1]
                 index += 2
-            case "--auto-approve":
+            case .autoApprove:
                 autoApproveXcodeDialog = true
                 index += 1
-            case "--refresh-code-issues-mode":
+            case .refreshCodeIssuesMode:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
                 }
@@ -245,9 +247,9 @@ public struct CLIParser {
                 refreshCodeIssuesMode = parsed
                 hasExplicitRefreshCodeIssuesMode = true
                 index += 2
-            case "--lazy-init":
+            case .lazyInit:
                 throw CLIError.message(Self.removedLazyInitMessage)
-            case "--stdio":
+            case .stdio:
                 if index + 1 < args.count {
                     let candidate = args[index + 1]
                     if !candidate.hasPrefix("-") {
@@ -265,7 +267,8 @@ public struct CLIParser {
                 stdioUpstreamURL = resolved.url
                 stdioUpstreamSource = resolved.source
                 index += 1
-            default:
+            case .helpShort, .help, .version, .url, .printURL, .dryRun, .forceRestart,
+                 .prefix, .bindir:
                 throw CLIError.message("Unknown argument: \(arg)")
             }
         }

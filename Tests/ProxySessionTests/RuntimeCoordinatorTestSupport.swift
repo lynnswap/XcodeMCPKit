@@ -11,9 +11,12 @@ import XcodeMCPTestSupport
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
     UpstreamSlotScheduler(
-        canUseUpstream: { _ in true },
+        canUseUpstream: { _ in UpstreamUseEvaluation(isUsable: true, effects: []) },
         selectUpstream: { occupied in
-            (0..<upstreamCount).first { occupied.contains($0) == false }
+            UpstreamSelectionResult(
+                upstreamIndex: (0..<upstreamCount).first { occupied.contains($0) == false },
+                effects: []
+            )
         }
     )
 }
@@ -620,7 +623,14 @@ actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
 }
 
 actor ReadinessFlag {
+    private struct Waiter {
+        let index: Int
+        let continuation: CheckedContinuation<Int, Error>
+    }
+
     private var ready: Bool
+    private var checks = 0
+    private var waiters: [Waiter] = []
 
     init(isReady: Bool) {
         self.ready = isReady
@@ -631,12 +641,46 @@ actor ReadinessFlag {
     }
 
     func isReady() -> Bool {
-        ready
+        checks += 1
+        resumeReadyWaiters()
+        return ready
+    }
+
+    func checkCount() -> Int {
+        checks
+    }
+
+    func nextCheck(at index: Int) async throws -> Int {
+        if checks > index {
+            return checks
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters.append(Waiter(index: index, continuation: continuation))
+        }
+    }
+
+    private func resumeReadyWaiters() {
+        var remaining: [Waiter] = []
+        for waiter in waiters {
+            if checks > waiter.index {
+                waiter.continuation.resume(returning: checks)
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        waiters = remaining
     }
 }
 
 actor AvailabilityFlag {
+    private struct Waiter {
+        let index: Int
+        let continuation: CheckedContinuation<Int, Error>
+    }
+
     private var available: Bool
+    private var checks = 0
+    private var waiters: [Waiter] = []
 
     init(isAvailable: Bool) {
         self.available = isAvailable
@@ -647,7 +691,30 @@ actor AvailabilityFlag {
     }
 
     func isAvailable() -> Bool {
-        available
+        checks += 1
+        resumeReadyWaiters()
+        return available
+    }
+
+    func nextCheck(at index: Int) async throws -> Int {
+        if checks > index {
+            return checks
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters.append(Waiter(index: index, continuation: continuation))
+        }
+    }
+
+    private func resumeReadyWaiters() {
+        var remaining: [Waiter] = []
+        for waiter in waiters {
+            if checks > waiter.index {
+                waiter.continuation.resume(returning: checks)
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        waiters = remaining
     }
 }
 

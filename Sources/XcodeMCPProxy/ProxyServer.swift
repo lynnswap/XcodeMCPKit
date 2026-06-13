@@ -67,20 +67,19 @@ public final class ProxyServer {
         }
     }
 
-    private let config: ProxyConfig
-    private let dependencies: Dependencies
-    private let group: EventLoopGroup
-    private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
-    private let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
-    private let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState
+    package let config: ProxyConfig
+    package let dependencies: Dependencies
+    package let group: EventLoopGroup
+    package let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
+    package let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
+    package let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState
     private var channels: [Channel] = []
-    private let logger: Logger = ProxyLogging.make("server")
-    private let runtimeLock = NSLock()
-    private let runtimeHolder = RuntimeHolder()
-    private let acceptedChannelTracker = ProxyAcceptedChannelTracker()
-    private var isShuttingDown = false
-    private var sessionManager: (any RuntimeCoordinating)?
-    private var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
+    package let logger: Logger = ProxyLogging.make("server")
+    package let runtimeLock = NSLock()
+    package let acceptedChannelTracker = ProxyAcceptedChannelTracker()
+    package var isShuttingDown = false
+    package var sessionManager: (any RuntimeCoordinating)?
+    package var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
 
     public convenience init(config: ProxyConfig) {
         self.init(config: config, dependencies: .live(config: config))
@@ -108,57 +107,6 @@ public final class ProxyServer {
 
     public func wait() async throws {
         try await waitForHTTP()
-    }
-
-    public func start() throws -> Channel {
-        let logger = self.logger
-        let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 256)
-            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .serverChannelInitializer { [acceptedChannelTracker] channel in
-                channel.pipeline.addHandler(ProxyAcceptedChannelHandler(tracker: acceptedChannelTracker))
-            }
-            .childChannelInitializer {
-                [runtimeHolder, config, refreshCodeIssuesCoordinator, refreshCodeIssuesTargetResolver, refreshCodeIssuesDebugState, logger] channel in
-                runtimeHolder.sessionManager(on: channel.eventLoop).flatMap { sessionManager in
-                    channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-                        channel.pipeline.addHandler(
-                            HTTPHandler(
-                                config: config,
-                                sessionManager: sessionManager,
-                                refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
-                                refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-                                refreshCodeIssuesDebugState: refreshCodeIssuesDebugState
-                            )
-                        )
-                    }
-                }.flatMapError { error in
-                    if case RuntimeHolderError.shuttingDown = error {
-                        channel.close(mode: .all, promise: nil)
-                        return channel.eventLoop.makeSucceededFuture(())
-                    }
-
-                    logger.warning(
-                        "Child channel initialization failed.",
-                        metadata: [
-                            "error": "\(error)"
-                        ]
-                    )
-                    return channel.eventLoop.makeFailedFuture(error)
-                }
-            }
-            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-        let boundChannels = try bindChannels(using: bootstrap)
-        guard installBoundChannelsAndPrepareRuntime(boundChannels) else {
-            for channel in boundChannels {
-                channel.close(promise: nil)
-            }
-            throw ProxyServerError.shutdownInProgress
-        }
-        guard let first = boundChannels.first else {
-            throw ProxyServerError.failedToBind
-        }
-        return first
     }
 
     public func shutdown() async throws {
@@ -226,7 +174,7 @@ public final class ProxyServer {
         return (config.listenHost, config.listenPort)
     }
 
-    private func bindChannels(using bootstrap: ServerBootstrap) throws -> [Channel] {
+    package func bindChannels(using bootstrap: ServerBootstrap) throws -> [Channel] {
         if config.listenHost != "localhost" {
             let channel = try bootstrap.bind(host: config.listenHost, port: config.listenPort).wait()
             return [channel]
@@ -364,9 +312,7 @@ public final class ProxyServer {
 
     private static func permissionDialogAssistantNameCandidates(config: ProxyConfig) -> [String] {
         var candidates = Set<String>(["XcodeMCPKit"])
-        if case .object(let clientInfo)? = config.initializeParamsOverride?["clientInfo"],
-           case .string(let name)? = clientInfo["name"],
-           name.isEmpty == false {
+        if let name = config.initializeParamsOverride?.clientName, name.isEmpty == false {
             candidates.insert(name)
         }
         return Array(candidates)
@@ -378,7 +324,6 @@ public final class ProxyServer {
         channels: [Channel]
     ) {
         runtimeLock.withLock {
-            runtimeHolder.beginShutdown()
             let context = (
                 sessionManager: sessionManager,
                 autoApprover: permissionDialogAutoApprover,
@@ -391,43 +336,17 @@ public final class ProxyServer {
         }
     }
 
-    private func installBoundChannelsAndPrepareRuntime(_ boundChannels: [Channel]) -> Bool {
-        runtimeLock.withLock {
-            guard isShuttingDown == false else {
-                return false
-            }
-
-            channels = boundChannels
-
-            if let sessionManager {
-                runtimeHolder.activate(sessionManager)
-                return true
-            }
-
-            if config.autoApproveXcodeDialog {
-                let autoApprover = dependencies.makeAutoApprover()
-                autoApprover.start()
-                permissionDialogAutoApprover = autoApprover
-            }
-
-            let sessionManager = dependencies.makeRuntimeCoordinator(config, group.next())
-            self.sessionManager = sessionManager
-            runtimeHolder.activate(sessionManager)
-            return true
-        }
+    package func setChannelsForStartedServer(_ startedChannels: [Channel]) {
+        channels = startedChannels
     }
 }
 
-private enum ProxyServerError: Error {
+package enum ProxyServerError: Error {
     case failedToBind
     case shutdownInProgress
 }
 
-private enum RuntimeHolderError: Error {
-    case shuttingDown
-}
-
-private final class ProxyAcceptedChannelTracker: @unchecked Sendable {
+package final class ProxyAcceptedChannelTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var channels: [ObjectIdentifier: Channel] = [:]
 
@@ -449,8 +368,8 @@ private final class ProxyAcceptedChannelTracker: @unchecked Sendable {
     }
 }
 
-private final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = Channel
+package final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
+    package typealias InboundIn = Channel
 
     private let tracker: ProxyAcceptedChannelTracker
 
@@ -458,59 +377,10 @@ private final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @uncheck
         self.tracker = tracker
     }
 
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+    package func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let channel = unwrapInboundIn(data)
         tracker.register(channel)
         context.fireChannelRead(data)
-    }
-}
-
-private final class RuntimeHolder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var sessionManager: (any RuntimeCoordinating)?
-    private var waiters: [EventLoopPromise<any RuntimeCoordinating>] = []
-    private var isShuttingDown = false
-
-    func sessionManager(on eventLoop: EventLoop) -> EventLoopFuture<any RuntimeCoordinating> {
-        lock.withLock {
-            if isShuttingDown {
-                return eventLoop.makeFailedFuture(RuntimeHolderError.shuttingDown)
-            }
-            if let sessionManager {
-                return eventLoop.makeSucceededFuture(sessionManager)
-            }
-            let promise = eventLoop.makePromise(of: (any RuntimeCoordinating).self)
-            waiters.append(promise)
-            return promise.futureResult
-        }
-    }
-
-    func activate(_ sessionManager: any RuntimeCoordinating) {
-        let waiters = lock.withLock { () -> [EventLoopPromise<any RuntimeCoordinating>] in
-            guard isShuttingDown == false else {
-                return []
-            }
-            self.sessionManager = sessionManager
-            let waiters = self.waiters
-            self.waiters = []
-            return waiters
-        }
-        for waiter in waiters {
-            waiter.succeed(sessionManager)
-        }
-    }
-
-    func beginShutdown() {
-        let waiters = lock.withLock { () -> [EventLoopPromise<any RuntimeCoordinating>] in
-            isShuttingDown = true
-            sessionManager = nil
-            let waiters = self.waiters
-            self.waiters = []
-            return waiters
-        }
-        for waiter in waiters {
-            waiter.fail(RuntimeHolderError.shuttingDown)
-        }
     }
 }
 
@@ -521,7 +391,7 @@ package protocol ProxyServerPermissionDialogAutoApprover: Sendable {
 
 extension XcodePermissionDialogAutoApprover: ProxyServerPermissionDialogAutoApprover {}
 
-private extension NSLock {
+package extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }

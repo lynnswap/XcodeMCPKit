@@ -1,58 +1,13 @@
 import Foundation
-import ProxyMCP
 
-/// Resolves the initialize params the proxy presents to mcpbridge:
-/// built-in defaults merged with the TOML override, with the clientInfo
-/// version auto-detected from Xcode's IDEChat*Version defaults unless the
-/// override pins one explicitly.
+/// Core-owned defaults and Xcode chat client version lookup for the
+/// initialize params the proxy presents to mcpbridge. JSON shaping is kept
+/// in ProxySession so ProxyCore stays independent of ProxyMCP.
 package enum InitializeHandshakeParams {
-    package static func resolved(
-        initializeParamsOverride: [String: JSONValue]?
-    ) -> [String: JSONValue] {
-        let mergedParams = ProxyFileConfigLoader.mergeJSONObjects(
-            defaultParams(),
-            overriding: initializeParamsOverride ?? [:]
-        )
-        guard hasExplicitClientVersionOverride(initializeParamsOverride: initializeParamsOverride) == false else {
-            return mergedParams
-        }
-        return applyingAutomaticClientVersion(to: mergedParams)
-    }
-
-    package static func defaultParams() -> [String: JSONValue] {
-        [
-            "protocolVersion": .string("2025-03-26"),
-            "capabilities": .object([:]),
-            "clientInfo": .object([
-                "name": .string(defaultProxyClientName()),
-                "version": .string(defaultProxyClientVersion()),
-            ]),
-        ]
-    }
-
     package static func hasExplicitClientVersionOverride(
-        initializeParamsOverride: [String: JSONValue]?
+        initializeParamsOverride: ProxyInitializeHandshakeOverride?
     ) -> Bool {
-        guard case .object(let clientInfo)? = initializeParamsOverride?["clientInfo"] else {
-            return false
-        }
-        return clientInfo["version"] != nil
-    }
-
-    package static func applyingAutomaticClientVersion(to params: [String: JSONValue]) -> [String: JSONValue] {
-        guard case .object(var clientInfo)? = params["clientInfo"],
-              case .string(let clientName)? = clientInfo["name"] else {
-            return params
-        }
-
-        guard let resolvedVersion = xcodeChatClientVersion(for: clientName) else {
-            return params
-        }
-
-        clientInfo["version"] = .string(resolvedVersion)
-        var updated = params
-        updated["clientInfo"] = .object(clientInfo)
-        return updated
+        initializeParamsOverride?.clientVersion != nil
     }
 
     package static func defaultClientVersion(for clientName: String) -> String {

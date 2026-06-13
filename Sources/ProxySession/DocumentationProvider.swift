@@ -420,7 +420,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
-        initializeParams: [String: JSONValue] = InitializeHandshakeParams.defaultParams(),
+        initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         clock: ClockClient = .liveValue,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
