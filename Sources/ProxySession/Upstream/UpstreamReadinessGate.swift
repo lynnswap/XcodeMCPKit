@@ -205,7 +205,7 @@ package final class UpstreamReadinessCoordinator: Sendable {
         if let isAvailable = gate.isAvailable, await isAvailable() {
             if didLogRunningWait == false {
                 logger.info(
-                    "Xcode is running; waiting for an Xcode workspace window before starting mcpbridge",
+                    "Xcode is running; waiting for it to become ready before starting mcpbridge",
                     metadata: [
                         "target": .string(gate.targetName)
                     ]

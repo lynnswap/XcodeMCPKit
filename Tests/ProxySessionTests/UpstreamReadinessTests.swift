@@ -10,70 +10,9 @@ import XcodeMCPTestSupport
 @testable import ProxySession
 
 extension RuntimeCoordinatorTests {
-    @Test func xcodeReadinessRequiresWorkspaceWindow() {
-        let pids: Set<pid_t> = [1234]
-
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: []
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 1234, title: "Welcome to Xcode", layer: 0, alpha: 1)
-                ]
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 5678, title: "XcodeMCPKit — xcode", layer: 0, alpha: 1)
-                ]
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 1234, title: "XcodeMCPKit — xcode", layer: 1, alpha: 1)
-                ]
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 1234, title: "XcodeMCPKit — xcode", layer: 0, alpha: 1)
-                ]
-            ) == true
-        )
-    }
-
-    @Test func xcodeReadinessFallsBackToProcessWhenAccessibilityWindowsAreUnavailable() {
-        #expect(
-            XcodeReadinessProbe.isReady(
-                xcodeProcessIDs: [1234],
-                windows: nil
-            )
-        )
-        #expect(
-            XcodeReadinessProbe.isReady(
-                xcodeProcessIDs: [],
-                windows: nil
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.isReady(
-                xcodeProcessIDs: [1234],
-                windows: [
-                    .init(ownerPID: 1234, title: "Welcome to Xcode", layer: 0, alpha: 1)
-                ]
-            ) == false
-        )
+    @Test func xcodeReadinessRequiresRunningXcodeProcess() {
+        #expect(XcodeReadinessProbe.isReady(xcodeProcessIDs: [1234]))
+        #expect(XcodeReadinessProbe.isReady(xcodeProcessIDs: []) == false)
     }
 
     @Test func xcodeReadinessParsesPGrepOutput() {
