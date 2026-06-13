@@ -326,9 +326,12 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let prewarmStarted = TestSignal()
+        let prewarmBlocker = AsyncGate()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            prewarmDelayNanoseconds: 300_000_000
+            prewarmStarted: prewarmStarted,
+            prewarmBlocker: prewarmBlocker
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 300),
@@ -338,8 +341,8 @@ extension RuntimeCoordinatorTests {
             prewarmDocumentationProviderOnStartup: true
         )
 
+        try await prewarmStarted.wait(description: "waiting for startup prewarm to begin")
         await manager.shutdown()
-        try? await Task.sleep(nanoseconds: 400_000_000)
 
         #expect(await documentationProvider.prewarmCount() == 0)
         #expect(await documentationProvider.shutdownCount() == 1)

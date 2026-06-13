@@ -18,7 +18,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: .seconds(5)
             ) { _ in
                 await acquisitions.append("first")
-                await releaseFirst.wait()
+                try await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -54,7 +54,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: .seconds(5)
             ) { _ in
                 await acquisitions.append("first")
-                await releaseFirst.wait()
+                try await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -92,7 +92,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: nil
             ) { _ in
                 await completionCount.append("first")
-                await releaseFirst.wait()
+                try await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -143,7 +143,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: .seconds(5)
             ) { _ in
                 await acquisitions.append("first")
-                await releaseFirst.wait()
+                try await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -202,10 +202,10 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: nil
             ) { _ in
                 await firstAcquired.signal()
-                await releaseFirst.wait()
+                try await releaseFirst.wait()
             }
         }
-        await firstAcquired.wait()
+        try await firstAcquired.wait()
 
         let secondTask = Task<Void, Never> {
             do {
@@ -245,7 +245,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: .seconds(5)
             ) { _ in
                 await acquisitions.append("first")
-                await releaseFirst.wait()
+                try await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -293,6 +293,7 @@ struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorResetCancelsQueuedWaiters() async throws {
         let clock = TestClock()
         let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
 
@@ -302,7 +303,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 requestTimeout: .seconds(5)
             ) { _ in
                 await acquisitions.append("first")
-                try await Task.sleep(for: .seconds(5))
+                try await releaseFirst.wait()
             }
         }
         try await spinUntil("waiting for first acquisition") {
@@ -349,6 +350,7 @@ struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorResetCancelsActiveExecution() async throws {
         let coordinator = RefreshCodeIssuesCoordinator()
         let started = TestSignal()
+        let releaseActive = AsyncGate()
         let outcomes = RecordedValues<String>()
 
         let activeTask = Task<Void, Never> {
@@ -358,7 +360,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                     requestTimeout: .seconds(5)
                 ) { _ in
                     started.signal()
-                    try await Task.sleep(for: .seconds(5))
+                    try await releaseActive.wait()
                     await outcomes.append("completed")
                 }
             } catch is CancellationError {
@@ -384,6 +386,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         let coordinator = RefreshCodeIssuesCoordinator()
         let activeStarted = TestSignal()
         let activeCancellationObserved = TestSignal()
+        let releaseActive = AsyncGate()
         let allowActiveExit = AsyncGate()
         let acquisitions = RecordedValues<String>()
 
@@ -396,11 +399,11 @@ struct RefreshCodeIssuesCoordinatorTests {
                     await acquisitions.append("first")
                     activeStarted.signal()
                     do {
-                        try await Task.sleep(for: .seconds(5))
+                        try await releaseActive.wait()
                     } catch is CancellationError {
                         await acquisitions.append("first-cancelling")
                         activeCancellationObserved.signal()
-                        await allowActiveExit.wait()
+                        await allowActiveExit.waitIgnoringCancellation()
                         throw CancellationError()
                     }
                 }
@@ -448,31 +451,5 @@ struct RefreshCodeIssuesCoordinatorTests {
             "first-cancelled",
             "second",
         ])
-    }
-}
-
-private actor AsyncGate {
-    private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func wait() async {
-        if isOpen {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
-    }
-
-    func signal() {
-        guard isOpen == false else {
-            return
-        }
-        isOpen = true
-        let waiters = waiters
-        self.waiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
     }
 }

@@ -370,22 +370,37 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var callTimeouts: [TimeAmount?] = []
     private let prewarmDelayNanoseconds: UInt64?
     private let toolListDelayNanoseconds: UInt64?
+    private let prewarmStarted: TestSignal?
+    private let prewarmBlocker: AsyncGate?
 
     init(
         toolListUpdate: DocumentationToolListUpdate,
         callOutcomes: [DocumentationProviderCallOutcome] = [],
         prewarmDelayNanoseconds: UInt64? = nil,
-        toolListDelayNanoseconds: UInt64? = nil
+        toolListDelayNanoseconds: UInt64? = nil,
+        prewarmStarted: TestSignal? = nil,
+        prewarmBlocker: AsyncGate? = nil
     ) {
         self.update = toolListUpdate
         self.callOutcomes = callOutcomes
         self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
         self.toolListDelayNanoseconds = toolListDelayNanoseconds
+        self.prewarmStarted = prewarmStarted
+        self.prewarmBlocker = prewarmBlocker
     }
 
     func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+        prewarmStarted?.signal()
         if let prewarmDelayNanoseconds {
             try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
+            guard !Task.isCancelled else { return .unavailable }
+        }
+        if let prewarmBlocker {
+            do {
+                try await prewarmBlocker.wait()
+            } catch {
+                return .unavailable
+            }
             guard !Task.isCancelled else { return .unavailable }
         }
         prewarmTimeouts.append(requestTimeout)

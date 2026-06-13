@@ -402,8 +402,8 @@ extension HTTPHandlerTests {
 
     @Test func httpBatchForwardsOtherCallsWhileDocumentationSearchIsStillResolving() async throws {
         let config = makeConfig(requestTimeout: 2)
-        let documentationStarted = NIOLockedValueBox(false)
-        let releaseDocumentation = DispatchSemaphore(value: 0)
+        let documentationStarted = TestSignal()
+        let releaseDocumentation = AsyncGate()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
@@ -417,8 +417,8 @@ extension HTTPHandlerTests {
                 )
             },
             documentationSearchResponder: { requestData in
-                documentationStarted.withLockedValue { $0 = true }
-                _ = releaseDocumentation.wait(timeout: .now() + 2)
+                documentationStarted.signal()
+                try await releaseDocumentation.wait()
                 let object = try #require(
                     JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
                 )
@@ -435,9 +435,6 @@ extension HTTPHandlerTests {
             config: config,
             sessionManager: sessionManager
         )
-        defer {
-            releaseDocumentation.signal()
-        }
 
         do {
             let postTask = Task {
@@ -461,15 +458,15 @@ extension HTTPHandlerTests {
                 )
             }
 
-            let didStartDocumentation = await waitUntil(timeout: .seconds(1)) {
-                documentationStarted.withLockedValue { $0 }
-            }
-            #expect(didStartDocumentation)
+            try await documentationStarted.wait(
+                timeout: .seconds(1),
+                description: "waiting for documentation search to start"
+            )
             let didForwardOtherTool = await waitUntil(timeout: .seconds(1)) {
                 sessionManager.sentToolNames() == ["OtherAllowedTool"]
             }
             #expect(didForwardOtherTool)
-            releaseDocumentation.signal()
+            await releaseDocumentation.signal()
 
             let rawResponse = try await postTask.value
             #expect(rawResponse.statusCode == 200)
@@ -488,6 +485,7 @@ extension HTTPHandlerTests {
             let otherContent = otherResult?["content"] as? [[String: Any]]
             #expect(otherContent?.first?["text"] as? String == "other-tool-result")
         } catch {
+            await releaseDocumentation.signal()
             try? await server.shutdown()
             throw error
         }
@@ -861,7 +859,7 @@ extension HTTPHandlerTests {
                 documentationRequests.withLockedValue { requests in
                     requests.append(query)
                 }
-                Thread.sleep(forTimeInterval: 0.2)
+                try await Task.sleep(for: .milliseconds(200))
                 let originalIDValue = try #require(object["id"])
                 let originalID = try #require(RPCID(any: originalIDValue))
                 return try makeToolSuccessResponse(
@@ -920,13 +918,13 @@ extension HTTPHandlerTests {
 
     @Test func httpSingleDocumentationSearchCancellationAbandonsPrefilterLease() async throws {
         let config = makeConfig(requestTimeout: 2)
-        let documentationStarted = DispatchSemaphore(value: 0)
-        let documentationRelease = DispatchSemaphore(value: 0)
+        let documentationStarted = TestSignal()
+        let documentationRelease = AsyncGate()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             documentationSearchResponder: { requestData in
                 documentationStarted.signal()
-                _ = documentationRelease.wait(timeout: .now() + 2)
+                try await documentationRelease.wait()
                 let object = try #require(
                     JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
                 )
@@ -967,9 +965,12 @@ extension HTTPHandlerTests {
             )
             let cancellationHandle = try #require(operation.cancellationHandle)
 
-            try #require(await waitForHTTPTestSemaphore(documentationStarted, timeoutSeconds: 1) == .success)
+            try await documentationStarted.wait(
+                timeout: .seconds(1),
+                description: "waiting for documentation search to start"
+            )
             service.cancel(cancellationHandle)
-            documentationRelease.signal()
+            await documentationRelease.signal()
 
             do {
                 _ = try await operation.future.get()
@@ -984,7 +985,7 @@ extension HTTPHandlerTests {
             #expect(sessionManager.sentToolNames().isEmpty)
             try await group.shutdownGracefully()
         } catch {
-            documentationRelease.signal()
+            await documentationRelease.signal()
             try? await group.shutdownGracefully()
             throw error
         }
@@ -992,8 +993,8 @@ extension HTTPHandlerTests {
 
     @Test func httpBatchDocumentationSearchCancellationAbandonsPrefilterLease() async throws {
         let config = makeConfig(requestTimeout: 2)
-        let documentationStarted = DispatchSemaphore(value: 0)
-        let documentationRelease = DispatchSemaphore(value: 0)
+        let documentationStarted = TestSignal()
+        let documentationRelease = AsyncGate()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
@@ -1008,7 +1009,7 @@ extension HTTPHandlerTests {
             },
             documentationSearchResponder: { requestData in
                 documentationStarted.signal()
-                _ = documentationRelease.wait(timeout: .now() + 2)
+                try await documentationRelease.wait()
                 let object = try #require(
                     JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
                 )
@@ -1056,9 +1057,12 @@ extension HTTPHandlerTests {
             )
             let cancellationHandle = try #require(operation.cancellationHandle)
 
-            try #require(await waitForHTTPTestSemaphore(documentationStarted, timeoutSeconds: 1) == .success)
+            try await documentationStarted.wait(
+                timeout: .seconds(1),
+                description: "waiting for documentation search to start"
+            )
             service.cancel(cancellationHandle)
-            documentationRelease.signal()
+            await documentationRelease.signal()
 
             do {
                 _ = try await operation.future.get()
@@ -1073,7 +1077,7 @@ extension HTTPHandlerTests {
             #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
             try await group.shutdownGracefully()
         } catch {
-            documentationRelease.signal()
+            await documentationRelease.signal()
             try? await group.shutdownGracefully()
             throw error
         }

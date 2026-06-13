@@ -87,7 +87,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
     private let documentationSearchResponder:
-        (@Sendable (_ requestData: Data) throws -> Data)?
+        (@Sendable (_ requestData: Data) async throws -> Data)?
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = LeaseManager()
 
@@ -95,7 +95,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         config: ProxyConfig,
         upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
         documentationSearchResponder:
-            (@Sendable (_ requestData: Data) throws -> Data)? = nil,
+            (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -110,7 +110,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         config: ProxyConfig,
         upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
-            (@Sendable (_ requestData: Data) throws -> Data)? = nil,
+            (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -125,7 +125,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         config: ProxyConfig,
         upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
-            (@Sendable (_ requestData: Data) throws -> Data)? = nil,
+            (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config
@@ -277,7 +277,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             return .fallbackToUpstream
         }
         do {
-            return .handled(try documentationSearchResponder(requestData))
+            return .handled(try await documentationSearchResponder(requestData))
         } catch is UpstreamSlotAcquisitionError {
             return .fallbackToUpstream
         }

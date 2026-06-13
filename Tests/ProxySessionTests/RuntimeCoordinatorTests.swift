@@ -869,7 +869,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -895,7 +901,7 @@ struct RuntimeCoordinatorTests {
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -980,7 +986,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -1005,7 +1017,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -1015,7 +1027,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let thirdTask = Task {
             try await manager.sharedToolsList(
@@ -1044,7 +1056,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -1068,7 +1086,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -1324,7 +1342,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -1346,7 +1370,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(

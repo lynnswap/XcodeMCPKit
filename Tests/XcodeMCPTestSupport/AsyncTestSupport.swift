@@ -407,6 +407,75 @@ package final class TestSignal: @unchecked Sendable {
     }
 }
 
+package actor AsyncGate {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var isOpen = false
+    private var waiters: [Waiter] = []
+
+    package init() {}
+
+    package func wait() async throws {
+        if isOpen {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                if isOpen {
+                    continuation.resume(returning: ())
+                    return
+                }
+                waiters.append(Waiter(id: waiterID, continuation: continuation))
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitIgnoringCancellation() async {
+        if isOpen {
+            return
+        }
+
+        try? await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            if isOpen {
+                continuation.resume(returning: ())
+                return
+            }
+            waiters.append(Waiter(id: UUID(), continuation: continuation))
+        }
+    }
+
+    package func signal() {
+        guard isOpen == false else {
+            return
+        }
+        isOpen = true
+        let waiters = waiters
+        self.waiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume(returning: ())
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+}
+
 package final class TestClock: Clock, @unchecked Sendable {
     package typealias Instant = ContinuousClock.Instant
     package typealias Duration = Swift.Duration
