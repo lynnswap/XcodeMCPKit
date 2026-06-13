@@ -1517,6 +1517,86 @@ struct RuntimeCoordinatorTests {
         _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
     }
 
+    @Test func controlPlaneDoesNotReturnStaleToolsCatalogAfterGenerationClear() async throws {
+        let brokerState = CanonicalBrokerState()
+        let debugMirror = ControlPlaneDebugMirror()
+        let loadStarted = TestSignal()
+        let releaseLoad = AsyncGate()
+        let coordinator = ControlPlaneCoordinator(
+            brokerState: brokerState,
+            debugMirror: debugMirror,
+            toolsCatalogLoader: { _, _ in
+                loadStarted.signal()
+                try await releaseLoad.wait()
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: .object(["tools": .array([])]),
+                    sourceUpstream: 0,
+                    durationMilliseconds: 1
+                )
+            },
+            windowsLoader: { _, _, _ in .object([:]) },
+            upstreamHandshakeStates: { [:] },
+            logger: ProxyLogging.make("control-plane-test"),
+            controlPlaneDefaultTimeout: nil
+        )
+
+        let task = Task {
+            try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
+        }
+        try await loadStarted.wait(description: "waiting for tools catalog load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
+        })
+
+        brokerState.clearToolsCatalog()
+        await releaseLoad.signal()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+    }
+
+    @Test func controlPlaneDoesNotReturnStaleWindowsAfterGenerationClear() async throws {
+        let brokerState = CanonicalBrokerState()
+        let debugMirror = ControlPlaneDebugMirror()
+        let loadStarted = TestSignal()
+        let releaseLoad = AsyncGate()
+        let coordinator = ControlPlaneCoordinator(
+            brokerState: brokerState,
+            debugMirror: debugMirror,
+            toolsCatalogLoader: { _, _ in
+                CanonicalToolsCatalogLoadResult(
+                    rawResult: .object(["tools": .array([])]),
+                    sourceUpstream: 0,
+                    durationMilliseconds: 1
+                )
+            },
+            windowsLoader: { _, _, _ in
+                loadStarted.signal()
+                try await releaseLoad.wait()
+                return .object(["windows": .array([])])
+            },
+            upstreamHandshakeStates: { [:] },
+            logger: ProxyLogging.make("control-plane-test"),
+            controlPlaneDefaultTimeout: nil
+        )
+
+        let task = Task {
+            try await coordinator.listWindows(route: .anyHealthy, deadlineUptimeNs: nil)
+        }
+        try await loadStarted.wait(description: "waiting for window load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.windows == 1
+        })
+
+        brokerState.clearInitialize()
+        await releaseLoad.signal()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+    }
+
     @Test func sessionManagerUsesInitializeParamsOverrideFromConfigFile() async throws {
         let configPath = try makeTempProxyConfigFile(
             """

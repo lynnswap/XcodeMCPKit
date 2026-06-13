@@ -633,6 +633,71 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpMixedBatchForwardsRefreshNotificationThroughNormalPath() async throws {
+        var config = makeConfig(requestTimeout: 2)
+        config.refreshCodeIssuesMode = .proxy
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                switch (method, toolName) {
+                case ("tools/call", "RunAllTests"):
+                    return .immediate(
+                        try makeToolSuccessResponse(id: originalID, text: "ok")
+                    )
+                case ("tools/call", "XcodeRefreshCodeIssuesInFile"):
+                    return .immediate(Data())
+                default:
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool")
+                    )
+                }
+            }
+        )
+        sessionManager.setInitialized(true)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, bodyData) = try await postHTTPAnyJSON(
+                url: server.url,
+                sessionID: "session-refresh-notification-forwarding",
+                payload: [
+                    toolsCallPayload(
+                        id: 510,
+                        name: "RunAllTests",
+                        arguments: [:]
+                    ),
+                    [
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": [
+                            "name": "XcodeRefreshCodeIssuesInFile",
+                            "arguments": [
+                                "tabIdentifier": "windowtab-notification",
+                                "filePath": "App/Sources/App.swift",
+                            ],
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.statusCode == 200)
+            let body = try #require(bodyData as? [[String: Any]])
+            #expect(body.count == 1)
+            #expect((body.first?["id"] as? NSNumber)?.intValue == 510)
+            #expect(sessionManager.sentToolNames() == [
+                "RunAllTests",
+                "XcodeRefreshCodeIssuesInFile",
+            ])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpMixedBatchRefreshRetryDoesNotReplayAllowedCalls() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream

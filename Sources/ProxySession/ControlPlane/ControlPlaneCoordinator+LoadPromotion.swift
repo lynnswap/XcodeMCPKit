@@ -43,6 +43,7 @@ extension ControlPlaneCoordinator {
                 requestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
                 rpcHandle: current.rpcHandle,
                 task: current.task,
+                startGeneration: current.startGeneration,
                 waiters: [:]
             ),
             error: CancellationError()

@@ -45,6 +45,7 @@ extension ProxyServer {
             stopPreparedRuntimeAfterStartFailure(preparedRuntime)
             throw ProxyServerError.failedToBind
         }
+        preparedRuntime.startLifecycle()
         return first
     }
 
@@ -68,9 +69,7 @@ extension ProxyServer {
 
         let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
         if config.autoApproveXcodeDialog {
-            let created = dependencies.makeAutoApprover()
-            created.start()
-            autoApprover = created
+            autoApprover = dependencies.makeAutoApprover()
         } else {
             autoApprover = nil
         }
@@ -129,5 +128,11 @@ private final class ProxyServerPreparedRuntime: @unchecked Sendable {
         self.sessionManager = sessionManager
         self.autoApprover = autoApprover
         self.ownsRuntime = ownsRuntime
+    }
+
+    func startLifecycle() {
+        autoApprover?.start()
+        guard ownsRuntime else { return }
+        sessionManager.start()
     }
 }

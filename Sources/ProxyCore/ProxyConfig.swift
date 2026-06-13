@@ -73,8 +73,8 @@ public struct ProxyConfig: Sendable {
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = disabledToolNames ?? []
-        if disabledToolNames == nil, configPath != nil {
-            loadFileConfig()
+        if configPath != nil {
+            loadFileConfig(preserveDisabledToolNames: disabledToolNames != nil)
         }
     }
 
@@ -82,11 +82,17 @@ public struct ProxyConfig: Sendable {
     /// override) from `configPath` and stores the decoded values. This is
     /// the only place the file is read; consumers use the stored values.
     public mutating func loadFileConfig() {
+        loadFileConfig(preserveDisabledToolNames: false)
+    }
+
+    private mutating func loadFileConfig(preserveDisabledToolNames: Bool) {
         let logger = ProxyLogging.make("config")
-        disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
-            configPath: configPath,
-            logger: logger
-        )
+        if preserveDisabledToolNames == false {
+            disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
+                configPath: configPath,
+                logger: logger
+            )
+        }
         initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
             configPath: configPath,
             logger: logger

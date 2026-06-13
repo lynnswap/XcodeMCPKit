@@ -1,6 +1,10 @@
 import ProxyCore
 import Foundation
+import NIO
+import NIOConcurrencyHelpers
+import ProxySession
 import Testing
+import XcodeMCPTestSupport
 
 @testable import XcodeMCPProxy
 
@@ -91,6 +95,95 @@ struct ProxyServerTests {
                 ["--sdk", "macosx"]
             ) == "/custom/toolchain/mcpbridge"
         )
+    }
+
+    @Test func startDoesNotLaunchRuntimeLifecycleWhenBindFails() async throws {
+        let blockerGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let blocker = try await ServerBootstrap(group: blockerGroup)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let blockedPort = try #require(blocker.localAddress?.port)
+
+        let autoApprover = RecordingAutoApprover()
+        let upstream = RecordingUpstreamSlot()
+        let config = ProxyConfig(
+            listenHost: "127.0.0.1",
+            listenPort: blockedPort,
+            upstreamCommand: "xcrun",
+            upstreamArgs: ["mcpbridge"],
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            autoApproveXcodeDialog: true
+        )
+        let server = ProxyServer(
+            config: config,
+            dependencies: .init(
+                makeAutoApprover: { autoApprover },
+                makeRuntimeCoordinator: { config, eventLoop in
+                    RuntimeCoordinator(
+                        config: config,
+                        eventLoop: eventLoop,
+                        upstreams: [upstream],
+                        startImmediately: false
+                    )
+                }
+            )
+        )
+
+        do {
+            _ = try server.start()
+            Issue.record("expected bind failure")
+        } catch {}
+
+        #expect(autoApprover.startCount == 0)
+        #expect(upstream.startCount == 0)
+
+        try? await server.shutdown()
+        try? await blocker.close().get()
+        await shutdown(blockerGroup)
+    }
+}
+
+private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermissionDialogAutoApprover {
+    private let startCountBox = NIOLockedValueBox(0)
+
+    var startCount: Int {
+        startCountBox.withLockedValue { $0 }
+    }
+
+    func start() {
+        startCountBox.withLockedValue { $0 += 1 }
+    }
+
+    func stop() {}
+}
+
+private final class RecordingUpstreamSlot: @unchecked Sendable, UpstreamSlotControlling {
+    private let startCountBox = NIOLockedValueBox(0)
+    private let eventStream: AsyncStream<UpstreamEvent>
+
+    var startCount: Int {
+        startCountBox.withLockedValue { $0 }
+    }
+
+    var events: AsyncStream<UpstreamEvent> {
+        eventStream
+    }
+
+    init() {
+        eventStream = AsyncStream { _ in }
+    }
+
+    func start() async {
+        startCountBox.withLockedValue { $0 += 1 }
+    }
+
+    func stop() async {}
+
+    func send(_ data: Data) async -> UpstreamSendResult {
+        _ = data
+        return .accepted
     }
 }
 

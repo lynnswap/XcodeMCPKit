@@ -66,6 +66,7 @@ package actor ControlPlaneCoordinator {
         let requestDeadlineUptimeNs: UInt64?
         let rpcHandle: ControlPlaneRPCHandle
         let task: Task<JSONValue, Error>
+        let startGeneration: UInt64
         var waiters: [WaiterID: WindowWaiterRecord] = [:]
     }
 
@@ -103,6 +104,7 @@ package actor ControlPlaneCoordinator {
     }
 
     package func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
+        cancelInvalidatedLoads()
         if let rawResult = brokerState.toolsCatalogRaw() {
             return rawResult
         }
@@ -138,6 +140,7 @@ package actor ControlPlaneCoordinator {
         route: ControlPlaneRoute,
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
+        cancelInvalidatedLoads()
         let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)
         let requestedPromotionDeadlineUptimeNs = promotionDeadlineUptimeNs(
             forWaiterDeadlineUptimeNs: deadlineUptimeNs
@@ -167,6 +170,7 @@ package actor ControlPlaneCoordinator {
     }
 
     package func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async {
+        cancelInvalidatedLoads()
         guard
             brokerState.toolsCatalogRaw() == nil,
             toolsCatalogLoad == nil,
@@ -283,7 +287,8 @@ package actor ControlPlaneCoordinator {
             requestTimeout: requestTimeout,
             requestDeadlineUptimeNs: requestDeadlineUptimeNs,
             rpcHandle: rpcHandle,
-            task: task
+            task: task,
+            startGeneration: brokerState.generation()
         )
         Task { [route, loadID] in
             let result: Result<JSONValue, Error>
@@ -495,6 +500,7 @@ package actor ControlPlaneCoordinator {
         result: Result<CanonicalToolsCatalogLoadResult, Error>
     ) {
         guard let load = takeToolsCatalogLoadIfMatching(loadID: loadID) else { return }
+        let completedUnderCurrentGeneration = brokerState.generation() == load.startGeneration
         if case .success(let loaded) = result, let sourceUpstream = loaded.sourceUpstream {
             brokerState.syncCanonicalToolsCatalog(
                 loaded.rawResult,
@@ -505,10 +511,12 @@ package actor ControlPlaneCoordinator {
         let waiters = Array(load.waiters.values)
         for waiter in waiters {
             waiter.timeoutTask?.cancel()
-            switch result {
-            case .success(let loaded):
+            switch (result, completedUnderCurrentGeneration) {
+            case (.success(let loaded), true):
                 waiter.continuation.resume(returning: loaded.rawResult)
-            case .failure(let error):
+            case (.success, false):
+                waiter.continuation.resume(throwing: CancellationError())
+            case (.failure(let error), _):
                 waiter.continuation.resume(throwing: error)
             }
         }
@@ -522,13 +530,16 @@ package actor ControlPlaneCoordinator {
     ) {
         guard let load = windowLoads[route], load.loadID == loadID else { return }
         windowLoads.removeValue(forKey: route)
+        let completedUnderCurrentGeneration = brokerState.generation() == load.startGeneration
         let waiters = Array(load.waiters.values)
         for waiter in waiters {
             waiter.timeoutTask?.cancel()
-            switch result {
-            case .success(let loaded):
+            switch (result, completedUnderCurrentGeneration) {
+            case (.success(let loaded), true):
                 waiter.continuation.resume(returning: loaded)
-            case .failure(let error):
+            case (.success, false):
+                waiter.continuation.resume(throwing: CancellationError())
+            case (.failure(let error), _):
                 waiter.continuation.resume(throwing: error)
             }
         }

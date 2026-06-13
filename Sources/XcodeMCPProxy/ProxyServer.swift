@@ -60,7 +60,8 @@ public final class ProxyServer {
                         config: config,
                         eventLoop: eventLoop,
                         upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue),
-                        xcodeTargetDiscovery: LiveXcodeTargetDiscovery()
+                        xcodeTargetDiscovery: LiveXcodeTargetDiscovery(),
+                        startImmediately: false
                     )
                 }
             )

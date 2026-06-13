@@ -41,6 +41,7 @@ package enum DocumentationSearchOutcome: Sendable {
 }
 
 package protocol RuntimeCoordinating: Sendable {
+    func start()
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
     func removeSession(id: String)
@@ -112,6 +113,8 @@ package protocol RuntimeCoordinating: Sendable {
 }
 
 extension RuntimeCoordinating {
+    package func start() {}
+
     package func hasDocumentationProvider() -> Bool {
         false
     }
@@ -196,6 +199,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
+    package let prewarmDocumentationProviderOnStartup: Bool
+    private let lifecycleStartedBox = NIOLockedValueBox(false)
 
     /// Composition-root entry point: the Xcode-specific readiness gate and
     /// target discovery are injected because their live implementations
@@ -204,7 +209,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyConfig,
         eventLoop: EventLoop,
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
-        xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil
+        xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
+        startImmediately: Bool = true
     ) {
         let count = max(1, min(config.upstreamProcessCount, 10))
         let upstreams = Self.makeDefaultUpstreams(
@@ -220,7 +226,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
             documentationProviderManager: documentationProviderManager,
-            prewarmDocumentationProviderOnStartup: documentationProviderManager != nil
+            prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
+            startImmediately: startImmediately
         )
     }
 
@@ -256,7 +263,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
             RuntimeScheduledTimeout)? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
-        prewarmDocumentationProviderOnStartup: Bool = false
+        prewarmDocumentationProviderOnStartup: Bool = false,
+        startImmediately: Bool = true
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -290,6 +298,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
+        self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         let resolvedReadinessGate = upstreamReadinessGate
             ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
         self.upstreamReadinessGate = resolvedReadinessGate
@@ -394,6 +403,18 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             taskBox = tasks
         }
 
+        if startImmediately {
+            start()
+        }
+    }
+
+    package func start() {
+        let shouldStart = lifecycleStartedBox.withLockedValue { started in
+            guard started == false else { return false }
+            started = true
+            return true
+        }
+        guard shouldStart else { return }
         startEagerInitializePrimary()
         if prewarmDocumentationProviderOnStartup {
             prewarmDocumentationProvider()

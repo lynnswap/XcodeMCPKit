@@ -532,6 +532,7 @@ extension HTTPPostService {
     package func refreshRequestRouting(from requestJSON: Any) -> RefreshRequestRouting? {
         if let object = requestJSON as? [String: Any],
             let refreshRequest = RefreshCodeIssuesRequest(requestObject: object),
+            Self.extractResponseIDs(from: object).isEmpty == false,
             let bodyData = try? JSONSerialization.data(withJSONObject: object, options: [])
         {
             return RefreshRequestRouting(
@@ -570,6 +571,11 @@ extension HTTPPostService {
                 remainingRequestObjects.append(object)
                 continue
             }
+            let responseIDs = Self.extractResponseIDs(from: object)
+            guard responseIDs.isEmpty == false else {
+                remainingRequestObjects.append(object)
+                continue
+            }
             let payload: Any = requests.count == 1 ? requests : object
             guard let bodyData = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
                 return nil
@@ -578,7 +584,7 @@ extension HTTPPostService {
                 RefreshRequestRoute(
                     request: candidate,
                     bodyData: bodyData,
-                    requestIDs: Self.extractResponseIDs(from: object),
+                    requestIDs: responseIDs,
                     requestIsBatch: requests.count == 1
                 )
             )
