@@ -99,6 +99,7 @@ extension RuntimeCoordinatorTests {
 
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(manager.cachedToolsListResult() != nil)
     }
 
     @Test func sharedToolsListTimeoutDoesNotInvalidateDocumentationProvider() async throws {
@@ -137,10 +138,11 @@ extension RuntimeCoordinatorTests {
         )
 
         #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(manager.cachedToolsListResult() != nil)
         #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
     }
 
-    @Test func documentationSearchKeepsCanonicalToolsCatalogWhenProviderStales() async throws {
+    @Test func documentationSearchKeepsCanonicalToolsCatalogWhenProviderRecoversAfterInvalidation() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -159,7 +161,7 @@ extension RuntimeCoordinatorTests {
         )
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callOutcomes: [.handled(providerResponse)]
+            callOutcomes: [.handled(providerResponse, invalidatedProvider: true)]
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -216,7 +218,7 @@ extension RuntimeCoordinatorTests {
         )
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callOutcomes: [.handled(providerResponse)]
+            callOutcomes: [.handled(providerResponse, invalidatedProvider: false)]
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -249,14 +251,14 @@ extension RuntimeCoordinatorTests {
         #expect(await documentationProvider.callCount() == 1)
     }
 
-    @Test func documentationSearchFallsBackToUpstreamWhenNoProviderAvailable() async throws {
+    @Test func documentationSearchReportsUnavailableWhenNoProviderAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callOutcomes: [.noProvider]
+            callOutcomes: [.unavailable(.noAvailableProvider)]
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -287,10 +289,11 @@ extension RuntimeCoordinatorTests {
             requestData: makeDocumentationSearchRequest(id: 43, query: "UIView"),
             requestTimeoutOverride: nil
         )
-        guard case .fallbackToUpstream = outcome else {
-            Issue.record("expected fallbackToUpstream outcome, got \(outcome)")
+        guard case .unavailable(let reason) = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
+        #expect(reason.message == DocumentationProviderUnavailableReason.userFacingMessage)
         #expect(manager.cachedToolsListResult() != nil)
         #expect(await documentationProvider.callCount() == 1)
     }
@@ -816,7 +819,7 @@ extension RuntimeCoordinatorTests {
             requestTimeoutOverride: nil
         )
 
-        guard case .handled(let responseData) = outcome else {
+        guard case .handled(let responseData, _) = outcome else {
             Issue.record("expected handled outcome, got \(outcome)")
             return
         }
@@ -825,7 +828,6 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
-            xcode26.processID,
             xcode27.processID,
         ])
     }
@@ -883,23 +885,20 @@ extension RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let responseData) = outcome else {
-            Issue.record("expected handled outcome, got \(outcome)")
+        guard case .unavailable = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData))
         let followUpTools = DocumentationToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
             to: try jsonValue(["tools": []])
         )
         #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
-        #expect(await factory.startAttempts() == [
+        #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
-            xcode26.processID,
             xcode27.processID,
             xcode26.processID,
-            xcode27.processID,
         ])
     }
 
@@ -949,8 +948,8 @@ extension RuntimeCoordinatorTests {
             requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
-        guard case .noProvider = outcome else {
-            Issue.record("expected noProvider outcome, got \(outcome)")
+        guard case .unavailable = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
 
@@ -1020,8 +1019,8 @@ extension RuntimeCoordinatorTests {
             requestData: makeDocumentationSearchRequest(id: 78, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
-        guard case .noProvider = outcome else {
-            Issue.record("expected noProvider outcome, got \(outcome)")
+        guard case .unavailable = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
 
@@ -1033,13 +1032,12 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
-            xcode26.processID,
             xcode27.processID,
+            xcode26.processID,
         ])
         #expect(await factory.startAttempts() == [
             xcode26.processID,
             xcode27.processID,
-            xcode26.processID,
             xcode27.processID,
             xcode26.processID,
             xcode27.processID,
@@ -1076,8 +1074,8 @@ extension RuntimeCoordinatorTests {
             requestData: makeDocumentationSearchRequest(id: 76, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
-        guard case .noProvider = outcome else {
-            Issue.record("expected noProvider outcome, got \(outcome)")
+        guard case .unavailable = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
 
@@ -1119,7 +1117,7 @@ extension RuntimeCoordinatorTests {
             requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
             requestTimeoutOverride: .milliseconds(1)
         )
-        guard case .failed(let error) = outcome else {
+        guard case .failed(let error, _) = outcome else {
             Issue.record("expected failed outcome, got \(outcome)")
             return
         }

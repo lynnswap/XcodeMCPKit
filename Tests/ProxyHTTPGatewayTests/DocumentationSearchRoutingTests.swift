@@ -8,7 +8,7 @@ import ProxyCore
 import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
- import ProxyXcodeSupport
+import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
 @testable import ProxyHTTPGateway
@@ -123,14 +123,13 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpDocumentationSearchFallsBackWhenInactiveProviderIsUnavailable() async throws {
+    @Test func httpDocumentationSearchReturnsUnavailableWhenProviderIsUnavailable() async throws {
         let config = makeConfig(requestTimeout: 2)
         let localDocumentationRequests = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
-            upstreamRequestResponder: { method, toolName, originalID in
-                #expect(method == "tools/call")
-                #expect(toolName == "DocumentationSearch")
+            upstreamRequestResponder: { _, _, originalID in
+                Issue.record("DocumentationSearch should not be forwarded upstream")
                 return .immediate(
                     try makeToolSuccessResponse(
                         id: originalID,
@@ -153,7 +152,7 @@ extension HTTPHandlerTests {
         do {
             let (response, body) = try await postHTTPJSON(
                 url: server.url,
-                sessionID: "session-docs-inactive-fallback",
+                sessionID: "session-docs-inactive-unavailable",
                 payload: toolsCallPayload(
                     id: 66,
                     name: "DocumentationSearch",
@@ -164,10 +163,10 @@ extension HTTPHandlerTests {
             )
 
             #expect(response.statusCode == 200)
-            let result = body["result"] as? [String: Any]
-            let content = result?["content"] as? [[String: Any]]
-            #expect(content?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
-            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+            let error = try #require(body["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32001)
+            #expect(error["message"] as? String == DocumentationProviderUnavailableReason.userFacingMessage)
+            #expect(sessionManager.sentToolNames() == [])
             #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
         } catch {
             try? await server.shutdown()
@@ -675,16 +674,15 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpBatchFallsBackDocumentationSearchWhenSameBatchToolsListDoesNotActivateProvider()
+    @Test func httpBatchReturnsUnavailableWhenSameBatchToolsListDoesNotActivateProvider()
         async throws
     {
         let config = makeConfig(requestTimeout: 2)
         let localDocumentationRequests = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
-            upstreamRequestResponder: { method, toolName, originalID in
-                #expect(method == "tools/call")
-                #expect(toolName == "DocumentationSearch")
+            upstreamRequestResponder: { _, _, originalID in
+                Issue.record("DocumentationSearch should not be forwarded upstream")
                 return .immediate(
                     try makeToolSuccessResponse(
                         id: originalID,
@@ -718,7 +716,7 @@ extension HTTPHandlerTests {
         do {
             let (response, bodyData) = try await postHTTPAnyJSON(
                 url: server.url,
-                sessionID: "session-tools-list-docs-fallback",
+                sessionID: "session-tools-list-docs-unavailable",
                 payload: [
                     [
                         "jsonrpc": "2.0",
@@ -729,7 +727,7 @@ extension HTTPHandlerTests {
                         id: 752,
                         name: "DocumentationSearch",
                         arguments: [
-                            "query": "UIView same batch fallback",
+                            "query": "UIView same batch unavailable",
                         ]
                     ),
                 ]
@@ -745,11 +743,11 @@ extension HTTPHandlerTests {
             #expect(tools.map { $0["name"] as? String }.contains("DocumentationSearch") == false)
 
             let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 752 }
-            let docsResult = docs?["result"] as? [String: Any]
-            let docsContent = docsResult?["content"] as? [[String: Any]]
-            #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+            let docsError = try #require(docs?["error"] as? [String: Any])
+            #expect((docsError["code"] as? NSNumber)?.intValue == -32001)
+            #expect(docsError["message"] as? String == DocumentationProviderUnavailableReason.userFacingMessage)
 
-            #expect(sessionManager.sentToolNames() == ["DocumentationSearch"])
+            #expect(sessionManager.sentToolNames() == [])
             #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
         } catch {
             try? await server.shutdown()
@@ -758,18 +756,17 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpBatchStartsDocumentationFallbackBeforeOtherForwardedRequestTimesOut()
+    @Test func httpBatchReturnsDocumentationUnavailableBeforeOtherForwardedRequestTimesOut()
         async throws
     {
         let config = makeConfig(requestTimeout: 0.25)
         let localDocumentationRequests = NIOLockedValueBox(0)
-        let fallbackDocumentationRequests = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
                 #expect(method == "tools/call")
                 if toolName == "DocumentationSearch" {
-                    fallbackDocumentationRequests.withLockedValue { $0 += 1 }
+                    Issue.record("DocumentationSearch should not be forwarded upstream")
                     return .immediate(
                         try makeToolSuccessResponse(
                             id: originalID,
@@ -801,13 +798,13 @@ extension HTTPHandlerTests {
         do {
             let (response, bodyData) = try await postHTTPAnyJSON(
                 url: server.url,
-                sessionID: "session-docs-fallback-before-other-timeout",
+                sessionID: "session-docs-unavailable-before-other-timeout",
                 payload: [
                     toolsCallPayload(
                         id: 761,
                         name: "DocumentationSearch",
                         arguments: [
-                            "query": "UIView fallback before timeout",
+                            "query": "UIView unavailable before timeout",
                         ]
                     ),
                     toolsCallPayload(
@@ -823,9 +820,9 @@ extension HTTPHandlerTests {
             #expect(bodyArray.count == 2)
 
             let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 761 }
-            let docsResult = docs?["result"] as? [String: Any]
-            let docsContent = docsResult?["content"] as? [[String: Any]]
-            #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
+            let docsError = try #require(docs?["error"] as? [String: Any])
+            #expect((docsError["code"] as? NSNumber)?.intValue == -32001)
+            #expect(docsError["message"] as? String == DocumentationProviderUnavailableReason.userFacingMessage)
 
             let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 762 }
             let otherError = other?["error"] as? [String: Any]
@@ -833,10 +830,8 @@ extension HTTPHandlerTests {
 
             #expect(sessionManager.sentToolRequests() == [
                 "OtherAllowedTool@0",
-                "DocumentationSearch@1",
             ])
             #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
-            #expect(fallbackDocumentationRequests.withLockedValue { $0 } == 1)
         } catch {
             try? await server.shutdown()
             throw error

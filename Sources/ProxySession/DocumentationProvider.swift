@@ -8,15 +8,44 @@ package enum DocumentationToolListUpdate: Sendable {
     case unchanged
     case unavailable
     case available(JSONValue)
+
+    package var debugLabel: String {
+        switch self {
+        case .unchanged:
+            "unchanged"
+        case .unavailable:
+            "unavailable"
+        case .available:
+            "available"
+        }
+    }
+}
+
+package enum DocumentationProviderUnavailableReason: Sendable, Error, CustomStringConvertible {
+    case noAvailableProvider
+
+    package static let userFacingMessage =
+        "DocumentationSearch is unavailable from the running Xcode documentation provider. Try restarting Xcode if the problem persists."
+
+    package var message: String {
+        switch self {
+        case .noAvailableProvider:
+            Self.userFacingMessage
+        }
+    }
+
+    package var description: String {
+        message
+    }
 }
 
 /// The manager's classification of one DocumentationSearch attempt.
-/// `noProvider` means no live provider could serve the call and the
-/// request should be forwarded to the regular mcpbridge upstream.
+/// When the manager is enabled, DocumentationSearch is owned by the
+/// documentation provider and does not fall back to the regular upstream.
 package enum DocumentationProviderCallOutcome: Sendable {
-    case handled(Data)
-    case noProvider
-    case failed(any Error)
+    case handled(Data, invalidatedProvider: Bool)
+    case unavailable(DocumentationProviderUnavailableReason)
+    case failed(any Error, invalidatedProvider: Bool)
 }
 
 package protocol DocumentationProviderManaging: Sendable {
@@ -459,27 +488,28 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationProviderCallOutcome {
         guard !isShutdown else {
-            return .noProvider
+            return .unavailable(.noAvailableProvider)
         }
         let deadline = Deadline.fromNow(requestTimeoutOverride, clock: clock)
-        // Each attempt: acquire provider, call, classify. A failed call or a
-        // "not enabled" response invalidates the provider and retries once
-        // with a replacement; the most recent classification wins.
-        var lastOutcome: DocumentationProviderCallOutcome?
-        var deadlineExpired = false
+        var rejectedProcessIDs: Set<pid_t> = []
+        var invalidatedProvider = false
 
-        for _ in 0..<2 {
+        while !Task.isCancelled {
             if let deadline, deadline.hasExpired {
-                deadlineExpired = true
-                break
+                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
-            guard let provider = await providerIfAvailable(requestTimeout: deadline?.remaining()) else {
+            guard let provider = await providerIfAvailable(
+                requestTimeout: deadline?.remaining(),
+                excluding: rejectedProcessIDs
+            ) else {
                 try Task.checkCancellation()
-                break
+                if let deadline, deadline.hasExpired {
+                    return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                return .unavailable(.noAvailableProvider)
             }
             if let deadline, deadline.hasExpired {
-                deadlineExpired = true
-                break
+                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
             do {
                 let response = try await provider.profile.connection.call(
@@ -487,32 +517,25 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     timeout: deadline?.remaining()
                 )
                 guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
-                    return .handled(response)
+                    return .handled(response, invalidatedProvider: invalidatedProvider)
                 }
                 await invalidate(provider, reason: "documentation_search_not_enabled")
+                rejectedProcessIDs.insert(provider.profile.target.processID)
+                invalidatedProvider = true
                 try Task.checkCancellation()
-                lastOutcome = .handled(response)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 try Task.checkCancellation()
                 await invalidate(provider, reason: "documentation_provider_call_failed")
-                lastOutcome = .failed(error)
+                rejectedProcessIDs.insert(provider.profile.target.processID)
+                invalidatedProvider = true
+                if let deadline, deadline.hasExpired {
+                    return .failed(error, invalidatedProvider: invalidatedProvider)
+                }
             }
         }
-
-        if let lastOutcome {
-            if case .failed(let error) = lastOutcome, error is UpstreamSlotAcquisitionError {
-                // The provider channel itself is gone; treat it like having
-                // no provider so the caller forwards to the regular upstream.
-                return .noProvider
-            }
-            return lastOutcome
-        }
-        if deadlineExpired {
-            return .failed(TimeoutError())
-        }
-        return .noProvider
+        throw CancellationError()
     }
 
     package func invalidate(reason _: String) async {
@@ -533,23 +556,41 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         await invalidate(reason: "shutdown")
     }
 
-    private func providerIfAvailable(requestTimeout: TimeAmount?) async -> ActiveProvider? {
+    private func providerIfAvailable(
+        requestTimeout: TimeAmount?,
+        excluding excludedProcessIDs: Set<pid_t> = []
+    ) async -> ActiveProvider? {
         guard !isShutdown else {
             return nil
         }
         if let activeProvider {
-            return activeProvider
+            if excludedProcessIDs.contains(activeProvider.profile.target.processID) {
+                self.activeProvider = nil
+                await activeProvider.profile.connection.stop()
+            } else {
+                return activeProvider
+            }
         }
         let selection: ProviderSelection
-        if let providerSelection {
+        let selectionIsShared: Bool
+        if let providerSelection, excludedProcessIDs.isEmpty {
             selection = providerSelection
+            selectionIsShared = true
         } else {
             let selectionTimeout = providerSelectionTimeout
             selection = ProviderSelection(
                 id: UUID(),
-                task: Task { await self.selectProvider(requestTimeout: selectionTimeout) }
+                task: Task {
+                    await self.selectProvider(
+                        requestTimeout: selectionTimeout,
+                        excluding: excludedProcessIDs
+                    )
+                }
             )
-            providerSelection = selection
+            selectionIsShared = excludedProcessIDs.isEmpty
+            if selectionIsShared {
+                providerSelection = selection
+            }
         }
 
         let waitResult = await waitForSelection(selection, requestTimeout: requestTimeout)
@@ -560,8 +601,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case .timedOut:
             return nil
         }
-        let selectionIsCurrent = providerSelection?.id == selection.id
-        if selectionIsCurrent {
+        let selectionIsCurrent = selectionIsShared ? providerSelection?.id == selection.id : true
+        if selectionIsShared, selectionIsCurrent {
             providerSelection = nil
         }
 
@@ -637,7 +678,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         await provider.profile.connection.stop()
     }
 
-    private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
+    private func selectProvider(
+        requestTimeout: TimeAmount?,
+        excluding excludedProcessIDs: Set<pid_t> = []
+    ) async -> CandidateProfile? {
         guard !isShutdown else {
             return nil
         }
@@ -645,15 +689,20 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let discoveredTargets = discovery.runningXcodeTargets()
         let targets: [DocumentationProviderTarget]
         if let pinnedProcessID {
-            targets = discoveredTargets.filter { $0.processID == pinnedProcessID }
+            targets = discoveredTargets.filter {
+                $0.processID == pinnedProcessID && excludedProcessIDs.contains($0.processID) == false
+            }
         } else {
-            targets = discoveredTargets
+            targets = discoveredTargets.filter {
+                excludedProcessIDs.contains($0.processID) == false
+            }
         }
         logger.debug(
             "Selecting documentation provider from running Xcode processes",
             metadata: [
                 "candidate_count": .string("\(targets.count)"),
                 "discovered_candidate_count": .string("\(discoveredTargets.count)"),
+                "excluded_candidate_count": .string("\(excludedProcessIDs.count)"),
                 "pinned_pid": .string(pinnedProcessID.map(String.init) ?? ""),
                 "candidates": .string(targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
             ]

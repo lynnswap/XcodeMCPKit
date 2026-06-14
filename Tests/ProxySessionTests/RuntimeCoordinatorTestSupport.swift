@@ -423,7 +423,7 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
         callCountValue += 1
         callTimeouts.append(requestTimeoutOverride)
         guard callOutcomes.isEmpty == false else {
-            return .noProvider
+            return .unavailable(.noAvailableProvider)
         }
         return callOutcomes.removeFirst()
     }

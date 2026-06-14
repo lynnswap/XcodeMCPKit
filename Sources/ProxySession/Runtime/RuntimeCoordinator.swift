@@ -33,11 +33,11 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 }
 
 /// The single routing decision for a DocumentationSearch tools/call:
-/// either the provider produced the response, or the request must be
-/// forwarded to the regular mcpbridge upstream.
+/// either the provider produced the response, or proxy-managed
+/// DocumentationSearch is unavailable.
 package enum DocumentationSearchOutcome: Sendable {
     case handled(Data)
-    case fallbackToUpstream
+    case unavailable(DocumentationProviderUnavailableReason)
 }
 
 package protocol RuntimeCoordinating: Sendable {
@@ -146,7 +146,7 @@ extension RuntimeCoordinating {
         requestData _: Data,
         requestTimeoutOverride _: TimeAmount?
     ) async throws -> DocumentationSearchOutcome {
-        .fallbackToUpstream
+        .unavailable(.noAvailableProvider)
     }
 }
 
@@ -563,7 +563,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? min(config.requestTimeout, 30)
             : 30
         let timeout = MCPMethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
-        let task = Task { [documentationProviderManager, logger] in
+        let task = Task { [weak self, documentationProviderManager, logger] in
             guard !Task.isCancelled else { return }
             logger.debug(
                 "Prewarming documentation provider",
@@ -571,7 +571,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     "timeout_seconds": .string("\(timeoutSeconds)"),
                 ]
             )
-            _ = await documentationProviderManager.prewarm(requestTimeout: timeout)
+            let update = await documentationProviderManager.prewarm(requestTimeout: timeout)
+            self?.recordDocumentationToolListUpdate(update)
             guard !Task.isCancelled else { return }
             logger.debug("Documentation provider prewarm completed")
         }
@@ -766,17 +767,39 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = timeoutDeadline(for: timeout)
+        logger.debug(
+            "Loading shared tools/list",
+            metadata: [
+                "session": .string(sessionID),
+                "timeout_ns": .string("\(timeout?.nanoseconds ?? -1)"),
+            ]
+        )
         let baseResult = try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.toolsCatalog(
                 deadlineUptimeNs: deadline
             )
         }
+        logger.debug(
+            "Loaded base tools/list",
+            metadata: [
+                "session": .string(sessionID),
+                "has_documentation_provider": .string("\(documentationProviderManager != nil)"),
+            ]
+        )
         guard let documentationProviderManager else {
             return baseResult
         }
         let update = await documentationToolListUpdate(
             manager: documentationProviderManager,
             requestTimeout: timeAmount(until: deadline)
+        )
+        recordDocumentationToolListUpdate(update)
+        logger.debug(
+            "Applied documentation provider tools/list overlay",
+            metadata: [
+                "session": .string(sessionID),
+                "update": .string(update.debugLabel),
+            ]
         )
         return DocumentationToolCatalog.applying(update, to: baseResult)
     }
@@ -805,7 +828,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationSearchOutcome {
         guard let documentationProviderManager else {
-            return .fallbackToUpstream
+            return .unavailable(.noAvailableProvider)
         }
         let timeout =
             requestTimeoutOverride
@@ -817,17 +840,45 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             requestData: requestData,
             requestTimeoutOverride: timeout
         ) {
-        case .handled(let data):
+        case .handled(let data, let invalidatedProvider):
+            if invalidatedProvider {
+                recordDocumentationProviderInvalidated(reason: "documentation_provider_recovered")
+            }
             return .handled(data)
-        case .noProvider:
-            return .fallbackToUpstream
-        case .failed(let error):
+        case .unavailable(let reason):
+            recordDocumentationProviderUnavailable(reason: "documentation_provider_unavailable")
+            return .unavailable(reason)
+        case .failed(let error, let invalidatedProvider):
+            if invalidatedProvider {
+                recordDocumentationProviderInvalidated(reason: "documentation_provider_invalidated")
+            }
             throw error
         }
     }
 
     package func hasDocumentationProvider() -> Bool {
         documentationProviderManager != nil
+    }
+
+    private func recordDocumentationToolListUpdate(_ update: DocumentationToolListUpdate) {
+        logger.debug(
+            "Documentation provider tools/list update observed",
+            metadata: ["update": .string(update.debugLabel)]
+        )
+    }
+
+    private func recordDocumentationProviderUnavailable(reason: String) {
+        logger.debug(
+            "Documentation provider unavailable",
+            metadata: ["reason": .string(reason)]
+        )
+    }
+
+    private func recordDocumentationProviderInvalidated(reason: String) {
+        logger.debug(
+            "Documentation provider invalidated",
+            metadata: ["reason": .string(reason)]
+        )
     }
 
     private func documentationToolListUpdate(

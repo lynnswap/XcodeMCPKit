@@ -24,6 +24,9 @@ package struct ControlPlaneRPCResponse: Sendable {
 /// upstream-acquisition failure surfaces as.
 package enum ControlPlaneErrorMapper {
     package static func jsonRPCError(for error: Error) -> (code: Int, message: String) {
+        if let error = error as? DocumentationProviderUnavailableReason {
+            return (-32001, error.message)
+        }
         if error is UpstreamSlotAcquisitionError {
             return (-32001, "upstream unavailable")
         }

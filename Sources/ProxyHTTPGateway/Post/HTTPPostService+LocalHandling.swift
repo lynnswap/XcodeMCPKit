@@ -466,8 +466,14 @@ extension HTTPPostService {
                     responseObjects.append(
                         contentsOf: Self.responseObjects(from: normalizedData)
                     )
-                case .fallbackToUpstream:
-                    fallbackRequests.append(request)
+                case .unavailable(let reason):
+                    responseObjects.append(
+                        Self.makeJSONRPCErrorResponseObject(
+                            id: originalID,
+                            code: -32001,
+                            message: reason.message
+                        )
+                    )
                 }
             } catch {
                 let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)

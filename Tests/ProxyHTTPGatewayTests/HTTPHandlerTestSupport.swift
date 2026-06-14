@@ -274,12 +274,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     ) async throws -> DocumentationSearchOutcome {
         _ = requestTimeoutOverride
         guard let documentationSearchResponder else {
-            return .fallbackToUpstream
+            return .unavailable(.noAvailableProvider)
         }
         do {
             return .handled(try await documentationSearchResponder(requestData))
         } catch is UpstreamSlotAcquisitionError {
-            return .fallbackToUpstream
+            return .unavailable(.noAvailableProvider)
         }
     }
 
