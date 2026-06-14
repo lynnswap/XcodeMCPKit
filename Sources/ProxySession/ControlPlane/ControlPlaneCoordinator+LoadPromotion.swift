@@ -43,6 +43,7 @@ extension ControlPlaneCoordinator {
                 requestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
                 rpcHandle: current.rpcHandle,
                 task: current.task,
+                startGeneration: current.startGeneration,
                 waiters: [:]
             ),
             error: CancellationError()
@@ -119,9 +120,6 @@ extension ControlPlaneCoordinator {
     }
 
     func currentPhase() -> Phase {
-        if initializeLoad != nil {
-            return .loadingInitialize
-        }
         if toolsCatalogLoad != nil || prewarmToolsCatalogLoad != nil {
             return .loadingToolsCatalog
         }
@@ -132,7 +130,6 @@ extension ControlPlaneCoordinator {
     }
 
     func currentWaiterCounts() -> ControlPlaneWaiterCounts {
-        let initializeCount = initializeLoad?.waiters.count ?? 0
         let toolsCount =
             (toolsCatalogLoad?.foregroundWaiterCount ?? 0)
             + (prewarmToolsCatalogLoad?.foregroundWaiterCount ?? 0)
@@ -140,7 +137,7 @@ extension ControlPlaneCoordinator {
             partial += load.waiters.count
         }
         return ControlPlaneWaiterCounts(
-            initialize: initializeCount,
+            initialize: 0,
             toolsCatalog: toolsCount,
             windows: windowsCount
         )
@@ -148,9 +145,6 @@ extension ControlPlaneCoordinator {
 
     func currentInFlightRequestLabels() -> [String] {
         var requests: [String] = []
-        if initializeLoad != nil {
-            requests.append("initialize")
-        }
         if toolsCatalogLoad != nil || prewarmToolsCatalogLoad != nil {
             requests.append("tools/list")
         }

@@ -24,7 +24,7 @@ struct UpstreamProcessTests {
             switch first {
             case .accepted:
                 break
-            case .overloaded:
+            case .backpressure, .unavailable:
                 Issue.record("first send should be accepted before queue reaches limit")
             }
 
@@ -35,10 +35,10 @@ struct UpstreamProcessTests {
                 await session.send(payload)
             }
             switch second {
-            case .accepted:
+            case .accepted, .backpressure:
                 break
-            case .overloaded:
-                break
+            case .unavailable:
+                Issue.record("queue-limit rejection should be backpressure, not unavailability")
             }
         }
     }
@@ -133,7 +133,7 @@ struct UpstreamProcessTests {
         switch sendResult {
         case .accepted:
             break
-        case .overloaded:
+        case .backpressure, .unavailable:
             Issue.record("send should not overload while checking buffered stdout reset")
         }
 
@@ -207,19 +207,8 @@ struct UpstreamProcessTests {
         let second = await slot.send(Data(#"{"jsonrpc":"2.0","id":2}"#.utf8))
         await slot.stop()
 
-        switch first {
-        case .accepted:
-            Issue.record("failed launch should not accept writes into an unavailable slot")
-        case .overloaded:
-            break
-        }
-
-        switch second {
-        case .accepted:
-            Issue.record("subsequent sends should still fail fast after launch failure")
-        case .overloaded:
-            break
-        }
+        #expect(first == .unavailable(.startFailed))
+        #expect(second == .unavailable(.notStarted))
     }
 
     @Test func upstreamSessionRejectsWritesAfterExitEvent() async throws {
@@ -243,7 +232,7 @@ struct UpstreamProcessTests {
             }
 
             let result = await session.send(Data(#"{"jsonrpc":"2.0","id":7}"#.utf8))
-            #expect(result == .overloaded)
+            #expect(result == .unavailable(.terminated))
         }
     }
 

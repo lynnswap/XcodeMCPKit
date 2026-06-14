@@ -223,35 +223,6 @@ package struct HTTPResponseWriter: Sendable {
         logger.info("HTTP response", metadata: metadata)
     }
 
-    private func sendResponseData(
-        on channel: Channel,
-        data: Data,
-        prefersEventStream: Bool,
-        keepAlive: Bool,
-        sessionID: String,
-        requestLog: HTTPHandler.RequestLogContext
-    ) -> EventLoopFuture<Void> {
-        if prefersEventStream {
-            return sendSingleSSE(
-                on: channel,
-                data: data,
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        } else {
-            var buffer = channel.allocator.buffer(capacity: data.count)
-            buffer.writeBytes(data)
-            return sendJSON(
-                on: channel,
-                buffer: buffer,
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        }
-    }
-
     private func sendErrorPayload(
         on channel: Channel,
         data: Data,

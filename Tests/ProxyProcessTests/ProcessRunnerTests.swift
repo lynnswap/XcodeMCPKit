@@ -1,3 +1,4 @@
+@testable import ProxyCore
 import Foundation
 import Testing
 import XcodeMCPTestSupport

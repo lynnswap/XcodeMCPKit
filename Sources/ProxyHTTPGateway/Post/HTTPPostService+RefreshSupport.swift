@@ -11,26 +11,6 @@ import ProxyXcodeSupport
 import ProxySession
 
 extension HTTPPostService {
-    package func callInternalTool(
-        name: String,
-        arguments: [String: Any],
-        sessionID: String,
-        eventLoop: EventLoop,
-        cancellationHandle: HTTPPostCancellationHandle? = nil,
-        upstreamIndexOverride: Int? = nil,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshInternalToolResult {
-        await forwardingService.callInternalTool(
-            name: name,
-            arguments: arguments,
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            cancellationHandle: cancellationHandle,
-            upstreamIndexOverride: upstreamIndexOverride,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
-    }
-
     package func listXcodeWindows(
         sessionID: String,
         eventLoop: EventLoop,
@@ -75,11 +55,6 @@ extension HTTPPostService {
         do {
             parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
         } catch {
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .invalidUpstreamResponse
-            )
             return .invalidRequest
         }
 
@@ -176,31 +151,22 @@ extension HTTPPostService {
 
             switch resolution {
             case .success(let responseData):
+                // Releasing the slot between retry attempts is this
+                // function's job; the terminal lease transition belongs to
+                // the caller that owns the whole refresh request.
                 if allowsLeaseRetry,
                     RefreshCodeIssuesWorkflow.isRetryableRefreshCodeIssuesFailure(responseData),
                     shouldRequeueLeaseOnRetryableFailure()
                 {
                     sessionManager.requeueRequestLease(leaseID)
-                } else {
-                    sessionManager.completeRequestLease(leaseID)
                 }
                 return .success(responseData)
             case .timeout:
-                sessionManager.failRequestLease(
-                    leaseID,
-                    terminalState: .timedOut,
-                    reason: .timedOut
-                )
                 return .timeout(
                     responseIDs: requestIDs,
                     isBatch: requestIsBatch
                 )
             case .invalidUpstreamResponse:
-                sessionManager.failRequestLease(
-                    leaseID,
-                    terminalState: .failed,
-                    reason: .invalidUpstreamResponse
-                )
                 return .invalidUpstreamResponse
             }
         } catch is CancellationError {
@@ -210,15 +176,43 @@ extension HTTPPostService {
                 isBatch: requestIsBatch
             )
         } catch {
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
+        }
+    }
+
+    /// The single terminal lease transition for a refresh request,
+    /// regardless of whether the proxy answered locally or forwarded.
+    package func finishRefreshLease(
+        _ leaseID: RequestLeaseID,
+        result: RefreshForwardAttemptResult
+    ) {
+        switch result {
+        case .success:
+            sessionManager.completeRequestLease(leaseID)
+        case .timeout:
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .timedOut,
+                reason: .timedOut
+            )
+        case .invalidRequest, .invalidUpstreamResponse:
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .invalidUpstreamResponse
+            )
+        case .upstreamUnavailable:
             sessionManager.failRequestLease(
                 leaseID,
                 terminalState: .failed,
                 reason: .upstreamUnavailable
             )
-            return .upstreamUnavailable(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
+        case .cancelled:
+            // The cancellation handle owns lease teardown on this path.
+            break
         }
     }
 
@@ -241,7 +235,7 @@ extension HTTPPostService {
 
     package static func isRetryScopedRefreshLeaseRequest(_ requestJSON: Any) -> Bool {
         if let object = requestJSON as? [String: Any] {
-            return isRefreshCodeIssuesRequestObject(object)
+            return RefreshCodeIssuesRequest(requestObject: object) != nil
         }
         guard let array = requestJSON as? [Any],
             array.count == 1,
@@ -249,17 +243,9 @@ extension HTTPPostService {
         else {
             return false
         }
-        return isRefreshCodeIssuesRequestObject(object)
+        return RefreshCodeIssuesRequest(requestObject: object) != nil
     }
 
-    package static func isRefreshCodeIssuesRequestObject(_ object: [String: Any]) -> Bool {
-        guard object["method"] as? String == "tools/call",
-            let params = object["params"] as? [String: Any]
-        else {
-            return false
-        }
-        return params["name"] as? String == "XcodeRefreshCodeIssuesInFile"
-    }
 
     package static func topLevelRequestDescriptor(
         sessionID: String,
@@ -286,9 +272,8 @@ extension HTTPPostService {
         eventLoop: EventLoop,
         leaseID: RequestLeaseID,
         cancellationHandle: HTTPPostCancellationHandle?
-    ) async -> RefreshWorkflowExecution {
-        let usedDirectForwarding = NIOLockedValueBox(false)
-        let result = await refreshWorkflow.run(
+    ) async -> RefreshForwardAttemptResult {
+        await refreshWorkflow.run(
             refreshRequest: refreshRequest,
             bodyData: bodyData,
             sessionID: sessionID,
@@ -310,7 +295,7 @@ extension HTTPPostService {
             },
             internalToolCaller: {
                 name, arguments, sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
-                await self.callInternalTool(
+                await self.forwardingService.callInternalTool(
                     name: name,
                     arguments: arguments,
                     sessionID: sessionID,
@@ -322,8 +307,7 @@ extension HTTPPostService {
             },
             forwarder: {
                 bodyData, sessionID, requestIDs, requestIsBatch, shouldRequeueLeaseOnRetryableFailure, eventLoop, requestTimeoutOverride in
-                usedDirectForwarding.withLockedValue { $0 = true }
-                return await self.forwardOnce(
+                await self.forwardOnce(
                     bodyData: bodyData,
                     sessionID: sessionID,
                     requestIDs: requestIDs,
@@ -336,9 +320,73 @@ extension HTTPPostService {
                 )
             }
         )
-        return RefreshWorkflowExecution(
-            result: result,
-            usedDirectForwarding: usedDirectForwarding.withLockedValue { $0 }
+    }
+
+    /// Runs one already-classified refresh route directly. A route is a
+    /// pure XcodeRefreshCodeIssuesInFile call extracted by the routing pass,
+    /// so re-entering handle() for it would only replay request gates that
+    /// are no-ops; this performs exactly the lease/cancellation choreography
+    /// the re-entry used to produce.
+    package func executeRefreshRoute(
+        _ route: RefreshRequestRoute,
+        sessionID: String,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?,
+        parentCancellationHandle: HTTPPostCancellationHandle?
+    ) async -> HTTPPostResolution {
+        let parsedRoutePayload =
+            (try? JSONSerialization.jsonObject(with: route.bodyData, options: []))
+            ?? [String: Any]()
+        let descriptor = Self.topLevelRequestDescriptor(
+            sessionID: sessionID,
+            parsedRequestJSON: parsedRoutePayload,
+            requestIsBatch: route.requestIsBatch,
+            requestIDs: route.requestIDs
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
+        let cancellationHandle = HTTPPostCancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: route.requestIDs.map(\.key)
+        )
+        if let parentCancellationHandle,
+            parentCancellationHandle.bindChildHandle(cancellationHandle) == false
+        {
+            cancellationHandle.cancel(using: sessionManager)
+            return .empty(status: .accepted, sessionID: sessionID)
+        }
+        sessionManager.activateRequestLease(
+            leaseID,
+            requestIDKey: route.requestIDs.first?.key,
+            upstreamIndex: nil,
+            timeout: requestTimeoutOverride
+                ?? Self.topLevelRequestTimeoutOverride(
+                    method: nil,
+                    defaultSeconds: requestTimeoutSeconds
+                )
+        )
+        let result = await forwardRefreshCodeIssuesRequest(
+            route.request,
+            bodyData: route.bodyData,
+            sessionID: sessionID,
+            requestIDs: route.requestIDs,
+            requestIsBatch: route.requestIsBatch,
+            requestTimeoutOverride: requestTimeoutOverride,
+            eventLoop: eventLoop,
+            leaseID: leaseID,
+            cancellationHandle: cancellationHandle
+        )
+        if Task.isCancelled {
+            cancellationHandle.markCompleted()
+            return .empty(status: .accepted, sessionID: sessionID)
+        }
+        cancellationHandle.markCompleted()
+        finishRefreshLease(leaseID, result: result)
+        return makeResolution(
+            from: result,
+            sessionID: sessionID,
+            prefersEventStream: prefersEventStream
         )
     }
 

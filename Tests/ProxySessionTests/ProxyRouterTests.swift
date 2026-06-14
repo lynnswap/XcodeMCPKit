@@ -66,7 +66,7 @@ struct ProxyRouterTests {
             sendNotification: { _ in }
         )
 
-        let future = router.registerBatch(on: eventLoop)
+        let future = router.registerBatchPending(on: eventLoop, responseIDKeys: ["1"]).future
         let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
         router.handleIncoming(Data(response.utf8))
 

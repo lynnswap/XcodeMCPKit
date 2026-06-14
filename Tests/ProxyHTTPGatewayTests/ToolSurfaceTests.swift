@@ -24,7 +24,8 @@ struct ToolSurfaceTests {
                         ],
                     ],
                 ])
-            )
+            ),
+            sourceUpstream: 0
         )
         let surface = ToolSurface(
             config: makeToolSurfaceConfig(),
@@ -75,7 +76,8 @@ struct ToolSurfaceTests {
                         ],
                     ],
                 ])
-            )
+            ),
+            sourceUpstream: 0
         )
         let surface = ToolSurface(
             config: makeToolSurfaceConfig(),
@@ -125,7 +127,8 @@ struct ToolSurfaceTests {
                         ],
                     ],
                 ])
-            )
+            ),
+            sourceUpstream: 0
         )
         let surface = ToolSurface(
             config: makeToolSurfaceConfig(),
@@ -403,7 +406,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     func shutdown() async {}
     func isInitialized() -> Bool { true }
     func cachedToolsListResult() -> JSONValue? { cachedToolsList }
-    func setCachedToolsListResult(_ result: JSONValue) { cachedToolsList = result }
+    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream _: Int) { cachedToolsList = result }
 
     func registerInitialize(
         sessionID: String,
@@ -421,13 +424,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func sharedXcodeListWindowsResult(
-        sessionID: String,
-        maxAge: TimeInterval,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        fatalError("unused in ToolSurfaceTests")
-    }
 
     func liveXcodeListWindowsResult(
         route: ControlPlaneRoute,
@@ -437,7 +433,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     }
 
     func hasDocumentationProvider() -> Bool { false }
-    func hasActiveDocumentationProvider() -> Bool { false }
 
     func chooseUpstreamIndex() -> Int? { nil }
 

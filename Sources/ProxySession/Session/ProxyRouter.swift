@@ -66,10 +66,11 @@ package final class ProxyRouter: Sendable {
         let timeout = effectiveTimeout.map { timeout in
             eventLoop.scheduleTask(in: timeout) { [weak self] in
                 guard let self else { return }
-                self.failTimeout(idKey: idKey)
+                self.failTimeout(idKey: idKey, token: token)
             }
         }
-        state.withLockedValue { state in
+        let displaced = state.withLockedValue { state -> Pending? in
+            let existing = state.pendingByID[idKey]
             state.pendingByID[idKey] = Pending(
                 token: token,
                 promise: promise,
@@ -77,26 +78,22 @@ package final class ProxyRouter: Sendable {
                 onTimeout: onTimeout,
                 responseIDKeys: nil
             )
+            return existing
         }
+        // A client reusing an in-flight request id supersedes the older
+        // request; fail it explicitly instead of leaking its promise and
+        // leaving its timer armed against the new registration.
+        displaced?.timeout?.cancel()
+        displaced?.promise.fail(CancellationError())
         return PendingRegistration(token: token, future: promise.futureResult)
     }
 
-    package func registerBatch(
-        on eventLoop: EventLoop,
-        timeout: TimeAmount? = nil,
-        onTimeout: (@Sendable () -> Void)? = nil
-    ) -> EventLoopFuture<ByteBuffer> {
-        registerBatchPending(
-            on: eventLoop,
-            timeout: timeout,
-            onTimeout: onTimeout
-        ).future
-    }
-
+    /// `responseIDKeys` must be the exact ids the proxy forwarded; batch
+    /// responses are correlated only by id overlap, never by guessing.
     package func registerBatchPending(
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil,
-        responseIDKeys: [String] = [],
+        responseIDKeys: [String],
         onTimeout: (@Sendable () -> Void)? = nil
     ) -> PendingRegistration {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
@@ -108,7 +105,6 @@ package final class ProxyRouter: Sendable {
                 self.failBatchTimeout(token: token)
             }
         }
-        let responseIDKeySet = Set(responseIDKeys)
         state.withLockedValue { state in
             state.pendingBatches.append(
                 Pending(
@@ -116,7 +112,7 @@ package final class ProxyRouter: Sendable {
                     promise: promise,
                     timeout: timeout,
                     onTimeout: onTimeout,
-                    responseIDKeys: responseIDKeySet.isEmpty ? nil : responseIDKeySet
+                    responseIDKeys: Set(responseIDKeys)
                 )
             )
         }
@@ -175,9 +171,10 @@ package final class ProxyRouter: Sendable {
         }
     }
 
-    private func failTimeout(idKey: String) {
-        let pending = state.withLockedValue { state in
-            state.pendingByID.removeValue(forKey: idKey)
+    private func failTimeout(idKey: String, token: UUID) {
+        let pending = state.withLockedValue { state -> Pending? in
+            guard state.pendingByID[idKey]?.token == token else { return nil }
+            return state.pendingByID.removeValue(forKey: idKey)
         }
         pending?.onTimeout?()
         pending?.promise.fail(TimeoutError())
@@ -201,22 +198,19 @@ package final class ProxyRouter: Sendable {
     }
 
     private func popBatch(matching responseIDKeys: Set<String>) -> Pending? {
-        state.withLockedValue { state in
-            if responseIDKeys.isEmpty == false {
-                if let index = state.pendingBatches.firstIndex(where: { pending in
-                    guard let expected = pending.responseIDKeys else {
-                        return false
-                    }
-                    return expected.isDisjoint(with: responseIDKeys) == false
-                }) {
-                    return state.pendingBatches.remove(at: index)
+        guard responseIDKeys.isEmpty == false else {
+            return nil
+        }
+        return state.withLockedValue { state in
+            guard let index = state.pendingBatches.firstIndex(where: { pending in
+                guard let expected = pending.responseIDKeys else {
+                    return false
                 }
-                if let index = state.pendingBatches.firstIndex(where: { $0.responseIDKeys == nil }) {
-                    return state.pendingBatches.remove(at: index)
-                }
+                return expected.isDisjoint(with: responseIDKeys) == false
+            }) else {
                 return nil
             }
-            return state.pendingBatches.isEmpty ? nil : state.pendingBatches.removeFirst()
+            return state.pendingBatches.remove(at: index)
         }
     }
 

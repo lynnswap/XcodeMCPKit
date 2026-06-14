@@ -1,3 +1,4 @@
+import ProxyXcodeSupport
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
@@ -40,1718 +41,6 @@ struct RuntimeCoordinatorTests {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: "session-explicit")
 
         #expect(environment["MCP_XCODE_SESSION_ID"] == "session-explicit")
-    }
-
-    @Test func xcodeReadinessRequiresWorkspaceWindow() {
-        let pids: Set<pid_t> = [1234]
-
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: []
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 1234, title: "Welcome to Xcode", layer: 0, alpha: 1)
-                ]
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 5678, title: "XcodeMCPKit — xcode", layer: 0, alpha: 1)
-                ]
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 1234, title: "XcodeMCPKit — xcode", layer: 1, alpha: 1)
-                ]
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.hasReadyWorkspaceWindow(
-                xcodeProcessIDs: pids,
-                windows: [
-                    .init(ownerPID: 1234, title: "XcodeMCPKit — xcode", layer: 0, alpha: 1)
-                ]
-            ) == true
-        )
-    }
-
-    @Test func xcodeReadinessFallsBackToProcessWhenAccessibilityWindowsAreUnavailable() {
-        #expect(
-            XcodeReadinessProbe.isReady(
-                xcodeProcessIDs: [1234],
-                windows: nil
-            )
-        )
-        #expect(
-            XcodeReadinessProbe.isReady(
-                xcodeProcessIDs: [],
-                windows: nil
-            ) == false
-        )
-        #expect(
-            XcodeReadinessProbe.isReady(
-                xcodeProcessIDs: [1234],
-                windows: [
-                    .init(ownerPID: 1234, title: "Welcome to Xcode", layer: 0, alpha: 1)
-                ]
-            ) == false
-        )
-    }
-
-    @Test func xcodeReadinessParsesPGrepOutput() {
-        let output = ProcessOutput(terminationStatus: 0, stdout: "1234\n\n5678\n", stderr: "")
-
-        #expect(XcodeReadinessProbe.processIDs(fromPGrepOutput: output) == [1234, 5678])
-        #expect(
-            XcodeReadinessProbe.processIDs(
-                fromPGrepOutput: ProcessOutput(terminationStatus: 1, stdout: "1234\n", stderr: "")
-            ).isEmpty
-        )
-    }
-
-    @Test func defaultReadinessGateRecognizesFlaggedXcrunMCPBridgeInvocation() {
-        var config = makeConfig(requestTimeout: 5)
-        config.upstreamArgs = ["--sdk", "macosx", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config))
-
-        config.upstreamCommand = "/usr/bin/xcrun"
-        config.upstreamArgs = ["--sdk=macosx", "--toolchain", "default", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config))
-    }
-
-    @Test func defaultReadinessGateIgnoresNonMCPBridgeAndCustomWrapperInvocations() {
-        var config = makeConfig(requestTimeout: 5)
-        config.upstreamArgs = ["--sdk", "macosx", "swift"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
-
-        config.upstreamCommand = "/bin/echo"
-        config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
-
-        config.upstreamCommand = "xcrun"
-        config.upstreamArgs = ["--sdk", "mcpbridge"]
-        #expect(RuntimeCoordinator.isDefaultXcrunMCPBridgeInvocation(config: config) == false)
-    }
-
-    @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
-        var config = makeConfig(requestTimeout: 5)
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) != nil)
-
-        config.disabledToolNames = [DocumentationToolCatalog.toolName]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
-
-        config.disabledToolNames = []
-        config.upstreamArgs = ["--sdk", "macosx", "swift"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
-
-        config.upstreamCommand = "/bin/echo"
-        config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config) == nil)
-    }
-
-    @Test func sharedToolsListMergesDocumentationProviderDescriptor() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ])
-        )
-
-        let result = try await manager.sharedToolsList(
-            sessionID: "session-docs-tools",
-            requestTimeoutOverride: nil
-        )
-
-        #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(manager.hasActiveDocumentationProvider())
-        let observedTimeout = try #require(await documentationProvider.lastToolListTimeout())
-        #expect(observedTimeout.nanoseconds > 0)
-    }
-
-    @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    documentationDescriptor(version: "26.6").foundationObject,
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ])
-        )
-
-        let result = try await manager.sharedToolsList(
-            sessionID: "session-docs-unavailable",
-            requestTimeoutOverride: nil
-        )
-
-        #expect(toolNames(in: result) == ["XcodeRead"])
-        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
-        #expect(manager.hasActiveDocumentationProvider() == false)
-    }
-
-    @Test func sharedToolsListTimeoutDoesNotInvalidateDocumentationProvider() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            toolListDelayNanoseconds: 50_000_000
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    documentationDescriptor(version: "26.6").foundationObject,
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ])
-        )
-
-        let result = try await manager.sharedToolsList(
-            sessionID: "session-docs-timeout",
-            requestTimeoutOverride: .milliseconds(1)
-        )
-
-        #expect(toolNames(in: result) == ["XcodeRead"])
-        #expect(manager.hasActiveDocumentationProvider() == false)
-        #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
-    }
-
-    @Test func documentationSearchInvalidatesCanonicalToolsCatalogWhenProviderStales() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let providerResponse = try makeJSONRPCResponse(
-            id: 41,
-            result: [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "Tool 'DocumentationSearch' is not enabled.",
-                    ],
-                ],
-                "isError": true,
-            ]
-        )
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callResults: [
-                DocumentationProviderCallResult(
-                    data: providerResponse,
-                    didInvalidateProvider: true
-                ),
-            ]
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    documentationDescriptor(version: "27.0").foundationObject,
-                ],
-            ])
-        )
-        #expect(manager.cachedToolsListResult() != nil)
-
-        let responseData = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 41, query: "UIView"),
-            requestTimeoutOverride: nil
-        )
-
-        #expect(responseData == providerResponse)
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.hasActiveDocumentationProvider() == false)
-        #expect(await documentationProvider.callCount() == 1)
-        let observedTimeout = try #require(await documentationProvider.lastCallTimeout())
-        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(5).nanoseconds)
-    }
-
-    @Test func documentationSearchDoesNotInvalidateWhenSuccessfulAnswerMentionsNotEnabled()
-        async throws
-    {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let providerResponse = try makeJSONRPCResponse(
-            id: 43,
-            result: [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "A user may see: Tool 'DocumentationSearch' is not enabled.",
-                    ],
-                ],
-                "isError": false,
-            ]
-        )
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callResults: [
-                DocumentationProviderCallResult(
-                    data: providerResponse,
-                    didInvalidateProvider: false
-                ),
-            ]
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        let cachedTools = try jsonValue([
-            "tools": [
-                documentationDescriptor(version: "27.0").foundationObject,
-            ],
-        ])
-        manager.setCachedToolsListResult(cachedTools)
-
-        let responseData = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
-            requestTimeoutOverride: nil
-        )
-
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
-        #expect(responseData == providerResponse)
-        let cachedResult = try #require(manager.cachedToolsListResult())
-        #expect(DocumentationToolCatalog.descriptor(in: cachedResult) != nil)
-        #expect(manager.hasActiveDocumentationProvider())
-        #expect(await documentationProvider.callCount() == 1)
-    }
-
-    @Test func documentationSearchKeepsProviderActiveAfterSuccessfulRetryInvalidatesCatalog() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let providerResponse = try makeJSONRPCResponse(
-            id: 42,
-            result: [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "{\"answer\":\"retry\"}",
-                    ],
-                ],
-                "isError": false,
-            ]
-        )
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callResults: [
-                DocumentationProviderCallResult(
-                    data: providerResponse,
-                    didInvalidateProvider: true
-                ),
-            ]
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ])
-        )
-        _ = try await manager.sharedToolsList(
-            sessionID: "session-docs-retry-active",
-            requestTimeoutOverride: nil
-        )
-        #expect(manager.hasActiveDocumentationProvider())
-        #expect(manager.cachedToolsListResult() != nil)
-
-        let responseData = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 42, query: "UIView"),
-            requestTimeoutOverride: nil
-        )
-
-        #expect(responseData == providerResponse)
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.hasActiveDocumentationProvider())
-        #expect(await documentationProvider.callCount() == 1)
-    }
-
-    @Test func documentationSearchClearsProviderStateWhenRecoveryFailsAfterInvalidation() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            callFailures: [
-                DocumentationProviderCallFailure(
-                    underlying: UpstreamSlotAcquisitionError.unavailable,
-                    providerIsActive: false
-                ),
-            ]
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider
-        )
-        defer { manager.shutdownAndWait() }
-
-        manager.setCachedToolsListResult(
-            try jsonValue([
-                "tools": [
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ])
-        )
-        _ = try await manager.sharedToolsList(
-            sessionID: "session-docs-recovery-failed",
-            requestTimeoutOverride: nil
-        )
-        #expect(manager.hasActiveDocumentationProvider())
-        #expect(manager.cachedToolsListResult() != nil)
-
-        await #expect(throws: UpstreamSlotAcquisitionError.self) {
-            try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 43, query: "UIView"),
-                requestTimeoutOverride: nil
-            )
-        }
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.hasActiveDocumentationProvider() == false)
-        #expect(await documentationProvider.callCount() == 1)
-    }
-
-    @Test func startupPrewarmsDocumentationProviderWhenEnabled() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 300),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider,
-            prewarmDocumentationProviderOnStartup: true
-        )
-        defer { manager.shutdownAndWait() }
-
-        try await spinUntil("waiting for documentation provider startup prewarm") {
-            await documentationProvider.prewarmCount() == 1
-        }
-
-        let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
-        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(30).nanoseconds)
-        #expect(await documentationProvider.toolListUpdateCount() == 1)
-        #expect(manager.hasActiveDocumentationProvider())
-    }
-
-    @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            prewarmDelayNanoseconds: 300_000_000
-        )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 300),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            documentationProviderManager: documentationProvider,
-            prewarmDocumentationProviderOnStartup: true
-        )
-
-        await manager.shutdown()
-        try? await Task.sleep(nanoseconds: 400_000_000)
-
-        #expect(await documentationProvider.prewarmCount() == 0)
-        #expect(await documentationProvider.shutdownCount() == 1)
-    }
-
-    @Test func documentationProviderManagerRejectsDescriptorWhenProbeCallIsNotEnabled() async throws {
-        let target = documentationProviderTarget(processID: 101)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .notEnabled
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: nil)
-        let result = DocumentationToolCatalog.applying(
-            update,
-            to: try jsonValue([
-                "tools": [
-                    documentationDescriptor(version: "stale").foundationObject,
-                ],
-            ])
-        )
-
-        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
-        #expect(await factory.startedPIDs() == [target.processID])
-    }
-
-    @Test func documentationProviderManagerUsesNumericIDsForMCPBridgeProbe() async throws {
-        let target = documentationProviderTarget(processID: 111)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        requiresNumericRequestIDs: true
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [target.processID])
-    }
-
-    @Test func documentationProviderManagerUsesConfiguredInitializeParamsForProbe() async throws {
-        let target = documentationProviderTarget(processID: 112)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ]
-        )
-        let initializeParams = try jsonValue([
-            "protocolVersion": "2025-03-26",
-            "capabilities": [
-                "roots": [
-                    "listChanged": true,
-                ],
-            ],
-            "clientInfo": [
-                "name": "ConfiguredAssistant",
-                "version": "9.9.9",
-            ],
-        ])
-        guard case .object(let initializeObject) = initializeParams else {
-            Issue.record("expected initialize params object")
-            return
-        }
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory,
-            initializeParams: initializeObject
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        let observedParams = try #require(await factory.initializeParams(for: target.processID).first)
-        guard case .object(let observedObject) = observedParams else {
-            Issue.record("expected initialize params object")
-            return
-        }
-        guard case .string("2025-03-26")? = observedObject["protocolVersion"] else {
-            Issue.record("expected configured protocol version")
-            return
-        }
-        guard case .object(let capabilities)? = observedObject["capabilities"],
-              case .object(let roots)? = capabilities["roots"],
-              case .bool(true)? = roots["listChanged"] else {
-            Issue.record("expected configured capabilities")
-            return
-        }
-        guard case .object(let clientInfo)? = observedObject["clientInfo"],
-              case .string("ConfiguredAssistant")? = clientInfo["name"],
-              case .string("9.9.9")? = clientInfo["version"] else {
-            Issue.record("expected configured client info")
-            return
-        }
-    }
-
-    @Test func documentationProviderManagerCoalescesConcurrentProviderSelection() async throws {
-        let target = documentationProviderTarget(processID: 121)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ],
-            startDelayNanoseconds: 100_000_000
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
-        )
-
-        async let firstUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
-        async let secondUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
-        let results = await [firstUpdate, secondUpdate]
-
-        for update in results {
-            let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-            #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        }
-        #expect(await factory.startAttempts() == [target.processID])
-        #expect(await factory.startedPIDs() == [target.processID])
-    }
-
-    @Test func documentationProviderManagerBoundsReusedProviderSelectionByCallerTimeout() async throws {
-        let target = documentationProviderTarget(processID: 122)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ],
-            startDelayNanoseconds: 500_000_000
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
-        )
-
-        async let longUpdate = manager.toolListUpdate(requestTimeout: .seconds(2))
-        try await spinUntil("waiting for provider selection to start") {
-            await factory.startAttempts() == [target.processID]
-        }
-
-        let shortStart = Date()
-        let shortUpdate = await manager.toolListUpdate(requestTimeout: .milliseconds(1))
-        #expect(Date().timeIntervalSince(shortStart) < 0.1)
-        if case .unavailable = shortUpdate {
-        } else {
-            Issue.record("short tools/list should time out while reusing provider selection")
-        }
-
-        let finalUpdate = await longUpdate
-        let result = DocumentationToolCatalog.applying(finalUpdate, to: try jsonValue(["tools": []]))
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [target.processID])
-    }
-
-    @Test func documentationProviderManagerKeepsSelectionAfterStartingCallerTimesOut() async throws {
-        let target = documentationProviderTarget(processID: 123)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ],
-            startDelayNanoseconds: 100_000_000
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
-        )
-
-        async let shortUpdate = manager.toolListUpdate(requestTimeout: .milliseconds(1))
-        try await spinUntil("waiting for provider selection to start") {
-            await factory.startAttempts() == [target.processID]
-        }
-
-        let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
-        if case .unavailable = await shortUpdate {
-        } else {
-            Issue.record("short tools/list should time out without cancelling provider selection")
-        }
-
-        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [target.processID])
-    }
-
-    @Test func documentationProviderManagerCancelsSelectionWaitForCancelledCaller() async throws {
-        let target = documentationProviderTarget(processID: 124)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                target.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ],
-            startDelayNanoseconds: 500_000_000
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
-        )
-
-        let task = Task {
-            try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 74, query: "UIView"),
-                requestTimeoutOverride: .seconds(2)
-            )
-        }
-        try await spinUntil("waiting for provider selection to start") {
-            await factory.startAttempts() == [target.processID]
-        }
-
-        let cancelStart = Date()
-        task.cancel()
-        await #expect(throws: CancellationError.self) {
-            try await task.value
-        }
-        #expect(Date().timeIntervalSince(cancelStart) < 0.25)
-
-        let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
-        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [target.processID])
-    }
-
-    @Test func documentationProviderManagerChecksAllRunningXcodeTargetsBeforePublishingDescriptor() async throws {
-        let xcode26 = documentationProviderTarget(processID: 201)
-        let xcode27 = documentationProviderTarget(processID: 202)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode26.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 20,
-                        includesDocumentationSearch: true,
-                        probeResponse: .notEnabled
-                    ),
-                ],
-                xcode27.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
-    }
-
-    @Test func documentationProviderManagerContinuesAfterCandidateProbeTimesOut() async throws {
-        let hung = documentationProviderTarget(processID: 205)
-        let working = documentationProviderTarget(processID: 206)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                hung.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .hang
-                    ),
-                ],
-                working.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [hung, working]),
-            sessionFactory: factory,
-            providerSelectionTimeout: .milliseconds(50)
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [hung.processID, working.processID])
-    }
-
-    @Test func documentationProviderManagerHonorsPinnedProcessID() async throws {
-        let pinned = documentationProviderTarget(processID: 203)
-        let other = documentationProviderTarget(processID: 204)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                pinned.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 20,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-                other.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [pinned, other]),
-            sessionFactory: factory,
-            pinnedProcessID: pinned.processID
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-
-        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
-        #expect(await factory.startedPIDs() == [pinned.processID])
-    }
-
-    @Test func documentationProviderManagerPrefersNewerServerVersionWhenToolCountsTie() async throws {
-        let xcode26 = documentationProviderTarget(processID: 211)
-        let xcode27 = documentationProviderTarget(processID: 212)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode26.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-                xcode27.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
-        )
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
-    }
-
-    @Test func documentationProviderManagerRetriesDocumentationSearchOnAlternateCandidate() async throws {
-        let xcode26 = documentationProviderTarget(processID: 201)
-        let xcode27 = documentationProviderTarget(processID: 202)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode26.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.notEnabled]
-                    ),
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .notEnabled
-                    ),
-                ],
-                xcode27.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.successText("{\"answer\":\"retry\"}")]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
-        )
-
-        let initialTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: nil),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
-
-        let result = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 73, query: "UIView"),
-            requestTimeoutOverride: nil
-        )
-
-        #expect(result.didInvalidateProvider)
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data) == false)
-        #expect(try toolContentText(in: result.data) == "{\"answer\":\"retry\"}")
-        #expect(await factory.startedPIDs() == [
-            xcode26.processID,
-            xcode27.processID,
-            xcode26.processID,
-            xcode27.processID,
-        ])
-    }
-
-    @Test func documentationProviderManagerInvalidatesReplacementWhenRetryReturnsNotEnabled() async throws {
-        let xcode26 = documentationProviderTarget(processID: 221)
-        let xcode27 = documentationProviderTarget(processID: 222)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode26.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.exit]
-                    ),
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .notEnabled
-                    ),
-                ],
-                xcode27.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.notEnabled]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
-        )
-
-        let initialTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: nil),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
-
-        let result = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
-            requestTimeoutOverride: .seconds(1)
-        )
-
-        #expect(result.didInvalidateProvider)
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(result.data))
-        let followUpTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: .seconds(1)),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
-        #expect(await factory.startAttempts() == [
-            xcode26.processID,
-            xcode27.processID,
-            xcode26.processID,
-            xcode27.processID,
-            xcode26.processID,
-            xcode27.processID,
-        ])
-    }
-
-    @Test func documentationProviderManagerInvalidatesReplacementWhenRetryTransportFails() async throws {
-        let xcode26 = documentationProviderTarget(processID: 225)
-        let xcode27 = documentationProviderTarget(processID: 226)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode26.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.exit]
-                    ),
-                ],
-                xcode27.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.exit]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
-        )
-
-        let initialTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: nil),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
-
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
-                requestTimeoutOverride: .seconds(1)
-            )
-            Issue.record("DocumentationSearch should report an invalidated retry failure")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.providerIsActive == false)
-            #expect(failure.underlying is UpstreamSlotAcquisitionError)
-        }
-
-        let followUpTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: .seconds(1)),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
-        #expect(await factory.startedPIDs() == [
-            xcode26.processID,
-            xcode27.processID,
-            xcode27.processID,
-        ])
-    }
-
-    @Test func documentationProviderManagerInvalidatesReplacementWhenNotEnabledRetryTransportFails()
-        async throws
-    {
-        let xcode26 = documentationProviderTarget(processID: 227)
-        let xcode27 = documentationProviderTarget(processID: 228)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode26.processID: [
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.notEnabled]
-                    ),
-                    .init(
-                        serverVersion: "26.6",
-                        toolCount: 50,
-                        includesDocumentationSearch: true,
-                        probeResponse: .notEnabled
-                    ),
-                ],
-                xcode27.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success
-                    ),
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.exit]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
-        )
-
-        let initialTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: nil),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(documentationDescriptorDescription(in: initialTools) == "docs-26.6")
-
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 78, query: "UIView"),
-                requestTimeoutOverride: .seconds(1)
-            )
-            Issue.record("DocumentationSearch should report an invalidated not-enabled retry failure")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.providerIsActive == false)
-            #expect(failure.underlying is UpstreamSlotAcquisitionError)
-        }
-
-        let followUpTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: .seconds(1)),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
-        #expect(await factory.startedPIDs() == [
-            xcode26.processID,
-            xcode27.processID,
-            xcode26.processID,
-            xcode27.processID,
-        ])
-        #expect(await factory.startAttempts() == [
-            xcode26.processID,
-            xcode27.processID,
-            xcode26.processID,
-            xcode27.processID,
-            xcode26.processID,
-            xcode27.processID,
-        ])
-    }
-
-    @Test func documentationProviderManagerReportsInactiveProviderWhenRecoveryFindsNoReplacement() async throws {
-        let xcode = documentationProviderTarget(processID: 231)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.exit]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
-            sessionFactory: factory
-        )
-
-        let initialTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: nil),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(documentationDescriptorDescription(in: initialTools) == "docs-27.0")
-
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 76, query: "UIView"),
-                requestTimeoutOverride: .seconds(1)
-            )
-            Issue.record("DocumentationSearch should report an invalidated provider failure")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.providerIsActive == false)
-            #expect(failure.underlying is UpstreamSlotAcquisitionError)
-        }
-
-        let followUpTools = DocumentationToolCatalog.applying(
-            await manager.toolListUpdate(requestTimeout: .seconds(1)),
-            to: try jsonValue(["tools": []])
-        )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
-    }
-
-    @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
-        let xcode = documentationProviderTarget(processID: 301)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.hang]
-                    ),
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.successText("{\"answer\":\"late\"}")]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
-            sessionFactory: factory
-        )
-
-        do {
-            _ = try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
-                requestTimeoutOverride: .milliseconds(1)
-            )
-            Issue.record("DocumentationSearch should time out without retrying")
-        } catch let failure as DocumentationProviderCallFailure {
-            #expect(failure.underlying is TimeoutError)
-            #expect(failure.providerIsActive == false)
-        } catch {
-            Issue.record("expected DocumentationProviderCallFailure, got \(error)")
-        }
-
-        #expect(await factory.startedPIDs() == [xcode.processID])
-    }
-
-    @Test func documentationProviderManagerKeepsProviderWhenDocumentationCallIsCancelled() async throws {
-        let xcode = documentationProviderTarget(processID: 302)
-        let factory = ScriptedDocumentationSessionFactory(
-            plansByPID: [
-                xcode.processID: [
-                    .init(
-                        serverVersion: "27.0",
-                        toolCount: 47,
-                        includesDocumentationSearch: true,
-                        probeResponse: .success,
-                        userCallResponses: [.hang]
-                    ),
-                ],
-            ]
-        )
-        let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [xcode]),
-            sessionFactory: factory
-        )
-        let task = Task {
-            try await manager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 92, query: "UIView"),
-                requestTimeoutOverride: .seconds(2)
-            )
-        }
-        let didStart = await waitUntil(timeout: .seconds(1)) {
-            await factory.startedPIDs() == [xcode.processID]
-        }
-        #expect(didStart)
-
-        task.cancel()
-        await #expect(throws: CancellationError.self) {
-            try await task.value
-        }
-
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
-        #expect(await factory.startedPIDs() == [xcode.processID])
-    }
-
-    @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
-        )
-        defer { manager.shutdownAndWait() }
-
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(await upstream.startCount() == 0)
-        #expect(await upstream.sentCount() == 0)
-
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        #expect(methodName(from: sent) == "initialize")
-        #expect(await upstream.startCount() > 0)
-    }
-
-    @Test func readinessGateStartsOnlyPrimaryUpstreamBeforePrimaryAttachCompletes() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream0 = TestUpstreamClient()
-        let upstream1 = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
-        )
-        defer { manager.shutdownAndWait() }
-
-        await readiness.setReady(true)
-        let sent = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
-        #expect(methodName(from: sent) == "initialize")
-        #expect(await upstream0.startCount() > 0)
-        #expect(await upstream1.startCount() == 0)
-        #expect(await upstream1.sentCount() == 0)
-    }
-
-    @Test func readinessGateLaunchesXcodeWhenUnavailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let launchRecorder = XcodeLaunchRecorder()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                launchRecorder: launchRecorder
-            )
-        )
-        defer { manager.shutdownAndWait() }
-
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() == 1
-        })
-        #expect(await upstream.startCount() == 0)
-        #expect(await upstream.sentCount() == 0)
-
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        #expect(await launchRecorder.launchCount() == 1)
-        #expect(await upstream.startCount() > 0)
-    }
-
-    @Test func readinessGateRetriesLaunchAfterFailedAutoLaunch() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let launchRecorder = XcodeLaunchRecorder(outcomes: [false, true])
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                launchRecorder: launchRecorder
-            )
-        )
-        defer { manager.shutdownAndWait() }
-
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() == 2
-        })
-        #expect(await upstream.startCount() == 0)
-
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-    }
-
-    @Test func readinessGateRetriesLaunchWhenSuccessfulOpenDoesNotProduceXcodeProcess() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let availability = AvailabilityFlag(isAvailable: false)
-        let launchRecorder = XcodeLaunchRecorder()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                availability: availability,
-                launchRetryIntervalNanoseconds: 2_000_000,
-                launchRecorder: launchRecorder
-            )
-        )
-        defer { manager.shutdownAndWait() }
-
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() >= 2
-        })
-        #expect(await upstream.startCount() == 0)
-
-        await availability.setAvailable(true)
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        #expect(await upstream.startCount() > 0)
-    }
-
-    @Test func readinessGateRetriesLaunchWhenXcodeQuitsWhileWaiting() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let availability = AvailabilityFlag(isAvailable: true)
-        let launchRecorder = XcodeLaunchRecorder()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                availability: availability,
-                launchRecorder: launchRecorder
-            )
-        )
-        defer { manager.shutdownAndWait() }
-
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(await launchRecorder.launchCount() == 0)
-        #expect(await upstream.startCount() == 0)
-
-        await availability.setAvailable(false)
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() == 1
-        })
-        #expect(await upstream.startCount() == 0)
-
-        await availability.setAvailable(true)
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        #expect(await upstream.startCount() > 0)
-    }
-
-    @Test func readinessGateCompletesPendingInitializeAfterXcodeAppears() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
-        )
-        defer { manager.shutdownAndWait() }
-
-        let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(await upstream.sentCount() == 0)
-
-        await readiness.setReady(true)
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        #expect(methodName(from: sent) == "initialize")
-        let upstreamID = try extractUpstreamID(from: sent)
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-
-        let response = try decodeJSON(
-            from: try await waitWithTimeout(
-                "waiting for deferred initialize response",
-                timeout: .seconds(2)
-            ) {
-                try await future.get()
-            }
-        )
-        #expect((response["id"] as? NSNumber)?.intValue == 1)
-        let initializeRequests = await upstream.sent().filter { methodName(from: $0) == "initialize" }
-        #expect(initializeRequests.count == 1)
-    }
-
-    @Test func readinessGateDebugResetDropsWaitingEagerInitialize() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
-        )
-        defer { manager.shutdownAndWait() }
-
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(await upstream.sentCount() == 0)
-
-        manager.debugReset()
-        await readiness.setReady(true)
-        try? await Task.sleep(nanoseconds: 50_000_000)
-
-        #expect(await upstream.sentCount() == 0)
-        #expect(await upstream.startCount() == 0)
-    }
-
-    @Test func readinessGateDoesNotSendTimedOutInitializeWaiterWhenXcodeAppears() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: false)
-        let clock = TestClock()
-        let config = makeConfig(requestTimeout: 0.05)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
-            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: clock)
-        )
-        defer { manager.shutdownAndWait() }
-
-        let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        await clock.sleep(untilSuspendedBy: 1)
-        clock.advance(by: .milliseconds(60))
-        await #expect(throws: TimeoutError.self) {
-            _ = try await future.get()
-        }
-        #expect(await upstream.sentCount() == 0)
-
-        let retryFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
-            requestObject: makeInitializeRequest(id: 2),
-            on: eventLoop
-        )
-        await clock.sleep(untilSuspendedBy: 1)
-        clock.advance(by: .milliseconds(60))
-        await #expect(throws: TimeoutError.self) {
-            _ = try await retryFuture.get()
-        }
-        #expect(await upstream.sentCount() == 0)
-
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        #expect(await upstream.sentCount() == 1)
-        #expect(await upstream.startCount() == 2)
-        let initializeRequests = await upstream.sent().filter { methodName(from: $0) == "initialize" }
-        #expect(initializeRequests.count == 1)
-    }
-
-    @Test func readinessGateWaitsInsteadOfTightRetryingWhenXcodeDisappears() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: true)
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
-        )
-        defer { manager.shutdownAndWait() }
-
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let upstreamID = try extractUpstreamID(from: sent)
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.isInitialized()
-        })
-
-        await readiness.setReady(false)
-        await upstream.yield(.exit(1))
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(await upstream.sentCount() == 2)
-
-        await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-    }
-
-    @Test func readinessGateBacksOffBeforeRetryingWhenXcodeIsStillAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: true)
-        let sleepRecorder = ControlledReadinessSleep()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                sleepRecorder: sleepRecorder
-            )
-        )
-        defer { manager.shutdownAndWait() }
-
-        let firstInit = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let firstInitID = try extractUpstreamID(from: firstInit)
-        await upstream.yield(.message(try makeInitializeResponse(id: firstInitID)))
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.isInitialized()
-        })
-
-        await upstream.yield(.exit(1))
-        _ = try await waitWithTimeout(
-            "waiting for readiness retry backoff",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 0)
-        }
-        #expect(await upstream.sentCount() == 2)
-
-        await sleepRecorder.resumeNext()
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let secondInit = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
-        let secondInitID = try extractUpstreamID(from: secondInit)
-        await upstream.yield(.message(try makeInitializeResponse(id: secondInitID)))
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.isInitialized()
-        })
-
-        await upstream.yield(.exit(1))
-        let secondDelay = try await waitWithTimeout(
-            "waiting for second readiness retry backoff",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 1)
-        }
-        #expect(secondDelay == 1_000_000_000)
-        await sleepRecorder.resumeNext()
     }
 
     @Test func upstreamStderrClassifierTreatsNoXcodeFatalAsAvailabilityWait() {
@@ -2374,85 +663,6 @@ struct RuntimeCoordinatorTests {
         }
     }
 
-    @Test func controlPlaneInitializeTimeoutDoesNotAbortLongerWaiter() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
-
-        let shortTask = Task {
-            try await manager.controlPlaneCoordinator.clientInitialize(
-                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .milliseconds(50))
-            )
-        }
-        let longTask = Task {
-            try await manager.controlPlaneCoordinator.clientInitialize(
-                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .seconds(1))
-            )
-        }
-
-        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let initUpstreamID = try extractUpstreamID(from: initRequest)
-
-        await #expect(throws: TimeoutError.self) {
-            _ = try await shortTask.value
-        }
-
-        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
-
-        let longResult = try await longTask.value
-        guard case .object(let object) = longResult else {
-            Issue.record("initialize result should be an object")
-            return
-        }
-        #expect(object["capabilities"] != nil)
-    }
-
-    @Test func controlPlaneInitializeCancellationDoesNotAbortLongerWaiter() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
-
-        let cancelledTask = Task {
-            try await manager.controlPlaneCoordinator.clientInitialize(
-                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .seconds(1))
-            )
-        }
-        let longTask = Task {
-            try await manager.controlPlaneCoordinator.clientInitialize(
-                deadlineUptimeNs: RuntimeCoordinator.timeoutDeadline(for: .seconds(1))
-            )
-        }
-
-        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let initUpstreamID = try extractUpstreamID(from: initRequest)
-        cancelledTask.cancel()
-
-        do {
-            _ = try await cancelledTask.value
-            Issue.record("cancelled initialize waiter should not complete successfully")
-        } catch is CancellationError {
-        } catch {
-            Issue.record("expected CancellationError but received \(error)")
-        }
-
-        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
-
-        let longResult = try await longTask.value
-        guard case .object(let object) = longResult else {
-            Issue.record("initialize result should be an object")
-            return
-        }
-        #expect(object["capabilities"] != nil)
-    }
-
     @Test func sessionManagerTimeoutDoesNotClearRecreatedSessionInitializeRoutingState()
         async throws
     {
@@ -2477,12 +687,6 @@ struct RuntimeCoordinatorTests {
 
         manager.removeSession(id: sessionID)
         _ = manager.session(id: sessionID)
-        manager.testSetInitializeRoutingState(
-            sessionID: sessionID,
-            upstreamIndex: 0,
-            preferOnNextPin: true,
-            didReceiveInitializeUpstreamMessage: true
-        )
         let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
 
         await #expect(throws: TimeoutError.self) {
@@ -2519,12 +723,6 @@ struct RuntimeCoordinatorTests {
 
         manager.removeSession(id: sessionID)
         _ = manager.session(id: sessionID)
-        manager.testSetInitializeRoutingState(
-            sessionID: sessionID,
-            upstreamIndex: 0,
-            preferOnNextPin: true,
-            didReceiveInitializeUpstreamMessage: true
-        )
         let replacementSnapshotBeforeError = try #require(manager.testSessionSnapshot(id: sessionID))
 
         await upstream.yield(
@@ -2671,7 +869,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -2697,7 +901,7 @@ struct RuntimeCoordinatorTests {
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -2782,7 +986,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -2807,7 +1017,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -2817,7 +1027,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let thirdTask = Task {
             try await manager.sharedToolsList(
@@ -2846,7 +1056,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -2870,7 +1086,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -3126,7 +1342,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -3148,7 +1370,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
 
-        try await Task.sleep(nanoseconds: 120_000_000)
+        uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
@@ -3295,6 +1517,160 @@ struct RuntimeCoordinatorTests {
         _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
     }
 
+    @Test func controlPlaneDoesNotReturnStaleToolsCatalogAfterGenerationClear() async throws {
+        let brokerState = CanonicalBrokerState()
+        let debugMirror = ControlPlaneDebugMirror()
+        let loadStarted = TestSignal()
+        let releaseLoad = AsyncGate()
+        let coordinator = ControlPlaneCoordinator(
+            brokerState: brokerState,
+            debugMirror: debugMirror,
+            toolsCatalogLoader: { _, _ in
+                loadStarted.signal()
+                try await releaseLoad.wait()
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: .object(["tools": .array([])]),
+                    sourceUpstream: 0,
+                    durationMilliseconds: 1
+                )
+            },
+            windowsLoader: { _, _, _ in .object([:]) },
+            upstreamHandshakeStates: { [:] },
+            logger: ProxyLogging.make("control-plane-test"),
+            controlPlaneDefaultTimeout: nil
+        )
+
+        let task = Task {
+            try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
+        }
+        try await loadStarted.wait(description: "waiting for tools catalog load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
+        })
+
+        brokerState.clearToolsCatalog()
+        await releaseLoad.signal()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+    }
+
+    @Test func controlPlaneDoesNotReturnStaleWindowsAfterGenerationClear() async throws {
+        let brokerState = CanonicalBrokerState()
+        let debugMirror = ControlPlaneDebugMirror()
+        let loadStarted = TestSignal()
+        let releaseLoad = AsyncGate()
+        let coordinator = ControlPlaneCoordinator(
+            brokerState: brokerState,
+            debugMirror: debugMirror,
+            toolsCatalogLoader: { _, _ in
+                CanonicalToolsCatalogLoadResult(
+                    rawResult: .object(["tools": .array([])]),
+                    sourceUpstream: 0,
+                    durationMilliseconds: 1
+                )
+            },
+            windowsLoader: { _, _, _ in
+                loadStarted.signal()
+                try await releaseLoad.wait()
+                return .object(["windows": .array([])])
+            },
+            upstreamHandshakeStates: { [:] },
+            logger: ProxyLogging.make("control-plane-test"),
+            controlPlaneDefaultTimeout: nil
+        )
+
+        let task = Task {
+            try await coordinator.listWindows(route: .anyHealthy, deadlineUptimeNs: nil)
+        }
+        try await loadStarted.wait(description: "waiting for window load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.windows == 1
+        })
+
+        brokerState.clearInitialize()
+        await releaseLoad.signal()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+    }
+
+    @Test func controlPlaneDelayedInvalidationDoesNotCancelFreshToolsCatalogLoad()
+        async throws
+    {
+        let brokerState = CanonicalBrokerState()
+        let debugMirror = ControlPlaneDebugMirror()
+        let loadIndexBox = NIOLockedValueBox(0)
+        let firstLoadStarted = TestSignal()
+        let secondLoadStarted = TestSignal()
+        let firstRelease = AsyncGate()
+        let secondRelease = AsyncGate()
+        let coordinator = ControlPlaneCoordinator(
+            brokerState: brokerState,
+            debugMirror: debugMirror,
+            toolsCatalogLoader: { _, _ in
+                let loadIndex = loadIndexBox.withLockedValue { value in
+                    value += 1
+                    return value
+                }
+                if loadIndex == 1 {
+                    firstLoadStarted.signal()
+                    try await firstRelease.wait()
+                    return CanonicalToolsCatalogLoadResult(
+                        rawResult: .object(["fresh": .bool(false)]),
+                        sourceUpstream: 0,
+                        durationMilliseconds: 1
+                    )
+                }
+                secondLoadStarted.signal()
+                try await secondRelease.wait()
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: .object(["fresh": .bool(true)]),
+                    sourceUpstream: 0,
+                    durationMilliseconds: 1
+                )
+            },
+            windowsLoader: { _, _, _ in .object([:]) },
+            upstreamHandshakeStates: { [:] },
+            logger: ProxyLogging.make("control-plane-test"),
+            controlPlaneDefaultTimeout: nil
+        )
+
+        let staleTask = Task {
+            try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
+        }
+        try await firstLoadStarted.wait(description: "waiting for stale tools catalog load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
+        })
+
+        brokerState.clearToolsCatalog()
+        let invalidatedGeneration = brokerState.generation()
+        let freshTask = Task {
+            try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
+        }
+        try await secondLoadStarted.wait(description: "waiting for fresh tools catalog load")
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
+        })
+
+        await coordinator.cancelLoadsStartedBeforeGeneration(
+            invalidatedGeneration,
+            reason: "delayed_invalidation"
+        )
+        await secondRelease.signal()
+
+        let result = try await freshTask.value
+        let object = try #require(result.foundationObject as? [String: Any])
+        #expect(object["fresh"] as? Bool == true)
+        await #expect(throws: CancellationError.self) {
+            _ = try await staleTask.value
+        }
+        await firstRelease.signal()
+    }
+
     @Test func sessionManagerUsesInitializeParamsOverrideFromConfigFile() async throws {
         let configPath = try makeTempProxyConfigFile(
             """
@@ -3313,6 +1689,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -3324,7 +1701,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "custom-proxy")
-        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
         #expect(capabilities["roots"] as? Bool == true)
     }
 
@@ -3343,6 +1720,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -3352,7 +1730,7 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
         #expect(clientInfo["name"] as? String == "Claude")
-        #expect(clientInfo["version"] as? String == manager.defaultClientVersion(for: "Claude"))
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultClientVersion(for: "Claude"))
     }
 
     @Test func xcodeChatClientVersionFallsBackToCodeAliasWhenExactStemMissing() async throws {
@@ -3364,7 +1742,7 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
-        let version = manager.xcodeChatClientVersion(
+        let version = InitializeHandshakeParams.xcodeChatClientVersion(
             for: "Claude",
             defaults: [
                 "IDEChatClaudeCodeVersion": #"{"version":"9.9.9"}"#,
@@ -3383,7 +1761,7 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
-        let version = manager.xcodeChatClientVersion(
+        let version = InitializeHandshakeParams.xcodeChatClientVersion(
             for: "Claude",
             defaults: [
                 "IDEChatClaudeVersion": #"{"version":"1.2.3"}"#,
@@ -3411,6 +1789,7 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -3420,8 +1799,8 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
         #expect(params["protocolVersion"] as? String == "2025-03-26")
-        #expect(clientInfo["name"] as? String == manager.defaultProxyClientName())
-        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(clientInfo["name"] as? String == InitializeHandshakeParams.defaultProxyClientName())
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
 
     @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
@@ -3442,6 +1821,7 @@ struct RuntimeCoordinatorTests {
         let timeoutClock = TestClock()
         var config = makeConfig(requestTimeout: 0.1)
         config.configPath = configPath
+        config.loadFileConfig()
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
@@ -3490,7 +1870,7 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.hasInitResult == false)
         #expect(params["protocolVersion"] as? String == "2025-03-26")
         #expect(clientInfo["name"] as? String == "configured-proxy")
-        #expect(clientInfo["version"] as? String == manager.defaultProxyClientVersion())
+        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
 
     @Test func sessionManagerSendsInitializedOnce() async throws {
@@ -3687,7 +2067,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.startPrimaryEagerRetry()
@@ -4014,9 +2394,9 @@ struct RuntimeCoordinatorTests {
         let originalB = RPCID(any: NSNumber(value: 101))!
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
+            manager.chooseUpstreamIndex())
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(upstreamIndexA != upstreamIndexB)
 
         let futureA = sessionA.router.registerRequest(idKey: originalA.key, on: eventLoop)
@@ -4170,7 +2550,7 @@ struct RuntimeCoordinatorTests {
 
         let sessionID = "session-A"
         let session = manager.session(id: sessionID)
-        _ = manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true)
+        _ = manager.chooseUpstreamIndex()
 
         _ = session.router.drainBufferedNotifications()
 
@@ -4202,7 +2582,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-debug"
         let session = manager.session(id: sessionID)
         let upstreamIndex = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         let original = RPCID(any: NSNumber(value: 301))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(1))
@@ -4360,11 +2740,11 @@ struct RuntimeCoordinatorTests {
             .message(try JSONSerialization.data(withJSONObject: warmup1Response, options: [])))
         #expect(
             await waitUntil(timeout: .seconds(2)) {
-                manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil
+                manager.chooseUpstreamIndex() == nil
             }
         )
 
-        let chosen = manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true)
+        let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == nil)
     }
 
@@ -4403,9 +2783,9 @@ struct RuntimeCoordinatorTests {
             description: "waiting for initialized notification"
         )
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
 
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-quarantine-recovery",
@@ -4513,9 +2893,9 @@ struct RuntimeCoordinatorTests {
         let initializedNotification = try #require(await upstream1.sentValue(at: 1))
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         let queuedRequestData = try JSONSerialization.data(
             withJSONObject: [
@@ -4725,9 +3105,9 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionIDB)
 
         let upstreamIndexA = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
+            manager.chooseUpstreamIndex())
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDB, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(upstreamIndexA != upstreamIndexB)
 
         await upstream1.yield(.exit(1))
@@ -4738,7 +3118,7 @@ struct RuntimeCoordinatorTests {
         )
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionIDA, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(repinned == 0)
     }
 
@@ -4769,7 +3149,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-timeout-repin"
         _ = manager.session(id: sessionID)
         let pinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
 
         manager.onRequestTimeout(
             sessionID: sessionID, requestIDKey: "dummy-1", upstreamIndex: pinned)
@@ -4779,7 +3159,7 @@ struct RuntimeCoordinatorTests {
             sessionID: sessionID, requestIDKey: "dummy-3", upstreamIndex: pinned)
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(repinned != pinned)
     }
 
@@ -4829,7 +3209,7 @@ struct RuntimeCoordinatorTests {
         let originalB = RPCID(any: NSNumber(value: 201))!
         let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
         let upstreamIndexB = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(upstreamIndexB == 0)
         let upstreamIDB = manager.assignUpstreamID(
             sessionID: sessionID, originalID: originalB, upstreamIndex: upstreamIndexB)
@@ -4950,7 +3330,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-overload-repin"
         let session = manager.session(id: sessionID)
         let pinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(pinned == 0)
 
         await upstream0.setOverloaded(true)
@@ -4975,7 +3355,7 @@ struct RuntimeCoordinatorTests {
         #expect((error?["message"] as? String) == "upstream overloaded")
 
         let repinned = try #require(
-            manager.chooseUpstreamIndex(sessionID: sessionID, shouldPin: true))
+            manager.chooseUpstreamIndex())
         #expect(repinned == 1)
 
         let original2 = RPCID(any: NSNumber(value: 921))!
@@ -5037,7 +3417,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
-        manager.setCachedToolsListResult(cachedToolsList)
+        manager.setCachedToolsListResult(cachedToolsList, sourceUpstream: 0)
 
         let initialInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
@@ -5073,7 +3453,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
-        manager.setCachedToolsListResult(cachedToolsList)
+        manager.setCachedToolsListResult(cachedToolsList, sourceUpstream: 0)
 
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
@@ -5102,7 +3482,7 @@ struct RuntimeCoordinatorTests {
                 manager.testStateSnapshot().upstreams[1].isInitialized
             }
         )
-        let chosen = manager.chooseUpstreamIndex(sessionID: "session-secondary", shouldPin: true)
+        let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == 1)
     }
 
@@ -5137,12 +3517,13 @@ struct RuntimeCoordinatorTests {
         let warmRetry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
         let warmRetryID = try extractUpstreamID(from: warmRetry)
 
-        manager.initializeGate.resetCachedInitializeResult()
+        manager.canonicalBrokerState.clearInitialize()
+        manager.initializeManager.resetWarmSecondaryForRetry()
         let cachedHandshake = try #require(JSONValue(any: [
             "capabilities": [String: Any](),
             "serverInfo": ["name": "cached-handshake"],
         ]))
-        manager.initializeGate.restoreCachedInitializeResultForTests(cachedHandshake)
+        manager.canonicalBrokerState.syncCanonicalInitialize(cachedHandshake, sourceUpstream: 0)
         let future = manager.registerInitialize(
             originalID: RPCID(any: NSNumber(value: 77))!,
             requestObject: makeInitializeRequest(id: 77),
@@ -5194,7 +3575,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let cachedToolsList = try #require(JSONValue(any: ["tools": []]))
-        manager.setCachedToolsListResult(cachedToolsList)
+        manager.setCachedToolsListResult(cachedToolsList, sourceUpstream: 0)
 
         let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
@@ -5207,9 +3588,9 @@ struct RuntimeCoordinatorTests {
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
         _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         try await waitForCondition(timeoutSeconds: 2) {
             if case .quarantined = manager.testStateSnapshot().upstreams[1].healthState {
@@ -5293,9 +3674,9 @@ struct RuntimeCoordinatorTests {
                 && snapshot.upstreams[0].initInFlight == false
         }
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-recovery-trigger",
@@ -5642,7 +4023,7 @@ struct RuntimeCoordinatorTests {
             isQuarantined = false
         }
         #expect(isQuarantined)
-        #expect(manager.chooseUpstreamIndex(sessionID: "session-A", shouldPin: true) == nil)
+        #expect(manager.chooseUpstreamIndex() == nil)
     }
 
     @Test func sessionManagerUpstreamExitClearsCanonicalToolsCatalogImmediately() async throws {
@@ -5665,7 +4046,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.handleUpstreamExit(1, upstreamIndex: 0)
@@ -5695,7 +4076,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])))
+        manager.setCachedToolsListResult(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.handleUpstreamProtocolViolation(
@@ -5857,9 +4238,9 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
-        _ = manager.upstreamSelectionPolicy.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
         _ = manager.chooseUpstreamIndex()
 
         let descriptor = SessionPipelineRequestDescriptor(
@@ -6001,7 +4382,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         _ = manager.session(id: "session-debug-reset")
-        manager.setCachedToolsListResult(.object(["tools": .array([])]))
+        manager.setCachedToolsListResult(.object(["tools": .array([])]), sourceUpstream: 0)
 
         let leaseID = manager.createRequestLease(
             descriptor: SessionPipelineRequestDescriptor(
@@ -6102,7 +4483,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func requestLeaseRegistryKeepsOnlyBoundedReleasedHistory() async throws {
-        let registry = RequestLeaseRegistry(releasedHistoryLimit: 2)
+        let registry = LeaseManager(releasedHistoryLimit: 2)
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-bounded-history",
             label: "tools/call:DocumentationSearch",
@@ -6134,7 +4515,7 @@ struct RuntimeCoordinatorTests {
     @Test func requestLeaseRegistryRequeueLeaseReleasesActiveSlotAndKeepsLeaseQueued()
         async throws
     {
-        let registry = RequestLeaseRegistry()
+        let registry = LeaseManager()
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-requeue",
             label: "tools/call:XcodeRefreshCodeIssuesInFile",
@@ -6166,7 +4547,7 @@ struct RuntimeCoordinatorTests {
     @Test func requestLeaseRegistryAbandonActiveLeasesUsesBoundedReleasedHistory()
         async throws
     {
-        let registry = RequestLeaseRegistry(releasedHistoryLimit: 1)
+        let registry = LeaseManager(releasedHistoryLimit: 1)
         let descriptor = SessionPipelineRequestDescriptor(
             sessionID: "session-abandon-history",
             label: "tools/call:DocumentationSearch",
@@ -6433,1013 +4814,4 @@ struct RuntimeCoordinatorTests {
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 
-}
-
-private func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
-    UpstreamSlotScheduler(
-        upstreamCount: upstreamCount,
-        defaultCapacity: 1,
-        canUseUpstream: { _ in true },
-        selectUpstream: { occupied in
-            (0..<upstreamCount).first { occupied.contains($0) == false }
-        }
-    )
-}
-
-private func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {
-    ProxyConfig(
-        listenHost: "127.0.0.1",
-        listenPort: 0,
-        upstreamCommand: "xcrun",
-        upstreamArgs: ["mcpbridge"],
-        upstreamSessionID: nil,
-        maxBodyBytes: 1024,
-        requestTimeout: requestTimeout,
-        prewarmToolsList: false
-    )
-}
-
-private func jsonValue(_ object: [String: Any]) throws -> JSONValue {
-    try #require(JSONValue(any: object))
-}
-
-private func documentationDescriptor(version: String) -> JSONValue {
-    JSONValue(any: [
-        "name": DocumentationToolCatalog.toolName,
-        "description": "docs-\(version)",
-        "inputSchema": [
-            "type": "object",
-            "properties": [
-                "query": [
-                    "type": "string",
-                ],
-            ],
-            "required": ["query"],
-        ],
-    ])!
-}
-
-private func toolNames(in result: JSONValue) -> [String] {
-    guard case .object(let object) = result,
-          case .array(let tools)? = object["tools"] else {
-        return []
-    }
-    return tools.compactMap { tool in
-        guard case .object(let toolObject) = tool,
-              case .string(let name)? = toolObject["name"] else {
-            return nil
-        }
-        return name
-    }
-}
-
-private func documentationDescriptorDescription(in result: JSONValue) -> String? {
-    guard let descriptor = DocumentationToolCatalog.descriptor(in: result),
-          case .object(let object) = descriptor,
-          case .string(let description)? = object["description"] else {
-        return nil
-    }
-    return description
-}
-
-private func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
-    try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/call",
-            "params": [
-                "name": DocumentationToolCatalog.toolName,
-                "arguments": [
-                    "query": query,
-                ],
-            ],
-        ],
-        options: []
-    )
-}
-
-private func makeJSONRPCResponse(id: Int64, result: [String: Any]) throws -> Data {
-    try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        ],
-        options: []
-    )
-}
-
-private func toolContentText(in responseData: Data) throws -> String? {
-    let object = try #require(
-        JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
-    )
-    let result = try #require(object["result"] as? [String: Any])
-    let content = try #require(result["content"] as? [[String: Any]])
-    return content.first?["text"] as? String
-}
-
-private func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
-    DocumentationProviderTarget(
-        processID: processID,
-        appPath: "/Applications/Xcode-\(processID).app",
-        developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
-        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge"
-    )
-}
-
-private struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
-    let targets: [DocumentationProviderTarget]
-
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
-        targets
-    }
-}
-
-private enum ScriptedDocumentationResponse: Sendable {
-    case success
-    case successText(String)
-    case hang
-    case notEnabled
-    case exit
-}
-
-private struct ScriptedDocumentationSessionPlan: Sendable {
-    let serverVersion: String
-    let toolCount: Int
-    let includesDocumentationSearch: Bool
-    let probeResponse: ScriptedDocumentationResponse
-    let userCallResponses: [ScriptedDocumentationResponse]
-    let requiresNumericRequestIDs: Bool
-
-    init(
-        serverVersion: String,
-        toolCount: Int,
-        includesDocumentationSearch: Bool,
-        probeResponse: ScriptedDocumentationResponse,
-        userCallResponses: [ScriptedDocumentationResponse] = [],
-        requiresNumericRequestIDs: Bool = false
-    ) {
-        self.serverVersion = serverVersion
-        self.toolCount = toolCount
-        self.includesDocumentationSearch = includesDocumentationSearch
-        self.probeResponse = probeResponse
-        self.userCallResponses = userCallResponses
-        self.requiresNumericRequestIDs = requiresNumericRequestIDs
-    }
-}
-
-private actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
-    private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
-    private var startAttemptProcessIDs: [pid_t] = []
-    private var startedProcessIDs: [pid_t] = []
-    private var initializeParamsByPID: [pid_t: [JSONValue]] = [:]
-    private let startDelayNanoseconds: UInt64?
-
-    init(
-        plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]],
-        startDelayNanoseconds: UInt64? = nil
-    ) {
-        self.plansByPID = plansByPID
-        self.startDelayNanoseconds = startDelayNanoseconds
-    }
-
-    func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
-        startAttemptProcessIDs.append(target.processID)
-        if let startDelayNanoseconds {
-            try await Task.sleep(nanoseconds: startDelayNanoseconds)
-        }
-        guard var plans = plansByPID[target.processID],
-              plans.isEmpty == false else {
-            throw UpstreamSlotAcquisitionError.unavailable
-        }
-        let plan = plans.removeFirst()
-        plansByPID[target.processID] = plans
-        startedProcessIDs.append(target.processID)
-        return ScriptedDocumentationSession(
-            processID: target.processID,
-            plan: plan,
-            recorder: self
-        )
-    }
-
-    func startedPIDs() -> [pid_t] {
-        startedProcessIDs
-    }
-
-    func startAttempts() -> [pid_t] {
-        startAttemptProcessIDs
-    }
-
-    func recordInitializeParams(_ params: JSONValue, for processID: pid_t) {
-        initializeParamsByPID[processID, default: []].append(params)
-    }
-
-    func initializeParams(for processID: pid_t) -> [JSONValue] {
-        initializeParamsByPID[processID] ?? []
-    }
-}
-
-private actor ScriptedDocumentationSession: UpstreamSession {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
-    private let processID: pid_t
-    private let plan: ScriptedDocumentationSessionPlan
-    private let recorder: ScriptedDocumentationSessionFactory
-    private var documentationCallCount = 0
-    private var remainingUserCallResponses: [ScriptedDocumentationResponse]
-
-    init(
-        processID: pid_t,
-        plan: ScriptedDocumentationSessionPlan,
-        recorder: ScriptedDocumentationSessionFactory
-    ) {
-        self.processID = processID
-        self.plan = plan
-        self.recorder = recorder
-        self.remainingUserCallResponses = plan.userCallResponses
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
-        self.events = AsyncStream { continuation in
-            streamContinuation = continuation
-        }
-        self.continuation = streamContinuation
-    }
-
-    func send(_ data: Data) async -> UpstreamSendResult {
-        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
-            as? [String: Any],
-            let method = object["method"] as? String else {
-            return .accepted
-        }
-        guard let requestID = object["id"] else {
-            return .accepted
-        }
-        if plan.requiresNumericRequestIDs, !(requestID is NSNumber) {
-            return .accepted
-        }
-
-        switch method {
-        case "initialize":
-            if let params = object["params"], let value = JSONValue(any: params) {
-                await recorder.recordInitializeParams(value, for: processID)
-            }
-            yieldResponse(
-                id: requestID,
-                result: [
-                    "serverInfo": [
-                        "name": "mcpbridge",
-                        "version": plan.serverVersion,
-                    ],
-                ]
-            )
-        case "tools/list":
-            yieldResponse(
-                id: requestID,
-                result: [
-                    "tools": toolsList(),
-                ]
-            )
-        case "tools/call":
-            documentationCallCount += 1
-            let response: ScriptedDocumentationResponse
-            if documentationCallCount == 1 {
-                response = plan.probeResponse
-            } else if remainingUserCallResponses.isEmpty == false {
-                response = remainingUserCallResponses.removeFirst()
-            } else {
-                response = .success
-            }
-            yieldDocumentationResponse(id: requestID, response: response)
-        default:
-            break
-        }
-        return .accepted
-    }
-
-    func stop() async {
-        continuation.finish()
-    }
-
-    private func toolsList() -> [[String: Any]] {
-        let fillerCount = max(0, plan.toolCount - (plan.includesDocumentationSearch ? 1 : 0))
-        var tools: [[String: Any]] = (0..<fillerCount).map { index in
-            [
-                "name": "Tool\(index)",
-                "description": "tool-\(index)",
-            ]
-        }
-        if plan.includesDocumentationSearch {
-            if let descriptor = documentationDescriptor(version: plan.serverVersion).foundationObject
-                as? [String: Any] {
-                tools.append(descriptor)
-            }
-        }
-        return tools
-    }
-
-    private func yieldDocumentationResponse(id: Any, response: ScriptedDocumentationResponse) {
-        switch response {
-        case .success:
-            yieldToolResponse(id: id, text: "{\"ok\":true}", isError: false)
-        case .successText(let text):
-            yieldToolResponse(id: id, text: text, isError: false)
-        case .hang:
-            break
-        case .notEnabled:
-            yieldToolResponse(
-                id: id,
-                text: "Tool 'DocumentationSearch' is not enabled.",
-                isError: true
-            )
-        case .exit:
-            continuation.yield(.exit(1))
-        }
-    }
-
-    private func yieldToolResponse(id: Any, text: String, isError: Bool) {
-        yieldResponse(
-            id: id,
-            result: [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": text,
-                    ],
-                ],
-                "isError": isError,
-            ]
-        )
-    }
-
-    private func yieldResponse(id: Any, result: [String: Any]) {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        ]
-        guard JSONSerialization.isValidJSONObject(response),
-              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
-            return
-        }
-        continuation.yield(.message(data))
-    }
-}
-
-private actor StubDocumentationProviderManager: DocumentationProviderManaging {
-    private var update: DocumentationToolListUpdate
-    private var callResults: [DocumentationProviderCallResult]
-    private var callFailures: [DocumentationProviderCallFailure]
-    private var callCountValue = 0
-    private var invalidateReasons: [String] = []
-    private var prewarmTimeouts: [TimeAmount?] = []
-    private var toolListTimeouts: [TimeAmount?] = []
-    private var callTimeouts: [TimeAmount?] = []
-    private let prewarmDelayNanoseconds: UInt64?
-    private let toolListDelayNanoseconds: UInt64?
-
-    init(
-        toolListUpdate: DocumentationToolListUpdate,
-        callResults: [DocumentationProviderCallResult] = [],
-        callFailures: [DocumentationProviderCallFailure] = [],
-        prewarmDelayNanoseconds: UInt64? = nil,
-        toolListDelayNanoseconds: UInt64? = nil
-    ) {
-        self.update = toolListUpdate
-        self.callResults = callResults
-        self.callFailures = callFailures
-        self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
-        self.toolListDelayNanoseconds = toolListDelayNanoseconds
-    }
-
-    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
-        if let prewarmDelayNanoseconds {
-            try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
-            guard !Task.isCancelled else { return .unavailable }
-        }
-        prewarmTimeouts.append(requestTimeout)
-        return await toolListUpdate(requestTimeout: requestTimeout)
-    }
-
-    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
-        toolListTimeouts.append(requestTimeout)
-        if let toolListDelayNanoseconds {
-            try? await Task.sleep(nanoseconds: toolListDelayNanoseconds)
-            guard !Task.isCancelled else { return .unavailable }
-        }
-        return update
-    }
-
-    func callDocumentationSearch(
-        requestData _: Data,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult {
-        callCountValue += 1
-        callTimeouts.append(requestTimeoutOverride)
-        if callFailures.isEmpty == false {
-            throw callFailures.removeFirst()
-        }
-        guard callResults.isEmpty == false else {
-            throw UpstreamSlotAcquisitionError.unavailable
-        }
-        return callResults.removeFirst()
-    }
-
-    func invalidate(reason: String) async {
-        invalidateReasons.append(reason)
-        update = .unavailable
-    }
-
-    func shutdown() async {
-        invalidateReasons.append("shutdown")
-    }
-
-    func callCount() -> Int {
-        callCountValue
-    }
-
-    func prewarmCount() -> Int {
-        prewarmTimeouts.count
-    }
-
-    func toolListUpdateCount() -> Int {
-        toolListTimeouts.count
-    }
-
-    func lastPrewarmTimeout() -> TimeAmount? {
-        prewarmTimeouts.last ?? nil
-    }
-
-    func shutdownCount() -> Int {
-        invalidateReasons.filter { $0 == "shutdown" }.count
-    }
-
-    func recordedInvalidateReasons() -> [String] {
-        invalidateReasons
-    }
-
-    func lastToolListTimeout() -> TimeAmount? {
-        toolListTimeouts.last ?? nil
-    }
-
-    func lastCallTimeout() -> TimeAmount? {
-        callTimeouts.last ?? nil
-    }
-}
-
-private func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {
-    var config = makeConfig(requestTimeout: 5)
-    config.upstreamSessionID = sharedSessionID
-    let upstreams = RuntimeCoordinator.makeDefaultUpstreams(
-        config: config,
-        sharedSessionID: sharedSessionID,
-        count: 1
-    )
-    let upstream = try #require(upstreams.first)
-    return try upstreamEnvironment(from: upstream)
-}
-
-private func upstreamEnvironment(from upstream: ManagedUpstreamSlot) throws -> [String: String] {
-    let upstreamMirror = Mirror(reflecting: upstream)
-    let factory = try #require(
-        upstreamMirror.children.first(where: { $0.label == "factory" })?.value,
-        "ManagedUpstreamSlot should expose a stored factory for tests"
-    )
-    let factoryMirror = Mirror(reflecting: factory)
-    let config = try #require(
-        factoryMirror.children.first(where: { $0.label == "config" })?.value,
-        "UpstreamProcess factory should expose a stored config for tests"
-    )
-    let configMirror = Mirror(reflecting: config)
-    return try #require(
-        configMirror.children.first(where: { $0.label == "environment" })?.value
-            as? [String: String],
-        "UpstreamProcess.Config should include environment for tests"
-    )
-}
-
-private func withEnvironmentVariables<T>(
-    _ values: [String: String],
-    body: () throws -> T
-) throws -> T {
-    let originalValues = values.keys.reduce(into: [String: String?]()) { result, key in
-        result[key] = ProcessInfo.processInfo.environment[key]
-    }
-
-    for (key, value) in values {
-        _ = unsafe setenv(key, value, 1)
-    }
-
-    defer {
-        for (key, value) in originalValues {
-            if let value {
-                _ = unsafe setenv(key, value, 1)
-            } else {
-                _ = unsafe unsetenv(key)
-            }
-        }
-    }
-
-    return try body()
-}
-
-private actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
-    private let sentMessages = RecordedValues<Data>()
-
-    init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
-        self.events = AsyncStream { continuation in
-            streamContinuation = continuation
-        }
-        self.continuation = streamContinuation
-    }
-
-    func start() async {}
-
-    func stop() async {
-        continuation.finish()
-    }
-
-    func send(_ data: Data) async -> UpstreamSendResult {
-        await sentMessages.append(data)
-        return .overloaded
-    }
-
-    func sent() async -> [Data] {
-        await sentMessages.snapshot()
-    }
-
-    func sentCount() async -> Int {
-        await sentMessages.count()
-    }
-
-    func sentValue(at index: Int) async -> Data? {
-        await sentMessages.value(at: index)
-    }
-
-    func nextSent(at index: Int) async throws -> Data {
-        try await sentMessages.nextValue(at: index)
-    }
-}
-
-private actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
-    private let sentMessages = RecordedValues<Data>()
-    private var overloaded = false
-    private var overloadBudget = 0
-    private var overloadNextInitializedNotification = false
-
-    init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
-        self.events = AsyncStream { continuation in
-            streamContinuation = continuation
-        }
-        self.continuation = streamContinuation
-    }
-
-    func start() async {}
-
-    func stop() async {
-        continuation.finish()
-    }
-
-    func setOverloaded(_ value: Bool) {
-        overloaded = value
-    }
-
-    func overloadNextSend() {
-        overloadBudget &+= 1
-    }
-
-    func overloadNextInitializedNotificationSend() {
-        overloadNextInitializedNotification = true
-    }
-
-    func send(_ data: Data) async -> UpstreamSendResult {
-        await sentMessages.append(data)
-        if overloadNextInitializedNotification,
-            methodName(from: data) == "notifications/initialized"
-        {
-            overloadNextInitializedNotification = false
-            return .overloaded
-        }
-        if overloadBudget > 0 {
-            overloadBudget -= 1
-            return .overloaded
-        }
-        return overloaded ? .overloaded : .accepted
-    }
-
-    func yield(_ event: UpstreamEvent) async {
-        continuation.yield(event)
-    }
-
-    func sent() async -> [Data] {
-        await sentMessages.snapshot()
-    }
-
-    func sentCount() async -> Int {
-        await sentMessages.count()
-    }
-
-    func sentValue(at index: Int) async -> Data? {
-        await sentMessages.value(at: index)
-    }
-
-    func nextSent(at index: Int) async throws -> Data {
-        try await sentMessages.nextValue(at: index)
-    }
-}
-
-private actor ReadinessFlag {
-    private var ready: Bool
-
-    init(isReady: Bool) {
-        self.ready = isReady
-    }
-
-    func setReady(_ value: Bool) {
-        ready = value
-    }
-
-    func isReady() -> Bool {
-        ready
-    }
-}
-
-private actor AvailabilityFlag {
-    private var available: Bool
-
-    init(isAvailable: Bool) {
-        self.available = isAvailable
-    }
-
-    func setAvailable(_ value: Bool) {
-        available = value
-    }
-
-    func isAvailable() -> Bool {
-        available
-    }
-}
-
-private actor ControlledReadinessSleep {
-    private var sleeps: [UInt64] = []
-    private var sleepContinuations: [CheckedContinuation<Void, Never>] = []
-    private var waiters: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
-
-    func sleep(nanoseconds: UInt64) async {
-        sleeps.append(nanoseconds)
-        resumeReadyWaiters()
-        await withCheckedContinuation { continuation in
-            sleepContinuations.append(continuation)
-        }
-    }
-
-    func nextSleep(at index: Int) async throws -> UInt64 {
-        if index < sleeps.count {
-            return sleeps[index]
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append((index, continuation))
-        }
-    }
-
-    func resumeNext() {
-        guard !sleepContinuations.isEmpty else { return }
-        sleepContinuations.removeFirst().resume()
-    }
-
-    private func resumeReadyWaiters() {
-        var remaining: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
-        for waiter in waiters {
-            if waiter.index < sleeps.count {
-                waiter.continuation.resume(returning: sleeps[waiter.index])
-            } else {
-                remaining.append(waiter)
-            }
-        }
-        waiters = remaining
-    }
-}
-
-private actor XcodeLaunchRecorder {
-    private var count = 0
-    private var outcomes: [Bool]
-
-    init(outcomes: [Bool] = []) {
-        self.outcomes = outcomes
-    }
-
-    func launch() -> Bool {
-        count += 1
-        guard outcomes.isEmpty == false else {
-            return true
-        }
-        return outcomes.removeFirst()
-    }
-
-    func launchCount() -> Int {
-        count
-    }
-}
-
-private func makeTestReadinessGate(
-    readiness: ReadinessFlag,
-    availability: AvailabilityFlag? = nil,
-    sleepRecorder: ControlledReadinessSleep? = nil,
-    launchRetryIntervalNanoseconds: UInt64 = 5_000_000_000,
-    launchRecorder: XcodeLaunchRecorder? = nil
-) -> UpstreamReadinessGate {
-    let launchIfUnavailable: (@Sendable () async -> Bool)?
-    if let launchRecorder {
-        launchIfUnavailable = {
-            await launchRecorder.launch()
-        }
-    } else {
-        launchIfUnavailable = nil
-    }
-
-    let isAvailable: (@Sendable () async -> Bool)?
-    if let availability {
-        isAvailable = {
-            await availability.isAvailable()
-        }
-    } else {
-        isAvailable = nil
-    }
-
-    return UpstreamReadinessGate(
-        isEnabled: true,
-        targetName: "mcpbridge",
-        pollIntervalNanoseconds: 1_000_000,
-        progressLogIntervalNanoseconds: 5_000_000_000,
-        launchRetryIntervalNanoseconds: launchRetryIntervalNanoseconds,
-        initialRetryBackoffNanoseconds: 1_000_000_000,
-        maxRetryBackoffNanoseconds: 8_000_000_000,
-        uptimeNanoseconds: {
-            DispatchTime.now().uptimeNanoseconds
-        },
-        sleepNanoseconds: { nanoseconds in
-            if let sleepRecorder, nanoseconds >= 1_000_000_000 {
-                await sleepRecorder.sleep(nanoseconds: nanoseconds)
-            } else {
-                try? await Task.sleep(nanoseconds: nanoseconds)
-            }
-        },
-        isAvailable: isAvailable,
-        launchIfUnavailable: launchIfUnavailable,
-        isReady: {
-            await readiness.isReady()
-        }
-    )
-}
-
-private func makeInitializeRequest(id: Int) -> [String: Any] {
-    [
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "initialize",
-        "params": [
-            "protocolVersion": "2025-03-26",
-            "capabilities": [String: Any](),
-            "clientInfo": [
-                "name": "session-manager-tests",
-                "version": "0.0",
-            ],
-        ],
-    ]
-}
-
-private func makeTempProxyConfigFile(_ contents: String) throws -> String {
-    let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let fileURL = directory.appendingPathComponent("proxy-config.toml")
-    try contents.write(to: fileURL, atomically: true, encoding: .utf8)
-    return fileURL.path
-}
-
-private func makeInitializeResponse(id: Int64) throws -> Data {
-    try makeInitializeResponse(id: id, serverName: nil)
-}
-
-private func makeInitializeResponse(id: Int64, serverName: String?) throws -> Data {
-    var result: [String: Any] = [
-        "capabilities": [String: Any]()
-    ]
-    if let serverName {
-        result["serverInfo"] = ["name": serverName]
-    }
-    let response: [String: Any] = [
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    ]
-    return try JSONSerialization.data(withJSONObject: response, options: [])
-}
-
-private func extractUpstreamID(from data: Data) throws -> Int64 {
-    let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
-    return (object?["id"] as? NSNumber)?.int64Value ?? 0
-}
-
-private func decodeJSON(from buffer: ByteBuffer) throws -> [String: Any] {
-    var buffer = buffer
-    guard let data = buffer.readData(length: buffer.readableBytes) else {
-        return [:]
-    }
-    return (try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]) ?? [:]
-}
-
-private func waitForSentCount(
-    _ upstream: TestUpstreamClient,
-    count: Int,
-    timeoutSeconds: UInt64
-) async throws {
-    do {
-        _ = try await waitWithTimeout(
-            "waiting for sent message \(count)",
-            timeout: .seconds(Int64(timeoutSeconds))
-        ) {
-            try await upstream.nextSent(at: count - 1)
-        }
-    } catch {
-        let actual = await upstream.sentCount()
-        throw WaitForSentCountError.timeout(expected: count, actual: actual)
-    }
-}
-
-private func waitForSentCount(
-    _ upstream: ToggleableOverloadUpstreamClient,
-    count: Int,
-    timeoutSeconds: UInt64
-) async throws {
-    do {
-        _ = try await waitWithTimeout(
-            "waiting for sent message \(count)",
-            timeout: .seconds(Int64(timeoutSeconds))
-        ) {
-            try await upstream.nextSent(at: count - 1)
-        }
-    } catch {
-        let actual = await upstream.sentCount()
-        throw WaitForSentCountError.timeout(expected: count, actual: actual)
-    }
-}
-
-private func makeDeterministicRuntimeTimeoutScheduler(
-    clock: TestClock
-) -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
-    { amount, operation in
-        let task = Task {
-            do {
-                try await clock.sleep(for: .nanoseconds(amount.nanoseconds))
-                operation()
-            } catch {
-                return
-            }
-        }
-        return RuntimeScheduledTimeout {
-            task.cancel()
-        }
-    }
-}
-
-private func spinUntilSentCount(
-    _ upstream: TestUpstreamClient,
-    count: Int,
-    description: String
-) async throws {
-    try await spinUntil(description, maxIterations: 1_000) {
-        await upstream.sentCount() >= count
-    }
-}
-
-private func spinUntilSentCount(
-    _ upstream: ToggleableOverloadUpstreamClient,
-    count: Int,
-    description: String
-) async throws {
-    try await spinUntil(description, maxIterations: 1_000) {
-        await upstream.sentCount() >= count
-    }
-}
-
-private enum WaitForSentCountError: Error {
-    case timeout(expected: Int, actual: Int)
-}
-
-private func waitForCondition(
-    timeoutSeconds: UInt64,
-    pollNanoseconds: UInt64 = 50_000_000,
-    _ condition: @escaping @Sendable () -> Bool
-) async throws {
-    _ = pollNanoseconds
-    let reached = await waitUntil(timeout: .seconds(Int64(timeoutSeconds))) {
-        condition()
-    }
-    if !reached {
-        throw WaitForConditionError.timeout
-    }
-}
-
-private enum WaitForConditionError: Error {
-    case timeout
-}
-
-private func methodName(from data: Data) -> String? {
-    guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
-    else {
-        return nil
-    }
-    return object["method"] as? String
-}
-
-private func makeToolListRequest(id: Int64) throws -> Data {
-    try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/list",
-        ],
-        options: []
-    )
-}
-
-private func makeToolListResponse(id: Int64) throws -> Data {
-    try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [:],
-        ],
-        options: []
-    )
-}
-
-private func yieldMessage(_ data: Data, to upstream: TestUpstreamClient) async {
-    await upstream.yield(.message(data))
-}
-
-private func sentValue(
-    from upstream: TestUpstreamClient,
-    at index: Int,
-    timeout: Duration = .seconds(5)
-) async throws -> Data {
-    try await nextValue(
-        "waiting for sent message \(index + 1)",
-        timeout: timeout
-    ) {
-        await upstream.sentValue(at: index)
-    }
-}
-
-private func sentValue(
-    from upstream: ToggleableOverloadUpstreamClient,
-    at index: Int,
-    timeout: Duration = .seconds(5)
-) async throws -> Data {
-    try await nextValue(
-        "waiting for sent message \(index + 1)",
-        timeout: timeout
-    ) {
-        await upstream.sentValue(at: index)
-    }
-}
-
-private func sentMessage(
-    from upstream: TestUpstreamClient,
-    matching predicate: @escaping @Sendable (Data) -> Bool,
-    timeout: Duration = .seconds(5)
-) async throws -> Data {
-    try await nextValue(
-        "waiting for matching sent message",
-        timeout: timeout
-    ) {
-        try Task.checkCancellation()
-        let sent = await upstream.sent()
-        return sent.first(where: predicate)
-    }
-}
-
-private func nextBufferedNotifications(
-    from router: ProxyRouter,
-    timeout: Duration = .seconds(5)
-) async throws -> [Data] {
-    try await waitWithTimeout(
-        "waiting for buffered notifications",
-        timeout: timeout
-    ) {
-        while true {
-            try Task.checkCancellation()
-            let drained = router.drainBufferedNotifications()
-            if !drained.isEmpty {
-                return drained
-            }
-            await Task.yield()
-        }
-    }
 }

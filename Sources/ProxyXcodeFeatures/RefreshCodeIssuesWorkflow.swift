@@ -17,6 +17,36 @@ package struct RefreshCodeIssuesRequest: Sendable {
         self.filePath = filePath
     }
 
+    /// The one place that recognizes this feature's tools/call shape.
+    package init?(requestObject object: [String: Any]) {
+        guard
+            object["method"] as? String == "tools/call",
+            let params = object["params"] as? [String: Any],
+            params["name"] as? String == Self.toolName
+        else {
+            return nil
+        }
+        let arguments = params["arguments"] as? [String: Any]
+        self.init(
+            tabIdentifier: arguments?["tabIdentifier"] as? String,
+            filePath: arguments?["filePath"] as? String
+        )
+    }
+
+    /// Unwraps a single request object, accepting a batch of exactly one.
+    package static func singleRequestObject(from requestJSON: Any) -> [String: Any]? {
+        if let object = requestJSON as? [String: Any] {
+            return object
+        }
+        guard let requests = requestJSON as? [Any],
+            requests.count == 1,
+            let object = requests.first as? [String: Any]
+        else {
+            return nil
+        }
+        return object
+    }
+
     package var queueKey: String {
         guard let tabIdentifier, tabIdentifier.isEmpty == false else {
             return Self.globalQueueKey
@@ -238,12 +268,12 @@ package struct RefreshCodeIssuesWorkflow {
         if executionBudget.isExhausted {
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "request_timeout_exhausted",
-                state: "timed_out"
+                step: .requestTimeoutExhausted,
+                state: .timedOut
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "timeout"
+                outcome: .timeout
             )
             return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
         }
@@ -291,18 +321,18 @@ package struct RefreshCodeIssuesWorkflow {
                 if executionBudget.isExhausted {
                     debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "queue_wait_timed_out",
-                        state: "timed_out"
+                        step: .queueWaitTimedOut,
+                        state: .timedOut
                     )
                     debugState.finishRequest(
                         requestID: debugRequestID,
-                        outcome: "timeout"
+                        outcome: .timeout
                     )
                     return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
                 }
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "execution_budget_started",
+                    step: .executionBudgetStarted,
                     metadata: [
                         "execution_timeout_ms": Self.timeoutDescription(
                             executionBudget.remainingTimeout()
@@ -328,7 +358,7 @@ package struct RefreshCodeIssuesWorkflow {
                 {
                     debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "proxy.completed"
+                        step: .proxyCompleted
                     )
                     result = .success(proxyResponseData)
                 } else {
@@ -367,11 +397,11 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "queue_wait_timed_out"
+                step: .queueWaitTimedOut
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "timeout"
+                outcome: .timeout
             )
             return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch is CancellationError {
@@ -386,23 +416,23 @@ package struct RefreshCodeIssuesWorkflow {
             )
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "cancelled",
-                state: "cancelled"
+                step: .cancelled,
+                state: .cancelled
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "cancelled"
+                outcome: .cancelled
             )
             return .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
         } catch {
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "invalid_request",
-                state: "failed"
+                step: .invalidRequest,
+                state: .failed
             )
             debugState.finishRequest(
                 requestID: debugRequestID,
-                outcome: "invalid_request"
+                outcome: .invalidRequest
             )
             return .invalidRequest
         }

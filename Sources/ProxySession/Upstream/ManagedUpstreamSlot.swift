@@ -25,10 +25,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
     private var current: RunningSessionBox?
     private var isShutdown = false
 
-    package init(
-        factory: any UpstreamSessionFactory,
-        startImmediately: Bool = false
-    ) {
+    package init(factory: any UpstreamSessionFactory) {
         self.factory = factory
 
         var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
@@ -36,12 +33,6 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
             streamContinuation = continuation
         }
         self.continuation = streamContinuation
-
-        if startImmediately {
-            Task { [weak self] in
-                await self?.start()
-            }
-        }
     }
 
     package func start() async {
@@ -67,7 +58,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
 
     package func send(_ data: Data) async -> UpstreamSendResult {
         guard !isShutdown else {
-            return .overloaded
+            return .unavailable(.shuttingDown)
         }
 
         if let current {
@@ -75,7 +66,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
 
         guard let pendingStart else {
-            return .overloaded
+            return .unavailable(.notStarted)
         }
 
         do {
@@ -84,11 +75,11 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
                 session: session,
                 attempt: pendingStart
             ) else {
-                return .overloaded
+                return .unavailable(.notStarted)
             }
             return await running.session.send(data)
         } catch {
-            return .overloaded
+            return .unavailable(.startFailed)
         }
     }
 

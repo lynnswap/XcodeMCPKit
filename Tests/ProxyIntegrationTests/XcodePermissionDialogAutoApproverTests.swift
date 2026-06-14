@@ -408,14 +408,6 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(candidates.contains(realExecutable.path))
     }
 
-    @Test func parseProcessIDLinesIgnoresInvalidPGrepOutput() {
-        let processIDs = LiveXcodePermissionDialogAXClient.parseProcessIDLines(
-            "\n 4317\nnot-a-pid\n0\n-1\n 6119 \n"
-        )
-
-        #expect(processIDs == [4317, 6119])
-    }
-
     @Test func autoApproverPromptsAccessibilityOnceAndRemainsInactiveWhenUntrusted() async {
         let axClient = RecordingAXClient(status: .untrusted)
         let approver = XcodePermissionDialogAutoApprover(

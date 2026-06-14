@@ -39,31 +39,28 @@ package final class UpstreamSlotScheduler: Sendable {
         var activeLeaseIDsByUpstream: [Int: RequestLeaseID] = [:]
         var activeTopLevelLeaseIDsBySession: [String: RequestLeaseID] = [:]
         var reservationsByLeaseID: [RequestLeaseID: Reservation] = [:]
-        var capacityByUpstream: [Int: Int] = [:]
     }
 
     private let logger: Logger
     private let state: NIOLockedValueBox<State>
-    private let canUseUpstream: @Sendable (Int) -> Bool
-    private let selectUpstream: @Sendable (Set<Int>) -> Int?
+    private let canUseUpstream: @Sendable (Int) -> UpstreamUseEvaluation
+    private let selectUpstream: @Sendable (Set<Int>) -> UpstreamSelectionResult
+    private let applyHealthEffects: @Sendable ([UpstreamHealthEffect]) -> Void
 
     package init(
-        upstreamCount: Int,
-        defaultCapacity: Int,
         logger: Logger = ProxyLogging.make("upstream.scheduler"),
-        canUseUpstream: @escaping @Sendable (Int) -> Bool,
-        selectUpstream: @escaping @Sendable (Set<Int>) -> Int?
+        canUseUpstream: @escaping @Sendable (Int) -> UpstreamUseEvaluation,
+        selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamSelectionResult,
+        applyHealthEffects: @escaping @Sendable ([UpstreamHealthEffect]) -> Void = { _ in }
     ) {
         self.logger = logger
         self.canUseUpstream = canUseUpstream
         self.selectUpstream = selectUpstream
+        self.applyHealthEffects = applyHealthEffects
         self.state = NIOLockedValueBox(
             State(
                 pendingRequests: [],
-                activeLeaseIDsByUpstream: [:],
-                capacityByUpstream: Dictionary(
-                    uniqueKeysWithValues: (0..<upstreamCount).map { ($0, defaultCapacity) }
-                )
+                activeLeaseIDsByUpstream: [:]
             )
         )
     }
@@ -262,8 +259,12 @@ package final class UpstreamSlotScheduler: Sendable {
     }
 
     private func dispatchQueuedRequestsIfPossible() {
-        let starts = state.withLockedValue { state -> [(PendingRequest, Int)] in
+        let dispatch = state.withLockedValue { state -> (
+            starts: [(PendingRequest, Int)],
+            healthEffects: [UpstreamHealthEffect]
+        ) in
             var ready: [(PendingRequest, Int)] = []
+            var healthEffects: [UpstreamHealthEffect] = []
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)
@@ -281,7 +282,9 @@ package final class UpstreamSlotScheduler: Sendable {
                         guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil else {
                             continue
                         }
-                        guard canUseUpstream(preferredUpstreamIndex) else {
+                        let evaluation = canUseUpstream(preferredUpstreamIndex)
+                        healthEffects.append(contentsOf: evaluation.effects)
+                        guard evaluation.isUsable else {
                             continue
                         }
                         chosenPendingIndex = pendingIndex
@@ -289,7 +292,9 @@ package final class UpstreamSlotScheduler: Sendable {
                         break
                     }
 
-                    guard let selectedUpstreamIndex = selectUpstream(occupied) else {
+                    let selection = selectUpstream(occupied)
+                    healthEffects.append(contentsOf: selection.effects)
+                    guard let selectedUpstreamIndex = selection.upstreamIndex else {
                         break
                     }
                     guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {
@@ -318,10 +323,14 @@ package final class UpstreamSlotScheduler: Sendable {
                 ready.append((pendingRequest, upstreamIndex))
             }
 
-            return ready
+            return (ready, healthEffects)
         }
 
-        for (request, upstreamIndex) in starts {
+        if dispatch.healthEffects.isEmpty == false {
+            applyHealthEffects(dispatch.healthEffects)
+        }
+
+        for (request, upstreamIndex) in dispatch.starts {
             logger.debug(
                 "Dispatching queued request to upstream slot",
                 metadata: [

@@ -20,38 +20,32 @@ package struct ControlPlaneRPCResponse: Sendable {
     package let upstreamIndex: Int
 }
 
-extension RuntimeCoordinator {
-    func awaitCanonicalInitializeSnapshot(
-        deadlineUptimeNs: UInt64?
-    ) async throws -> CanonicalInitializeLoadResult {
-        if let cached = canonicalBrokerState.initializeResult() {
-            return CanonicalInitializeLoadResult(
-                result: cached,
-                sourceUpstream: canonicalBrokerState.initializeSourceUpstream()
-            )
+/// The one place that decides which JSON-RPC error a control-plane or
+/// upstream-acquisition failure surfaces as.
+package enum ControlPlaneErrorMapper {
+    package static func jsonRPCError(for error: Error) -> (code: Int, message: String) {
+        if let error = error as? DocumentationProviderUnavailableReason {
+            return (-32001, error.message)
         }
-
-        let internalSessionID = controlPlaneSessionID(for: "initialize", route: nil)
-        let originalID = RPCID(any: "__control-plane-init-\(UUID().uuidString)")!
-        let future = registerInitializeWaiter(
-            sessionID: internalSessionID,
-            originalID: originalID,
-            requestObject: makeInternalInitializeRequest(id: 0),
-            on: eventLoop
-        )
-        var buffer = try await waitForEventLoopFuture(
-            future,
-            deadlineUptimeNs: deadlineUptimeNs
-        )
-        guard let responseData = buffer.readData(length: buffer.readableBytes) else {
-            throw ControlPlaneError.invalidResponse("missing initialize payload")
+        if error is UpstreamSlotAcquisitionError {
+            return (-32001, "upstream unavailable")
         }
-        return CanonicalInitializeLoadResult(
-            result: try extractJSONRPCResult(from: responseData),
-            sourceUpstream: canonicalBrokerState.initializeSourceUpstream()
-        )
+        if let error = error as? ControlPlaneRequestError {
+            return jsonRPCError(for: error.underlying)
+        }
+        if let error = error as? ControlPlaneError {
+            switch error {
+            case .invalidResponse:
+                return (-32000, "upstream timeout")
+            case .upstreamRPC(let code, let message):
+                return (code, message)
+            }
+        }
+        return (-32000, "upstream timeout")
     }
+}
 
+extension RuntimeCoordinator {
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlaneRPCHandle

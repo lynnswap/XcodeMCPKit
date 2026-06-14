@@ -1,3 +1,4 @@
+import ProxyCore
 import Foundation
 
 package struct InstallOptions {

@@ -154,6 +154,33 @@ struct CLIParserTests {
         #expect(config.disabledToolNames.isEmpty)
     }
 
+    @Test func configLoadsHandshakeOverrideWhenDisabledToolsAreExplicit() throws {
+        let configPath = try makeTempConfigFile(
+            """
+            [tools]
+            disabled = ["RunAllTests"]
+
+            [upstream_handshake]
+            clientName = "custom-client"
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let config = ProxyConfig(
+            listenHost: "localhost",
+            listenPort: 0,
+            upstreamCommand: "xcrun",
+            upstreamArgs: ["mcpbridge"],
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            configPath: configPath,
+            disabledToolNames: ["ExplicitTool"]
+        )
+
+        #expect(config.disabledToolNames == ["ExplicitTool"])
+        #expect(config.initializeParamsOverride?.clientName == "custom-client")
+    }
+
     @Test func cliParsesUpstreamProcesses() async throws {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--upstream-processes", "10"],

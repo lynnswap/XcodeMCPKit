@@ -35,10 +35,10 @@ private final class StdinWriter: @unchecked Sendable {
         defer { state.unlock() }
 
         guard !isClosed else {
-            return .overloaded
+            return .unavailable(.terminated)
         }
         guard queuedBytes + payload.count <= maxQueuedWriteBytes else {
-            return .overloaded
+            return .backpressure
         }
 
         queuedBytes += payload.count
@@ -154,9 +154,17 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     }
 
     package func send(_ data: Data) async -> UpstreamSendResult {
-        guard !didFinishEvents, !isStopping, !terminationObserved, process != nil, let stdinWriter else {
-            logger.warning("Upstream send skipped because session is unavailable")
-            return .overloaded
+        if isStopping {
+            logger.warning("Upstream send skipped because session is stopping")
+            return .unavailable(.shuttingDown)
+        }
+        if didFinishEvents || terminationObserved {
+            logger.warning("Upstream send skipped because session has terminated")
+            return .unavailable(.terminated)
+        }
+        guard process != nil, let stdinWriter else {
+            logger.warning("Upstream send skipped because session never started")
+            return .unavailable(.notStarted)
         }
 
         var payload = data
@@ -165,7 +173,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
         }
 
         let result = stdinWriter.send(payload)
-        if result == .overloaded {
+        if result == .backpressure {
             logger.warning(
                 "Upstream write queue overloaded",
                 metadata: [

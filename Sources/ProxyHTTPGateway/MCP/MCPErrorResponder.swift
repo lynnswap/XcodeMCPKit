@@ -63,7 +63,11 @@ enum MCPErrorResponder {
     }
 
     static func requestMetadata(from data: Data) -> (ids: [RPCID], isBatch: Bool) {
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+        requestMetadata(fromParsed: try? JSONSerialization.jsonObject(with: data, options: []))
+    }
+
+    static func requestMetadata(fromParsed json: Any?) -> (ids: [RPCID], isBatch: Bool) {
+        guard let json else {
             return ([], false)
         }
         if let object = json as? [String: Any] {
@@ -83,10 +87,6 @@ enum MCPErrorResponder {
             return (ids, true)
         }
         return ([], false)
-    }
-
-    static func requestIDs(from data: Data) -> [RPCID] {
-        requestMetadata(from: data).ids
     }
 
     private static func makeErrorObject(

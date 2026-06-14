@@ -1,5 +1,3 @@
-import AppKit
-import Darwin
 import Foundation
 import Logging
 import NIO
@@ -10,26 +8,44 @@ package enum DocumentationToolListUpdate: Sendable {
     case unchanged
     case unavailable
     case available(JSONValue)
-}
 
-package struct DocumentationProviderCallResult: Sendable {
-    package let data: Data
-    package let didInvalidateProvider: Bool
-
-    package init(data: Data, didInvalidateProvider: Bool) {
-        self.data = data
-        self.didInvalidateProvider = didInvalidateProvider
+    package var debugLabel: String {
+        switch self {
+        case .unchanged:
+            "unchanged"
+        case .unavailable:
+            "unavailable"
+        case .available:
+            "available"
+        }
     }
 }
 
-package struct DocumentationProviderCallFailure: Error {
-    package let underlying: any Error
-    package let providerIsActive: Bool
+package enum DocumentationProviderUnavailableReason: Sendable, Error, CustomStringConvertible {
+    case noAvailableProvider
 
-    package init(underlying: any Error, providerIsActive: Bool) {
-        self.underlying = underlying
-        self.providerIsActive = providerIsActive
+    package static let userFacingMessage =
+        "DocumentationSearch is unavailable from the running Xcode documentation provider. Try restarting Xcode if the problem persists."
+
+    package var message: String {
+        switch self {
+        case .noAvailableProvider:
+            Self.userFacingMessage
+        }
     }
+
+    package var description: String {
+        message
+    }
+}
+
+/// The manager's classification of one DocumentationSearch attempt.
+/// When the manager is enabled, DocumentationSearch is owned by the
+/// documentation provider and does not fall back to the regular upstream.
+package enum DocumentationProviderCallOutcome: Sendable {
+    case handled(Data, invalidatedProvider: Bool)
+    case unavailable(DocumentationProviderUnavailableReason)
+    case failed(any Error, invalidatedProvider: Bool)
 }
 
 package protocol DocumentationProviderManaging: Sendable {
@@ -38,31 +54,9 @@ package protocol DocumentationProviderManaging: Sendable {
     func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult
+    ) async throws -> DocumentationProviderCallOutcome
     func invalidate(reason: String) async
     func shutdown() async
-}
-
-package struct DisabledDocumentationProviderManager: DocumentationProviderManaging {
-    package init() {}
-
-    package func prewarm(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
-        .unchanged
-    }
-
-    package func toolListUpdate(requestTimeout _: TimeAmount?) async -> DocumentationToolListUpdate {
-        .unchanged
-    }
-
-    package func callDocumentationSearch(
-        requestData _: Data,
-        requestTimeoutOverride _: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult {
-        throw UpstreamSlotAcquisitionError.unavailable
-    }
-
-    package func invalidate(reason _: String) async {}
-    package func shutdown() async {}
 }
 
 package enum DocumentationToolCatalog {
@@ -203,146 +197,6 @@ package enum DocumentationToolCatalog {
             guard let object = item as? [String: Any] else { return nil }
             return object["result"] as? [String: Any]
         }
-    }
-}
-
-package struct DocumentationProviderTarget: Sendable, Equatable {
-    package let processID: pid_t
-    package let appPath: String
-    package let developerDir: String
-    package let mcpbridgePath: String
-
-    package init(
-        processID: pid_t,
-        appPath: String,
-        developerDir: String,
-        mcpbridgePath: String
-    ) {
-        self.processID = processID
-        self.appPath = appPath
-        self.developerDir = developerDir
-        self.mcpbridgePath = mcpbridgePath
-    }
-}
-
-package protocol XcodeTargetDiscovering: Sendable {
-    func runningXcodeTargets() -> [DocumentationProviderTarget]
-}
-
-package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering {
-    package init() {}
-
-    package func runningXcodeTargets() -> [DocumentationProviderTarget] {
-        var targetsByPID: [pid_t: DocumentationProviderTarget] = [:]
-
-        for application in NSWorkspace.shared.runningApplications {
-            guard application.bundleIdentifier == "com.apple.dt.Xcode",
-                  application.isTerminated == false,
-                  let bundlePath = application.bundleURL?.path else {
-                continue
-            }
-            if let target = Self.target(processID: application.processIdentifier, appPath: bundlePath) {
-                targetsByPID[target.processID] = target
-            }
-        }
-
-        for processID in Self.runningProcessIDs(named: "Xcode") {
-            if targetsByPID[processID] != nil {
-                continue
-            }
-            guard let processPath = Self.processPath(processID: processID),
-                  let appPath = Self.appPath(fromExecutablePath: processPath),
-                  let target = Self.target(processID: processID, appPath: appPath) else {
-                continue
-            }
-            targetsByPID[target.processID] = target
-        }
-
-        return targetsByPID.values.sorted { lhs, rhs in
-            if lhs.appPath == rhs.appPath {
-                return lhs.processID < rhs.processID
-            }
-            return lhs.appPath < rhs.appPath
-        }
-    }
-
-    private static func target(processID: pid_t, appPath: String) -> DocumentationProviderTarget? {
-        let developerDir = URL(fileURLWithPath: appPath)
-            .appendingPathComponent("Contents/Developer")
-            .path
-        let mcpbridgePath = URL(fileURLWithPath: developerDir)
-            .appendingPathComponent("usr/bin/mcpbridge")
-            .path
-        guard FileManager.default.isExecutableFile(atPath: mcpbridgePath) else {
-            return nil
-        }
-        return DocumentationProviderTarget(
-            processID: processID,
-            appPath: appPath,
-            developerDir: developerDir,
-            mcpbridgePath: mcpbridgePath
-        )
-    }
-
-    private static func appPath(fromExecutablePath path: String) -> String? {
-        guard let range = path.range(of: "/Contents/MacOS/Xcode") else {
-            return nil
-        }
-        return String(path[..<range.lowerBound])
-    }
-
-    private static func processPath(processID: pid_t) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-p", String(processID), "-o", "comm="]
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            return nil
-        }
-        let output = String(
-            data: stdout.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        )?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let output, output.isEmpty == false else {
-            return nil
-        }
-        return output
-    }
-
-    private static func runningProcessIDs(named processName: String) -> [pid_t] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-x", processName]
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            return []
-        }
-        let output = String(
-            data: stdout.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? ""
-        return output
-            .split(whereSeparator: \.isNewline)
-            .compactMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 }
 
@@ -584,17 +438,19 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let providerSelectionTimeout: TimeAmount?
     private let pinnedProcessID: pid_t?
     private let initializeParams: [String: JSONValue]
+    private let clock: ClockClient
     private let logger: Logger
     private var activeProvider: ActiveProvider?
     private var providerSelection: ProviderSelection?
     private var isShutdown = false
 
     package init(
-        discovery: any XcodeTargetDiscovering = LiveXcodeTargetDiscovery(),
+        discovery: any XcodeTargetDiscovering,
         sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
-        initializeParams: [String: JSONValue] = DocumentationProviderManager.defaultInitializeParams(),
+        initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
+        clock: ClockClient = .liveValue,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
@@ -602,6 +458,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.providerSelectionTimeout = providerSelectionTimeout
         self.pinnedProcessID = pinnedProcessID
         self.initializeParams = initializeParams
+        self.clock = clock
         self.logger = logger
     }
 
@@ -629,106 +486,56 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     package func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallResult {
+    ) async throws -> DocumentationProviderCallOutcome {
         guard !isShutdown else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            return .unavailable(.noAvailableProvider)
         }
-        let requestDeadline = Self.requestDeadline(for: requestTimeoutOverride)
-        let initialTimeout = Self.requestTimeout(until: requestDeadline)
-        guard initialTimeout?.nanoseconds != 0 else {
-            throw TimeoutError()
-        }
-        guard let provider = await providerIfAvailable(requestTimeout: initialTimeout) else {
-            try Task.checkCancellation()
-            throw UpstreamSlotAcquisitionError.unavailable
-        }
+        let deadline = Deadline.fromNow(requestTimeoutOverride, clock: clock)
+        var rejectedProcessIDs: Set<pid_t> = []
+        var invalidatedProvider = false
 
-        let callTimeout = Self.requestTimeout(until: requestDeadline)
-        guard callTimeout?.nanoseconds != 0 else {
-            throw TimeoutError()
-        }
-
-        let response: Data
-        do {
-            response = try await provider.profile.connection.call(
-                requestData,
-                timeout: callTimeout
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            try Task.checkCancellation()
-            await invalidate(provider, reason: "documentation_provider_call_failed")
-            let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
-            guard replacementSelectionTimeout?.nanoseconds != 0 else {
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+        while !Task.isCancelled {
+            if let deadline, deadline.hasExpired {
+                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
-            guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
+            guard let provider = await providerIfAvailable(
+                requestTimeout: deadline?.remaining(),
+                excluding: rejectedProcessIDs
+            ) else {
                 try Task.checkCancellation()
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+                if let deadline, deadline.hasExpired {
+                    return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                return .unavailable(.noAvailableProvider)
             }
-            let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
-            guard retryCallTimeout?.nanoseconds != 0 else {
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: true)
+            if let deadline, deadline.hasExpired {
+                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
-            let retryResponse: Data
             do {
-                retryResponse = try await replacement.profile.connection.call(
+                let response = try await provider.profile.connection.call(
                     requestData,
-                    timeout: retryCallTimeout
+                    timeout: deadline?.remaining()
                 )
+                guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
+                    return .handled(response, invalidatedProvider: invalidatedProvider)
+                }
+                await invalidate(provider, reason: "documentation_search_not_enabled")
+                rejectedProcessIDs.insert(provider.profile.target.processID)
+                invalidatedProvider = true
+                try Task.checkCancellation()
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 try Task.checkCancellation()
-                await invalidate(replacement, reason: "documentation_provider_retry_call_failed")
-                throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
+                await invalidate(provider, reason: "documentation_provider_call_failed")
+                rejectedProcessIDs.insert(provider.profile.target.processID)
+                invalidatedProvider = true
+                if let deadline, deadline.hasExpired {
+                    return .failed(error, invalidatedProvider: invalidatedProvider)
+                }
             }
-            if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
-                await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
-            }
-            return DocumentationProviderCallResult(
-                data: retryResponse,
-                didInvalidateProvider: true
-            )
         }
-        guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: false)
-        }
-
-        await invalidate(provider, reason: "documentation_search_not_enabled")
-        try Task.checkCancellation()
-        let replacementSelectionTimeout = Self.requestTimeout(until: requestDeadline)
-        guard replacementSelectionTimeout?.nanoseconds != 0 else {
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
-        }
-        guard let replacement = await providerIfAvailable(requestTimeout: replacementSelectionTimeout) else {
-            try Task.checkCancellation()
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
-        }
-        let retryCallTimeout = Self.requestTimeout(until: requestDeadline)
-        guard retryCallTimeout?.nanoseconds != 0 else {
-            return DocumentationProviderCallResult(data: response, didInvalidateProvider: true)
-        }
-        do {
-            let retryResponse = try await replacement.profile.connection.call(
-                requestData,
-                timeout: retryCallTimeout
-            )
-            if DocumentationToolCatalog.responseIsDocumentationNotEnabled(retryResponse) {
-                await invalidate(replacement, reason: "documentation_search_retry_not_enabled")
-            }
-            return DocumentationProviderCallResult(
-                data: retryResponse,
-                didInvalidateProvider: true
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            try Task.checkCancellation()
-            await invalidate(replacement, reason: "documentation_search_retry_call_failed")
-            throw DocumentationProviderCallFailure(underlying: error, providerIsActive: false)
-        }
+        throw CancellationError()
     }
 
     package func invalidate(reason _: String) async {
@@ -749,23 +556,41 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         await invalidate(reason: "shutdown")
     }
 
-    private func providerIfAvailable(requestTimeout: TimeAmount?) async -> ActiveProvider? {
+    private func providerIfAvailable(
+        requestTimeout: TimeAmount?,
+        excluding excludedProcessIDs: Set<pid_t> = []
+    ) async -> ActiveProvider? {
         guard !isShutdown else {
             return nil
         }
         if let activeProvider {
-            return activeProvider
+            if excludedProcessIDs.contains(activeProvider.profile.target.processID) {
+                self.activeProvider = nil
+                await activeProvider.profile.connection.stop()
+            } else {
+                return activeProvider
+            }
         }
         let selection: ProviderSelection
-        if let providerSelection {
+        let selectionIsShared: Bool
+        if let providerSelection, excludedProcessIDs.isEmpty {
             selection = providerSelection
+            selectionIsShared = true
         } else {
             let selectionTimeout = providerSelectionTimeout
             selection = ProviderSelection(
                 id: UUID(),
-                task: Task { await self.selectProvider(requestTimeout: selectionTimeout) }
+                task: Task {
+                    await self.selectProvider(
+                        requestTimeout: selectionTimeout,
+                        excluding: excludedProcessIDs
+                    )
+                }
             )
-            providerSelection = selection
+            selectionIsShared = excludedProcessIDs.isEmpty
+            if selectionIsShared {
+                providerSelection = selection
+            }
         }
 
         let waitResult = await waitForSelection(selection, requestTimeout: requestTimeout)
@@ -776,8 +601,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case .timedOut:
             return nil
         }
-        let selectionIsCurrent = providerSelection?.id == selection.id
-        if selectionIsCurrent {
+        let selectionIsCurrent = selectionIsShared ? providerSelection?.id == selection.id : true
+        if selectionIsShared, selectionIsCurrent {
             providerSelection = nil
         }
 
@@ -853,23 +678,31 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         await provider.profile.connection.stop()
     }
 
-    private func selectProvider(requestTimeout: TimeAmount?) async -> CandidateProfile? {
+    private func selectProvider(
+        requestTimeout: TimeAmount?,
+        excluding excludedProcessIDs: Set<pid_t> = []
+    ) async -> CandidateProfile? {
         guard !isShutdown else {
             return nil
         }
-        let selectionDeadline = Self.requestDeadline(for: requestTimeout)
+        let selectionDeadline = Deadline.fromNow(requestTimeout, clock: clock)
         let discoveredTargets = discovery.runningXcodeTargets()
         let targets: [DocumentationProviderTarget]
         if let pinnedProcessID {
-            targets = discoveredTargets.filter { $0.processID == pinnedProcessID }
+            targets = discoveredTargets.filter {
+                $0.processID == pinnedProcessID && excludedProcessIDs.contains($0.processID) == false
+            }
         } else {
-            targets = discoveredTargets
+            targets = discoveredTargets.filter {
+                excludedProcessIDs.contains($0.processID) == false
+            }
         }
         logger.debug(
             "Selecting documentation provider from running Xcode processes",
             metadata: [
                 "candidate_count": .string("\(targets.count)"),
                 "discovered_candidate_count": .string("\(discoveredTargets.count)"),
+                "excluded_candidate_count": .string("\(excludedProcessIDs.count)"),
                 "pinned_pid": .string(pinnedProcessID.map(String.init) ?? ""),
                 "candidates": .string(targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
             ]
@@ -879,7 +712,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             guard !Task.isCancelled, !isShutdown else {
                 break
             }
-            let candidateTimeout = Self.candidateProbeTimeout(
+            let candidateTimeout = candidateProbeTimeout(
                 until: selectionDeadline,
                 remainingCandidateCount: targets.count - index
             )
@@ -971,14 +804,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         target: DocumentationProviderTarget,
         requestTimeout: TimeAmount?
     ) async throws -> CandidateProfile {
-        let probeDeadline = Self.requestDeadline(for: requestTimeout ?? .seconds(30))
+        let probeDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
         try Task.checkCancellation()
         let session = try await sessionFactory.startSession(for: target)
         let connection = DocumentationProviderConnection(session: session)
         do {
             try Task.checkCancellation()
             await connection.start()
-            let initializeTimeout = Self.requestTimeout(until: probeDeadline)
+            let initializeTimeout = remainingTimeout(until: probeDeadline)
             guard initializeTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
@@ -992,7 +825,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized",
             ])
-            let toolsListTimeout = Self.requestTimeout(until: probeDeadline)
+            let toolsListTimeout = remainingTimeout(until: probeDeadline)
             guard toolsListTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
@@ -1004,7 +837,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             guard let descriptor = DocumentationToolCatalog.descriptor(in: toolsResult) else {
                 throw UpstreamSlotAcquisitionError.unavailable
             }
-            let documentationProbeTimeout = Self.requestTimeout(until: probeDeadline)
+            let documentationProbeTimeout = remainingTimeout(until: probeDeadline)
             guard documentationProbeTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
@@ -1028,17 +861,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             await connection.stop()
             throw error
         }
-    }
-
-    package static func defaultInitializeParams() -> [String: JSONValue] {
-        [
-            "protocolVersion": .string("2025-03-26"),
-            "capabilities": .object([:]),
-            "clientInfo": .object([
-                "name": .string("XcodeMCPKit"),
-                "version": .string("dev"),
-            ]),
-        ]
     }
 
     private func makeInitializeRequestData() throws -> Data {
@@ -1134,33 +956,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             .compactMap { Int($0) }
     }
 
-    private static func requestDeadline(for requestTimeout: TimeAmount?) -> UInt64? {
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+    private func remainingTimeout(until deadline: Deadline?) -> TimeAmount? {
+        guard let deadline else {
             return nil
         }
-        let now = DispatchTime.now().uptimeNanoseconds
-        let remainingToMax = UInt64.max &- now
-        let clamped = min(UInt64(requestTimeout.nanoseconds), remainingToMax)
-        return now &+ clamped
+        return deadline.remaining()
     }
 
-    private static func requestTimeout(until deadlineUptimeNs: UInt64?) -> TimeAmount? {
-        guard let deadlineUptimeNs else {
-            return nil
-        }
-        let now = DispatchTime.now().uptimeNanoseconds
-        guard deadlineUptimeNs > now else {
-            return .nanoseconds(0)
-        }
-        let remaining = deadlineUptimeNs - now
-        return .nanoseconds(Int64(min(remaining, UInt64(Int64.max))))
-    }
-
-    private static func candidateProbeTimeout(
-        until deadlineUptimeNs: UInt64?,
+    private func candidateProbeTimeout(
+        until deadline: Deadline?,
         remainingCandidateCount: Int
     ) -> TimeAmount? {
-        guard let remaining = requestTimeout(until: deadlineUptimeNs) else {
+        guard let remaining = remainingTimeout(until: deadline) else {
             return nil
         }
         guard remaining.nanoseconds > 0 else {

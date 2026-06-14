@@ -1,3 +1,4 @@
+import ProxyCore
 import Darwin
 import Foundation
 import XcodeMCPProxy

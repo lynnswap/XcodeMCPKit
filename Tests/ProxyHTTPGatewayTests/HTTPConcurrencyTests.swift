@@ -6,6 +6,7 @@ import Testing
 import ProxyCore
 import ProxyMCP
 import ProxySession
+import ProxyXcodeFeatures
 import XcodeMCPTestSupport
 @testable import ProxyHTTPGateway
 
@@ -243,7 +244,8 @@ struct HTTPConcurrencyTests {
                             ],
                         ],
                     ],
-                ])!
+                ])!,
+                sourceUpstream: 0
             )
             await upstream.clearRecordedRequests()
 
@@ -436,7 +438,7 @@ struct HTTPConcurrencyTests {
 
             let tasks = (0..<3).map { index in
                 Task {
-                    _ = try? await postJSON(
+                    _ = try await postJSON(
                         url: url,
                         sessionID: sessionID,
                         payload: toolCallPayload(
@@ -451,13 +453,16 @@ struct HTTPConcurrencyTests {
                 }
             }
 
+            try await upstream.waitForRefreshStartCount(1)
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.didEmitErrorFive() == false
+                    server.refreshDebugState.snapshot().queue.activeRequestCount >= 1
                 }
             )
+            #expect(await upstream.didEmitErrorFive() == false)
+            await upstream.releaseRefreshResponses()
             for task in tasks {
-                task.cancel()
+                _ = try await task.value
             }
         } catch {
             try? await server.shutdown()
@@ -484,7 +489,7 @@ struct HTTPConcurrencyTests {
 
             let tasks = (0..<3).map { index in
                 Task {
-                    _ = try? await postJSON(
+                    _ = try await postJSON(
                         url: url,
                         sessionID: sessionID,
                         payload: toolCallPayload(
@@ -499,13 +504,16 @@ struct HTTPConcurrencyTests {
                 }
             }
 
+            try await upstream.waitForRefreshStartCount(1)
             #expect(
                 await waitUntil(timeout: .seconds(2)) {
-                    await upstream.didEmitConcurrentRefreshError() == false
+                    server.refreshDebugState.snapshot().queue.activeRequestCount == 3
                 }
             )
+            #expect(await upstream.didEmitConcurrentRefreshError() == false)
+            await upstream.releaseRefreshResponses()
             for task in tasks {
-                task.cancel()
+                _ = try await task.value
             }
         } catch {
             try? await server.shutdown()
@@ -671,6 +679,7 @@ private struct TestHTTPServer {
     let sessionManager: RuntimeCoordinator
     let upstream: any UpstreamSlotControlling
     let childChannelTracker: HTTPTestServerChannelTracker
+    let refreshDebugState: RefreshCodeIssuesDebugState
 
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
@@ -695,6 +704,9 @@ private struct TestHTTPServer {
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
             config: config, eventLoop: group.next(), upstreams: [upstream])
+        let refreshDebugState = RefreshCodeIssuesDebugState(
+            defaultRequestTimeoutSeconds: config.requestTimeout
+        )
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -704,7 +716,8 @@ private struct TestHTTPServer {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             config: config,
-                            sessionManager: sessionManager
+                            sessionManager: sessionManager,
+                            refreshCodeIssuesDebugState: refreshDebugState
                         )
                     )
                 }
@@ -723,7 +736,8 @@ private struct TestHTTPServer {
             url: url,
             sessionManager: sessionManager,
             upstream: upstream,
-            childChannelTracker: childChannelTracker
+            childChannelTracker: childChannelTracker,
+            refreshDebugState: refreshDebugState
         )
     }
 
@@ -946,6 +960,8 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
 private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private let refreshStarts = RecordedValues<String>()
+    private let releaseResponses = AsyncGate()
     private var activeTabs: Set<String> = []
     private var emittedErrorFive = false
 
@@ -965,6 +981,15 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
 
     func didEmitErrorFive() -> Bool {
         emittedErrorFive
+    }
+
+    func waitForRefreshStartCount(_ count: Int) async throws {
+        guard count > 0 else { return }
+        _ = try await refreshStarts.nextValue(at: count - 1)
+    }
+
+    func releaseRefreshResponses() async {
+        await releaseResponses.signal()
     }
 
     func send(_ data: Data) async -> UpstreamSendResult {
@@ -1015,9 +1040,14 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
         }
 
         activeTabs.insert(tabIdentifier)
+        await refreshStarts.append(tabIdentifier)
         let responseData = makeDefaultResponse(id: id, method: method)
         Task { [tabIdentifier, responseData] in
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            do {
+                try await releaseResponses.wait()
+            } catch {
+                return
+            }
             completeRefresh(
                 tabIdentifier: tabIdentifier,
                 responseData: responseData
@@ -1104,6 +1134,8 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
 private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<UpstreamEvent>
     private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    private let refreshStarts = RecordedValues<Int>()
+    private let releaseResponses = AsyncGate()
     private var hasActiveRefresh = false
     private var emittedConcurrentRefreshError = false
 
@@ -1123,6 +1155,15 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
 
     func didEmitConcurrentRefreshError() -> Bool {
         emittedConcurrentRefreshError
+    }
+
+    func waitForRefreshStartCount(_ count: Int) async throws {
+        guard count > 0 else { return }
+        _ = try await refreshStarts.nextValue(at: count - 1)
+    }
+
+    func releaseRefreshResponses() async {
+        await releaseResponses.signal()
     }
 
     func send(_ data: Data) async -> UpstreamSendResult {
@@ -1170,9 +1211,15 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
         }
 
         hasActiveRefresh = true
+        let startIndex = await refreshStarts.count()
+        await refreshStarts.append(startIndex + 1)
         let responseData = makeDefaultResponse(id: id, method: method)
         Task { [responseData] in
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            do {
+                try await releaseResponses.wait()
+            } catch {
+                return
+            }
             completeRefresh(responseData: responseData)
         }
     }
@@ -1454,7 +1501,8 @@ private func addEmbeddedHTTPHandler(
 ) throws {
     let handler = HTTPHandler(
         config: config,
-        sessionManager: sessionManager
+        sessionManager: sessionManager,
+        usesSynchronousLocalResolution: true
     )
     try channel.pipeline.addHandler(handler).wait()
 }

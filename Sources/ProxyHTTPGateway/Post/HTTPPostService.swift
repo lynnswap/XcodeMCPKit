@@ -34,6 +34,7 @@ package final class HTTPPostService: Sendable {
 
     package let sessionManager: any RuntimeCoordinating
     package let disabledToolNames: Set<String>
+    package let usesSynchronousLocalResolution: Bool
     package let localResponder: LocalMCPResponder
     package let forwardingService: MCPForwardingService
     package let refreshWorkflow: RefreshCodeIssuesWorkflow
@@ -46,15 +47,18 @@ package final class HTTPPostService: Sendable {
         refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
+        usesSynchronousLocalResolution: Bool = false,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.requestTimeoutSeconds = config.requestTimeout
         self.sessionManager = sessionManager
         self.disabledToolNames = config.disabledToolNames
+        self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
             refreshCodeIssuesMode: config.refreshCodeIssuesMode,
             disabledToolNames: config.disabledToolNames,
+            usesSynchronousLocalResolution: usesSynchronousLocalResolution,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
@@ -81,10 +85,10 @@ package final class HTTPPostService: Sendable {
         requestTimeoutOverride: TimeAmount? = nil,
         parentCancellationHandle: HTTPPostCancellationHandle? = nil
     ) -> HTTPPostOperation {
-        let requestMetadata = MCPErrorResponder.requestMetadata(from: bodyData)
+        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
+        let requestMetadata = MCPErrorResponder.requestMetadata(fromParsed: parsedRequestJSON)
         let requestIDs = requestMetadata.ids
         let requestIsBatch = requestMetadata.isBatch
-        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
 
         if let localRequest = Self.localHandlingRequest(from: parsedRequestJSON),
             let localHandling = localResponder.handle(
@@ -113,26 +117,11 @@ package final class HTTPPostService: Sendable {
         let sessionID = headerSessionID ?? UUID().uuidString
 
         if sessionManager.isInitialized() == false {
-            if requestIDs.isEmpty {
-                return HTTPPostOperation(
-                    future: eventLoop.makeSucceededFuture(
-                        .plain(
-                            status: .unprocessableEntity,
-                            body: "expected initialize request",
-                            sessionID: sessionID
-                        )
-                    ),
-                    cancellationHandle: nil
-                )
-            }
             return HTTPPostOperation(
                 future: eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: requestIDs,
-                        code: -32000,
-                        message: "expected initialize request",
-                        forceBatchArray: requestIsBatch,
+                    Self.makeExpectedInitializeResolution(
+                        requestIDs: requestIDs,
+                        requestIsBatch: requestIsBatch,
                         sessionID: sessionID,
                         prefersEventStream: prefersEventStream
                     )
@@ -173,12 +162,14 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        let filteredRequest: FilteredToolCallRequest
+        let routing: ToolCallRouting
         do {
-            filteredRequest = try filterDisabledToolCalls(
+            routing = try routeToolCalls(
                 bodyData: bodyData,
-                parsedRequestJSON: parsedRequestJSON,
-                forceBatchArray: requestIsBatch
+                sessionID: sessionID,
+                forceBatchArray: requestIsBatch,
+                eventLoop: eventLoop,
+                requestTimeoutOverride: requestTimeoutOverride
             )
         } catch {
             return HTTPPostOperation(
@@ -197,12 +188,7 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let localToolFilter = filterLocalToolCalls(
-            filteredRequest: filteredRequest,
-            sessionID: sessionID,
-            eventLoop: eventLoop,
-            requestTimeoutOverride: requestTimeoutOverride
-        ) {
+        if let localToolFilter = routing.localOperation {
             if let parentCancellationHandle,
                 parentCancellationHandle.bindChildHandle(localToolFilter.cancellationHandle) == false
             {
@@ -293,7 +279,7 @@ package final class HTTPPostService: Sendable {
         }
 
         return makeForwardingOperation(
-            filteredRequest: filteredRequest,
+            filteredRequest: routing.forwardedRequest,
             sessionID: sessionID,
             headerSessionID: headerSessionID,
             requestIsBatch: requestIsBatch,
@@ -478,37 +464,12 @@ package final class HTTPPostService: Sendable {
                 terminalState: .failed,
                 reason: .upstreamOverloaded
             )
-            if localResponseData != nil {
-                return eventLoop.makeSucceededFuture(
-                    Self.makePartialBatchErrorResolution(
-                        localResponseData: localResponseData,
-                        responseIDs: forwardedRequestIDs,
-                        code: -32001,
-                        message: "upstream unavailable",
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream,
-                        forceBatchArray: filteredRequest.forceBatchArray,
-                        fallbackStatus: .serviceUnavailable,
-                        fallbackBody: "upstream unavailable"
-                    )
-                )
-            }
-            if forwardedRequestIDs.isEmpty {
-                return eventLoop.makeSucceededFuture(
-                    .plain(
-                        status: .serviceUnavailable,
-                        body: "upstream unavailable",
-                        sessionID: sessionID
-                    )
-                )
-            }
             return eventLoop.makeSucceededFuture(
-                .mcpError(
-                    id: nil,
-                    ids: forwardedRequestIDs,
-                    code: -32001,
-                    message: "upstream unavailable",
-                    forceBatchArray: requestIsBatch,
+                Self.makeUpstreamUnavailableResolution(
+                    localResponseData: localResponseData,
+                    responseIDs: forwardedRequestIDs,
+                    forceBatchArray: filteredRequest.forceBatchArray,
+                    requestIsBatch: requestIsBatch,
                     sessionID: sessionID,
                     prefersEventStream: prefersEventStream
                 )

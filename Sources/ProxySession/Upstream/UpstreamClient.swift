@@ -10,9 +10,20 @@ package enum UpstreamEvent: Sendable {
     case exit(Int32)
 }
 
-package enum UpstreamSendResult: Sendable {
+package enum UpstreamUnavailableReason: Sendable, Equatable {
+    case notStarted
+    case startFailed
+    case terminated
+    case shuttingDown
+}
+
+/// Why a send did not reach the upstream. Backpressure is the only case
+/// that should count against the upstream's health; an unavailable slot is
+/// already handled by the exit/quarantine machinery.
+package enum UpstreamSendResult: Sendable, Equatable {
     case accepted
-    case overloaded
+    case backpressure
+    case unavailable(UpstreamUnavailableReason)
 }
 
 package protocol UpstreamSession: AnyObject, Sendable {

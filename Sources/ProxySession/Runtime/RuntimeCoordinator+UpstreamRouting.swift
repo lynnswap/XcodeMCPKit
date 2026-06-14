@@ -8,7 +8,7 @@ extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
         guard upstreamHealthManager.initializedHealthyishCount() == 0 else { return }
         guard upstreamHealthManager.anyRecoveryInFlight() == false else { return }
-        if initializeManager.consumeRetryAfterWarmInitFailureRegardlessOfCachedInit() {
+        if initializeManager.consumeWarmInitRecoveryIntent(policy: .regardlessOfCachedInitialize) {
             startPrimaryEagerRetry()
             if upstreamHealthManager.anyRecoveryInFlight() {
                 return
@@ -139,6 +139,14 @@ extension RuntimeCoordinator {
         routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
     }
 
+    /// The staleness rule for the canonical tools catalog: it must not
+    /// survive losing the upstream it came from unless another initialized
+    /// upstream can still vouch for an equivalent catalog.
+    func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
+        canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
+            && !upstreamHealthManager.anyInitialized()
+    }
+
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
@@ -170,14 +178,12 @@ extension RuntimeCoordinator {
         } else {
             shouldResetGlobalInit = false
         }
-        let shouldClearToolsCatalog =
-            canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !upstreamHealthManager.anyInitialized()
+        let shouldClearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if shouldResetGlobalInit || shouldClearToolsCatalog {
             if shouldResetGlobalInit {
-                initializeManager.resetCachedInitializeResult()
+                initializeManager.resetWarmSecondaryForRetry()
             }
-            invalidateControlPlaneSynchronously(
+            invalidateControlPlane(
                 reason: "upstream_exit_\(upstreamIndex)",
                 clearInitialize: shouldResetGlobalInit,
                 clearToolsCatalog: shouldClearToolsCatalog
@@ -195,10 +201,10 @@ extension RuntimeCoordinator {
                 let primaryInitInFlight = upstreamHealthManager.primaryInitInFlight()
                 if primaryInitInFlight {
                     initializeManager
-                        .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(true)
+                        .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 } else {
                     initializeManager
-                        .setShouldRetryEagerInitializePrimaryAfterWarmInitFailure(false)
+                        .setWarmInitRecoveryIntent(.none)
                     startEagerInitializePrimary(applyBackoff: true)
                 }
             }
@@ -240,20 +246,31 @@ extension RuntimeCoordinator {
             if ensureRunning {
                 await upstreams[upstreamIndex].start()
             }
-            let result = await upstreams[upstreamIndex].send(data)
-            if result == .accepted {
+            switch await upstreams[upstreamIndex].send(data) {
+            case .accepted:
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
                     direction: "outbound",
                     data: data
                 )
-                return
+            case .backpressure:
+                self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+                self.failPendingSend(
+                    originalRequestData: data,
+                    upstreamIndex: upstreamIndex,
+                    code: -32002,
+                    message: "upstream overloaded"
+                )
+            case .unavailable:
+                // The exit/quarantine machinery owns health for a dead slot;
+                // a send into it must not be misdiagnosed as overload.
+                self.failPendingSend(
+                    originalRequestData: data,
+                    upstreamIndex: upstreamIndex,
+                    code: -32001,
+                    message: "upstream unavailable"
+                )
             }
-            self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
-            self.handleOverloadedUpstreamSend(
-                originalRequestData: data,
-                upstreamIndex: upstreamIndex
-            )
         }
     }
 
@@ -399,16 +416,13 @@ extension RuntimeCoordinator {
         sessionRegistry.testSnapshot(id: id)
     }
 
-    func testSetInitializeRoutingState(
-        sessionID _: String,
-        upstreamIndex _: Int,
-        preferOnNextPin _: Bool,
-        didReceiveInitializeUpstreamMessage _: Bool = false
-    ) {}
-
-    func handleOverloadedUpstreamSend(
+    /// Fails the requests pending on an undeliverable send by synthesizing
+    /// the matching JSON-RPC error responses back through the router.
+    func failPendingSend(
         originalRequestData: Data,
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        code: Int,
+        message: String
     ) {
         guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: [])
         else {
@@ -416,8 +430,8 @@ extension RuntimeCoordinator {
         }
 
         let overloadError: [String: Any] = [
-            "code": -32002,
-            "message": "upstream overloaded",
+            "code": code,
+            "message": message,
         ]
 
         let responseAny: Any? = {
@@ -647,11 +661,9 @@ extension RuntimeCoordinator {
             )
         }
         let clearInitialize = upstreamIndex == 0 && initSnapshot.hasInitResult == false
-        let clearToolsCatalog =
-            canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !upstreamHealthManager.anyInitialized()
+        let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if clearInitialize || clearToolsCatalog {
-            invalidateControlPlaneSynchronously(
+            invalidateControlPlane(
                 reason: "protocol_violation_\(upstreamIndex)",
                 clearInitialize: clearInitialize,
                 clearToolsCatalog: clearToolsCatalog

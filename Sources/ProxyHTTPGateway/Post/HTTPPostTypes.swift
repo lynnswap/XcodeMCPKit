@@ -41,11 +41,6 @@ package struct HTTPPostOperation {
     package let cancellationHandle: HTTPPostCancellationHandle?
 }
 
-package struct RefreshWorkflowExecution {
-    let result: RefreshForwardAttemptResult
-    let usedDirectForwarding: Bool
-}
-
 package struct RefreshRequestRoute: Sendable {
     let request: RefreshCodeIssuesRequest
     let bodyData: Data

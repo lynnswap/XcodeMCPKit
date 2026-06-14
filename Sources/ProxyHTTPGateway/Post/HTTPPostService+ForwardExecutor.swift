@@ -64,14 +64,11 @@ extension HTTPPostService {
         if let refreshRouting, filteredRequest.forwardedResponseIDs.isEmpty == false {
             if headerSessionID == nil {
                 return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: filteredRequest.forwardedResponseIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    Self.makeExpectedInitializeResolution(
+                        requestIDs: filteredRequest.forwardedResponseIDs,
+                        requestIsBatch: requestIsBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
                     eventLoop: eventLoop,
@@ -86,7 +83,7 @@ extension HTTPPostService {
             {
                 let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
                 let refreshTask = Task { [self] in
-                    let execution = await forwardRefreshCodeIssuesRequest(
+                    let result = await forwardRefreshCodeIssuesRequest(
                         route.request,
                         bodyData: route.bodyData,
                         sessionID: sessionID,
@@ -105,8 +102,9 @@ extension HTTPPostService {
                             return
                         }
                         cancellationHandle?.markCompleted()
+                        self.finishRefreshLease(leaseID, result: result)
                         let resolution = self.makeResolution(
-                            from: execution.result,
+                            from: result,
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
@@ -128,9 +126,6 @@ extension HTTPPostService {
                                 emptyStatus: .accepted
                             )
                         )
-                        if execution.usedDirectForwarding == false {
-                            self.sessionManager.completeRequestLease(leaseID)
-                        }
                     }
                 }
                 cancellationHandle?.bindRefreshTask(refreshTask)
@@ -162,16 +157,14 @@ extension HTTPPostService {
                         )
                         continue
                     }
-                    let operation = self.handle(
-                        bodyData: route.bodyData,
-                        headerSessionID: sessionID,
-                        headerSessionExists: true,
+                    let resolution = await self.executeRefreshRoute(
+                        route,
+                        sessionID: sessionID,
                         prefersEventStream: prefersEventStream,
                         eventLoop: eventLoop,
                         requestTimeoutOverride: remainingTimeout,
                         parentCancellationHandle: cancellationHandle
                     )
-                    let resolution = try? await operation.future.get()
                     payloads.append(
                         Self.responseDataForBatchResolution(
                             resolution,
@@ -199,6 +192,9 @@ extension HTTPPostService {
                             )
                         )
                     } else {
+                        // Bounded single re-entry: the routing pass removed
+                        // every refresh item, so the remainder cannot reach
+                        // this branch again (depth <= 1 structurally).
                         let operation = self.handle(
                             bodyData: remainingBodyData,
                             headerSessionID: sessionID,
@@ -255,45 +251,14 @@ extension HTTPPostService {
                 sessionID: sessionID,
                 upstreamIndexOverride: upstreamIndex
             ) else {
-                if localResponseData != nil {
-                    return makeImmediateLeaseResolution(
-                        Self.makePartialBatchErrorResolution(
-                            localResponseData: localResponseData,
-                            responseIDs: filteredRequest.forwardedResponseIDs,
-                            code: -32001,
-                            message: "upstream unavailable",
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream,
-                            forceBatchArray: filteredRequest.forceBatchArray,
-                            fallbackStatus: .serviceUnavailable,
-                            fallbackBody: "upstream unavailable"
-                        ),
-                        leaseID: leaseID,
-                        eventLoop: eventLoop,
-                        cancellationHandle: cancellationHandle
-                    )
-                }
-                if filteredRequest.forwardedResponseIDs.isEmpty {
-                    return makeImmediateLeaseResolution(
-                        .plain(
-                        status: .serviceUnavailable,
-                        body: "upstream unavailable",
-                        sessionID: sessionID
-                        ),
-                        leaseID: leaseID,
-                        eventLoop: eventLoop,
-                        cancellationHandle: cancellationHandle
-                    )
-                }
                 return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: filteredRequest.forwardedResponseIDs,
-                    code: -32001,
-                    message: "upstream unavailable",
-                    forceBatchArray: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    Self.makeUpstreamUnavailableResolution(
+                        localResponseData: localResponseData,
+                        responseIDs: filteredRequest.forwardedResponseIDs,
+                        forceBatchArray: filteredRequest.forceBatchArray,
+                        requestIsBatch: requestIsBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
                     eventLoop: eventLoop,
@@ -322,27 +287,12 @@ extension HTTPPostService {
             if prepared.transform.isBatch || prepared.transform.method != "initialize"
                 || !prepared.transform.expectsResponse
             {
-                if prepared.transform.responseIDs.isEmpty {
-                    return makeImmediateLeaseResolution(
-                        .plain(
-                        status: .unprocessableEntity,
-                        body: "expected initialize request",
-                        sessionID: sessionID
-                        ),
-                        leaseID: leaseID,
-                        eventLoop: eventLoop,
-                        cancellationHandle: cancellationHandle
-                    )
-                }
                 return makeImmediateLeaseResolution(
-                    .mcpError(
-                    id: nil,
-                    ids: prepared.transform.responseIDs,
-                    code: -32000,
-                    message: "expected initialize request",
-                    forceBatchArray: prepared.transform.isBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    Self.makeExpectedInitializeResolution(
+                        requestIDs: prepared.transform.responseIDs,
+                        requestIsBatch: prepared.transform.isBatch,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
                     ),
                     leaseID: leaseID,
                     eventLoop: eventLoop,

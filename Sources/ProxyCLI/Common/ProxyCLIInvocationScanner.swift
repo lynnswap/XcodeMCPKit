@@ -1,3 +1,4 @@
+import ProxyCore
 import Foundation
 import XcodeMCPProxy
 
@@ -31,49 +32,9 @@ package struct ProxyCLIInstallScan {
 }
 
 package enum ProxyCLIInvocationScanner {
-    private static let serverOnlyFlags: Set<String> = [
-        "--config",
-        "--auto-approve",
-        "--listen",
-        "--host",
-        "--port",
-        "--max-body-bytes",
-        "--upstream-command",
-        "--upstream-args",
-        "--upstream-arg",
-        "--upstream-processes",
-        "--session-id",
-        "--refresh-code-issues-mode",
-    ]
-
-    private static let serverOnlyValueFlags: Set<String> = [
-        "--config",
-        "--listen",
-        "--host",
-        "--port",
-        "--max-body-bytes",
-        "--upstream-command",
-        "--upstream-args",
-        "--upstream-arg",
-        "--upstream-processes",
-        "--session-id",
-        "--refresh-code-issues-mode",
-    ]
-
-    private static let serverForwardedValueFlags: Set<String> = [
-        "--config",
-        "--listen",
-        "--host",
-        "--port",
-        "--upstream-command",
-        "--upstream-args",
-        "--upstream-arg",
-        "--upstream-processes",
-        "--session-id",
-        "--max-body-bytes",
-        "--request-timeout",
-        "--refresh-code-issues-mode",
-    ]
+    private static let serverOnlyFlags = ProxyCLIFlag.serverOnlyFlagNames
+    private static let serverOnlyValueFlags = ProxyCLIFlag.serverOnlyValueFlagNames
+    private static let serverForwardedValueFlags = ProxyCLIFlag.serverForwardedValueFlagNames
 
     package static func scanAdapter(_ args: [String]) -> ProxyCLIAdapterScan {
         var scan = ProxyCLIAdapterScan()

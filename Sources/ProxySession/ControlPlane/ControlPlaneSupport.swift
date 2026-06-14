@@ -16,11 +16,6 @@ package enum ControlPlaneRoute: Hashable, Sendable {
     }
 }
 
-package struct CanonicalInitializeLoadResult: Sendable {
-    package let result: JSONValue
-    package let sourceUpstream: Int?
-}
-
 package struct CanonicalToolsCatalogLoadResult: Sendable {
     package let rawResult: JSONValue
     package let sourceUpstream: Int?

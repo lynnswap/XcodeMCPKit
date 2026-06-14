@@ -23,17 +23,23 @@ package struct LocalMCPResponder {
     private let sessionManager: any RuntimeCoordinating
     private let refreshCodeIssuesMode: RefreshCodeIssuesMode
     private let disabledToolNames: Set<String>
+    /// EmbeddedChannel-based tests cannot complete promises from another
+    /// thread, so they opt in to a synchronous resolution path explicitly
+    /// instead of production code sniffing the event-loop type.
+    private let usesSynchronousLocalResolution: Bool
     private let logger: Logger
 
     package init(
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesMode: RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
+        usesSynchronousLocalResolution: Bool = false,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = disabledToolNames
+        self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
         self.logger = logger
     }
 
@@ -137,7 +143,7 @@ package struct LocalMCPResponder {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }
-            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
+            if usesSynchronousLocalResolution {
                 do {
                     let result = try Self.waitForAsyncResult {
                         try await sessionManager.sharedToolsList(
@@ -219,7 +225,7 @@ package struct LocalMCPResponder {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }
-            if shouldUseEmbeddedTestSynchronousResolution(on: eventLoop) {
+            if usesSynchronousLocalResolution {
                 do {
                     let result = try Self.waitForAsyncResult {
                         try await sessionManager.liveXcodeListWindowsResult(
@@ -314,7 +320,7 @@ package struct LocalMCPResponder {
         id: RPCID,
         error: Error
     ) throws -> Data {
-        let mapped = mapMCPError(error)
+        let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,
@@ -330,24 +336,6 @@ package struct LocalMCPResponder {
         return try JSONSerialization.data(withJSONObject: response, options: [])
     }
 
-    private static func mapMCPError(_ error: Error) -> (code: Int, message: String) {
-        if error is UpstreamSlotAcquisitionError {
-            return (-32001, "upstream unavailable")
-        }
-        if let error = error as? ControlPlaneRequestError {
-            return mapMCPError(error.underlying)
-        }
-        if let error = error as? ControlPlaneError {
-            switch error {
-            case .invalidResponse:
-                return (-32000, "upstream timeout")
-            case .upstreamRPC(let code, let message):
-                return (code, message)
-            }
-        }
-        return (-32000, "upstream timeout")
-    }
-
     private static func fallbackLocalError(
         id: RPCID,
         sessionID: String
@@ -358,10 +346,6 @@ package struct LocalMCPResponder {
             message: "upstream timeout",
             sessionID: sessionID
         )
-    }
-
-    private func shouldUseEmbeddedTestSynchronousResolution(on eventLoop: EventLoop) -> Bool {
-        String(describing: type(of: eventLoop)).contains("EmbeddedEventLoop")
     }
 
     private static func waitForAsyncResult<Output: Sendable>(

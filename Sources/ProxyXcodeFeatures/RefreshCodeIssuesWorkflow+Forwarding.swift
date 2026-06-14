@@ -6,6 +6,36 @@ import ProxyMCP
 import ProxyXcodeSupport
 
 extension RefreshCodeIssuesWorkflow {
+    /// Every proxy-mode bail-out funnels through here: record the debug
+    /// step, log the reason, and return nil so the caller falls back to a
+    /// plain upstream refresh.
+    private func fallBackToUpstream(
+        reason: String,
+        state: RefreshCodeIssuesDebugRequestState? = nil,
+        extraMetadata: [String: String] = [:],
+        debugRequestID: String,
+        logMetadata: Logger.Metadata
+    ) -> Data? {
+        var debugMetadata = extraMetadata
+        debugMetadata["fallback_reason"] = reason
+        debugState.updateStep(
+            requestID: debugRequestID,
+            step: .proxyFallbackToUpstream,
+            state: state,
+            metadata: debugMetadata
+        )
+        var mergedLogMetadata = logMetadata
+        mergedLogMetadata["fallback_reason"] = .string(reason)
+        for (key, value) in extraMetadata {
+            mergedLogMetadata[key] = .string(value)
+        }
+        logger.debug(
+            "Refresh code issues proxy mode fell back to upstream refresh",
+            metadata: mergedLogMetadata
+        )
+        return nil
+    }
+
     package func runProxyRefresh(
         refreshRequest: RefreshCodeIssuesRequest,
         sessionID: String,
@@ -21,7 +51,7 @@ extension RefreshCodeIssuesWorkflow {
     ) async throws -> Data? {
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.select_internal_upstream"
+            step: .proxySelectInternalUpstream
         )
         try Self.throwIfCancelled(
             debugState: debugState,
@@ -29,20 +59,11 @@ extension RefreshCodeIssuesWorkflow {
         )
 
         guard let internalUpstreamIndex = await internalUpstreamChooser(sessionID) else {
-            let fallbackReason = "internal upstream unavailable"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                metadata: ["fallback_reason": fallbackReason]
+            return fallBackToUpstream(
+                reason: "internal upstream unavailable",
+                debugRequestID: debugRequestID,
+                logMetadata: baseMetadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: baseMetadata.merging(
-                    ["fallback_reason": Logger.MetadataValue.string(fallbackReason)],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         }
         try Self.throwIfCancelled(
             debugState: debugState,
@@ -63,15 +84,15 @@ extension RefreshCodeIssuesWorkflow {
                     self.debugState.updateStep(
                         requestID: debugRequestID,
                         step: executionBudget.isExhausted
-                            ? "proxy.execution_budget_exhausted"
-                            : "proxy.reserved_upstream_budget",
-                        state: executionBudget.isExhausted ? "timed_out" : nil
+                            ? .proxyExecutionBudgetExhausted
+                            : .proxyReservedUpstreamBudget,
+                        state: executionBudget.isExhausted ? .timedOut : nil
                     )
                     return nil
                 }
                 self.debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "proxy.list_windows",
+                    step: .proxyListWindows,
                     metadata: [
                         "internal_upstream": "\(internalUpstreamIndex)",
                         "timeout_ms": Self.timeoutDescription(timeout),
@@ -96,24 +117,15 @@ extension RefreshCodeIssuesWorkflow {
         )
 
         guard let target = resolution.target else {
-            let fallbackReason = resolution.failureReason ?? "unknown"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                metadata: [
-                    "fallback_reason": fallbackReason,
+            return fallBackToUpstream(
+                reason: resolution.failureReason ?? "unknown",
+                extraMetadata: [
                     "workspace_path": resolution.workspacePath ?? "none",
                     "resolved_file_path": resolution.resolvedFilePath ?? "none",
-                ]
+                ],
+                debugRequestID: debugRequestID,
+                logMetadata: metadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: metadata.merging(
-                    ["fallback_reason": Logger.MetadataValue.string(fallbackReason)],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         }
 
         let arguments: [String: Any] = [
@@ -126,23 +138,14 @@ extension RefreshCodeIssuesWorkflow {
             reserving: Self.minimumUpstreamFallbackBudgetSeconds
         )
         if navigatorIssuesTimeout == nil, executionBudget.hasDeadline {
-            let fallbackReason = executionBudget.isExhausted
-                ? "execution budget exhausted before navigator issues"
-                : "reserved upstream fallback budget before navigator issues"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                state: executionBudget.isExhausted ? "timed_out" : nil,
-                metadata: ["fallback_reason": fallbackReason]
+            return fallBackToUpstream(
+                reason: executionBudget.isExhausted
+                    ? "execution budget exhausted before navigator issues"
+                    : "reserved upstream fallback budget before navigator issues",
+                state: executionBudget.isExhausted ? .timedOut : nil,
+                debugRequestID: debugRequestID,
+                logMetadata: metadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: metadata.merging(
-                    ["fallback_reason": Logger.MetadataValue.string(fallbackReason)],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         }
         try Self.throwIfCancelled(
             debugState: debugState,
@@ -150,7 +153,7 @@ extension RefreshCodeIssuesWorkflow {
         )
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.list_navigator_issues",
+            step: .proxyListNavigatorIssues,
             metadata: [
                 "internal_upstream": "\(internalUpstreamIndex)",
                 "resolved_target": target.resolvedFilePath,
@@ -170,86 +173,44 @@ extension RefreshCodeIssuesWorkflow {
         case .success(let result):
             navigatorResult = result
         case .timeout:
-            let fallbackReason = "navigator issues timed out"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                state: "timed_out",
-                metadata: [
-                    "fallback_reason": fallbackReason,
-                    "resolved_target": target.resolvedFilePath,
-                ]
+            return fallBackToUpstream(
+                reason: "navigator issues timed out",
+                state: .timedOut,
+                extraMetadata: ["resolved_target": target.resolvedFilePath],
+                debugRequestID: debugRequestID,
+                logMetadata: metadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: metadata.merging(
-                    [
-                        "fallback_reason": Logger.MetadataValue.string(fallbackReason),
-                        "resolved_target": Logger.MetadataValue.string(target.resolvedFilePath),
-                    ],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         case .cancelled:
             throw CancellationError()
         case .unavailable:
-            let fallbackReason = "navigator issues unavailable"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                metadata: [
-                    "fallback_reason": fallbackReason,
-                    "resolved_target": target.resolvedFilePath,
-                ]
+            return fallBackToUpstream(
+                reason: "navigator issues unavailable",
+                extraMetadata: ["resolved_target": target.resolvedFilePath],
+                debugRequestID: debugRequestID,
+                logMetadata: metadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: metadata.merging(
-                    [
-                        "fallback_reason": Logger.MetadataValue.string(fallbackReason),
-                        "resolved_target": Logger.MetadataValue.string(target.resolvedFilePath),
-                    ],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         }
 
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.filter_navigator_issues",
+            step: .proxyFilterNavigatorIssues,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
         guard let filteredNavigatorResult = Self.filterNavigatorIssuesResult(
             navigatorResult,
             matchingResolvedFilePath: target.resolvedFilePath
         ) else {
-            let fallbackReason = "navigator issues payload malformed"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                metadata: [
-                    "fallback_reason": fallbackReason,
-                    "resolved_target": target.resolvedFilePath,
-                ]
+            return fallBackToUpstream(
+                reason: "navigator issues payload malformed",
+                extraMetadata: ["resolved_target": target.resolvedFilePath],
+                debugRequestID: debugRequestID,
+                logMetadata: metadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: metadata.merging(
-                    [
-                        "fallback_reason": Logger.MetadataValue.string(fallbackReason),
-                        "resolved_target": Logger.MetadataValue.string(target.resolvedFilePath),
-                    ],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         }
 
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.encode_response",
+            step: .proxyEncodeResponse,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
         guard let responseID = requestIDs.first,
@@ -259,31 +220,17 @@ extension RefreshCodeIssuesWorkflow {
                 forceBatchArray: requestIsBatch
             )
         else {
-            let fallbackReason = "invalid proxy response encoding"
-            debugState.updateStep(
-                requestID: debugRequestID,
-                step: "proxy.fallback_to_upstream",
-                metadata: [
-                    "fallback_reason": fallbackReason,
-                    "resolved_target": target.resolvedFilePath,
-                ]
+            return fallBackToUpstream(
+                reason: "invalid proxy response encoding",
+                extraMetadata: ["resolved_target": target.resolvedFilePath],
+                debugRequestID: debugRequestID,
+                logMetadata: metadata
             )
-            logger.debug(
-                "Refresh code issues proxy mode fell back to upstream refresh",
-                metadata: metadata.merging(
-                    [
-                        "fallback_reason": Logger.MetadataValue.string(fallbackReason),
-                        "resolved_target": Logger.MetadataValue.string(target.resolvedFilePath),
-                    ],
-                    uniquingKeysWith: { _, new in new }
-                )
-            )
-            return nil
         }
 
         debugState.updateStep(
             requestID: debugRequestID,
-            step: "proxy.success",
+            step: .proxySuccess,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
         logger.debug(
@@ -315,8 +262,8 @@ extension RefreshCodeIssuesWorkflow {
             if executionBudget.isExhausted {
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.execution_budget_exhausted",
-                    state: "timed_out"
+                    step: .upstreamExecutionBudgetExhausted,
+                    state: .timedOut
                 )
                 finalResult = .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
                 break resultLoop
@@ -324,7 +271,7 @@ extension RefreshCodeIssuesWorkflow {
 
             debugState.updateStep(
                 requestID: debugRequestID,
-                step: "upstream.attempt_\(attempt)",
+                step: .upstreamAttempt(attempt),
                 metadata: ["timeout_ms": Self.timeoutDescription(attemptTimeout)]
             )
             let attemptMetadata = baseMetadata.merging(
@@ -353,14 +300,14 @@ extension RefreshCodeIssuesWorkflow {
                     if !executionBudget.canDelay(delayNanos) {
                         debugState.updateStep(
                             requestID: debugRequestID,
-                            step: "upstream.retry_budget_exhausted"
+                            step: .upstreamRetryBudgetExhausted
                         )
                         finalResult = .success(responseData)
                         break resultLoop
                     }
                     debugState.updateStep(
                         requestID: debugRequestID,
-                        step: "upstream.retry_delay",
+                        step: .upstreamRetryDelay,
                         metadata: ["delay_ms": "\(delayNanos / 1_000_000)"]
                     )
                     logger.debug(
@@ -375,8 +322,8 @@ extension RefreshCodeIssuesWorkflow {
                     } catch is CancellationError {
                         debugState.updateStep(
                             requestID: debugRequestID,
-                            step: "cancelled",
-                            state: "cancelled"
+                            step: .cancelled,
+                            state: .cancelled
                         )
                         finalResult = .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
                         break resultLoop
@@ -393,39 +340,39 @@ extension RefreshCodeIssuesWorkflow {
                 }
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: retryable ? "upstream.retry_exhausted" : "upstream.success"
+                    step: retryable ? .upstreamRetryExhausted : .upstreamSuccess
                 )
                 finalResult = .success(responseData)
                 break resultLoop
             case .timeout:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.timeout",
-                    state: "timed_out"
+                    step: .upstreamTimeout,
+                    state: .timedOut
                 )
                 finalResult = result
                 break resultLoop
             case .upstreamUnavailable:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.unavailable",
-                    state: "failed"
+                    step: .upstreamUnavailable,
+                    state: .failed
                 )
                 finalResult = result
                 break resultLoop
             case .invalidRequest:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.invalid_request",
-                    state: "failed"
+                    step: .upstreamInvalidRequest,
+                    state: .failed
                 )
                 finalResult = result
                 break resultLoop
             case .invalidUpstreamResponse:
                 debugState.updateStep(
                     requestID: debugRequestID,
-                    step: "upstream.invalid_response",
-                    state: "failed"
+                    step: .upstreamInvalidResponse,
+                    state: .failed
                 )
                 finalResult = result
                 break resultLoop

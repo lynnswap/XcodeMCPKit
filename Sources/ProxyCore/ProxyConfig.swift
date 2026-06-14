@@ -26,14 +26,7 @@ public struct ProxyConfig: Sendable {
     public var upstreamSessionID: String?
     public var maxBodyBytes: Int
     public var requestTimeout: TimeInterval
-    public var configPath: String? {
-        didSet {
-            disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
-                configPath: configPath,
-                logger: ProxyLogging.make("config")
-            )
-        }
-    }
+    public var configPath: String?
     public var transport: ProxyTransport
     public var stdioUpstreamURL: URL?
     public var stdioUpstreamSource: StdioUpstreamSource?
@@ -42,6 +35,7 @@ public struct ProxyConfig: Sendable {
     public var autoApproveXcodeDialog: Bool
     public var refreshCodeIssuesMode: RefreshCodeIssuesMode
     public var disabledToolNames: Set<String>
+    package var initializeParamsOverride: ProxyInitializeHandshakeOverride?
 
     public init(
         listenHost: String,
@@ -78,11 +72,31 @@ public struct ProxyConfig: Sendable {
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
-        self.disabledToolNames = disabledToolNames
-            ?? ProxyFileConfigLoader.loadDisabledToolNames(
+        self.disabledToolNames = disabledToolNames ?? []
+        if configPath != nil {
+            loadFileConfig(preserveDisabledToolNames: disabledToolNames != nil)
+        }
+    }
+
+    /// Reads the TOML file config (disabled tools, initialize-params
+    /// override) from `configPath` and stores the decoded values. This is
+    /// the only place the file is read; consumers use the stored values.
+    public mutating func loadFileConfig() {
+        loadFileConfig(preserveDisabledToolNames: false)
+    }
+
+    private mutating func loadFileConfig(preserveDisabledToolNames: Bool) {
+        let logger = ProxyLogging.make("config")
+        if preserveDisabledToolNames == false {
+            disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
                 configPath: configPath,
-                logger: ProxyLogging.make("config")
+                logger: logger
             )
+        }
+        initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
+            configPath: configPath,
+            logger: logger
+        )
     }
 }
 
@@ -140,8 +154,11 @@ public struct CLIParser {
         var index = 1
         while index < args.count {
             let arg = args[index]
-            switch arg {
-            case "--listen":
+            guard let flag = ProxyCLIFlag(rawValue: arg) else {
+                throw CLIError.message("Unknown argument: \(arg)")
+            }
+            switch flag {
+            case .listen:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--listen requires host:port")
                 }
@@ -156,25 +173,25 @@ public struct CLIParser {
                     listenHost = value
                 }
                 index += 2
-            case "--host":
+            case .host:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--host requires a value")
                 }
                 listenHost = args[index + 1]
                 index += 2
-            case "--port":
+            case .port:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--port requires a value")
                 }
                 listenPort = Int(args[index + 1]) ?? listenPort
                 index += 2
-            case "--upstream-command":
+            case .upstreamCommand:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-command requires a value")
                 }
                 upstreamCommand = args[index + 1]
                 index += 2
-            case "--upstream-args":
+            case .upstreamArgs:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-args requires a value")
                 }
@@ -182,13 +199,13 @@ public struct CLIParser {
                 let parts = value.split(separator: ",").map { String($0) }.filter { !$0.isEmpty }
                 upstreamArgs = parts.isEmpty ? [] : parts
                 index += 2
-            case "--upstream-arg":
+            case .upstreamArg:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-arg requires a value")
                 }
                 upstreamArgs.append(args[index + 1])
                 index += 2
-            case "--upstream-processes":
+            case .upstreamProcesses:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--upstream-processes requires a value")
                 }
@@ -197,36 +214,36 @@ public struct CLIParser {
                 }
                 upstreamProcessCount = parsed
                 index += 2
-            case "--xcode-pid":
+            case .xcodePID:
                 throw CLIError.message(Self.removedXcodePIDMessage)
-            case "--session-id":
+            case .sessionID:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--session-id requires a value")
                 }
                 upstreamSessionID = args[index + 1]
                 index += 2
-            case "--max-body-bytes":
+            case .maxBodyBytes:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--max-body-bytes requires a value")
                 }
                 maxBodyBytes = Int(args[index + 1]) ?? maxBodyBytes
                 index += 2
-            case "--request-timeout":
+            case .requestTimeout:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--request-timeout requires seconds")
                 }
                 requestTimeout = TimeInterval(args[index + 1]) ?? requestTimeout
                 index += 2
-            case "--config":
+            case .config:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--config requires a value")
                 }
                 configPath = args[index + 1]
                 index += 2
-            case "--auto-approve":
+            case .autoApprove:
                 autoApproveXcodeDialog = true
                 index += 1
-            case "--refresh-code-issues-mode":
+            case .refreshCodeIssuesMode:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
                 }
@@ -236,9 +253,9 @@ public struct CLIParser {
                 refreshCodeIssuesMode = parsed
                 hasExplicitRefreshCodeIssuesMode = true
                 index += 2
-            case "--lazy-init":
+            case .lazyInit:
                 throw CLIError.message(Self.removedLazyInitMessage)
-            case "--stdio":
+            case .stdio:
                 if index + 1 < args.count {
                     let candidate = args[index + 1]
                     if !candidate.hasPrefix("-") {
@@ -256,7 +273,8 @@ public struct CLIParser {
                 stdioUpstreamURL = resolved.url
                 stdioUpstreamSource = resolved.source
                 index += 1
-            default:
+            case .helpShort, .help, .version, .url, .printURL, .dryRun, .forceRestart,
+                 .prefix, .bindir:
                 throw CLIError.message("Unknown argument: \(arg)")
             }
         }
@@ -296,30 +314,6 @@ public struct CLIParser {
             autoApproveXcodeDialog: autoApproveXcodeDialog,
             refreshCodeIssuesMode: refreshCodeIssuesMode
         )
-    }
-
-    public static func usage() -> String {
-        """
-        Usage: xcode-mcp-proxy [options]
-
-        Options:
-          --listen host:port         Listen address (default: localhost:0)
-          --host host                Listen host (default: localhost)
-          --port port                Listen port (default: 0)
-          --upstream-command cmd     Upstream command (default: xcrun)
-          --upstream-args a,b,c      Upstream args (default: mcpbridge)
-          --upstream-arg value       Append a single upstream arg
-          --upstream-processes n     Upstream process count (default: 1, max: 10)
-          --session-id id            Upstream session id (env MCP_XCODE_SESSION_ID)
-          --max-body-bytes n         Max request body size (default: 1048576)
-          --request-timeout seconds  Request timeout (default: 300, 0 disables non-initialize timeouts)
-          --config path              Path to proxy config TOML (env \(configPathEnv))
-          --auto-approve             Auto-approve the Xcode permission dialog
-          --refresh-code-issues-mode proxy|upstream
-                                     Refresh implementation (default: proxy; env \(refreshCodeIssuesModeEnv))
-          --stdio [url]              Run in STDIO mode (default: discovery -> http://localhost:8765/mcp)
-          -h, --help                 Show help
-        """
     }
 
     private static func parseListen(_ value: String) throws -> (host: String, port: Int) {
