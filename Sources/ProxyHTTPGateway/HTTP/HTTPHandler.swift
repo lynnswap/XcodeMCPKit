@@ -321,15 +321,17 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         let normalizedOriginHost = Self.normalizedHost(originHost)
-        guard Self.isLoopbackOrConfiguredHost(
+        let hostHeader = requestHead.headers.first(name: "Host")
+        guard Self.originHostIsAllowed(
             normalizedOriginHost,
-            configuredHost: config.listenHost
+            configuredHost: config.listenHost,
+            hostHeader: hostHeader
         ) else {
             return false
         }
 
         let originPort = components.port ?? Self.defaultPort(for: scheme)
-        if let hostHeaderPort = Self.port(fromHostHeader: requestHead.headers.first(name: "Host")),
+        if let hostHeaderPort = Self.port(fromHostHeader: hostHeader),
             originPort != hostHeaderPort
         {
             return false
@@ -352,6 +354,22 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         scheme == "https" ? 443 : 80
     }
 
+    private static func originHostIsAllowed(
+        _ originHost: String,
+        configuredHost: String,
+        hostHeader: String?
+    ) -> Bool {
+        if isLoopbackOrConfiguredHost(originHost, configuredHost: configuredHost) {
+            return true
+        }
+        guard isWildcardHost(configuredHost),
+            let requestHost = host(fromHostHeader: hostHeader)
+        else {
+            return false
+        }
+        return originHost == normalizedHost(requestHost)
+    }
+
     private static func isLoopbackOrConfiguredHost(
         _ host: String,
         configuredHost: String
@@ -367,6 +385,15 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return true
         }
         return false
+    }
+
+    private static func isWildcardHost(_ host: String) -> Bool {
+        switch normalizedHost(host) {
+        case "0.0.0.0", "::", "0:0:0:0:0:0:0:0":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func isIPv4LoopbackHost(_ host: String) -> Bool {
@@ -385,6 +412,29 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             octets.append(value)
         }
         return octets.first == 127
+    }
+
+    private static func host(fromHostHeader hostHeader: String?) -> String? {
+        guard let hostHeader = hostHeader?.trimmingCharacters(in: .whitespacesAndNewlines),
+            hostHeader.isEmpty == false
+        else {
+            return nil
+        }
+        if hostHeader.hasPrefix("["),
+            let closeBracket = hostHeader.firstIndex(of: "]")
+        {
+            return String(hostHeader[hostHeader.index(after: hostHeader.startIndex)..<closeBracket])
+        }
+        let colonCount = hostHeader.reduce(0) { count, character in
+            character == ":" ? count + 1 : count
+        }
+        if colonCount == 1,
+            let colon = hostHeader.lastIndex(of: ":"),
+            Int(hostHeader[hostHeader.index(after: colon)...]) != nil
+        {
+            return String(hostHeader[..<colon])
+        }
+        return hostHeader
     }
 
     private static func port(fromHostHeader hostHeader: String?) -> Int? {

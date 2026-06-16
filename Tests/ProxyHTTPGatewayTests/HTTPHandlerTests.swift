@@ -648,6 +648,75 @@ struct HTTPHandlerTests {
         #expect(sessionManager.isInitialized() == false)
     }
 
+    @Test func httpAllowsOriginMatchingHostHeaderWhenBoundToWildcard() async throws {
+        var config = makeConfig()
+        config.listenHost = "0.0.0.0"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Host", value: "192.0.2.10:8765")
+        head.headers.add(name: "Origin", value: "http://192.0.2.10:8765")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+        #expect(response.head.headers.first(name: "Mcp-Session-Id") != nil)
+    }
+
+    @Test func httpRejectsOriginMismatchingHostHeaderWhenBoundToWildcard() async throws {
+        var config = makeConfig()
+        config.listenHost = "0.0.0.0"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Host", value: "192.0.2.10:8765")
+        head.headers.add(name: "Origin", value: "http://example.invalid:8765")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.isInitialized() == false)
+    }
+
     @Test func httpPostRejectsLargeBody() async throws {
         let config = makeConfig(maxBodyBytes: 1)
         let channel = EmbeddedChannel()
