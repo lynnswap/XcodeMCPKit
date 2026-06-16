@@ -13,6 +13,11 @@ public actor StdioAdapter {
         }
     }
 
+    private struct RequestResult {
+        let payloads: [Data]
+        let shouldStartSSEAfterOutput: Bool
+    }
+
     private enum AdapterError: Error {
         case invalidResponse
         case httpStatus(Int)
@@ -127,11 +132,18 @@ public actor StdioAdapter {
         if stopped { return }
         let envelope = inspectRequest(data)
         do {
-            let responseData = try await sendRequest(data)
-            if let responseData {
-                await outputWriter.send(responseData)
+            let result = try await sendRequest(data)
+            if result.payloads.isEmpty == false {
+                for payload in result.payloads {
+                    await outputWriter.send(payload)
+                }
+                if result.shouldStartSSEAfterOutput {
+                    startSSEIfNeeded()
+                }
             } else if envelope.expectsResponse {
                 await emitError(for: envelope, message: "upstream returned empty response")
+            } else if result.shouldStartSSEAfterOutput {
+                startSSEIfNeeded()
             }
         } catch let error as AdapterError {
             if stopped || Task.isCancelled { return }
@@ -149,7 +161,7 @@ public actor StdioAdapter {
         }
     }
 
-    private func sendRequest(_ data: Data) async throws -> Data? {
+    private func sendRequest(_ data: Data) async throws -> RequestResult {
         let envelope = inspectRequest(data)
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "POST"
@@ -169,53 +181,62 @@ public actor StdioAdapter {
             throw AdapterError.invalidResponse
         }
         if (200...299).contains(http.statusCode) {
-            guard let payload = responsePayloadData(responseData, from: http) else { return nil }
-            if envelope.method == "initialize" {
-                updateSessionState(from: http, responseData: payload)
-                startSSEIfNeeded()
+            let payloads = responsePayloadsData(responseData, from: http)
+            if payloads.isEmpty {
+                return RequestResult(payloads: [], shouldStartSSEAfterOutput: false)
             }
-            guard isValidJSONPayload(payload) else {
+            if envelope.method == "initialize" {
+                updateSessionState(from: http, payloads: payloads)
+            }
+            guard payloads.allSatisfy({ isValidJSONPayload($0) }) else {
                 throw AdapterError.invalidResponse
             }
-            return payload
+            return RequestResult(
+                payloads: payloads,
+                shouldStartSSEAfterOutput: envelope.method == "initialize"
+            )
         }
-        if let payload = responsePayloadData(responseData, from: http),
-            isValidJSONPayload(payload)
+        let payloads = responsePayloadsData(responseData, from: http)
+        if payloads.isEmpty == false,
+            payloads.allSatisfy({ isValidJSONPayload($0) })
         {
-            return payload
+            return RequestResult(payloads: payloads, shouldStartSSEAfterOutput: false)
         }
         throw AdapterError.httpStatus(http.statusCode)
     }
 
-    private func updateSessionState(from response: HTTPURLResponse, responseData: Data) {
+    private func updateSessionState(from response: HTTPURLResponse, payloads: [Data]) {
         if let returnedSessionID = response.value(forHTTPHeaderField: "MCP-Session-Id"),
             returnedSessionID.isEmpty == false
         {
             sessionID = returnedSessionID
         }
-        if let version = initializeProtocolVersion(from: responseData) {
+        if let version = payloads.lazy.compactMap({ self.initializeProtocolVersion(from: $0) }).first {
             negotiatedProtocolVersion = version
         }
     }
 
-    private func responsePayloadData(_ data: Data, from response: HTTPURLResponse) -> Data? {
-        guard !data.isEmpty else { return nil }
+    private func responsePayloadsData(_ data: Data, from response: HTTPURLResponse) -> [Data] {
+        guard !data.isEmpty else { return [] }
         let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
-        guard contentType.hasPrefix("text/event-stream") else { return data }
-        return singleSSEPayloadData(from: data)
+        guard contentType.hasPrefix("text/event-stream") else { return [data] }
+        return ssePayloadsData(from: data)
     }
 
-    private func singleSSEPayloadData(from data: Data) -> Data? {
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
+    private func ssePayloadsData(from data: Data) -> [Data] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
         var decoder = SSEDecoder()
-        var payload: Data?
+        var payloads: [Data] = []
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = rawLine.hasSuffix("\r") ? rawLine.dropLast() : Substring(rawLine)
             if let eventPayload = decoder.feed(line: String(line)) {
-                payload = eventPayload
+                payloads.append(eventPayload)
             }
         }
-        return payload ?? decoder.flushIfNeeded()
+        if let tail = decoder.flushIfNeeded() {
+            payloads.append(tail)
+        }
+        return payloads
     }
 
     private func initializeProtocolVersion(from data: Data) -> String? {

@@ -712,6 +712,30 @@ struct HTTPHandlerTests {
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
+    @Test func httpJSONRPCResponseIsAcceptedWithoutUpstreamRouting() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let sessionID = try initializeHTTPChannel(channel)
+        let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 99,
+            "result": ["ok": true],
+        ]
+        try postJSON(payload, sessionID: sessionID, to: channel)
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .accepted)
+        #expect(response.body.isEmpty)
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == chooseCountBeforeResponse)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+    }
+
     @Test func httpInitializePrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
