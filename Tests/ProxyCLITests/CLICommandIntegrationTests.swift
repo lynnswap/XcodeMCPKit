@@ -19,6 +19,91 @@ struct CLICommandIntegrationTests {
         try await runCLICommandRoundTrip(responseMode: .sse)
     }
 
+    @Test func cliCommandDoesNotSerializeRequestsAfterInitialize() async throws {
+        let server = try StubMCPHTTPServer.start(
+            responseMode: .json,
+            delayedResponseMethod: "tools/call"
+        )
+        let errors = CapturedLines()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { upstreamURL, requestTimeout, input, output in
+                    StdioAdapter(
+                        upstreamURL: upstreamURL,
+                        requestTimeout: requestTimeout,
+                        input: input,
+                        output: output
+                    )
+                },
+                input: inputPipe.fileHandleForReading,
+                output: outputPipe.fileHandleForWriting
+            )
+        )
+
+        do {
+            let initialize =
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+            let slowCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
+            let toolsList = #"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#
+            inputPipe.fileHandleForWriting.write(
+                Data(initialize.utf8) + Data("\n".utf8)
+                    + Data(slowCall.utf8) + Data("\n".utf8)
+                    + Data(toolsList.utf8) + Data("\n".utf8)
+            )
+            inputPipe.fileHandleForWriting.closeFile()
+
+            let exitCode = try await waitWithTimeout(
+                "CLI command should finish after delayed concurrent request completes",
+                timeout: .seconds(5)
+            ) {
+                await command.run(
+                    args: [
+                        "xcode-mcp-proxy",
+                        "--url",
+                        server.url.absoluteString,
+                    ],
+                    environment: [:]
+                )
+            }
+            outputPipe.fileHandleForWriting.closeFile()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+
+            #expect(exitCode == 0)
+            #expect(errors.snapshot().isEmpty)
+
+            let output = String(decoding: outputData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let responseIDs = try output
+                .split(separator: "\n")
+                .map { line in
+                    let object = try #require(
+                        JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+                    )
+                    return try #require((object["id"] as? NSNumber)?.intValue)
+                }
+            #expect(responseIDs.count == 3)
+            #expect(responseIDs.first == 1)
+            let slowResponseIndex = try #require(responseIDs.firstIndex(of: 2))
+            let fastResponseIndex = try #require(responseIDs.firstIndex(of: 3))
+            #expect(fastResponseIndex < slowResponseIndex)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
     private func runCLICommandRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
         let server = try StubMCPHTTPServer.start(responseMode: responseMode)
         let errors = CapturedLines()
@@ -129,7 +214,10 @@ private struct StubMCPHTTPServer {
     let childChannelTracker: HTTPTestServerChannelTracker
     let recorder: StubMCPHTTPRecorder
 
-    static func start(responseMode: StubMCPHTTPResponseMode) throws -> StubMCPHTTPServer {
+    static func start(
+        responseMode: StubMCPHTTPResponseMode,
+        delayedResponseMethod: String? = nil
+    ) throws -> StubMCPHTTPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
         let recorder = StubMCPHTTPRecorder()
@@ -141,7 +229,8 @@ private struct StubMCPHTTPServer {
                     channel.pipeline.addHandler(
                         StubMCPHTTPHandler(
                             recorder: recorder,
-                            responseMode: responseMode
+                            responseMode: responseMode,
+                            delayedResponseMethod: delayedResponseMethod
                         )
                     )
                 }
@@ -205,15 +294,18 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
 
     private let recorder: StubMCPHTTPRecorder
     private let responseMode: StubMCPHTTPResponseMode
+    private let delayedResponseMethod: String?
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBufferAllocator().buffer(capacity: 0)
 
     init(
         recorder: StubMCPHTTPRecorder,
-        responseMode: StubMCPHTTPResponseMode
+        responseMode: StubMCPHTTPResponseMode,
+        delayedResponseMethod: String?
     ) {
         self.recorder = recorder
         self.responseMode = responseMode
+        self.delayedResponseMethod = delayedResponseMethod
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -300,11 +392,22 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
                 status: .ok,
                 headers: headers
             )
-            var buffer = context.channel.allocator.buffer(capacity: responseBody.count)
-            buffer.writeBytes(responseBody)
-            context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
-            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            if requestObject?["method"] as? String == delayedResponseMethod {
+                let sendableContext = SendableChannelHandlerContext(value: context)
+                context.eventLoop.scheduleTask(in: .milliseconds(250)) {
+                    self.sendPOSTResponse(
+                        context: sendableContext.value,
+                        responseHead: responseHead,
+                        responseBody: responseBody
+                    )
+                }
+            } else {
+                sendPOSTResponse(
+                    context: context,
+                    responseHead: responseHead,
+                    responseBody: responseBody
+                )
+            }
         case .DELETE:
             let responseHead = HTTPResponseHead(version: requestHead.version, status: .ok)
             context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
@@ -315,6 +418,22 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
         }
     }
+
+    private func sendPOSTResponse(
+        context: ChannelHandlerContext,
+        responseHead: HTTPResponseHead,
+        responseBody: Data
+    ) {
+        var buffer = context.channel.allocator.buffer(capacity: responseBody.count)
+        buffer.writeBytes(responseBody)
+        context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
+}
+
+private struct SendableChannelHandlerContext: @unchecked Sendable {
+    let value: ChannelHandlerContext
 }
 
 extension XcodeMCPProxyCLICommand: @unchecked Sendable {}

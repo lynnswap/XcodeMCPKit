@@ -28,7 +28,7 @@ public actor StdioAdapter {
     private var negotiatedProtocolVersion: String?
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
-    private var requestTail: Task<Void, Never>?
+    private var initializationTask: Task<Void, Never>?
     private var readTask: Task<Void, Never>?
     private var sseTask: Task<Void, Never>?
     private var started = false
@@ -88,13 +88,16 @@ public actor StdioAdapter {
         let result = framer.append(data)
         for message in result.messages {
             let requestID = UUID()
-            let previous = requestTail
+            let method = inspectRequest(message).method
+            let pendingInitialization = initializationTask
             let task = Task { [weak self] in
-                _ = await previous?.value
+                _ = await pendingInitialization?.value
                 guard let self else { return }
                 await self.runRequestTask(id: requestID, data: message)
             }
-            requestTail = task
+            if method == "initialize" {
+                initializationTask = task
+            }
             requestTasks[requestID] = task
         }
 

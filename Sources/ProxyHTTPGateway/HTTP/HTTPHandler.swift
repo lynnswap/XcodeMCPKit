@@ -457,7 +457,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleDelete(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        guard let sessionID = validateExistingSession(
+        guard let sessionID = validateDeletableSession(
             on: context.channel,
             head: head,
             requestLog: requestLog
@@ -654,6 +654,69 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
                 requestLog: requestLog
             )
             return nil
+        }
+        guard let protocolVersion = HTTPRequestValidator.protocolVersion(from: head.headers),
+            protocolVersion.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "protocol version required",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard MCPProtocolVersion.isSupported(protocolVersion),
+            protocolVersion == expectedProtocolVersion
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "protocol version mismatch",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        return sessionID
+    }
+
+    private func validateDeletableSession(
+        on channel: Channel,
+        head: HTTPRequestHead,
+        requestLog: RequestLogContext
+    ) -> String? {
+        guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers),
+            sessionID.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "session id required",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard controlService.hasSession(id: sessionID) else {
+            _ = sendPlain(
+                on: channel,
+                status: .notFound,
+                body: "session not found",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard let expectedProtocolVersion = controlService.negotiatedProtocolVersion(id: sessionID),
+            expectedProtocolVersion.isEmpty == false
+        else {
+            return sessionID
         }
         guard let protocolVersion = HTTPRequestValidator.protocolVersion(from: head.headers),
             protocolVersion.isEmpty == false

@@ -500,6 +500,24 @@ struct HTTPHandlerTests {
         #expect(afterDeleteResponse.body == "session not found")
     }
 
+    @Test func httpDeleteTerminatesUninitializedSession() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        _ = sessionManager.uninitializedSession(id: "uninitialized-session")
+
+        var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
+        deleteHead.headers.add(name: "MCP-Session-Id", value: "uninitialized-session")
+        try channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let deleteResponse = try collectResponse(from: channel)
+        #expect(deleteResponse.head.status == .ok)
+        #expect(sessionManager.hasSession(id: "uninitialized-session") == false)
+    }
+
     @Test func httpRejectsInvalidOrigin() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()

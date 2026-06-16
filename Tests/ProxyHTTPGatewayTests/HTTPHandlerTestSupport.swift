@@ -173,6 +173,19 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func uninitializedSession(id: String) -> SessionContext {
+        state.withLockedValue { state in
+            if let existing = state.sessions[id] {
+                state.sessionProtocolVersions.removeValue(forKey: id)
+                return existing
+            }
+            let context = SessionContext(id: id, config: config)
+            state.sessions[id] = context
+            state.sessionProtocolVersions.removeValue(forKey: id)
+            return context
+        }
+    }
+
     func hasSession(id: String) -> Bool {
         state.withLockedValue { state in
             state.sessions[id] != nil
