@@ -303,6 +303,60 @@ struct RuntimeCoordinatorTests {
         #expect(secondRoute.upstreamID.key == "duplicate")
     }
 
+    @Test func sessionManagerRoutesServerInitiatedRequestToSingleSession() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let firstSessionID = "session-server-request-a"
+        let firstSession = manager.session(id: firstSessionID)
+        let firstFuture = manager.registerInitialize(
+            sessionID: firstSessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        _ = try await firstFuture.get()
+
+        let secondSessionID = "session-server-request-b"
+        let secondSession = manager.session(id: secondSessionID)
+        let secondFuture = manager.registerInitialize(
+            sessionID: secondSessionID,
+            originalID: RPCID(any: NSNumber(value: 2))!,
+            requestObject: makeInitializeRequest(id: 2),
+            on: eventLoop
+        )
+        _ = try await secondFuture.get()
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "server-request-1",
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        let serverRequestData = try JSONSerialization.data(
+            withJSONObject: serverRequest,
+            options: []
+        )
+        manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let routes = [
+            firstSession.serverRequestTracker.consume(clientID: clientID),
+            secondSession.serverRequestTracker.consume(clientID: clientID),
+        ].compactMap { $0 }
+        #expect(routes.count == 1)
+        #expect(routes.first?.upstreamIndex == 0)
+        #expect(routes.first?.upstreamID.key == "server-request-1")
+    }
+
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()
         async throws
     {

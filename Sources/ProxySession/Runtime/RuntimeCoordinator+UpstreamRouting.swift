@@ -518,6 +518,7 @@ extension RuntimeCoordinator {
         struct ServerInitiatedPayload {
             let data: Data
             let object: [String: Any]
+            let expectsResponse: Bool
 
             func routedData(
                 for session: SessionContext,
@@ -547,7 +548,8 @@ extension RuntimeCoordinator {
                 return [
                     ServerInitiatedPayload(
                         data: data,
-                        object: object
+                        object: object,
+                        expectsResponse: JSONRPCMessageInspector.requestID(from: object) != nil
                     )
                 ]
             }
@@ -566,7 +568,8 @@ extension RuntimeCoordinator {
                     payloads.append(
                         ServerInitiatedPayload(
                             data: encoded,
-                            object: object
+                            object: object,
+                            expectsResponse: JSONRPCMessageInspector.requestID(from: object) != nil
                         )
                     )
                 }
@@ -620,7 +623,10 @@ extension RuntimeCoordinator {
 
         if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
-                for session in routedTargets {
+                let payloadTargets = payload.expectsResponse
+                    ? Array(routedTargets.prefix(1))
+                    : routedTargets
+                for session in payloadTargets {
                     guard let routedData = payload.routedData(
                         for: session,
                         upstreamIndex: upstreamIndex
