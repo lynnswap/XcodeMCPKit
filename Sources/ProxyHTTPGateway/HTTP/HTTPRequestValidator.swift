@@ -19,12 +19,14 @@ enum HTTPRequestValidator {
     }
 
     static func acceptsEventStream(_ headers: HTTPHeaders) -> Bool {
-        guard let accept = headers.first(name: "Accept")?.lowercased() else { return false }
+        let accept = combinedHeaderValue(name: "Accept", from: headers).lowercased()
+        guard accept.isEmpty == false else { return false }
         return accept.contains("text/event-stream")
     }
 
     static func acceptsJSON(_ headers: HTTPHeaders) -> Bool {
-        guard let accept = headers.first(name: "Accept")?.lowercased() else { return false }
+        let accept = combinedHeaderValue(name: "Accept", from: headers).lowercased()
+        guard accept.isEmpty == false else { return false }
         return accept.contains("application/json") || accept.contains("*/*")
     }
 
@@ -46,5 +48,14 @@ enum HTTPRequestValidator {
         }
         // The gateway currently chooses JSON responses for single POST replies.
         return false
+    }
+
+    private static func combinedHeaderValue(name: String, from headers: HTTPHeaders) -> String {
+        headers
+            .filter { header in
+                header.name.compare(name, options: .caseInsensitive) == .orderedSame
+            }
+            .map(\.value)
+            .joined(separator: ",")
     }
 }

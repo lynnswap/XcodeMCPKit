@@ -345,14 +345,27 @@ public actor StdioAdapter {
 
     private func deleteSessionIfNeeded() async {
         guard let sessionID, let negotiatedProtocolVersion else { return }
+        defer {
+            self.sessionID = nil
+            self.negotiatedProtocolVersion = nil
+        }
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "DELETE"
         request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
         request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
         applyTimeout(to: &request)
-        _ = try? await session.data(for: request)
-        self.sessionID = nil
-        self.negotiatedProtocolVersion = nil
+        let urlSession = session
+        let deleteRequest = request
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                _ = try? await urlSession.data(for: deleteRequest)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
     }
 
     private func stopLocked(cancelReadTask: Bool) {

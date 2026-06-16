@@ -335,6 +335,38 @@ struct HTTPHandlerTests {
         #expect(response.body == "client must accept application/json and text/event-stream")
     }
 
+    @Test func httpPostAllowsRequiredAcceptTypesAcrossRepeatedHeaders() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": MCPProtocolVersion.current,
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+        #expect(response.head.headers.first(name: "Mcp-Session-Id")?.isEmpty == false)
+    }
+
     @Test func httpPostRejectsNonJSONContentType() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
