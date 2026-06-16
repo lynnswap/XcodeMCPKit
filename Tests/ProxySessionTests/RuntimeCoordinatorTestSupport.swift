@@ -920,7 +920,7 @@ func makeInitializeRequest(id: Int) -> [String: Any] {
         "id": id,
         "method": "initialize",
         "params": [
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-06-18",
             "capabilities": [String: Any](),
             "clientInfo": [
                 "name": "session-manager-tests",
@@ -945,6 +945,7 @@ func makeInitializeResponse(id: Int64) throws -> Data {
 
 func makeInitializeResponse(id: Int64, serverName: String?) throws -> Data {
     var result: [String: Any] = [
+        "protocolVersion": MCPProtocolVersion.current,
         "capabilities": [String: Any]()
     ]
     if let serverName {

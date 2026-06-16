@@ -20,11 +20,13 @@ it’s usually because the upstream (`xcrun mcpbridge` / Xcode) was slow on the 
 - The tool list cache is **not persisted to disk**. It survives repeated Codex restarts as long as the proxy server stays running.
 - `tools/list` is intentionally treated as stable for the lifetime of the proxy process (no background refresh), to avoid upstream churn and surprise Xcode permission dialogs.
 
-## HTTP/SSE client cannot connect
+## Streamable HTTP client cannot connect
 - Ensure `xcode-mcp-proxy-server` is running.
 - Confirm the URL is correct (default: `http://localhost:8765/mcp`).
 - If you changed the listen address/port, check the discovery file: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
 - Confirm `pid` is alive and `updatedAt` is recent; stale data should be ignored.
+- Ensure `POST /mcp` sends `Content-Type: application/json` and `Accept: application/json, text/event-stream`.
+- After initialize, ensure the client sends the server-issued `MCP-Session-Id` and `MCP-Protocol-Version: 2025-06-18`.
 
 ## `Address already in use` / `errno: 48`
 Another process is already listening on the same port (default: `8765`).
@@ -84,4 +86,7 @@ When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagn
 - If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
 
 ## `session not found`
-Ensure the client is using the same session.
+Ensure the client is using the server-issued `MCP-Session-Id`. Initialize requests must not rely on a caller-provided session id, and `DELETE /mcp` permanently terminates the session.
+
+## `protocol version required` / `protocol version mismatch`
+The proxy only accepts `MCP-Protocol-Version: 2025-06-18` after initialize. Reinitialize the client session if it cached an older protocol version or omitted the header.

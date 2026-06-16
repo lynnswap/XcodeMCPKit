@@ -140,7 +140,10 @@ extension RuntimeCoordinator {
         result: JSONValue
     ) {
         for item in pending {
-            sessionRegistry.markInitialized(id: item.sessionID)
+            sessionRegistry.markInitialized(
+                id: item.sessionID,
+                negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: result)
+            )
             if let buffer = encodeInitializeResponse(
                 originalID: item.originalID,
                 result: result
@@ -170,6 +173,15 @@ extension RuntimeCoordinator {
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
         buffer.writeBytes(data)
         return buffer
+    }
+
+    static func protocolVersion(fromInitializeResult result: JSONValue) -> String? {
+        guard case .object(let object) = result,
+              case .string(let version)? = object["protocolVersion"]
+        else {
+            return nil
+        }
+        return version
     }
 
     func encodeInitializeErrorResponse(originalID: RPCID, errorObject: [String: Any])

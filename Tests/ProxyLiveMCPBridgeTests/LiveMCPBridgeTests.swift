@@ -52,7 +52,7 @@ struct LiveMCPBridgeTests {
                 "id": 1,
                 "method": "initialize",
                 "params": [
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": "2025-06-18",
                     "clientInfo": [
                         "name": assistantName,
                         "version": "dev",
@@ -151,7 +151,7 @@ struct LiveMCPBridgeTests {
                     "id": 1,
                     "method": "initialize",
                     "params": [
-                        "protocolVersion": "2025-03-26",
+                        "protocolVersion": "2025-06-18",
                         "clientInfo": [
                             "name": "XcodeMCPKitLiveTest",
                             "version": "dev",
@@ -309,9 +309,10 @@ private func postJSON(
     var request = URLRequest(url: url, timeoutInterval: 25)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
     request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
@@ -325,7 +326,7 @@ private func get(
     urlSession: URLSession
 ) async throws -> Data {
     var request = URLRequest(url: url, timeoutInterval: timeoutInterval)
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     let (data, response) = try await urlSession.data(for: request)
     _ = try #require(response as? HTTPURLResponse)
     return data

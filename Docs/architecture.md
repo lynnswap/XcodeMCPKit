@@ -1,13 +1,15 @@
 # XcodeMCPProxy Architecture
 
 ## Summary
-- `xcode-mcp-proxy-server` runs as the proxy server (HTTP/SSE; spawns `xcrun mcpbridge`).
+- `xcode-mcp-proxy-server` runs as the proxy server (Streamable HTTP; spawns `xcrun mcpbridge`).
 - HTTP-capable MCP clients connect directly to the proxy server (default: `http://localhost:8765/mcp`).
-- `xcode-mcp-proxy` runs as a STDIO adapter for clients that require STDIO, forwarding to the proxy server over HTTP/SSE.
+- `xcode-mcp-proxy` remains as a supported STDIO compatibility adapter, forwarding to the proxy server as a modern Streamable HTTP client.
+- The proxy targets MCP protocol version `2025-06-18`, matching current Xcode `mcpbridge` negotiation.
+- JSON-RPC batch requests are rejected at the HTTP boundary.
 
 ## Diagrams
 
-### Proxy Server (HTTP/SSE)
+### Proxy Server (Streamable HTTP)
 ```mermaid
 flowchart LR
   subgraph Clients["MCP clients (multiple)"]
@@ -16,7 +18,7 @@ flowchart LR
     clientB(["Client B"])
     clientN(["Client N"])
   end
-  proxy["xcode-mcp-proxy-server<br/>HTTP/SSE"]
+  proxy["xcode-mcp-proxy-server<br/>Streamable HTTP"]
   subgraph Upstreams["Upstream (mcpbridge pool)"]
     direction TB
     upstream1(["xcrun mcpbridge #1<br/>stdio JSON-RPC"])
@@ -25,9 +27,9 @@ flowchart LR
   end
   xcode["Xcode MCP server"]
 
-  clientA -->|HTTP POST / SSE| proxy
-  clientB -->|HTTP POST / SSE| proxy
-  clientN -->|HTTP POST / SSE| proxy
+  clientA -->|POST/GET/DELETE /mcp| proxy
+  clientB -->|POST/GET/DELETE /mcp| proxy
+  clientN -->|POST/GET/DELETE /mcp| proxy
   proxy -->|stdio JSON-RPC| upstream1
   proxy -->|stdio JSON-RPC| upstream2
   proxy -->|stdio JSON-RPC| upstreamN
@@ -51,7 +53,7 @@ flowchart LR
     clientB -->|NDJSON over STDIO| adapterB
   end
 
-  proxy["xcode-mcp-proxy-server<br/>HTTP/SSE"]
+  proxy["xcode-mcp-proxy-server<br/>Streamable HTTP"]
   subgraph Upstreams["Upstream (mcpbridge pool)"]
     direction TB
     upstream1(["xcrun mcpbridge #1<br/>stdio JSON-RPC"])
@@ -60,8 +62,8 @@ flowchart LR
   end
   xcode["Xcode MCP server"]
 
-  adapterA -->|HTTP POST / SSE| proxy
-  adapterB -->|HTTP POST / SSE| proxy
+  adapterA -->|POST/GET/DELETE /mcp| proxy
+  adapterB -->|POST/GET/DELETE /mcp| proxy
   proxy -->|stdio JSON-RPC| upstream1
   proxy -->|stdio JSON-RPC| upstream2
   proxy -->|stdio JSON-RPC| upstreamN
@@ -77,3 +79,10 @@ flowchart LR
   - `XCODE_MCP_PROXY_ENDPOINT`
   - discovery file (`~/Library/Caches/XcodeMCPProxy/endpoint.json`)
 - default (`http://localhost:8765/mcp`)
+
+## Streamable HTTP Contract
+- `POST /mcp` requires `Content-Type: application/json` and `Accept` containing both `application/json` and `text/event-stream`.
+- The server generates `MCP-Session-Id` on `initialize`; caller-provided session ids are ignored for initialize.
+- After initialize, `POST`, `GET`, and `DELETE` require both `MCP-Session-Id` and `MCP-Protocol-Version: 2025-06-18`.
+- Missing session ids return `400`; unknown or terminated session ids return `404`.
+- `DELETE /mcp` terminates the session; later requests with that session id return `404`.

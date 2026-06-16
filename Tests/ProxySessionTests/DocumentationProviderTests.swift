@@ -426,7 +426,7 @@ extension RuntimeCoordinatorTests {
             ]
         )
         let initializeParams = try jsonValue([
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-06-18",
             "capabilities": [
                 "roots": [
                     "listChanged": true,
@@ -456,7 +456,7 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected initialize params object")
             return
         }
-        guard case .string("2025-03-26")? = observedObject["protocolVersion"] else {
+        guard case .string("2025-06-18")? = observedObject["protocolVersion"] else {
             Issue.record("expected configured protocol version")
             return
         }

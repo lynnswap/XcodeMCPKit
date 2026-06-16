@@ -1699,7 +1699,7 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
         let capabilities = try #require(params["capabilities"] as? [String: Any])
 
-        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == "custom-proxy")
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
         #expect(capabilities["roots"] as? Bool == true)
@@ -1798,7 +1798,7 @@ struct RuntimeCoordinatorTests {
         let params = try #require(object?["params"] as? [String: Any])
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
-        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == InitializeHandshakeParams.defaultProxyClientName())
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
@@ -1868,7 +1868,7 @@ struct RuntimeCoordinatorTests {
 
         let snapshot = manager.testStateSnapshot()
         #expect(snapshot.hasInitResult == false)
-        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == "configured-proxy")
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }

@@ -7,8 +7,15 @@ enum HTTPRequestValidationFailure: Error {
 }
 
 enum HTTPRequestValidator {
+    static let sessionHeader = "MCP-Session-Id"
+    static let protocolVersionHeader = "MCP-Protocol-Version"
+
     static func sessionID(from headers: HTTPHeaders) -> String? {
-        headers.first(name: "Mcp-Session-Id")
+        headers.first(name: sessionHeader)
+    }
+
+    static func protocolVersion(from headers: HTTPHeaders) -> String? {
+        headers.first(name: protocolVersionHeader)
     }
 
     static func acceptsEventStream(_ headers: HTTPHeaders) -> Bool {
@@ -17,7 +24,7 @@ enum HTTPRequestValidator {
     }
 
     static func acceptsJSON(_ headers: HTTPHeaders) -> Bool {
-        guard let accept = headers.first(name: "Accept")?.lowercased() else { return true }
+        guard let accept = headers.first(name: "Accept")?.lowercased() else { return false }
         return accept.contains("application/json") || accept.contains("*/*")
     }
 
@@ -31,13 +38,13 @@ enum HTTPRequestValidator {
     ) throws -> Bool {
         let wantsEventStream = acceptsEventStream(headers)
         let wantsJSON = acceptsJSON(headers)
-        guard wantsEventStream || wantsJSON else {
+        guard wantsEventStream && wantsJSON else {
             throw HTTPRequestValidationFailure.notAcceptable
         }
         guard contentTypeIsJSON(headers) else {
             throw HTTPRequestValidationFailure.unsupportedMediaType
         }
-        // Prefer JSON when both are acceptable.
-        return wantsEventStream && !wantsJSON
+        // The gateway currently chooses JSON responses for single POST replies.
+        return false
     }
 }

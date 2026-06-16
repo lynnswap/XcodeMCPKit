@@ -110,11 +110,31 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let headerSessionID, !headerSessionExists {
-            _ = sessionManager.session(id: headerSessionID)
+        guard let sessionID = headerSessionID, sessionID.isEmpty == false else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .badRequest,
+                        body: "session id required",
+                        sessionID: nil
+                    )
+                ),
+                cancellationHandle: nil
+            )
         }
 
-        let sessionID = headerSessionID ?? UUID().uuidString
+        guard headerSessionExists else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .notFound,
+                        body: "session not found",
+                        sessionID: sessionID
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
 
         if sessionManager.isInitialized() == false {
             return HTTPPostOperation(

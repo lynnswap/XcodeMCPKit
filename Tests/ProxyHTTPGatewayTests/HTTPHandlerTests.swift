@@ -8,7 +8,7 @@ import ProxyCore
 import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
- import ProxyXcodeSupport
+import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
 @testable import ProxyHTTPGateway
@@ -314,7 +314,7 @@ struct HTTPHandlerTests {
         #expect(response.head.status == .notAcceptable)
     }
 
-    @Test func httpPostRejectsNonJSONContentType() async throws {
+    @Test func httpPostRequiresJSONAndEventStreamAcceptTypes() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -323,6 +323,27 @@ struct HTTPHandlerTests {
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        var body = channel.allocator.buffer(capacity: 2)
+        body.writeString("{}")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .notAcceptable)
+        #expect(response.body == "client must accept application/json and text/event-stream")
+    }
+
+    @Test func httpPostRejectsNonJSONContentType() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "text/plain")
         var body = channel.allocator.buffer(capacity: 2)
         body.writeString("{}")
@@ -334,6 +355,183 @@ struct HTTPHandlerTests {
         #expect(response.head.status == .unsupportedMediaType)
     }
 
+    @Test func httpPostNonInitializeRequiresSessionHeader() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .badRequest)
+        #expect(response.body == "session id required")
+    }
+
+    @Test func httpPostUnknownSessionReturnsNotFound() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "MCP-Session-Id", value: "missing-session")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.body == "session not found")
+    }
+
+    @Test func httpPostRequiresNegotiatedProtocolVersionAfterInitialize() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try initializeHTTPChannel(channel)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "MCP-Session-Id", value: sessionID)
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .badRequest)
+        #expect(response.body == "protocol version required")
+    }
+
+    @Test func httpPostRejectsMismatchedProtocolVersionAfterInitialize() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try initializeHTTPChannel(channel)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "MCP-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: "2025-11-25")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .badRequest)
+        #expect(response.body == "protocol version mismatch")
+    }
+
+    @Test func httpDeleteTerminatesSession() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try initializeHTTPChannel(channel)
+
+        var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
+        deleteHead.headers.add(name: "MCP-Session-Id", value: sessionID)
+        deleteHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        try channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let deleteResponse = try collectResponse(from: channel)
+        #expect(deleteResponse.head.status == .ok)
+        #expect(sessionManager.hasSession(id: sessionID) == false)
+
+        var sseHead = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
+        sseHead.headers.add(name: "Accept", value: "text/event-stream")
+        sseHead.headers.add(name: "MCP-Session-Id", value: sessionID)
+        sseHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        try channel.writeInbound(HTTPServerRequestPart.head(sseHead))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let afterDeleteResponse = try collectResponse(from: channel)
+        #expect(afterDeleteResponse.head.status == .notFound)
+        #expect(afterDeleteResponse.body == "session not found")
+    }
+
+    @Test func httpRejectsInvalidOrigin() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "Origin", value: "https://example.invalid")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.isInitialized() == false)
+    }
+
     @Test func httpPostRejectsLargeBody() async throws {
         let config = makeConfig(maxBodyBytes: 1)
         let channel = EmbeddedChannel()
@@ -342,7 +540,7 @@ struct HTTPHandlerTests {
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: 2)
         body.writeString("{}")
@@ -366,7 +564,7 @@ struct HTTPHandlerTests {
             "id": 1,
             "method": "initialize",
             "params": [
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": "2025-06-18",
                 "capabilities": [String: Any](),
                 "clientInfo": [
                     "name": "xcode-mcp-proxy-tests",
@@ -377,7 +575,7 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
@@ -410,7 +608,7 @@ struct HTTPHandlerTests {
             "id": 1,
             "method": "initialize",
             "params": [
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": "2025-06-18",
                 "capabilities": [String: Any](),
                 "clientInfo": [
                     "name": "xcode-mcp-proxy-tests",
@@ -445,7 +643,7 @@ struct HTTPHandlerTests {
             "jsonrpc": "2.0",
             "method": "initialize",
             "params": [
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": "2025-06-18",
                 "capabilities": [String: Any](),
                 "clientInfo": [
                     "name": "xcode-mcp-proxy-tests",
@@ -455,7 +653,7 @@ struct HTTPHandlerTests {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
@@ -473,7 +671,7 @@ struct HTTPHandlerTests {
         #expect((error?["message"] as? String) == "missing id")
     }
 
-    @Test func httpSingleElementBatchInitializeMissingIDReturnsArrayShape() async throws {
+    @Test func httpJSONArrayBodyIsRejectedBeforeInitializeRouting() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -485,7 +683,7 @@ struct HTTPHandlerTests {
                 "jsonrpc": "2.0",
                 "method": "initialize",
                 "params": [
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": [String: Any](),
                     "clientInfo": [
                         "name": "xcode-mcp-proxy-tests",
@@ -494,34 +692,19 @@ struct HTTPHandlerTests {
                 ],
             ]
         ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: nil, to: channel)
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-        #expect(response.head.headers.first(name: "Content-Type") == "application/json")
-        let array = try #require(
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-                as? [[String: Any]])
-        #expect(array.count == 1)
-        #expect(array[0]["id"] is NSNull)
-        let error = array[0]["error"] as? [String: Any]
-        #expect((error?["code"] as? NSNumber)?.intValue == -32600)
-        #expect((error?["message"] as? String) == "missing id")
+        assertBatchRejected(response)
+        #expect(sessionManager.isInitialized() == false)
     }
 
-    @Test func httpSingleElementBatchErrorReturnsArrayShape() async throws {
+    @Test func httpJSONArrayBodyIsRejectedBeforeUpstreamRouting() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-batch")
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let payload: [[String: Any]] = [
@@ -531,27 +714,11 @@ struct HTTPHandlerTests {
                 "method": "tools/list",
             ]
         ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: "session-batch", to: channel)
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-        #expect(response.head.headers.first(name: "Content-Type") == "application/json")
-        let array = try #require(
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-                as? [[String: Any]])
-        #expect(array.count == 1)
-        #expect((array[0]["id"] as? NSNumber)?.intValue == 42)
-        let error = array[0]["error"] as? [String: Any]
-        #expect((error?["code"] as? NSNumber)?.intValue == -32000)
-        #expect((error?["message"] as? String) == "expected initialize request")
+        assertBatchRejected(response)
+        #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
     @Test func httpTimeoutReturnsMCPErrorAndCleansMapping() async throws {
@@ -571,7 +738,7 @@ struct HTTPHandlerTests {
         ]
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -588,9 +755,10 @@ struct HTTPHandlerTests {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -614,7 +782,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
     }
 
-    @Test func httpTimeoutReturnsSSEErrorWhenEventStreamIsPreferred() async throws {
+    @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -631,7 +799,7 @@ struct HTTPHandlerTests {
         ]
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -651,22 +819,20 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        advanceEventLoopTime(on: channel, by: .milliseconds(300))
-
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-        #expect(response.head.headers.first(name: "Content-Type") == "text/event-stream")
-        #expect(response.body.contains("data:"))
-        #expect(response.body.contains("\"code\":-32000"))
+        #expect(response.head.status == .notAcceptable)
+        #expect(response.head.headers.first(name: "Content-Type") == "text/plain; charset=utf-8")
+        #expect(response.body == "client must accept application/json and text/event-stream")
     }
 
-    @Test func httpBatchTimeoutCountsHealthPenaltyOnceAndCleansAllMappings() async throws {
+    @Test func httpJSONArrayBodyDoesNotCreateTimeoutMappings() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -683,7 +849,7 @@ struct HTTPHandlerTests {
         ]
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -710,32 +876,14 @@ struct HTTPHandlerTests {
                 "method": "tools/list",
             ],
         ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: sessionID, to: channel)
 
-        #expect(sessionManager.mappedUpstreamRequestCount() == 3)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-        let array = try #require(
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-                as? [[String: Any]])
-        #expect(array.count == 3)
-        for object in array {
-            let error = object["error"] as? [String: Any]
-            #expect((error?["code"] as? NSNumber)?.intValue == -32000)
-            #expect((error?["message"] as? String) == "upstream timeout")
-        }
-        #expect(sessionManager.requestTimeoutNotificationCount() == 1)
+        assertBatchRejected(response)
+        #expect(sessionManager.requestTimeoutNotificationCount() == 0)
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
     }
 
@@ -756,7 +904,7 @@ struct HTTPHandlerTests {
         ]
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -775,9 +923,10 @@ struct HTTPHandlerTests {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -811,7 +960,7 @@ struct HTTPHandlerTests {
         ]
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -825,9 +974,10 @@ struct HTTPHandlerTests {
         let chooseCountBeforeMalformedRequest = sessionManager.chooseUpstreamIndexCallCount()
 
         var malformedHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        malformedHead.headers.add(name: "Accept", value: "application/json")
+        malformedHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         malformedHead.headers.add(name: "Content-Type", value: "application/json")
         malformedHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        malformedHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var malformedBody = channel.allocator.buffer(capacity: 20)
         malformedBody.writeString("{\"jsonrpc\":\"2.0\",")
         try channel.writeInbound(HTTPServerRequestPart.head(malformedHead))
@@ -873,7 +1023,7 @@ struct HTTPHandlerTests {
         ]
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -890,9 +1040,10 @@ struct HTTPHandlerTests {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -910,7 +1061,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
-    @Test func httpSessionHeaderAutoCreatesSession() async throws {
+    @Test func httpInitializeIgnoresCallerProvidedSessionHeader() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -927,9 +1078,10 @@ struct HTTPHandlerTests {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: "missing-session")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -938,7 +1090,11 @@ struct HTTPHandlerTests {
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .ok)
-        #expect(response.head.headers.first(name: "Mcp-Session-Id") == "missing-session")
+        let returnedSessionID = try #require(response.head.headers.first(name: "Mcp-Session-Id"))
+        #expect(returnedSessionID.isEmpty == false)
+        #expect(returnedSessionID != "missing-session")
+        #expect(sessionManager.hasSession(id: returnedSessionID))
+        #expect(sessionManager.hasSession(id: "missing-session") == false)
         #expect(response.body.contains("\"result\""))
     }
 
@@ -953,6 +1109,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -985,7 +1142,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1006,9 +1163,10 @@ struct HTTPHandlerTests {
         let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
 
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        toolsHead.headers.add(name: "Accept", value: "application/json")
+        toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1057,7 +1215,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1081,9 +1239,10 @@ struct HTTPHandlerTests {
         let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
 
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        toolsHead.headers.add(name: "Accept", value: "application/json")
+        toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1109,11 +1268,12 @@ struct HTTPHandlerTests {
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
-    @Test func httpSingleItemBatchToolsListUsesCachedResult() async throws {
+    @Test func httpSingleItemBatchToolsListIsRejectedBeforeCacheLookup() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-batch-tools-list")
         sessionManager.setInitialized(true)
         sessionManager.setCachedToolsListResult(
             JSONValue(any: ["tools": [Any]()])!,
@@ -1126,33 +1286,14 @@ struct HTTPHandlerTests {
             "id": 2,
             "method": "tools/list",
         ]]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-Id", value: "session-batch-tools-list")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: "session-batch-tools-list", to: channel)
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-
-        let responseArray =
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-            as? [[String: Any]]
-        let responseObject = try #require(responseArray?.first)
-        #expect((responseObject["id"] as? NSNumber)?.intValue == 2)
-        let result = responseObject["result"] as? [String: Any]
-        let tools = result?["tools"] as? [Any]
-        #expect(tools?.isEmpty == true)
+        assertBatchRejected(response)
         #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
-    @Test func httpForwardedSingleItemBatchToolsListRewritesDescription() async throws {
+    @Test func httpForwardedSingleItemBatchToolsListIsRejectedBeforeForwarding() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -1179,6 +1320,7 @@ struct HTTPHandlerTests {
                 )
             }
         )
+        _ = sessionManager.session(id: "session-forwarded-batch-tools-list")
         sessionManager.setInitialized(true)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1187,31 +1329,11 @@ struct HTTPHandlerTests {
             "id": 22,
             "method": "tools/list",
         ]]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-Id", value: "session-forwarded-batch-tools-list")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: "session-forwarded-batch-tools-list", to: channel)
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-
-        let responseArray =
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-            as? [[String: Any]]
-        let responseObject = try #require(responseArray?.first)
-        let result = responseObject["result"] as? [String: Any]
-        let tools = try #require(result?["tools"] as? [[String: Any]])
-        let refreshTool = tools.first { $0["name"] as? String == "XcodeRefreshCodeIssuesInFile" }
-        let description = refreshTool?["description"] as? String
-        #expect(description?.contains("--refresh-code-issues-mode upstream") == true)
-        #expect(sessionManager.sentUpstreamCount() == 1)
+        assertBatchRejected(response)
+        #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
     @Test func httpToolsListCachesResultOnMissWhenParamsArePresent() async throws {
@@ -1243,7 +1365,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1267,9 +1389,10 @@ struct HTTPHandlerTests {
         let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
 
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        toolsHead.headers.add(name: "Accept", value: "application/json")
+        toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1292,9 +1415,10 @@ struct HTTPHandlerTests {
         ]
         let toolsData2 = try JSONSerialization.data(withJSONObject: toolsPayload2, options: [])
         var toolsHead2 = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        toolsHead2.headers.add(name: "Accept", value: "application/json")
+        toolsHead2.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead2.headers.add(name: "Content-Type", value: "application/json")
         toolsHead2.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        toolsHead2.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody2 = channel.allocator.buffer(capacity: toolsData2.count)
         toolsBody2.writeBytes(toolsData2)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead2))
@@ -1340,7 +1464,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1359,9 +1483,10 @@ struct HTTPHandlerTests {
         let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
 
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        toolsHead.headers.add(name: "Accept", value: "application/json")
+        toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1409,7 +1534,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1428,9 +1553,10 @@ struct HTTPHandlerTests {
         let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
 
         var toolsHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        toolsHead.headers.add(name: "Accept", value: "application/json")
+        toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1579,7 +1705,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1602,6 +1728,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1669,7 +1796,7 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpForwardedSingleItemBatchResourcesListRewritesUnsupportedResponse() async throws {
+    @Test func httpForwardedSingleItemBatchResourcesListIsRejectedBeforeForwarding() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -1688,6 +1815,7 @@ struct HTTPHandlerTests {
                 return .immediate(try JSONSerialization.data(withJSONObject: response, options: []))
             }
         )
+        _ = sessionManager.session(id: "session-forwarded-batch-resources-list")
         sessionManager.setInitialized(true)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
@@ -1697,29 +1825,11 @@ struct HTTPHandlerTests {
             "method": "resources/list",
             "params": [String: Any](),
         ]]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-Id", value: "session-forwarded-batch-resources-list")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: "session-forwarded-batch-resources-list", to: channel)
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-
-        let responseArray =
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-            as? [[String: Any]]
-        let responseObject = try #require(responseArray?.first)
-        let result = responseObject["result"] as? [String: Any]
-        let resources = result?["resources"] as? [Any]
-        #expect(resources?.isEmpty == true)
-        #expect(sessionManager.sentUpstreamCount() == 1)
+        assertBatchRejected(response)
+        #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
     @Test func forwardingServiceSelectsMatchingObjectFromMultiItemBatchResponse() throws {
@@ -1834,6 +1944,7 @@ struct HTTPHandlerTests {
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-1")
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let payload: [String: Any] = [
@@ -1845,9 +1956,10 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1898,7 +2010,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1919,9 +2031,10 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1975,7 +2088,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -1996,9 +2109,10 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2047,7 +2161,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -2068,9 +2182,10 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2121,7 +2236,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -2142,9 +2257,10 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2199,7 +2315,7 @@ struct HTTPHandlerTests {
         let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
 
         var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        initHead.headers.add(name: "Accept", value: "application/json")
+        initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         initHead.headers.add(name: "Content-Type", value: "application/json")
         var initBody = channel.allocator.buffer(capacity: initData.count)
         initBody.writeBytes(initData)
@@ -2220,9 +2336,10 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))

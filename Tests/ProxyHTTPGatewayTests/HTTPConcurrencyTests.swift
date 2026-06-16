@@ -586,6 +586,7 @@ struct HTTPConcurrencyTests {
             request.httpMethod = "GET"
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+            request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
             let sseTask = Task<(HTTPURLResponse, String), Error> {
                 try await withTestURLSession { session in
@@ -915,7 +916,7 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id,
-            "result": ["capabilities": [String: Any]()],
+            "result": ["protocolVersion": MCPProtocolVersion.current, "capabilities": [String: Any]()],
         ]
         return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
@@ -1065,6 +1066,7 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
+                "protocolVersion": MCPProtocolVersion.current,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -1234,6 +1236,7 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
+                "protocolVersion": MCPProtocolVersion.current,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -1341,6 +1344,7 @@ private actor NotifyingUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
+                "protocolVersion": MCPProtocolVersion.current,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -1354,7 +1358,7 @@ private func initializePayload(id: Int) -> [String: Any] {
         "id": id,
         "method": "initialize",
         "params": [
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-06-18",
             "capabilities": [String: Any](),
             "clientInfo": [
                 "name": "xcode-mcp-proxy-concurrency-tests",
@@ -1434,12 +1438,13 @@ private func postJSON(
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     if let timeout {
         request.timeoutInterval = timeout
     }
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
 
     return try await withTestURLSession(timeout: timeout ?? 5) { session in
@@ -1465,12 +1470,13 @@ private func postStatusOnly(
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     if let timeout {
         request.timeoutInterval = timeout
     }
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
 
     return try await withTestURLSession(timeout: timeout ?? 5) { session in
@@ -1514,10 +1520,11 @@ private func postEmbeddedJSON(
 ) throws {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Accept", value: "application/json, text/event-stream")
     head.headers.add(name: "Content-Type", value: "application/json")
     if let sessionID {
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
     }
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)

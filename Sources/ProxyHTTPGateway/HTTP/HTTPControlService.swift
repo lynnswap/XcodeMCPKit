@@ -96,6 +96,10 @@ package final class HTTPControlService: Sendable {
         runtimeCoordinator.hasSession(id: sessionID)
     }
 
+    package func negotiatedProtocolVersion(id sessionID: String) -> String? {
+        runtimeCoordinator.negotiatedProtocolVersion(id: sessionID)
+    }
+
     package func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
         let promise = eventLoop.makePromise(of: Void.self)
         promise.completeWithTask { [runtimeCoordinator, refreshCodeIssuesCoordinator, refreshCodeIssuesDebugState] in

@@ -6,6 +6,7 @@ package struct SessionRecord: Sendable {
     package let context: SessionContext
     package let generation: UInt64
     package var isInitialized: Bool
+    package var negotiatedProtocolVersion: String?
 }
 
 package final class SessionRegistry: Sendable {
@@ -31,7 +32,8 @@ package final class SessionRegistry: Sendable {
             state.sessions[id] = SessionRecord(
                 context: context,
                 generation: state.nextGeneration,
-                isInitialized: false
+                isInitialized: false,
+                negotiatedProtocolVersion: nil
             )
             return context
         }
@@ -75,10 +77,14 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func markInitialized(id sessionID: String) {
+    package func markInitialized(
+        id sessionID: String,
+        negotiatedProtocolVersion: String?
+    ) {
         state.withLockedValue { state in
             guard var record = state.sessions[sessionID] else { return }
             record.isInitialized = true
+            record.negotiatedProtocolVersion = negotiatedProtocolVersion
             state.sessions[sessionID] = record
         }
     }
@@ -86,6 +92,12 @@ package final class SessionRegistry: Sendable {
     package func isInitialized(id sessionID: String) -> Bool {
         state.withLockedValue { state in
             state.sessions[sessionID]?.isInitialized ?? false
+        }
+    }
+
+    package func negotiatedProtocolVersion(id sessionID: String) -> String? {
+        state.withLockedValue { state in
+            state.sessions[sessionID]?.negotiatedProtocolVersion
         }
     }
 

@@ -44,6 +44,7 @@ package protocol RuntimeCoordinating: Sendable {
     func start()
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
+    func negotiatedProtocolVersion(id: String) -> String?
     func removeSession(id: String)
     func debugReset()
     func shutdown() async
@@ -114,6 +115,10 @@ package protocol RuntimeCoordinating: Sendable {
 
 extension RuntimeCoordinating {
     package func start() {}
+
+    package func negotiatedProtocolVersion(id _: String) -> String? {
+        nil
+    }
 
     package func hasDocumentationProvider() -> Bool {
         false
@@ -429,6 +434,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         sessionRegistry.hasSession(id: id)
     }
 
+    package func negotiatedProtocolVersion(id: String) -> String? {
+        sessionRegistry.negotiatedProtocolVersion(id: id)
+    }
+
     package func removeSession(id: String) {
         let context = sessionRegistry.removeSession(id: id)
         context?.notificationHub.closeAll()
@@ -717,7 +726,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if let cachedResult {
             _ = session(id: sessionID)
-            sessionRegistry.markInitialized(id: sessionID)
+            sessionRegistry.markInitialized(
+                id: sessionID,
+                negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: cachedResult)
+            )
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }

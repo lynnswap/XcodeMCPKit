@@ -2,6 +2,7 @@ import ProxyCore
 import ProxyStdioTransport
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import NIOHTTP1
 import Testing
 import XcodeMCPProxy
@@ -10,8 +11,16 @@ import XcodeMCPTestSupport
 
 @Suite(.serialized)
 struct CLICommandIntegrationTests {
-    @Test func cliCommandRoundTripsJSONOverStubHTTPServer() async throws {
-        let server = try StubMCPHTTPServer.start()
+    @Test func cliCommandRoundTripsJSONOverModernStubHTTPServer() async throws {
+        try await runCLICommandRoundTrip(responseMode: .json)
+    }
+
+    @Test func cliCommandAcceptsSingleSSEPostResponsesFromModernStubHTTPServer() async throws {
+        try await runCLICommandRoundTrip(responseMode: .sse)
+    }
+
+    private func runCLICommandRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
+        let server = try StubMCPHTTPServer.start(responseMode: responseMode)
         let errors = CapturedLines()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
@@ -39,8 +48,12 @@ struct CLICommandIntegrationTests {
         )
 
         do {
-            let request = Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8) + Data("\n".utf8)
-            inputPipe.fileHandleForWriting.write(request)
+            let initialize =
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+            let toolsList = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
+            inputPipe.fileHandleForWriting.write(
+                Data(initialize.utf8) + Data("\n".utf8) + Data(toolsList.utf8) + Data("\n".utf8)
+            )
             inputPipe.fileHandleForWriting.closeFile()
 
             let exitCode = try await waitWithTimeout(
@@ -64,12 +77,42 @@ struct CLICommandIntegrationTests {
 
             let output = String(decoding: outputData, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let responseObject = try #require(
-                JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
-            )
-            #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
-            let result = responseObject["result"] as? [String: Any]
+            let responseObjects = try output
+                .split(separator: "\n")
+                .map { line in
+                    try #require(
+                        JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+                    )
+                }
+            #expect(responseObjects.count == 2)
+            #expect((responseObjects.first?["id"] as? NSNumber)?.intValue == 1)
+            #expect((responseObjects.last?["id"] as? NSNumber)?.intValue == 2)
+            let result = responseObjects.last?["result"] as? [String: Any]
             #expect(result?["transport"] as? String == "stub")
+
+            let requests = server.recorder.snapshot()
+            let initializePost = try #require(requests.first { $0.bodyMethod == "initialize" })
+            #expect(initializePost.httpMethod == "POST")
+            #expect(initializePost.sessionID == nil)
+            #expect(initializePost.protocolVersion == nil)
+            #expect(initializePost.accept == "application/json, text/event-stream")
+            #expect(initializePost.contentType == "application/json")
+
+            let toolsPost = try #require(requests.first { $0.bodyMethod == "tools/list" })
+            #expect(toolsPost.httpMethod == "POST")
+            #expect(toolsPost.sessionID == "server-session")
+            #expect(toolsPost.protocolVersion == MCPProtocolVersion.current)
+            #expect(toolsPost.accept == "application/json, text/event-stream")
+            #expect(toolsPost.contentType == "application/json")
+
+            let sseGet = try #require(requests.first { $0.httpMethod == "GET" })
+            #expect(sseGet.sessionID == "server-session")
+            #expect(sseGet.protocolVersion == MCPProtocolVersion.current)
+            #expect(sseGet.accept == "text/event-stream")
+
+            let delete = try #require(requests.first { $0.httpMethod == "DELETE" })
+            #expect(delete.sessionID == "server-session")
+            #expect(delete.protocolVersion == MCPProtocolVersion.current)
         } catch {
             try? await server.shutdown()
             throw error
@@ -84,16 +127,23 @@ private struct StubMCPHTTPServer {
     let channel: Channel
     let url: URL
     let childChannelTracker: HTTPTestServerChannelTracker
+    let recorder: StubMCPHTTPRecorder
 
-    static func start() throws -> StubMCPHTTPServer {
+    static func start(responseMode: StubMCPHTTPResponseMode) throws -> StubMCPHTTPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
+        let recorder = StubMCPHTTPRecorder()
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 32)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 return channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-                    channel.pipeline.addHandler(StubMCPHTTPHandler())
+                    channel.pipeline.addHandler(
+                        StubMCPHTTPHandler(
+                            recorder: recorder,
+                            responseMode: responseMode
+                        )
+                    )
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -107,7 +157,8 @@ private struct StubMCPHTTPServer {
             group: group,
             channel: channel,
             url: URL(string: "http://127.0.0.1:\(port)/mcp")!,
-            childChannelTracker: childChannelTracker
+            childChannelTracker: childChannelTracker,
+            recorder: recorder
         )
     }
 
@@ -120,12 +171,50 @@ private struct StubMCPHTTPServer {
     }
 }
 
+private enum StubMCPHTTPResponseMode: Sendable {
+    case json
+    case sse
+}
+
+private struct StubMCPHTTPRequest: Sendable {
+    let httpMethod: String
+    let bodyMethod: String?
+    let sessionID: String?
+    let protocolVersion: String?
+    let accept: String?
+    let contentType: String?
+}
+
+private final class StubMCPHTTPRecorder: @unchecked Sendable {
+    private let requests = NIOLockedValueBox<[StubMCPHTTPRequest]>([])
+
+    func append(_ request: StubMCPHTTPRequest) {
+        requests.withLockedValue { requests in
+            requests.append(request)
+        }
+    }
+
+    func snapshot() -> [StubMCPHTTPRequest] {
+        requests.withLockedValue { $0 }
+    }
+}
+
 private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
+    private let recorder: StubMCPHTTPRecorder
+    private let responseMode: StubMCPHTTPResponseMode
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBufferAllocator().buffer(capacity: 0)
+
+    init(
+        recorder: StubMCPHTTPRecorder,
+        responseMode: StubMCPHTTPResponseMode
+    ) {
+        self.recorder = recorder
+        self.responseMode = responseMode
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
@@ -143,6 +232,19 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
 
     private func handleRequest(context: ChannelHandlerContext) {
         guard let requestHead else { return }
+        let requestData = Data(bodyBuffer.readableBytesView)
+        let requestObject =
+            (try? JSONSerialization.jsonObject(with: requestData)) as? [String: Any]
+        recorder.append(
+            StubMCPHTTPRequest(
+                httpMethod: requestHead.method.rawValue,
+                bodyMethod: requestObject?["method"] as? String,
+                sessionID: requestHead.headers.first(name: "MCP-Session-Id"),
+                protocolVersion: requestHead.headers.first(name: "MCP-Protocol-Version"),
+                accept: requestHead.headers.first(name: "Accept"),
+                contentType: requestHead.headers.first(name: "Content-Type")
+            )
+        )
 
         switch requestHead.method {
         case .GET:
@@ -158,34 +260,54 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
             context.flush()
         case .POST:
-            let requestData = Data(
-                bodyBuffer.readableBytesView
-            )
-            let requestObject =
-                (try? JSONSerialization.jsonObject(with: requestData)) as? [String: Any]
+            let isInitialize = requestObject?["method"] as? String == "initialize"
+            let resultObject: [String: Any]
+            if isInitialize {
+                resultObject = [
+                    "protocolVersion": MCPProtocolVersion.current,
+                    "capabilities": [String: Any](),
+                ]
+            } else {
+                resultObject = [
+                    "transport": "stub",
+                ]
+            }
             let responseObject: [String: Any] = [
                 "jsonrpc": "2.0",
                 "id": requestObject?["id"] as Any,
-                "result": [
-                    "transport": "stub"
-                ],
+                "result": resultObject,
             ]
             let responseData =
                 (try? JSONSerialization.data(withJSONObject: responseObject, options: []))
                 ?? Data("{}".utf8)
 
             var headers = HTTPHeaders()
-            headers.add(name: "Content-Type", value: "application/json")
-            headers.add(name: "Content-Length", value: "\(responseData.count)")
+            if isInitialize {
+                headers.add(name: "MCP-Session-Id", value: "server-session")
+            }
+            let responseBody: Data
+            switch responseMode {
+            case .json:
+                responseBody = responseData
+                headers.add(name: "Content-Type", value: "application/json")
+            case .sse:
+                responseBody = Data("event: message\ndata: \(String(decoding: responseData, as: UTF8.self))\n\n".utf8)
+                headers.add(name: "Content-Type", value: "text/event-stream")
+            }
+            headers.add(name: "Content-Length", value: "\(responseBody.count)")
             let responseHead = HTTPResponseHead(
                 version: requestHead.version,
                 status: .ok,
                 headers: headers
             )
-            var buffer = context.channel.allocator.buffer(capacity: responseData.count)
-            buffer.writeBytes(responseData)
+            var buffer = context.channel.allocator.buffer(capacity: responseBody.count)
+            buffer.writeBytes(responseBody)
             context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        case .DELETE:
+            let responseHead = HTTPResponseHead(version: requestHead.version, status: .ok)
+            context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
             context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
         default:
             let responseHead = HTTPResponseHead(version: requestHead.version, status: .methodNotAllowed)

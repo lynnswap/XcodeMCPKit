@@ -13,9 +13,9 @@
 - `ProxyXcodeFeatures`
   - `XcodeRefreshCodeIssuesInFile` planning, target resolution, queueing, tool-list rewriting.
 - `ProxyHTTPGateway`
-  - HTTP/SSE request handling, local MCP responses, forwarding, batch orchestration.
+  - Streamable HTTP request handling, transport validation, local MCP responses, forwarding.
 - `ProxyStdioTransport`
-  - STDIO adapter that forwards through the HTTP/SSE proxy.
+  - STDIO compatibility adapter that forwards through the Streamable HTTP proxy.
 - `XcodeMCPProxy`
   - Composition root only.
 
@@ -24,7 +24,8 @@
 - `ProxySession`
   - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, and lease cleanup.
 - `ProxyHTTPGateway`
-  - Owns request/response transport concerns only.
+  - Owns HTTP transport validation, server-issued session ids, protocol-version enforcement, and request/response transport concerns.
+  - Rejects JSON-RPC batch arrays at the HTTP boundary.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
 - `ProxyXcodeFeatures`
   - Owns refresh workflow and other Xcode-specific feature logic.

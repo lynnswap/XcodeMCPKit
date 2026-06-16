@@ -70,7 +70,7 @@ extension XcodeMCPProxyCLICommand {
           xcode-mcp-proxy [options]
 
         Description:
-          STDIO adapter that forwards MCP traffic to a running xcode-mcp-proxy-server (HTTP/SSE).
+          STDIO compatibility adapter that forwards MCP traffic to a running xcode-mcp-proxy-server (Streamable HTTP).
 
         Options:
           --request-timeout seconds  Request timeout (default: 300, 0 disables)
