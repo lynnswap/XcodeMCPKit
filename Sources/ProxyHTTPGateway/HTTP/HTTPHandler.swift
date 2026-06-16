@@ -360,10 +360,28 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" {
             return true
         }
-        if host == "127.0.0.1" || host.hasPrefix("127.") {
+        if isIPv4LoopbackHost(host) {
             return true
         }
         return false
+    }
+
+    private static func isIPv4LoopbackHost(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+
+        var octets: [Int] = []
+        for part in parts {
+            guard part.isEmpty == false,
+                part.allSatisfy({ $0.isNumber }),
+                let value = Int(part),
+                (0...255).contains(value)
+            else {
+                return false
+            }
+            octets.append(value)
+        }
+        return octets.first == 127
     }
 
     private static func port(fromHostHeader hostHeader: String?) -> Int? {
