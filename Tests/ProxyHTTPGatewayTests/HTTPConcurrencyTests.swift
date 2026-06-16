@@ -803,7 +803,10 @@ private actor EchoUpstreamClient: UpstreamSlotControlling {
         let method = object["method"] as? String
         let result: [String: Any]
         if method == "initialize" {
-            result = ["capabilities": [String: Any]()]
+            result = [
+                "protocolVersion": MCPProtocolVersion.current,
+                "capabilities": [String: Any](),
+            ]
         } else {
             result = [:]
         }

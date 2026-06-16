@@ -136,6 +136,17 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        if let responseObject = parsedRequestJSON as? [String: Any],
+            let responseID = JSONRPCMessageInspector.responseID(from: responseObject)
+        {
+            return makeClientResponseForwardingOperation(
+                bodyData: bodyData,
+                sessionID: sessionID,
+                responseID: responseID,
+                eventLoop: eventLoop
+            )
+        }
+
         if sessionManager.isInitialized() == false {
             return HTTPPostOperation(
                 future: eventLoop.makeSucceededFuture(
@@ -498,6 +509,36 @@ package final class HTTPPostService: Sendable {
         return HTTPPostOperation(
             future: future,
             cancellationHandle: cancellationHandle
+        )
+    }
+
+    private func makeClientResponseForwardingOperation(
+        bodyData: Data,
+        sessionID: String,
+        responseID: RPCID,
+        eventLoop: EventLoop
+    ) -> HTTPPostOperation {
+        let session = sessionManager.session(id: sessionID)
+        if let upstreamIndex = session.serverRequestTracker.consume(idKey: responseID.key) {
+            sessionManager.sendUpstream(
+                bodyData,
+                upstreamIndex: upstreamIndex,
+                ensureRunning: false
+            )
+        } else {
+            logger.debug(
+                "Acknowledging client JSON-RPC response without a routed upstream request",
+                metadata: [
+                    "session": .string(sessionID),
+                    "id": .string(responseID.key),
+                ]
+            )
+        }
+        return HTTPPostOperation(
+            future: eventLoop.makeSucceededFuture(
+                .empty(status: .accepted, sessionID: sessionID)
+            ),
+            cancellationHandle: nil
         )
     }
 }

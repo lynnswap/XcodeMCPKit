@@ -515,13 +515,23 @@ extension RuntimeCoordinator {
             return
         }
 
-        let serverInitiatedPayloads: [Data] = {
+        struct ServerInitiatedPayload {
+            let data: Data
+            let responseIDKey: String?
+        }
+
+        let serverInitiatedPayloads: [ServerInitiatedPayload] = {
             if let object = any as? [String: Any] {
                 guard object["method"] is String else { return [] }
-                return [data]
+                return [
+                    ServerInitiatedPayload(
+                        data: data,
+                        responseIDKey: object["id"].flatMap { RPCID(any: $0)?.key }
+                    )
+                ]
             }
             if let array = any as? [Any] {
-                var payloads: [Data] = []
+                var payloads: [ServerInitiatedPayload] = []
                 payloads.reserveCapacity(array.count)
                 for item in array {
                     guard let object = item as? [String: Any],
@@ -532,7 +542,12 @@ extension RuntimeCoordinator {
                     else {
                         continue
                     }
-                    payloads.append(encoded)
+                    payloads.append(
+                        ServerInitiatedPayload(
+                            data: encoded,
+                            responseIDKey: object["id"].flatMap { RPCID(any: $0)?.key }
+                        )
+                    )
                 }
                 return payloads
             }
@@ -585,7 +600,13 @@ extension RuntimeCoordinator {
         if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
                 for session in routedTargets {
-                    session.router.handleIncoming(payload)
+                    if let responseIDKey = payload.responseIDKey {
+                        session.serverRequestTracker.record(
+                            idKey: responseIDKey,
+                            upstreamIndex: upstreamIndex
+                        )
+                    }
+                    session.router.handleIncoming(payload.data)
                 }
             }
             return

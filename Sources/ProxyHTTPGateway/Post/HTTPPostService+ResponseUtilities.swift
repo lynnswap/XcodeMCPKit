@@ -144,9 +144,10 @@ extension HTTPPostService {
 
     package static func requestRequiresInitialize(_ parsedRequestJSON: Any) -> Bool {
         if let object = parsedRequestJSON as? [String: Any] {
-            let method = object["method"] as? String
-            let expectsResponse = object["id"] != nil
-            return method != "initialize" || !expectsResponse
+            if case .request("initialize", _) = JSONRPCMessageInspector.kind(of: object) {
+                return false
+            }
+            return true
         }
         if parsedRequestJSON is [Any] {
             return true

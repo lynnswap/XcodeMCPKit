@@ -712,7 +712,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
-    @Test func httpJSONRPCResponseIsAcceptedWithoutUpstreamRouting() async throws {
+    @Test func httpJSONRPCResponseIsForwardedAndAcceptedWithoutWaiting() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -721,6 +721,10 @@ struct HTTPHandlerTests {
 
         let sessionID = try initializeHTTPChannel(channel)
         let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
+        sessionManager.session(id: sessionID).serverRequestTracker.record(
+            idKey: "99",
+            upstreamIndex: 0
+        )
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -733,7 +737,13 @@ struct HTTPHandlerTests {
         #expect(response.head.status == .accepted)
         #expect(response.body.isEmpty)
         #expect(sessionManager.chooseUpstreamIndexCallCount() == chooseCountBeforeResponse)
-        #expect(sessionManager.sentUpstreamCount() == 0)
+        #expect(sessionManager.sentUpstreamCount() == 1)
+        let sentPayload = try #require(sessionManager.sentUpstreamPayloads().last)
+        let sentObject = try #require(
+            JSONSerialization.jsonObject(with: sentPayload, options: []) as? [String: Any]
+        )
+        #expect((sentObject["id"] as? NSNumber)?.intValue == 99)
+        #expect((sentObject["result"] as? [String: Any])?["ok"] as? Bool == true)
     }
 
     @Test func httpInitializePrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {

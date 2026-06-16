@@ -11,6 +11,7 @@ package enum LocalPostHandling {
     case pendingResponse(
         future: EventLoopFuture<ByteBuffer>,
         sessionID: String,
+        errorSessionID: String?,
         originalID: RPCID
     )
     case immediateResponse(data: Data, sessionID: String)
@@ -99,6 +100,7 @@ package struct LocalMCPResponder {
             return .pendingResponse(
                 future: future,
                 sessionID: sessionID,
+                errorSessionID: nil,
                 originalID: originalID
             )
         }
@@ -208,6 +210,7 @@ package struct LocalMCPResponder {
             return .pendingResponse(
                 future: promise.futureResult,
                 sessionID: headerSessionID,
+                errorSessionID: headerSessionID,
                 originalID: originalID
             )
         }
@@ -280,6 +283,7 @@ package struct LocalMCPResponder {
             return .pendingResponse(
                 future: promise.futureResult,
                 sessionID: headerSessionID,
+                errorSessionID: headerSessionID,
                 originalID: originalID
             )
         }

@@ -417,17 +417,16 @@ public actor StdioAdapter {
             return RequestEnvelope(method: nil, ids: [])
         }
         if let object = json as? [String: Any] {
-            if let id = object["id"], !(id is NSNull), let jsonID = JSONValue(any: id) {
-                return RequestEnvelope(method: object["method"] as? String, ids: [jsonID])
-            }
-            return RequestEnvelope(method: object["method"] as? String, ids: [])
+            let method = JSONRPCMessageInspector.method(from: object)
+            let ids = JSONRPCMessageInspector.requestID(from: object).map { [$0.value] } ?? []
+            return RequestEnvelope(method: method, ids: ids)
         }
         if let array = json as? [Any] {
             var ids: [JSONValue] = []
             for item in array {
                 guard let object = item as? [String: Any] else { continue }
-                if let id = object["id"], !(id is NSNull), let jsonID = JSONValue(any: id) {
-                    ids.append(jsonID)
+                if let id = JSONRPCMessageInspector.requestID(from: object) {
+                    ids.append(id.value)
                 }
             }
             return RequestEnvelope(method: nil, ids: ids)

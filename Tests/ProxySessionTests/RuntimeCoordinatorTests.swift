@@ -169,6 +169,91 @@ struct RuntimeCoordinatorTests {
         #expect(manager.chooseUpstreamIndex() == 0)
     }
 
+    @Test func sessionManagerRejectsUnsupportedInitializeProtocolBeforeIssuingSession()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-unsupported-protocol"
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": upstreamID,
+            "result": [
+                "protocolVersion": "2025-03-26",
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let responseData = try JSONSerialization.data(withJSONObject: response, options: [])
+        await upstream.yield(.message(responseData))
+
+        let responseObject = try decodeJSON(
+            from: try await waitWithTimeout(
+                "waiting for unsupported initialize response",
+                timeout: .seconds(2)
+            ) {
+                try await future.get()
+            }
+        )
+        let error = try #require(responseObject["error"] as? [String: Any])
+        #expect(error["message"] as? String == "unsupported upstream protocol version")
+        #expect(manager.hasSession(id: sessionID) == false)
+        #expect(manager.isInitialized() == false)
+    }
+
+    @Test func sessionManagerRecordsServerInitiatedRequestUpstreamForClientResponses()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-server-request"
+        let session = manager.session(id: sessionID)
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        _ = try await future.get()
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "server-request-1",
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        let serverRequestData = try JSONSerialization.data(
+            withJSONObject: serverRequest,
+            options: []
+        )
+        manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
+
+        #expect(session.serverRequestTracker.consume(idKey: "server-request-1") == 0)
+        #expect(session.serverRequestTracker.consume(idKey: "server-request-1") == nil)
+    }
+
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()
         async throws
     {

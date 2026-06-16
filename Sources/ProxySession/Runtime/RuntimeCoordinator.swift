@@ -10,10 +10,12 @@ package final class SessionContext: Sendable {
     package let id: String
     package let router: ProxyRouter
     package let notificationHub: NotificationHub
+    package let serverRequestTracker: ServerRequestTracker
 
     package init(id: String, config: ProxyConfig) {
         self.id = id
         self.notificationHub = NotificationHub()
+        self.serverRequestTracker = ServerRequestTracker()
         self.router = ProxyRouter(
             requestTimeout: makeRequestTimeout(config.requestTimeout),
             hasActiveClients: { [weak notificationHub] in
@@ -731,7 +733,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             _ = session(id: sessionID)
             sessionRegistry.markInitialized(
                 id: sessionID,
-                negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: cachedResult),
+                negotiatedProtocolVersion: Self.supportedProtocolVersion(
+                    fromInitializeResult: cachedResult
+                ),
                 buffersUnmappedNotificationsUntilClientConnects: true
             )
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {

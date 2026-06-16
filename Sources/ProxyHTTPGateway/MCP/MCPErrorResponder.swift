@@ -67,26 +67,8 @@ enum MCPErrorResponder {
     }
 
     static func requestMetadata(fromParsed json: Any?) -> (ids: [RPCID], isBatch: Bool) {
-        guard let json else {
-            return ([], false)
-        }
-        if let object = json as? [String: Any] {
-            if let id = object["id"], let rpcID = RPCID(any: id) {
-                return ([rpcID], false)
-            }
-            return ([], false)
-        }
-        if let array = json as? [Any] {
-            let ids: [RPCID] = array.compactMap { item -> RPCID? in
-                guard let object = item as? [String: Any],
-                      let id = object["id"] else {
-                    return nil
-                }
-                return RPCID(any: id)
-            }
-            return (ids, true)
-        }
-        return ([], false)
+        let metadata = JSONRPCMessageInspector.requestMetadata(fromParsed: json)
+        return (metadata.ids, metadata.isBatch)
     }
 
     private static func makeErrorObject(

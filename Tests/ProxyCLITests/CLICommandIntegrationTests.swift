@@ -1,4 +1,5 @@
 import ProxyCore
+import ProxyMCP
 import ProxyStdioTransport
 import Foundation
 import NIO
@@ -333,6 +334,82 @@ struct CLICommandIntegrationTests {
             )
             #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
             #expect(server.recorder.snapshot().contains { $0.httpMethod == "DELETE" })
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
+    @Test func cliCommandTreatsAcceptedJSONRPCResponseAsAcknowledged() async throws {
+        let server = try StubMCPHTTPServer.start(responseMode: .json)
+        let errors = CapturedLines()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { upstreamURL, requestTimeout, input, output in
+                    StdioAdapter(
+                        upstreamURL: upstreamURL,
+                        requestTimeout: requestTimeout,
+                        input: input,
+                        output: output
+                    )
+                },
+                input: inputPipe.fileHandleForReading,
+                output: outputPipe.fileHandleForWriting
+            )
+        )
+
+        do {
+            let initialize =
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+            let response = #"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#
+            inputPipe.fileHandleForWriting.write(
+                Data(initialize.utf8) + Data("\n".utf8)
+                    + Data(response.utf8) + Data("\n".utf8)
+            )
+            inputPipe.fileHandleForWriting.closeFile()
+
+            let exitCode = try await waitWithTimeout(
+                "CLI command should treat accepted JSON-RPC response as acknowledged",
+                timeout: .seconds(5)
+            ) {
+                await command.run(
+                    args: [
+                        "xcode-mcp-proxy",
+                        "--url",
+                        server.url.absoluteString,
+                    ],
+                    environment: [:]
+                )
+            }
+            outputPipe.fileHandleForWriting.closeFile()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+
+            #expect(exitCode == 0)
+            #expect(errors.snapshot().isEmpty)
+
+            let responseObjects = try parseOutputObjects(outputData)
+            #expect(responseObjects.count == 1)
+            #expect((responseObjects.first?["id"] as? NSNumber)?.intValue == 1)
+
+            let responsePost = try #require(
+                server.recorder.snapshot().first {
+                    $0.httpMethod == "POST" && $0.bodyMethod == nil
+                }
+            )
+            #expect(responsePost.sessionID == "server-session")
+            #expect(responsePost.protocolVersion == MCPProtocolVersion.current)
         } catch {
             try? await server.shutdown()
             throw error
@@ -793,6 +870,20 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             }
             context.flush()
         case .POST:
+            if let requestObject,
+                stubIsJSONRPCResponse(requestObject)
+            {
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Length", value: "0")
+                let responseHead = HTTPResponseHead(
+                    version: requestHead.version,
+                    status: .accepted,
+                    headers: headers
+                )
+                context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+                return
+            }
             if requestObject?["method"] as? String == hangingResponseMethod {
                 return
             }
@@ -904,6 +995,16 @@ private func stubSSEEventData(for object: [String: Any]) -> Data? {
         return nil
     }
     return Data("event: message\ndata: \(String(decoding: data, as: UTF8.self))\n\n".utf8)
+}
+
+private func stubIsJSONRPCResponse(_ object: [String: Any]) -> Bool {
+    guard object["method"] == nil,
+        let id = object["id"],
+        RPCID(any: id) != nil
+    else {
+        return false
+    }
+    return object["result"] != nil || object["error"] != nil
 }
 
 extension XcodeMCPProxyCLICommand: @unchecked Sendable {}

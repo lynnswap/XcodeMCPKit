@@ -99,6 +99,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var requestSuccessNotifications = 0
         var pendingResponses: [PendingResponse] = []
         var sentRequests: [SentRequest] = []
+        var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
         var requeuedLeaseCount = 0
     }
@@ -213,6 +214,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             state.cachedToolsList = nil
             state.pendingResponses.removeAll()
             state.sentRequests.removeAll()
+            state.sentUpstreamPayloads.removeAll()
             state.upstreamIDMapping.removeAll()
         }
     }
@@ -413,6 +415,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = ensureRunning
         state.withLockedValue { state in
             state.upstreamSendCount += 1
+            state.sentUpstreamPayloads.append(data)
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
@@ -750,6 +753,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func sentUpstreamCount() -> Int {
         state.withLockedValue { $0.upstreamSendCount }
+    }
+
+    func sentUpstreamPayloads() -> [Data] {
+        state.withLockedValue { $0.sentUpstreamPayloads }
     }
 
     func sentToolNames() -> [String] {

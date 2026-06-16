@@ -86,7 +86,7 @@ extension HTTPHandler {
         }
     }
 
-    func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
+    func sendSingleSSE(on channel: Channel, data: Data, keepAlive: Bool, sessionID: String?, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
         responseWriter.sendSingleSSE(
             on: channel,
             data: data,
@@ -96,7 +96,7 @@ extension HTTPHandler {
         )
     }
 
-    func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionID: String, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
+    func sendJSON(on channel: Channel, buffer: ByteBuffer, keepAlive: Bool, sessionID: String?, requestLog: RequestLogContext) -> EventLoopFuture<Void> {
         responseWriter.sendJSON(
             on: channel,
             buffer: buffer,

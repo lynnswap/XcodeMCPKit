@@ -18,7 +18,7 @@ extension HTTPPostService {
         forceBatchArray: Bool
     ) -> EventLoopFuture<HTTPPostResolution> {
         switch handling {
-        case .pendingResponse(let future, let sessionID, let originalID):
+        case .pendingResponse(let future, let sessionID, let errorSessionID, let originalID):
             return future.map { buffer in
                 var buffer = buffer
                 guard let data = buffer.readData(length: buffer.readableBytes) else {
@@ -31,9 +31,12 @@ extension HTTPPostService {
                 let responseData = forceBatchArray
                     ? Self.forceBatchArrayResponseDataIfNeeded(data)
                     : data
+                let responseSessionID = Self.isJSONRPCErrorResponse(data)
+                    ? errorSessionID
+                    : sessionID
                 return .responseData(
                     data: responseData,
-                    sessionID: sessionID,
+                    sessionID: responseSessionID,
                     prefersEventStream: prefersEventStream
                 )
             }.flatMapError { _ in
@@ -44,7 +47,7 @@ extension HTTPPostService {
                         code: -32000,
                         message: "upstream timeout",
                         forceBatchArray: forceBatchArray,
-                        sessionID: sessionID,
+                        sessionID: errorSessionID,
                         prefersEventStream: prefersEventStream
                     )
                 )
@@ -102,6 +105,17 @@ extension HTTPPostService {
             return data
         }
         return (try? JSONSerialization.data(withJSONObject: [payload], options: [])) ?? data
+    }
+
+    private static func isJSONRPCErrorResponse(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
+            object["method"] == nil,
+            object["error"] != nil
+        else {
+            return false
+        }
+        return object["id"] != nil
     }
 
     package struct ToolCallRouting {

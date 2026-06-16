@@ -538,9 +538,10 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         let parsedRequestObject = parsedRequestJSON as? [String: Any]
         let isInitializeRequest = parsedRequestObject?["method"] as? String == "initialize"
         let hasValidInitializeID: Bool = {
-            guard isInitializeRequest,
-                let idValue = parsedRequestObject?["id"],
-                RPCID(any: idValue) != nil
+            guard let parsedRequestObject,
+                case .request("initialize", _) = JSONRPCMessageInspector.kind(
+                    of: parsedRequestObject
+                )
             else {
                 return false
             }
@@ -561,20 +562,6 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
             effectiveSessionID = sessionID
             headerSessionExists = true
-        }
-        if !isInitializeRequest,
-            let parsedRequestObject,
-            Self.isJSONRPCResponse(parsedRequestObject)
-        {
-            guard let responseSessionID = effectiveSessionID else { return }
-            _ = sendEmpty(
-                on: context.channel,
-                status: .accepted,
-                keepAlive: head.isKeepAlive,
-                sessionID: responseSessionID,
-                requestLog: requestLog
-            )
-            return
         }
         let keepAlive = head.isKeepAlive
         let channel = context.channel
@@ -637,17 +624,6 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
         }
-    }
-
-    private static func isJSONRPCResponse(_ object: [String: Any]) -> Bool {
-        guard object["method"] == nil,
-            let id = object["id"],
-            !(id is NSNull),
-            RPCID(any: id) != nil
-        else {
-            return false
-        }
-        return object["result"] != nil || object["error"] != nil
     }
 
     private func validateExistingSession(
