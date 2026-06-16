@@ -4,7 +4,32 @@ package enum JSONRPCMessageKind: Sendable {
     case request(method: String, id: RPCID)
     case notification(method: String)
     case response(id: RPCID)
-    case invalidOrOther
+    case malformed(id: RPCID?)
+    case other
+
+    package var requestID: RPCID? {
+        guard case .request(_, let id) = self else { return nil }
+        return id
+    }
+
+    package var responseID: RPCID? {
+        guard case .response(let id) = self else { return nil }
+        return id
+    }
+
+    package var malformedID: RPCID? {
+        guard case .malformed(let id) = self else { return nil }
+        return id
+    }
+
+    package var isServerInitiated: Bool {
+        switch self {
+        case .request, .notification:
+            return true
+        case .response, .malformed, .other:
+            return false
+        }
+    }
 }
 
 package struct JSONRPCRequestMetadata: Sendable {
@@ -14,21 +39,29 @@ package struct JSONRPCRequestMetadata: Sendable {
 
 package enum JSONRPCMessageInspector {
     package static func kind(of object: [String: Any]) -> JSONRPCMessageKind {
-        if let method = object["method"] as? String {
-            guard let idValue = object["id"],
-                let id = RPCID(any: idValue)
-            else {
+        let rawID = object["id"]
+        let parsedID = rawID.flatMap { RPCID(any: $0) }
+
+        if let methodValue = object["method"] {
+            guard let method = methodValue as? String else {
+                return .malformed(id: parsedID)
+            }
+            guard rawID != nil else {
                 return .notification(method: method)
             }
-            return .request(method: method, id: id)
+            guard let parsedID else {
+                return .notification(method: method)
+            }
+            return .request(method: method, id: parsedID)
         }
 
-        guard object["method"] == nil,
-            let idValue = object["id"],
-            let id = RPCID(any: idValue),
+        guard let id = parsedID,
             object["result"] != nil || object["error"] != nil
         else {
-            return .invalidOrOther
+            if rawID != nil {
+                return .malformed(id: parsedID)
+            }
+            return .other
         }
         return .response(id: id)
     }
@@ -37,23 +70,21 @@ package enum JSONRPCMessageInspector {
         switch kind(of: object) {
         case .request(let method, _), .notification(let method):
             return method
-        case .response, .invalidOrOther:
+        case .response, .malformed, .other:
             return nil
         }
     }
 
     package static func requestID(from object: [String: Any]) -> RPCID? {
-        guard case .request(_, let id) = kind(of: object) else {
-            return nil
-        }
-        return id
+        kind(of: object).requestID
     }
 
     package static func responseID(from object: [String: Any]) -> RPCID? {
-        guard case .response(let id) = kind(of: object) else {
-            return nil
-        }
-        return id
+        kind(of: object).responseID
+    }
+
+    package static func invalidMessageID(from object: [String: Any]) -> RPCID? {
+        kind(of: object).malformedID
     }
 
     package static func isResponse(_ object: [String: Any]) -> Bool {

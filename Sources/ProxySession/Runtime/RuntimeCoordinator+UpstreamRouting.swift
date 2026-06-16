@@ -24,7 +24,8 @@ extension RuntimeCoordinator {
         }
 
         if var object = json as? [String: Any],
-            let upstreamID = upstreamID(from: object["id"])
+            let responseID = JSONRPCMessageInspector.responseID(from: object),
+            let upstreamID = upstreamID(from: responseID)
         {
             if let mapping = upstreamRouter.consume(
                 upstreamIndex: upstreamIndex,
@@ -74,7 +75,9 @@ extension RuntimeCoordinator {
                     transformed.append(item)
                     continue
                 }
-                guard let upstreamID = upstreamID(from: object["id"]) else {
+                guard let responseID = JSONRPCMessageInspector.responseID(from: object),
+                    let upstreamID = upstreamID(from: responseID)
+                else {
                     transformed.append(item)
                     continue
                 }
@@ -436,24 +439,23 @@ extension RuntimeCoordinator {
 
         let responseAny: Any? = {
             if let object = any as? [String: Any] {
-                guard let id = object["id"], !(id is NSNull) else { return nil }
+                guard let id = JSONRPCMessageInspector.requestID(from: object) else { return nil }
                 return [
                     "jsonrpc": "2.0",
-                    "id": id,
+                    "id": id.value.foundationObject,
                     "error": overloadError,
                 ]
             }
             if let array = any as? [Any] {
                 let objects = array.compactMap { item -> [String: Any]? in
                     guard let object = item as? [String: Any],
-                        let id = object["id"],
-                        !(id is NSNull)
+                        let id = JSONRPCMessageInspector.requestID(from: object)
                     else {
                         return nil
                     }
                     return [
                         "jsonrpc": "2.0",
-                        "id": id,
+                        "id": id.value.foundationObject,
                         "error": overloadError,
                     ]
                 }
@@ -485,14 +487,28 @@ extension RuntimeCoordinator {
         return nil
     }
 
+    func upstreamID(from id: RPCID) -> Int64? {
+        upstreamID(from: id.value.foundationObject)
+    }
+
     func isServerInitiatedMessage(_ value: Any) -> Bool {
         if let object = value as? [String: Any] {
-            return object["method"] is String
+            switch JSONRPCMessageInspector.kind(of: object) {
+            case .request, .notification:
+                return true
+            case .response, .malformed, .other:
+                return false
+            }
         }
         if let array = value as? [Any] {
             return array.contains { item in
                 guard let object = item as? [String: Any] else { return false }
-                return object["method"] is String
+                switch JSONRPCMessageInspector.kind(of: object) {
+                case .request, .notification:
+                    return true
+                case .response, .malformed, .other:
+                    return false
+                }
             }
         }
         return false
@@ -544,12 +560,13 @@ extension RuntimeCoordinator {
 
         let serverInitiatedPayloads: [ServerInitiatedPayload] = {
             if let object = any as? [String: Any] {
-                guard object["method"] is String else { return [] }
+                let kind = JSONRPCMessageInspector.kind(of: object)
+                guard kind.isServerInitiated else { return [] }
                 return [
                     ServerInitiatedPayload(
                         data: data,
                         object: object,
-                        expectsResponse: JSONRPCMessageInspector.requestID(from: object) != nil
+                        expectsResponse: kind.requestID != nil
                     )
                 ]
             }
@@ -558,18 +575,21 @@ extension RuntimeCoordinator {
                 payloads.reserveCapacity(array.count)
                 for item in array {
                     guard let object = item as? [String: Any],
-                        object["method"] is String,
                         JSONSerialization.isValidJSONObject(object),
                         let encoded = try? JSONSerialization.data(
                             withJSONObject: object, options: [])
                     else {
                         continue
                     }
+                    let kind = JSONRPCMessageInspector.kind(of: object)
+                    guard kind.isServerInitiated else {
+                        continue
+                    }
                     payloads.append(
                         ServerInitiatedPayload(
                             data: encoded,
                             object: object,
-                            expectsResponse: JSONRPCMessageInspector.requestID(from: object) != nil
+                            expectsResponse: kind.requestID != nil
                         )
                     )
                 }

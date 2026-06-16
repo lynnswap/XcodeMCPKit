@@ -746,6 +746,32 @@ struct HTTPHandlerTests {
         #expect((sentObject["result"] as? [String: Any])?["ok"] as? Bool == true)
     }
 
+    @Test func httpMalformedJSONRPCObjectWithIDReturnsInvalidRequestError() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let sessionID = try initializeHTTPChannel(channel)
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 123,
+        ]
+        try postJSON(payload, sessionID: sessionID, to: channel)
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+        let responseObject = try #require(
+            JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
+                as? [String: Any]
+        )
+        #expect((responseObject["id"] as? NSNumber)?.intValue == 123)
+        let error = try #require(responseObject["error"] as? [String: Any])
+        #expect((error["code"] as? NSNumber)?.intValue == -32600)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+    }
+
     @Test func httpInitializePrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()

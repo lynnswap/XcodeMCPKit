@@ -281,8 +281,7 @@ package actor DocumentationProviderConnection {
     package func call(_ requestData: Data, timeout: TimeAmount?) async throws -> Data {
         guard var object = try JSONSerialization.jsonObject(with: requestData, options: [])
             as? [String: Any],
-            let originalIDValue = object["id"],
-            let originalID = RPCID(any: originalIDValue) else {
+            let originalID = JSONRPCMessageInspector.requestID(from: object) else {
             throw ControlPlaneError.invalidResponse("missing DocumentationSearch request id")
         }
 
@@ -349,8 +348,7 @@ package actor DocumentationProviderConnection {
 
     private func handleMessage(_ data: Data) {
         guard var object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-              let responseIDValue = object["id"],
-              let responseID = RPCID(any: responseIDValue),
+              let responseID = JSONRPCMessageInspector.responseID(from: object),
               let pending = pendingResponses.removeValue(forKey: responseID.key) else {
             return
         }

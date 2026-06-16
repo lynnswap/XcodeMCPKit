@@ -110,12 +110,11 @@ extension HTTPPostService {
     private static func isJSONRPCErrorResponse(_ data: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],
-            object["method"] == nil,
             object["error"] != nil
         else {
             return false
         }
-        return object["id"] != nil
+        return JSONRPCMessageInspector.responseID(from: object) != nil
     }
 
     package struct ToolCallRouting {
@@ -370,8 +369,7 @@ extension HTTPPostService {
             guard !Task.isCancelled else {
                 break
             }
-            guard let idValue = request["id"],
-                  let originalID = RPCID(any: idValue) else {
+            guard let originalID = JSONRPCMessageInspector.requestID(from: request) else {
                 continue
             }
             let requestTimeout = Self.remainingRequestTimeout(until: deadline)
@@ -438,8 +436,7 @@ extension HTTPPostService {
             guard !Task.isCancelled else {
                 break
             }
-            guard let idValue = request["id"],
-                  let originalID = RPCID(any: idValue) else {
+            guard let originalID = JSONRPCMessageInspector.requestID(from: request) else {
                 continue
             }
             guard JSONSerialization.isValidJSONObject(request),
@@ -514,19 +511,18 @@ extension HTTPPostService {
         guard sessionManager.hasDocumentationProvider() else {
             return false
         }
-        guard object["method"] as? String == "tools/call",
-              object["id"] != nil,
-              let params = object["params"] as? [String: Any],
-              params["name"] as? String == DocumentationToolCatalog.toolName,
-              disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+        guard case .request("tools/call", _) = JSONRPCMessageInspector.kind(of: object),
+            let params = object["params"] as? [String: Any],
+            params["name"] as? String == DocumentationToolCatalog.toolName,
+            disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
             return false
         }
         return true
     }
 
     private func isToolsListRequest(_ object: [String: Any]) -> Bool {
-        object["method"] as? String == "tools/list"
-            && object["id"] != nil
+        JSONRPCMessageInspector.requestID(from: object) != nil
+            && JSONRPCMessageInspector.method(from: object) == "tools/list"
             && sessionManager.isInitialized()
     }
 

@@ -285,6 +285,61 @@ struct RuntimeCoordinatorTests {
         #expect(session.serverRequestTracker.consume(clientID: clientID) == nil)
     }
 
+    @Test func sessionManagerDoesNotTreatServerRequestIDAsPendingResponseID()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-server-request-id-collision"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let originalID = RPCID(any: NSNumber(value: 42))!
+        let responseFuture = session.router.registerRequest(
+            idKey: originalID.key,
+            on: eventLoop
+        )
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: upstreamID),
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: serverRequest, options: []),
+            upstreamIndex: 0
+        )
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == String(upstreamID))
+
+        manager.routeUpstreamMessage(try makeToolListResponse(id: upstreamID), upstreamIndex: 0)
+        _ = try await responseFuture.get()
+    }
+
     @Test func serverRequestTrackerPreservesDuplicateUpstreamIDsAcrossUpstreams()
         async throws
     {

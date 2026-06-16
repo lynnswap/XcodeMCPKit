@@ -106,9 +106,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
         if let explicitMethod {
             return explicitMethod
         }
-        guard let responseIDValue = object["id"],
-            let responseID = RPCID(any: responseIDValue)
-        else {
+        guard let responseID = JSONRPCMessageInspector.responseID(from: object) else {
             return nil
         }
         return responseMethodsByIDKey[responseID.key]

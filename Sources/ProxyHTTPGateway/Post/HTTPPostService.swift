@@ -136,15 +136,33 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let responseObject = parsedRequestJSON as? [String: Any],
-            let responseID = JSONRPCMessageInspector.responseID(from: responseObject)
-        {
-            return makeClientResponseForwardingOperation(
-                responseObject: responseObject,
-                sessionID: sessionID,
-                responseID: responseID,
-                eventLoop: eventLoop
-            )
+        if let requestObject = parsedRequestJSON as? [String: Any] {
+            switch JSONRPCMessageInspector.kind(of: requestObject) {
+            case .malformed(let invalidID):
+                return HTTPPostOperation(
+                    future: eventLoop.makeSucceededFuture(
+                        .mcpError(
+                            id: invalidID,
+                            ids: [],
+                            code: -32600,
+                            message: "invalid request",
+                            forceBatchArray: false,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    ),
+                    cancellationHandle: nil
+                )
+            case .response(let responseID):
+                return makeClientResponseForwardingOperation(
+                    responseObject: requestObject,
+                    sessionID: sessionID,
+                    responseID: responseID,
+                    eventLoop: eventLoop
+                )
+            case .request, .notification, .other:
+                break
+            }
         }
 
         if sessionManager.isInitialized() == false {
