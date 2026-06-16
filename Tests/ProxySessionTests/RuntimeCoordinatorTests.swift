@@ -415,7 +415,9 @@ struct RuntimeCoordinatorTests {
         _ = try await future.get()
     }
 
-    @Test func sessionManagerDropsUnmappedNotificationsForCachedInitializeSessions() async throws {
+    @Test func sessionManagerBuffersUnmappedNotificationsForCachedInitializeSessionsUntilClientConnects()
+        async throws
+    {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -457,6 +459,12 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(notification))
 
         _ = try await cachedFuture.get()
+        let received = try await nextBufferedNotifications(from: session.router)
+        #expect(received.count == 1)
+        #expect(received.first == notification)
+
+        manager.markNotificationClientConnected(sessionID: sessionID)
+        await upstream.yield(.message(notification))
         #expect(
             await staysTrue(for: .milliseconds(200)) {
                 session.router.drainBufferedNotifications().isEmpty
@@ -538,7 +546,9 @@ struct RuntimeCoordinatorTests {
         )
     }
 
-    @Test func sessionManagerDoesNotRouteUnmappedNotificationsToCachedInitializeSessions() async throws {
+    @Test func sessionManagerRoutesUnmappedNotificationsToCachedInitializeSessionsUntilClientConnects()
+        async throws
+    {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -592,6 +602,25 @@ struct RuntimeCoordinatorTests {
         await upstream0.yield(.message(notification0))
         await upstream1.yield(.message(notification1))
 
+        let received = try await waitWithTimeout(
+            "waiting for cached initialize notifications",
+            timeout: .seconds(5)
+        ) {
+            var notifications: [Data] = []
+            while notifications.count < 2 {
+                notifications.append(contentsOf: session.router.drainBufferedNotifications())
+                if notifications.count >= 2 {
+                    return notifications
+                }
+                await Task.yield()
+            }
+            return notifications
+        }
+        #expect(Set(received) == Set([notification0, notification1]))
+
+        manager.markNotificationClientConnected(sessionID: sessionID)
+        await upstream0.yield(.message(notification0))
+        await upstream1.yield(.message(notification1))
         #expect(
             await staysTrue(for: .milliseconds(200)) {
                 session.router.drainBufferedNotifications().isEmpty

@@ -731,7 +731,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             _ = session(id: sessionID)
             sessionRegistry.markInitialized(
                 id: sessionID,
-                negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: cachedResult)
+                negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: cachedResult),
+                buffersUnmappedNotificationsUntilClientConnects: true
             )
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
