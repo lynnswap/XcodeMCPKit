@@ -36,9 +36,7 @@ swift run -c release xcode-mcp-proxy-install
 
 各リリースタグ（`v*`）では、次のファイルを公開します:
 
-- `xcode-mcp-proxy.tar.gz`（universal binary）
-- `xcode-mcp-proxy-darwin-arm64.tar.gz`
-- `xcode-mcp-proxy-darwin-x86_64.tar.gz`
+- `xcode-mcp-proxy-darwin-arm64.tar.gz`（Apple Silicon）
 - `SHA256SUMS.txt`
 
 例:
@@ -47,7 +45,7 @@ swift run -c release xcode-mcp-proxy-install
 VERSION=v0.1.0
 BASE_URL="https://github.com/lynnswap/XcodeMCPKit/releases/download/${VERSION}"
 
-ARCHIVE="xcode-mcp-proxy.tar.gz"
+ARCHIVE="xcode-mcp-proxy-darwin-arm64.tar.gz"
 curl -fL -O "${BASE_URL}/${ARCHIVE}"
 curl -fL -O "${BASE_URL}/SHA256SUMS.txt"
 grep "  ${ARCHIVE}\$" SHA256SUMS.txt | shasum -a 256 -c
@@ -59,12 +57,6 @@ chmod +x "${HOME}/.local/bin/xcode-mcp-proxy" \
          "${HOME}/.local/bin/xcode-mcp-proxy-server" \
          "${HOME}/.local/bin/xcode-mcp-proxy-install"
 ```
-
-プラットフォーム別アーカイブを使いたい場合は、次のいずれかを選べます:
-
-- `xcode-mcp-proxy.tar.gz`: universal binary
-- `xcode-mcp-proxy-darwin-arm64.tar.gz`: Apple Silicon
-- `xcode-mcp-proxy-darwin-x86_64.tar.gz`: Intel
 
 #### 任意: インストール先を変更
 
@@ -161,12 +153,14 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 swift test -Xswiftc -strict-concurrency=minimal
 XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
+scripts/publish-local-release.sh v0.1.0
 XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS=1 swift test --no-parallel --filter ProxyLiveMCPBridgeTests -Xswiftc -strict-concurrency=minimal
 XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal
 python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 ```
 
 - `scripts/check.sh` は default suite と opt-in の process / pipe suite を実行します。
+- `scripts/publish-local-release.sh` は arm64 archive をビルドし、draft GitHub Release を作成して release verification workflow を dispatch します。workflow が通った後に release が公開されます。
 - live `mcpbridge` suite はローカル専用で、CI には含めません。
 - live suite は現在起動中の Xcode を使い、Xcode process が 1 つだけある前提で、`127.0.0.1:0` と temp discovery path を使います。
 - stress suite は明示 opt-in 専用で、`scripts/check.sh` には含めません。大量 HTTP / session multiplexing を検証します。

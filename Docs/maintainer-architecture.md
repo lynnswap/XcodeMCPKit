@@ -63,7 +63,21 @@ the default suite includes `ProxyArchitectureTests`.
 - Full local maintainer check:
   - `scripts/check.sh`
 
-These mirror the existing release workflow split and intentionally avoid requiring real `mcpbridge`.
+These are used by the default CI workflow and release verification, and intentionally avoid requiring real `mcpbridge`.
+
+## Release Flow
+
+- Entry point:
+  - `scripts/publish-local-release.sh v1.2.3`
+- Behavior:
+  - Builds the arm64 archive and `SHA256SUMS.txt` locally.
+  - Pushes the release tag from `main`.
+  - Creates a draft GitHub Release.
+  - Dispatches `.github/workflows/release.yml` for the tag ref.
+  - The workflow publishes the draft only after `scripts/check.sh` and release asset verification pass.
+- Distribution:
+  - GitHub Releases publish `xcode-mcp-proxy-darwin-arm64.tar.gz` and `SHA256SUMS.txt`.
+  - x86_64 and universal archives are not produced.
 
 ## Stress Suite
 

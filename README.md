@@ -36,9 +36,7 @@ swift run -c release xcode-mcp-proxy-install
 
 Each release tag (`v*`) publishes:
 
-- `xcode-mcp-proxy.tar.gz` (universal binary)
-- `xcode-mcp-proxy-darwin-arm64.tar.gz`
-- `xcode-mcp-proxy-darwin-x86_64.tar.gz`
+- `xcode-mcp-proxy-darwin-arm64.tar.gz` (Apple Silicon)
 - `SHA256SUMS.txt`
 
 Example:
@@ -47,7 +45,7 @@ Example:
 VERSION=v0.1.0
 BASE_URL="https://github.com/lynnswap/XcodeMCPKit/releases/download/${VERSION}"
 
-ARCHIVE="xcode-mcp-proxy.tar.gz"
+ARCHIVE="xcode-mcp-proxy-darwin-arm64.tar.gz"
 curl -fL -O "${BASE_URL}/${ARCHIVE}"
 curl -fL -O "${BASE_URL}/SHA256SUMS.txt"
 grep "  ${ARCHIVE}\$" SHA256SUMS.txt | shasum -a 256 -c
@@ -59,12 +57,6 @@ chmod +x "${HOME}/.local/bin/xcode-mcp-proxy" \
          "${HOME}/.local/bin/xcode-mcp-proxy-server" \
          "${HOME}/.local/bin/xcode-mcp-proxy-install"
 ```
-
-If you prefer a platform-specific archive, choose one of:
-
-- `xcode-mcp-proxy.tar.gz`: universal binary
-- `xcode-mcp-proxy-darwin-arm64.tar.gz`: Apple Silicon
-- `xcode-mcp-proxy-darwin-x86_64.tar.gz`: Intel
 
 #### Optional: change the installation destination
 
@@ -162,12 +154,14 @@ Logs are written to stderr.
 swift test -Xswiftc -strict-concurrency=minimal
 XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
+scripts/publish-local-release.sh v0.1.0
 XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS=1 swift test --no-parallel --filter ProxyLiveMCPBridgeTests -Xswiftc -strict-concurrency=minimal
 XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal
 python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 ```
 
 - `scripts/check.sh` runs the default suite and the opt-in process / pipe suite.
+- `scripts/publish-local-release.sh` builds the arm64 archive, creates a draft GitHub Release, and dispatches release verification. The release is published only after the workflow passes.
 - The live `mcpbridge` suite is local-only and intentionally excluded from CI.
 - The live suite uses the currently running Xcode session, requires exactly one Xcode process, uses `127.0.0.1:0`, and writes discovery output under a temp path.
 - The stress suite is opt-in only and intentionally excluded from `scripts/check.sh`; it runs high-volume HTTP/session multiplexing checks.

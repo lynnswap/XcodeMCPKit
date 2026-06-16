@@ -3,23 +3,19 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-release.sh --arch <arm64|x86_64> --version <tag> [--dist-root <dir>]
+Usage: scripts/build-release.sh --version <tag> [--dist-root <dir>]
 
-Builds release binaries and stages them under:
-  <dist-root>/<arch>/bin/
+Builds arm64 release binaries and stages them under:
+  <dist-root>/arm64/bin/
 EOF
 }
 
-arch=""
 version=""
 dist_root="dist"
+arch="arm64"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --arch)
-      arch="${2:-}"
-      shift 2
-      ;;
     --version)
       version="${2:-}"
       shift 2
@@ -40,25 +36,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$arch" ]]; then
-  echo "--arch is required." >&2
-  usage
-  exit 1
-fi
-
 if [[ -z "$version" ]]; then
   echo "--version is required." >&2
   usage
   exit 1
 fi
-
-case "$arch" in
-  arm64|x86_64) ;;
-  *)
-    echo "Unsupported arch: $arch (expected arm64 or x86_64)" >&2
-    exit 1
-    ;;
-esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$dist_root" = /* ]]; then
@@ -101,6 +83,13 @@ for product in "${products[@]}"; do
   target_path="$bin_out/$product"
   cp "$source_path" "$target_path"
   chmod +x "$target_path"
+  if command -v lipo >/dev/null 2>&1; then
+    archs="$(lipo -archs "$target_path")"
+    if [[ "$archs" != "arm64" ]]; then
+      echo "Expected arm64 binary for $product, got: $archs" >&2
+      exit 1
+    fi
+  fi
   if command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$target_path" >/dev/null
   fi
