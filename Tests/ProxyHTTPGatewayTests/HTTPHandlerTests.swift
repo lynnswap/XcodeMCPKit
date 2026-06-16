@@ -745,12 +745,14 @@ struct HTTPHandlerTests {
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .ok)
+        #expect(response.head.headers.first(name: "Mcp-Session-Id") == nil)
         let object =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
             as? [String: Any]
         let error = object?["error"] as? [String: Any]
         #expect((error?["code"] as? NSNumber)?.intValue == -32600)
         #expect((error?["message"] as? String) == "missing id")
+        #expect(sessionManager.isInitialized() == false)
     }
 
     @Test func httpJSONArrayBodyIsRejectedBeforeInitializeRouting() async throws {

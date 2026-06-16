@@ -324,7 +324,9 @@ struct RuntimeCoordinatorTests {
         #expect(methodName(from: retriedWarmInitialize) == "initialize")
     }
 
-    @Test func sessionManagerDropsUnmappedNotificationsAfterInitializeCompletes() async throws {
+    @Test func sessionManagerBuffersUnmappedNotificationsAfterInitializeUntilNotificationClientConnects()
+        async throws
+    {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -358,6 +360,12 @@ struct RuntimeCoordinatorTests {
             options: []
         )
         _ = try await future.get()
+        await upstream.yield(.message(notification))
+        let received = try await nextBufferedNotifications(from: session.router)
+        #expect(received.count == 1)
+        #expect(received.first == notification)
+
+        manager.markNotificationClientConnected(sessionID: sessionID)
         await upstream.yield(.message(notification))
         #expect(
             await staysTrue(for: .milliseconds(200)) {

@@ -77,6 +77,7 @@ package final class HTTPControlService: Sendable {
         let session = runtimeCoordinator.session(id: sessionID)
         let hadClients = session.notificationHub.hasSseClients
         session.notificationHub.addSse(channel)
+        runtimeCoordinator.markNotificationClientConnected(sessionID: sessionID)
         let bufferedNotifications = hadClients ? [] : session.router.drainBufferedNotifications()
         return HTTPSSEOpenResult(bufferedNotifications: bufferedNotifications)
     }

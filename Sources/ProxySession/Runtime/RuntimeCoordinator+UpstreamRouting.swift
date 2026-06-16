@@ -575,6 +575,13 @@ extension RuntimeCoordinator {
             routedTargets.append(target)
         }
 
+        for target in sessionRegistry.pendingNotificationClientTargets() {
+            guard routedSessionIDs.insert(target.id).inserted else {
+                continue
+            }
+            routedTargets.append(target)
+        }
+
         if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
                 for session in routedTargets {

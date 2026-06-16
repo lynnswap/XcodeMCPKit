@@ -5,6 +5,7 @@ import NIOFoundationCompat
 import NIOHTTP1
 import NIOConcurrencyHelpers
 import ProxyCore
+import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
 
@@ -532,12 +533,21 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let isInitializeRequest =
-            (parsedRequestJSON as? [String: Any])?["method"] as? String == "initialize"
-        let effectiveSessionID: String
+        let parsedRequestObject = parsedRequestJSON as? [String: Any]
+        let isInitializeRequest = parsedRequestObject?["method"] as? String == "initialize"
+        let hasValidInitializeID: Bool = {
+            guard isInitializeRequest,
+                let idValue = parsedRequestObject?["id"],
+                RPCID(any: idValue) != nil
+            else {
+                return false
+            }
+            return true
+        }()
+        let effectiveSessionID: String?
         let headerSessionExists: Bool
         if isInitializeRequest {
-            effectiveSessionID = UUID().uuidString
+            effectiveSessionID = hasValidInitializeID ? UUID().uuidString : nil
             headerSessionExists = false
         } else {
             guard let sessionID = validateExistingSession(

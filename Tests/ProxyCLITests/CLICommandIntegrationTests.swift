@@ -173,6 +173,90 @@ struct CLICommandIntegrationTests {
         try await server.shutdown()
     }
 
+    @Test func cliCommandSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
+        let server = try StubMCPHTTPServer.start(
+            responseMode: .json,
+            hangingResponseMethod: "tools/call"
+        )
+        let errors = CapturedLines()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { upstreamURL, requestTimeout, input, output in
+                    StdioAdapter(
+                        upstreamURL: upstreamURL,
+                        requestTimeout: requestTimeout,
+                        input: input,
+                        output: output
+                    )
+                },
+                input: inputPipe.fileHandleForReading,
+                output: outputPipe.fileHandleForWriting
+            )
+        )
+
+        do {
+            let initialize =
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+            let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
+            inputPipe.fileHandleForWriting.write(
+                Data(initialize.utf8) + Data("\n".utf8)
+                    + Data(longRunningCall.utf8) + Data("\n".utf8)
+            )
+            inputPipe.fileHandleForWriting.closeFile()
+
+            let exitCode = try await waitWithTimeout(
+                "CLI command should delete the session after timed-out drain",
+                timeout: .seconds(6)
+            ) {
+                await command.run(
+                    args: [
+                        "xcode-mcp-proxy",
+                        "--url",
+                        server.url.absoluteString,
+                        "--request-timeout",
+                        "0",
+                    ],
+                    environment: [:]
+                )
+            }
+            outputPipe.fileHandleForWriting.closeFile()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+
+            #expect(exitCode == 0)
+            #expect(errors.snapshot().isEmpty)
+            let output = String(decoding: outputData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let responseIDs = try output
+                .split(separator: "\n")
+                .map { line in
+                    let object = try #require(
+                        JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+                    )
+                    return try #require((object["id"] as? NSNumber)?.intValue)
+                }
+            #expect(responseIDs.contains(1))
+
+            let delete = try #require(server.recorder.snapshot().first { $0.httpMethod == "DELETE" })
+            #expect(delete.sessionID == "server-session")
+            #expect(delete.protocolVersion == MCPProtocolVersion.current)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
     private func runCLICommandRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
         let server = try StubMCPHTTPServer.start(responseMode: responseMode)
         let errors = CapturedLines()
@@ -286,6 +370,7 @@ private struct StubMCPHTTPServer {
     static func start(
         responseMode: StubMCPHTTPResponseMode,
         delayedResponseMethod: String? = nil,
+        hangingResponseMethod: String? = nil,
         hangsDELETE: Bool = false
     ) throws -> StubMCPHTTPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -301,6 +386,7 @@ private struct StubMCPHTTPServer {
                             recorder: recorder,
                             responseMode: responseMode,
                             delayedResponseMethod: delayedResponseMethod,
+                            hangingResponseMethod: hangingResponseMethod,
                             hangsDELETE: hangsDELETE
                         )
                     )
@@ -366,6 +452,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
     private let recorder: StubMCPHTTPRecorder
     private let responseMode: StubMCPHTTPResponseMode
     private let delayedResponseMethod: String?
+    private let hangingResponseMethod: String?
     private let hangsDELETE: Bool
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBufferAllocator().buffer(capacity: 0)
@@ -374,11 +461,13 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         recorder: StubMCPHTTPRecorder,
         responseMode: StubMCPHTTPResponseMode,
         delayedResponseMethod: String?,
+        hangingResponseMethod: String?,
         hangsDELETE: Bool
     ) {
         self.recorder = recorder
         self.responseMode = responseMode
         self.delayedResponseMethod = delayedResponseMethod
+        self.hangingResponseMethod = hangingResponseMethod
         self.hangsDELETE = hangsDELETE
     }
 
@@ -426,6 +515,9 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
             context.flush()
         case .POST:
+            if requestObject?["method"] as? String == hangingResponseMethod {
+                return
+            }
             let isInitialize = requestObject?["method"] as? String == "initialize"
             let resultObject: [String: Any]
             if isInitialize {

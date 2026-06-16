@@ -22,7 +22,7 @@ package enum HTTPPostResolution {
         code: Int,
         message: String,
         forceBatchArray: Bool,
-        sessionID: String,
+        sessionID: String?,
         prefersEventStream: Bool
     )
     case plain(

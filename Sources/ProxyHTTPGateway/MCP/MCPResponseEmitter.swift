@@ -27,7 +27,7 @@ enum MCPResponseEmitter {
         on channel: Channel,
         data: Data,
         keepAlive: Bool,
-        sessionID: String
+        sessionID: String?
     ) -> EventLoopFuture<Void> {
         guard let payload = SSECodec.encodeDataEvent(data) else {
             return channel.eventLoop.makeFailedFuture(EmitterError.invalidEventStreamPayload)
@@ -36,7 +36,9 @@ enum MCPResponseEmitter {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
         headers.add(name: "Cache-Control", value: "no-cache")
-        headers.add(name: "Mcp-Session-Id", value: sessionID)
+        if let sessionID {
+            headers.add(name: "Mcp-Session-Id", value: sessionID)
+        }
 
         var head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         head.headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")

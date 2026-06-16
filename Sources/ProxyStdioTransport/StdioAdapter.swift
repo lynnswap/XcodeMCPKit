@@ -134,6 +134,7 @@ public actor StdioAdapter {
                 await emitError(for: envelope, message: "upstream returned empty response")
             }
         } catch let error as AdapterError {
+            if stopped || Task.isCancelled { return }
             logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
             switch error {
             case .httpStatus(let status):
@@ -142,6 +143,7 @@ public actor StdioAdapter {
                 await emitError(for: envelope, message: "invalid upstream response")
             }
         } catch {
+            if stopped || Task.isCancelled { return }
             logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
             await emitError(for: envelope, message: "upstream unavailable")
         }
@@ -245,10 +247,11 @@ public actor StdioAdapter {
             } catch is CancellationError {
                 return
             } catch {
+                if stopped || Task.isCancelled { return }
                 logger.warning("SSE disconnected", metadata: ["error": "\(error)"])
             }
 
-            if stopped { break }
+            if stopped || Task.isCancelled { break }
             let delay = backoffDelay(for: attempt)
             attempt += 1
             try? await Task.sleep(nanoseconds: delay)
@@ -330,8 +333,12 @@ public actor StdioAdapter {
         }
 
         guard !requestTasks.isEmpty else { return }
-        stopped = true
         sseTask?.cancel()
+        await deleteSessionIfNeeded()
+        for task in requestTasks.values {
+            task.cancel()
+        }
+        stopped = true
         session.invalidateAndCancel()
         await drainRequestTasks()
     }

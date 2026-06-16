@@ -158,7 +158,7 @@ extension HTTPHandler {
         forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: RequestLogContext
     ) -> EventLoopFuture<Void> {
         responseWriter.sendMCPError(
@@ -182,7 +182,7 @@ extension HTTPHandler {
         forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: RequestLogContext
     ) -> EventLoopFuture<Void> {
         responseWriter.sendMCPError(

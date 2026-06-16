@@ -45,6 +45,7 @@ package protocol RuntimeCoordinating: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
     func negotiatedProtocolVersion(id: String) -> String?
+    func markNotificationClientConnected(sessionID: String)
     func removeSession(id: String)
     func debugReset()
     func shutdown() async
@@ -119,6 +120,8 @@ extension RuntimeCoordinating {
     package func negotiatedProtocolVersion(id _: String) -> String? {
         nil
     }
+
+    package func markNotificationClientConnected(sessionID _: String) {}
 
     package func hasDocumentationProvider() -> Bool {
         false
@@ -765,6 +768,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             requestObject: requestObject,
             on: eventLoop
         )
+    }
+
+    package func markNotificationClientConnected(sessionID: String) {
+        sessionRegistry.markNotificationClientConnected(id: sessionID)
     }
 
     package func sharedToolsList(

@@ -140,10 +140,16 @@ extension RuntimeCoordinator {
         result: JSONValue
     ) {
         for item in pending {
-            sessionRegistry.markInitialized(
-                id: item.sessionID,
-                negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: result)
-            )
+            if sessionRegistry.sessionStillMatchesPendingInitialize(
+                sessionID: item.sessionID,
+                sessionGeneration: item.sessionGeneration
+            ) {
+                sessionRegistry.markInitialized(
+                    id: item.sessionID,
+                    negotiatedProtocolVersion: Self.protocolVersion(fromInitializeResult: result),
+                    buffersUnmappedNotificationsUntilClientConnects: true
+                )
+            }
             if let buffer = encodeInitializeResponse(
                 originalID: item.originalID,
                 result: result

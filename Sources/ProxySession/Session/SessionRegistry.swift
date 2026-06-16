@@ -7,6 +7,7 @@ package struct SessionRecord: Sendable {
     package let generation: UInt64
     package var isInitialized: Bool
     package var negotiatedProtocolVersion: String?
+    package var buffersUnmappedNotificationsUntilClientConnects: Bool
 }
 
 package final class SessionRegistry: Sendable {
@@ -33,7 +34,8 @@ package final class SessionRegistry: Sendable {
                 context: context,
                 generation: state.nextGeneration,
                 isInitialized: false,
-                negotiatedProtocolVersion: nil
+                negotiatedProtocolVersion: nil,
+                buffersUnmappedNotificationsUntilClientConnects: false
             )
             return context
         }
@@ -77,14 +79,35 @@ package final class SessionRegistry: Sendable {
         }
     }
 
+    package func pendingNotificationClientTargets() -> [SessionContext] {
+        state.withLockedValue { state in
+            state.sessions.values.compactMap { record in
+                record.isInitialized && record.buffersUnmappedNotificationsUntilClientConnects
+                    ? record.context
+                    : nil
+            }
+        }
+    }
+
     package func markInitialized(
         id sessionID: String,
-        negotiatedProtocolVersion: String?
+        negotiatedProtocolVersion: String?,
+        buffersUnmappedNotificationsUntilClientConnects: Bool = false
     ) {
         state.withLockedValue { state in
             guard var record = state.sessions[sessionID] else { return }
             record.isInitialized = true
             record.negotiatedProtocolVersion = negotiatedProtocolVersion
+            record.buffersUnmappedNotificationsUntilClientConnects =
+                buffersUnmappedNotificationsUntilClientConnects
+            state.sessions[sessionID] = record
+        }
+    }
+
+    package func markNotificationClientConnected(id sessionID: String) {
+        state.withLockedValue { state in
+            guard var record = state.sessions[sessionID] else { return }
+            record.buffersUnmappedNotificationsUntilClientConnects = false
             state.sessions[sessionID] = record
         }
     }

@@ -14,7 +14,7 @@ package enum LocalPostHandling {
         originalID: RPCID
     )
     case immediateResponse(data: Data, sessionID: String)
-    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String)
+    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String?)
 }
 
 package struct LocalMCPResponder {
@@ -85,7 +85,7 @@ package struct LocalMCPResponder {
                     id: nil,
                     code: -32600,
                     message: "missing id",
-                    sessionID: headerSessionID ?? UUID().uuidString
+                    sessionID: headerSessionID
                 )
             }
             let sessionID = headerSessionID ?? UUID().uuidString
