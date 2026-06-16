@@ -302,6 +302,25 @@ package final class LeaseManager: Sendable {
         }
     }
 
+    package func activeSessionID(upstreamIndex: Int) -> String? {
+        state.withLockedValue { state in
+            let leaseIDs = state.activeLeaseIDsByUpstream[upstreamIndex] ?? []
+            let records = leaseIDs.compactMap { state.leasesByID[$0] }
+                .filter { $0.state == .active }
+            guard records.isEmpty == false else {
+                return nil
+            }
+            return records.sorted { lhs, rhs in
+                if lhs.descriptor.isTopLevelClientRequest
+                    != rhs.descriptor.isTopLevelClientRequest
+                {
+                    return lhs.descriptor.isTopLevelClientRequest
+                }
+                return (lhs.startedAt ?? .distantPast) < (rhs.startedAt ?? .distantPast)
+            }.first?.descriptor.sessionID
+        }
+    }
+
     private func finishLease(
         _ leaseID: RequestLeaseID,
         terminalState: RequestLeaseState,

@@ -15,7 +15,9 @@ package final class SessionContext: Sendable {
     package init(id: String, config: ProxyConfig) {
         self.id = id
         self.notificationHub = NotificationHub()
-        self.serverRequestTracker = ServerRequestTracker()
+        self.serverRequestTracker = ServerRequestTracker(
+            routeTimeout: makeRequestTimeout(config.requestTimeout) ?? .seconds(300)
+        )
         self.router = ProxyRouter(
             requestTimeout: makeRequestTimeout(config.requestTimeout),
             hasActiveClients: { [weak notificationHub] in

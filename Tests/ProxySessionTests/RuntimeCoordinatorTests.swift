@@ -358,7 +358,49 @@ struct RuntimeCoordinatorTests {
         #expect(secondRoute.upstreamID.key == "duplicate")
     }
 
-    @Test func sessionManagerRoutesServerInitiatedRequestToSingleSession() async throws {
+    @Test func serverRequestTrackerExpiresUnansweredRoutes() async throws {
+        let tracker = ServerRequestTracker(routeTimeout: .seconds(1))
+        let upstreamID = RPCID(any: "stale")!
+        let now = Date()
+
+        let clientID = tracker.record(
+            upstreamID: upstreamID,
+            upstreamIndex: 0,
+            now: now
+        )
+
+        let expired = tracker.consume(
+            clientID: clientID,
+            now: now.addingTimeInterval(2)
+        )
+        #expect(expired == nil)
+    }
+
+    @Test func serverRequestTrackerEvictsOldestRoutesAtCapacity() async throws {
+        let tracker = ServerRequestTracker(routeTimeout: .seconds(60), maxRoutes: 2)
+        let now = Date()
+        let first = tracker.record(
+            upstreamID: RPCID(any: "first")!,
+            upstreamIndex: 0,
+            now: now
+        )
+        let second = tracker.record(
+            upstreamID: RPCID(any: "second")!,
+            upstreamIndex: 0,
+            now: now
+        )
+        let third = tracker.record(
+            upstreamID: RPCID(any: "third")!,
+            upstreamIndex: 0,
+            now: now
+        )
+
+        #expect(tracker.consume(clientID: first, now: now) == nil)
+        #expect(tracker.consume(clientID: second, now: now)?.upstreamID.key == "second")
+        #expect(tracker.consume(clientID: third, now: now)?.upstreamID.key == "third")
+    }
+
+    @Test func sessionManagerRoutesServerInitiatedRequestToOwningSession() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -390,6 +432,23 @@ struct RuntimeCoordinatorTests {
         )
         _ = try await secondFuture.get()
 
+        let ownerLeaseID = manager.createRequestLease(
+            descriptor: SessionPipelineRequestDescriptor(
+                sessionID: secondSessionID,
+                label: "tools/call:owner",
+                isBatch: false,
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            ownerLeaseID,
+            requestIDKey: "owner",
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+        defer { manager.completeRequestLease(ownerLeaseID) }
+
         let serverRequest: [String: Any] = [
             "jsonrpc": "2.0",
             "id": "server-request-1",
@@ -403,13 +462,10 @@ struct RuntimeCoordinatorTests {
         manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
 
         let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
-        let routes = [
-            firstSession.serverRequestTracker.consume(clientID: clientID),
-            secondSession.serverRequestTracker.consume(clientID: clientID),
-        ].compactMap { $0 }
-        #expect(routes.count == 1)
-        #expect(routes.first?.upstreamIndex == 0)
-        #expect(routes.first?.upstreamID.key == "server-request-1")
+        #expect(firstSession.serverRequestTracker.consume(clientID: clientID) == nil)
+        let route = try #require(secondSession.serverRequestTracker.consume(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == "server-request-1")
     }
 
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()

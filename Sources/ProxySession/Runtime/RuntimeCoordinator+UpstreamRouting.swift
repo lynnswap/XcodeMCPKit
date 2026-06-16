@@ -611,6 +611,7 @@ extension RuntimeCoordinator {
 
         var routedTargets: [SessionContext] = []
         var routedSessionIDs = Set<String>()
+        var pendingInitializeTargets: [SessionContext] = []
 
         if upstreamIndex == 0 {
             for pending in initializeManager.pendingInitializes() {
@@ -623,6 +624,7 @@ extension RuntimeCoordinator {
                 else {
                     continue
                 }
+                pendingInitializeTargets.append(target)
                 routedTargets.append(target)
             }
         }
@@ -641,21 +643,39 @@ extension RuntimeCoordinator {
             routedTargets.append(target)
         }
 
-        if !routedTargets.isEmpty {
-            for payload in serverInitiatedPayloads {
-                let payloadTargets = payload.expectsResponse
-                    ? Array(routedTargets.prefix(1))
-                    : routedTargets
-                for session in payloadTargets {
-                    guard let routedData = payload.routedData(
-                        for: session,
-                        upstreamIndex: upstreamIndex
-                    ) else {
-                        continue
-                    }
-                    session.router.handleIncoming(routedData)
-                }
+        let owningTarget = activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
+        var routedAnyPayload = false
+
+        for payload in serverInitiatedPayloads {
+            let payloadTargets = serverInitiatedTargets(
+                expectsResponse: payload.expectsResponse,
+                owningTarget: owningTarget,
+                pendingInitializeTargets: pendingInitializeTargets,
+                routedTargets: routedTargets
+            )
+            if payload.expectsResponse && payloadTargets.isEmpty {
+                logger.debug(
+                    "Dropping response-requiring server request without an owning session",
+                    metadata: [
+                        "upstream": .string("\(upstreamIndex)"),
+                        "bytes": .string("\(payload.data.count)"),
+                    ]
+                )
+                continue
             }
+            for session in payloadTargets {
+                guard let routedData = payload.routedData(
+                    for: session,
+                    upstreamIndex: upstreamIndex
+                ) else {
+                    continue
+                }
+                session.router.handleIncoming(routedData)
+                routedAnyPayload = true
+            }
+        }
+
+        if routedAnyPayload {
             return
         }
 
@@ -667,6 +687,34 @@ extension RuntimeCoordinator {
             ]
         )
         debugRecorder.recordDroppedUnmappedNotification(upstreamIndex: upstreamIndex)
+    }
+
+    private func activeLeaseSessionTarget(upstreamIndex: Int) -> SessionContext? {
+        guard let sessionID = leaseManager.activeSessionID(upstreamIndex: upstreamIndex) else {
+            return nil
+        }
+        return sessionRegistry.contextIfPresent(id: sessionID)
+    }
+
+    private func serverInitiatedTargets(
+        expectsResponse: Bool,
+        owningTarget: SessionContext?,
+        pendingInitializeTargets: [SessionContext],
+        routedTargets: [SessionContext]
+    ) -> [SessionContext] {
+        guard expectsResponse else {
+            return routedTargets
+        }
+        if let owningTarget {
+            return [owningTarget]
+        }
+        if pendingInitializeTargets.count == 1 {
+            return pendingInitializeTargets
+        }
+        if routedTargets.count == 1 {
+            return routedTargets
+        }
+        return []
     }
 
     func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
