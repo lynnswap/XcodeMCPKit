@@ -1047,8 +1047,11 @@ func spinUntilSentCount(
     count: Int,
     description: String
 ) async throws {
-    try await spinUntil(description, maxIterations: 1_000) {
-        await upstream.sentCount() >= count
+    guard count > 0 else {
+        return
+    }
+    _ = try await waitWithTimeout(description, timeout: .seconds(5)) {
+        try await upstream.nextSent(at: count - 1)
     }
 }
 
@@ -1057,8 +1060,11 @@ func spinUntilSentCount(
     count: Int,
     description: String
 ) async throws {
-    try await spinUntil(description, maxIterations: 1_000) {
-        await upstream.sentCount() >= count
+    guard count > 0 else {
+        return
+    }
+    _ = try await waitWithTimeout(description, timeout: .seconds(5)) {
+        try await upstream.nextSent(at: count - 1)
     }
 }
 
