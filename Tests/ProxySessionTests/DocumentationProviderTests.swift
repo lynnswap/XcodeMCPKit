@@ -662,6 +662,8 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerContinuesAfterCandidateProbeTimesOut() async throws {
         let hung = documentationProviderTarget(processID: 205)
         let working = documentationProviderTarget(processID: 206)
+        let timeoutClock = TestClock()
+        let uptimeClock = TestUptimeClock()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 hung.processID: [
@@ -685,10 +687,38 @@ extension RuntimeCoordinatorTests {
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [hung, working]),
             sessionFactory: factory,
-            providerSelectionTimeout: .milliseconds(50)
+            providerSelectionTimeout: .seconds(1),
+            clock: makeDeterministicClockClient(
+                timeoutClock: timeoutClock,
+                uptimeClock: uptimeClock
+            )
         )
 
-        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let updateTask = Task {
+            await manager.toolListUpdate(requestTimeout: .seconds(2))
+        }
+        defer { updateTask.cancel() }
+        try await waitWithTimeout("waiting for hung documentation probe") {
+            try await factory.waitForRequestCount(
+                1,
+                processID: hung.processID,
+                method: "tools/call"
+            )
+        }
+        await timeoutClock.sleep(untilSuspendedBy: 2)
+        uptimeClock.advance(by: .milliseconds(500))
+        timeoutClock.advance(by: .milliseconds(500))
+        try await waitWithTimeout("waiting for replacement documentation probe") {
+            try await factory.waitForRequestCount(
+                1,
+                processID: working.processID,
+                method: "tools/call"
+            )
+        }
+
+        let update = try await waitWithTimeout("waiting for documentation provider selection") {
+            await updateTask.value
+        }
         let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")

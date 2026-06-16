@@ -165,10 +165,20 @@ struct ScriptedDocumentationSessionPlan: Sendable {
 }
 
 actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
+    private struct RequestCountWaiter {
+        let id: UUID
+        let processID: pid_t
+        let method: String
+        let count: Int
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
     private var startAttemptProcessIDs: [pid_t] = []
     private var startedProcessIDs: [pid_t] = []
     private var initializeParamsByPID: [pid_t: [JSONValue]] = [:]
+    private var requestCountsByPID: [pid_t: [String: Int]] = [:]
+    private var requestCountWaiters: [RequestCountWaiter] = []
     private let startDelayNanoseconds: UInt64?
 
     init(
@@ -213,6 +223,64 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     func initializeParams(for processID: pid_t) -> [JSONValue] {
         initializeParamsByPID[processID] ?? []
     }
+
+    func recordRequest(method: String, for processID: pid_t) {
+        requestCountsByPID[processID, default: [:]][method, default: 0] += 1
+        resumeRequestCountWaiters()
+    }
+
+    func requestCount(processID: pid_t, method: String) -> Int {
+        requestCountsByPID[processID]?[method] ?? 0
+    }
+
+    func waitForRequestCount(_ count: Int, processID: pid_t, method: String) async throws {
+        if requestCount(processID: processID, method: method) >= count {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if requestCount(processID: processID, method: method) >= count {
+                    continuation.resume(returning: ())
+                    return
+                }
+                requestCountWaiters.append(
+                    RequestCountWaiter(
+                        id: waiterID,
+                        processID: processID,
+                        method: method,
+                        count: count,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelRequestCountWaiter(id: waiterID)
+            }
+        }
+    }
+
+    private func resumeRequestCountWaiters() {
+        var remaining: [RequestCountWaiter] = []
+        for waiter in requestCountWaiters {
+            if requestCount(processID: waiter.processID, method: waiter.method) >= waiter.count {
+                waiter.continuation.resume(returning: ())
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        requestCountWaiters = remaining
+    }
+
+    private func cancelRequestCountWaiter(id: UUID) {
+        guard let index = requestCountWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = requestCountWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
 }
 
 actor ScriptedDocumentationSession: UpstreamSession {
@@ -252,6 +320,7 @@ actor ScriptedDocumentationSession: UpstreamSession {
         if plan.requiresNumericRequestIDs, !(requestID is NSNumber) {
             return .accepted
         }
+        await recorder.recordRequest(method: method, for: processID)
 
         switch method {
         case "initialize":
@@ -954,6 +1023,22 @@ func makeDeterministicRuntimeTimeoutScheduler(
             task.cancel()
         }
     }
+}
+
+func makeDeterministicClockClient(
+    timeoutClock: TestClock,
+    uptimeClock: TestUptimeClock
+) -> ClockClient {
+    ClockClient(
+        now: {
+            Date(timeIntervalSince1970: Double(uptimeClock.now()) / 1_000_000_000)
+        },
+        uptimeNanoseconds: uptimeClock.now,
+        sleep: { duration in
+            try? await timeoutClock.sleep(for: duration)
+        },
+        sleepForTimeInterval: { _ in }
+    )
 }
 
 func spinUntilSentCount(

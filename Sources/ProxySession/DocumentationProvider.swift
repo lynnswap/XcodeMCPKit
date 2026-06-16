@@ -239,12 +239,14 @@ private final class DocumentationPendingResponse: @unchecked Sendable {
 
 package actor DocumentationProviderConnection {
     private let session: any UpstreamSession
+    private let clock: ClockClient
     private var eventTask: Task<Void, Never>?
     private var pendingResponses: [String: DocumentationPendingResponse] = [:]
     private var nextID: Int64 = 1
 
-    package init(session: any UpstreamSession) {
+    package init(session: any UpstreamSession, clock: ClockClient = .liveValue) {
         self.session = session
+        self.clock = clock
     }
 
     package func start() {
@@ -325,9 +327,11 @@ package actor DocumentationProviderConnection {
         guard let timeout, timeout.nanoseconds > 0 else {
             return
         }
-        let nanoseconds = UInt64(timeout.nanoseconds)
-        pending.timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: nanoseconds)
+        pending.timeoutTask = Task { [weak self, clock] in
+            await clock.sleep(.nanoseconds(timeout.nanoseconds))
+            guard Task.isCancelled == false else {
+                return
+            }
             await self?.failPending(id: id, error: TimeoutError())
         }
     }
@@ -647,10 +651,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             let profile = await selection.task.value
             state.resume(.completed(profile))
         }
+        let clock = clock
         let timeoutTask: Task<Void, Never>?
         if let requestTimeout, requestTimeout.nanoseconds > 0 {
             timeoutTask = Task {
-                try? await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
+                guard Task.isCancelled == false else {
+                    return
+                }
                 state.resume(.timedOut)
             }
         } else {
@@ -783,8 +791,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             group.addTask {
                 try await self.probe(target: target, requestTimeout: requestTimeout)
             }
+            let clock = clock
             group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
+                try Task.checkCancellation()
                 throw TimeoutError()
             }
             do {
@@ -807,7 +817,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let probeDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
         try Task.checkCancellation()
         let session = try await sessionFactory.startSession(for: target)
-        let connection = DocumentationProviderConnection(session: session)
+        let connection = DocumentationProviderConnection(session: session, clock: clock)
         do {
             try Task.checkCancellation()
             await connection.start()
