@@ -110,11 +110,60 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        if let headerSessionID, !headerSessionExists {
-            _ = sessionManager.session(id: headerSessionID)
+        guard let sessionID = headerSessionID, sessionID.isEmpty == false else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .badRequest,
+                        body: "session id required",
+                        sessionID: nil
+                    )
+                ),
+                cancellationHandle: nil
+            )
         }
 
-        let sessionID = headerSessionID ?? UUID().uuidString
+        guard headerSessionExists else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .notFound,
+                        body: "session not found",
+                        sessionID: sessionID
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+
+        if let requestObject = parsedRequestJSON as? [String: Any] {
+            switch JSONRPCMessageInspector.kind(of: requestObject) {
+            case .malformed(let invalidID):
+                return HTTPPostOperation(
+                    future: eventLoop.makeSucceededFuture(
+                        .mcpError(
+                            id: invalidID,
+                            ids: [],
+                            code: -32600,
+                            message: "invalid request",
+                            forceBatchArray: false,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    ),
+                    cancellationHandle: nil
+                )
+            case .response(let responseID):
+                return makeClientResponseForwardingOperation(
+                    responseObject: requestObject,
+                    sessionID: sessionID,
+                    responseID: responseID,
+                    eventLoop: eventLoop
+                )
+            case .request, .notification, .other:
+                break
+            }
+        }
 
         if sessionManager.isInitialized() == false {
             return HTTPPostOperation(
@@ -478,6 +527,55 @@ package final class HTTPPostService: Sendable {
         return HTTPPostOperation(
             future: future,
             cancellationHandle: cancellationHandle
+        )
+    }
+
+    private func makeClientResponseForwardingOperation(
+        responseObject: [String: Any],
+        sessionID: String,
+        responseID: RPCID,
+        eventLoop: EventLoop
+    ) -> HTTPPostOperation {
+        guard JSONSerialization.isValidJSONObject(responseObject),
+            let responseData = try? JSONSerialization.data(withJSONObject: responseObject, options: [])
+        else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .badRequest,
+                        body: "invalid json-rpc response",
+                        sessionID: sessionID
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+        let future = sessionManager.forwardServerRequestResponse(
+            responseData: responseData,
+            sessionID: sessionID,
+            responseID: responseID,
+            on: eventLoop
+        ).map { forwardingResult -> HTTPPostResolution in
+            switch forwardingResult {
+            case .accepted, .missingRoute:
+                return .empty(status: .accepted, sessionID: sessionID)
+            case .invalidResponse:
+                return .plain(
+                    status: .badRequest,
+                    body: "invalid json-rpc response",
+                    sessionID: sessionID
+                )
+            case .upstreamUnavailable:
+                return .plain(
+                    status: .serviceUnavailable,
+                    body: "upstream unavailable",
+                    sessionID: sessionID
+                )
+            }
+        }
+        return HTTPPostOperation(
+            future: future,
+            cancellationHandle: nil
         )
     }
 }

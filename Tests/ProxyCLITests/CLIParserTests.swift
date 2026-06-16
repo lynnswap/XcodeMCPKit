@@ -181,6 +181,35 @@ struct CLIParserTests {
         #expect(config.initializeParamsOverride?.clientName == "custom-client")
     }
 
+    @Test func configRejectsLegacyHandshakeProtocolVersion() throws {
+        let configPath = try makeTempConfigFile(
+            """
+            [upstream_handshake]
+            protocolVersion = "2025-03-26"
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let config = ProxyConfig(
+            listenHost: "localhost",
+            listenPort: 0,
+            upstreamCommand: "xcrun",
+            upstreamArgs: ["mcpbridge"],
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            configPath: configPath
+        )
+
+        #expect(config.initializeParamsOverride?.protocolVersion == "2025-03-26")
+        do {
+            try config.validateModernProtocolConfiguration()
+            Issue.record("expected legacy protocolVersion to be rejected")
+        } catch let error as CLIError {
+            #expect(error.description.contains("2025-06-18"))
+            #expect(error.description.contains("2025-03-26"))
+        }
+    }
+
     @Test func cliParsesUpstreamProcesses() async throws {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--upstream-processes", "10"],

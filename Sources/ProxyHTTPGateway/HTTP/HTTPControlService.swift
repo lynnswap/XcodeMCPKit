@@ -77,6 +77,7 @@ package final class HTTPControlService: Sendable {
         let session = runtimeCoordinator.session(id: sessionID)
         let hadClients = session.notificationHub.hasSseClients
         session.notificationHub.addSse(channel)
+        runtimeCoordinator.markNotificationClientConnected(sessionID: sessionID)
         let bufferedNotifications = hadClients ? [] : session.router.drainBufferedNotifications()
         return HTTPSSEOpenResult(bufferedNotifications: bufferedNotifications)
     }
@@ -94,6 +95,10 @@ package final class HTTPControlService: Sendable {
 
     package func hasSession(id sessionID: String) -> Bool {
         runtimeCoordinator.hasSession(id: sessionID)
+    }
+
+    package func negotiatedProtocolVersion(id sessionID: String) -> String? {
+        runtimeCoordinator.negotiatedProtocolVersion(id: sessionID)
     }
 
     package func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {

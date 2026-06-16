@@ -111,8 +111,7 @@ package struct ToolSurface: Sendable {
                 if let method, let originalID {
                     return (method, originalID)
                 }
-                guard let responseIDValue = object["id"],
-                    let responseID = RPCID(any: responseIDValue),
+                guard let responseID = JSONRPCMessageInspector.responseID(from: object),
                     let method = responseMethodsByIDKey[responseID.key],
                     let originalID = responseOriginalIDsByKey[responseID.key]
                 else {
@@ -144,8 +143,7 @@ package struct ToolSurface: Sendable {
         var rewroteAny = false
         let rewrittenArray = array.map { item -> Any in
             guard let object = item as? [String: Any],
-                let responseIDValue = object["id"],
-                let responseID = RPCID(any: responseIDValue),
+                let responseID = JSONRPCMessageInspector.responseID(from: object),
                 let method = responseMethodsByIDKey[responseID.key],
                 let originalID = responseOriginalIDsByKey[responseID.key]
             else {
@@ -281,8 +279,7 @@ package struct ToolSurface: Sendable {
             return nil
         }
         if let object = payload as? [String: Any] {
-            guard let responseIDValue = object["id"],
-                let responseID = RPCID(any: responseIDValue),
+            guard let responseID = JSONRPCMessageInspector.responseID(from: object),
                 responseID.key == responseIDKey
             else {
                 return nil
@@ -294,8 +291,7 @@ package struct ToolSurface: Sendable {
         }
         for item in array {
             guard let object = item as? [String: Any],
-                let responseIDValue = object["id"],
-                let responseID = RPCID(any: responseIDValue),
+                let responseID = JSONRPCMessageInspector.responseID(from: object),
                 responseID.key == responseIDKey
             else {
                 continue

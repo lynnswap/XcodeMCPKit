@@ -94,6 +94,10 @@ codex mcp add xcode -- xcode-mcp-proxy
 
 ```bash
 claude mcp remove xcode
+# 推奨: Streamable HTTP
+claude mcp add --transport http xcode http://localhost:8765/mcp
+
+# 互換モード: STDIO
 claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 ```
 
@@ -170,7 +174,7 @@ python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 
 | キー | 型 | 既定値 |
 |------|----|--------|
-| `upstream_handshake.protocolVersion` | string | `"2025-03-26"` |
+| `upstream_handshake.protocolVersion` | string | `"2025-06-18"` |
 | `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
 | `upstream_handshake.clientVersion` | string | `"dev"` |
 | `upstream_handshake.capabilities` | table | `{}` |
@@ -178,6 +182,8 @@ python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 `clientVersion` を省略した場合、`clientName` に対応する Xcode の `IDEChat*Version` があれば、その version を自動で使います。
 
 ### アダプタ: `xcode-mcp-proxy`
+
+STDIO が必要な MCP クライアント向けの互換アダプタです。HTTP に対応しているクライアントは `xcode-mcp-proxy-server` に Streamable HTTP で直接接続してください。
 
 #### オプション
 

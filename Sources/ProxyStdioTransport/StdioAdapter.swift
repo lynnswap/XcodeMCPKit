@@ -5,11 +5,17 @@ import ProxyMCP
 
 public actor StdioAdapter {
     private struct RequestEnvelope {
+        let method: String?
         let ids: [JSONValue]
 
         var expectsResponse: Bool {
             !ids.isEmpty
         }
+    }
+
+    private struct RequestResult {
+        let payloads: [Data]
+        let shouldStartSSEAfterOutput: Bool
     }
 
     private enum AdapterError: Error {
@@ -23,9 +29,11 @@ public actor StdioAdapter {
     private let outputWriter: StdioWriter
     private let logger: Logger
     private let session: URLSession
-    private let sessionID: String
+    private var sessionID: String?
+    private var negotiatedProtocolVersion: String?
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
+    private var initializationTask: Task<Void, Never>?
     private var readTask: Task<Void, Never>?
     private var sseTask: Task<Void, Never>?
     private var started = false
@@ -45,15 +53,11 @@ public actor StdioAdapter {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
         self.session = URLSession(configuration: configuration)
-        self.sessionID = "stdio-\(UUID().uuidString)"
     }
 
     public func start() async {
         guard !started else { return }
         started = true
-        sseTask = Task { [weak self] in
-            await self?.sseLoop()
-        }
         readTask = Task { [weak self] in
             await self?.readLoop()
         }
@@ -89,9 +93,15 @@ public actor StdioAdapter {
         let result = framer.append(data)
         for message in result.messages {
             let requestID = UUID()
+            let method = inspectRequest(message).method
+            let pendingInitialization = initializationTask
             let task = Task { [weak self] in
+                _ = await pendingInitialization?.value
                 guard let self else { return }
                 await self.runRequestTask(id: requestID, data: message)
+            }
+            if method == "initialize" {
+                initializationTask = task
             }
             requestTasks[requestID] = task
         }
@@ -122,13 +132,21 @@ public actor StdioAdapter {
         if stopped { return }
         let envelope = inspectRequest(data)
         do {
-            let responseData = try await sendRequest(data)
-            if let responseData {
-                await outputWriter.send(responseData)
+            let result = try await sendRequest(data)
+            if result.payloads.isEmpty == false {
+                for payload in result.payloads {
+                    await outputWriter.send(payload)
+                }
+                if result.shouldStartSSEAfterOutput {
+                    startSSEIfNeeded()
+                }
             } else if envelope.expectsResponse {
                 await emitError(for: envelope, message: "upstream returned empty response")
+            } else if result.shouldStartSSEAfterOutput {
+                startSSEIfNeeded()
             }
         } catch let error as AdapterError {
+            if stopped || Task.isCancelled { return }
             logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
             switch error {
             case .httpStatus(let status):
@@ -137,17 +155,24 @@ public actor StdioAdapter {
                 await emitError(for: envelope, message: "invalid upstream response")
             }
         } catch {
+            if stopped || Task.isCancelled { return }
             logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
             await emitError(for: envelope, message: "upstream unavailable")
         }
     }
 
-    private func sendRequest(_ data: Data) async throws -> Data? {
+    private func sendRequest(_ data: Data) async throws -> RequestResult {
+        let envelope = inspectRequest(data)
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        if envelope.method != "initialize", let sessionID {
+            request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+        }
+        if envelope.method != "initialize", let negotiatedProtocolVersion {
+            request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        }
         applyTimeout(to: &request)
         request.httpBody = data
 
@@ -156,16 +181,82 @@ public actor StdioAdapter {
             throw AdapterError.invalidResponse
         }
         if (200...299).contains(http.statusCode) {
-            guard !responseData.isEmpty else { return nil }
-            guard isValidJSONPayload(responseData) else {
+            let payloads = responsePayloadsData(responseData, from: http)
+            if payloads.isEmpty {
+                return RequestResult(payloads: [], shouldStartSSEAfterOutput: false)
+            }
+            if envelope.method == "initialize" {
+                updateSessionState(from: http, payloads: payloads)
+            }
+            guard payloads.allSatisfy({ isValidJSONPayload($0) }) else {
                 throw AdapterError.invalidResponse
             }
-            return responseData
+            return RequestResult(
+                payloads: payloads,
+                shouldStartSSEAfterOutput: envelope.method == "initialize"
+            )
         }
-        if !responseData.isEmpty, isValidJSONPayload(responseData) {
-            return responseData
+        let payloads = responsePayloadsData(responseData, from: http)
+        if payloads.isEmpty == false,
+            payloads.allSatisfy({ isValidJSONPayload($0) })
+        {
+            return RequestResult(payloads: payloads, shouldStartSSEAfterOutput: false)
         }
         throw AdapterError.httpStatus(http.statusCode)
+    }
+
+    private func updateSessionState(from response: HTTPURLResponse, payloads: [Data]) {
+        if let returnedSessionID = response.value(forHTTPHeaderField: "MCP-Session-Id"),
+            returnedSessionID.isEmpty == false
+        {
+            sessionID = returnedSessionID
+        }
+        if let version = payloads.lazy.compactMap({ self.initializeProtocolVersion(from: $0) }).first {
+            negotiatedProtocolVersion = version
+        }
+    }
+
+    private func responsePayloadsData(_ data: Data, from response: HTTPURLResponse) -> [Data] {
+        guard !data.isEmpty else { return [] }
+        let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        guard contentType.hasPrefix("text/event-stream") else { return [data] }
+        return ssePayloadsData(from: data)
+    }
+
+    private func ssePayloadsData(from data: Data) -> [Data] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var decoder = SSEDecoder()
+        var payloads: [Data] = []
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.hasSuffix("\r") ? rawLine.dropLast() : Substring(rawLine)
+            if let eventPayload = decoder.feed(line: String(line)) {
+                payloads.append(eventPayload)
+            }
+        }
+        if let tail = decoder.flushIfNeeded() {
+            payloads.append(tail)
+        }
+        return payloads
+    }
+
+    private func initializeProtocolVersion(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+            let result = object["result"] as? [String: Any],
+            let protocolVersion = result["protocolVersion"] as? String,
+            MCPProtocolVersion.isSupported(protocolVersion)
+        else {
+            return nil
+        }
+        return protocolVersion
+    }
+
+    private func startSSEIfNeeded() {
+        guard sessionID != nil, negotiatedProtocolVersion != nil, sseTask == nil, !stopped else {
+            return
+        }
+        sseTask = Task { [weak self] in
+            await self?.sseLoop()
+        }
     }
 
     private func sseLoop() async {
@@ -177,10 +268,11 @@ public actor StdioAdapter {
             } catch is CancellationError {
                 return
             } catch {
+                if stopped || Task.isCancelled { return }
                 logger.warning("SSE disconnected", metadata: ["error": "\(error)"])
             }
 
-            if stopped { break }
+            if stopped || Task.isCancelled { break }
             let delay = backoffDelay(for: attempt)
             attempt += 1
             try? await Task.sleep(nanoseconds: delay)
@@ -188,10 +280,14 @@ public actor StdioAdapter {
     }
 
     private func consumeSSE() async throws {
+        guard let sessionID, let negotiatedProtocolVersion else {
+            throw AdapterError.invalidResponse
+        }
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+        request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
         applyTimeout(to: &request, allowLongRunning: true)
 
         let (bytes, response) = try await session.bytes(for: request)
@@ -258,14 +354,49 @@ public actor StdioAdapter {
         }
 
         guard !requestTasks.isEmpty else { return }
-        stopped = true
         sseTask?.cancel()
+        await deleteSessionIfNeeded()
+        for task in requestTasks.values {
+            task.cancel()
+        }
+        stopped = true
         session.invalidateAndCancel()
         await drainRequestTasks()
     }
 
     private func stop(cancelReadTask: Bool) async {
+        if !stopped {
+            await deleteSessionIfNeeded()
+        }
         stopLocked(cancelReadTask: cancelReadTask)
+    }
+
+    private func deleteSessionIfNeeded() async {
+        guard let sessionID else { return }
+        let negotiatedProtocolVersion = self.negotiatedProtocolVersion
+        defer {
+            self.sessionID = nil
+            self.negotiatedProtocolVersion = nil
+        }
+        var request = URLRequest(url: upstreamURL)
+        request.httpMethod = "DELETE"
+        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+        if let negotiatedProtocolVersion {
+            request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        }
+        applyTimeout(to: &request)
+        let urlSession = session
+        let deleteRequest = request
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                _ = try? await urlSession.data(for: deleteRequest)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
     }
 
     private func stopLocked(cancelReadTask: Bool) {
@@ -283,25 +414,24 @@ public actor StdioAdapter {
 
     private func inspectRequest(_ data: Data) -> RequestEnvelope {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return RequestEnvelope(ids: [])
+            return RequestEnvelope(method: nil, ids: [])
         }
         if let object = json as? [String: Any] {
-            if let id = object["id"], !(id is NSNull), let jsonID = JSONValue(any: id) {
-                return RequestEnvelope(ids: [jsonID])
-            }
-            return RequestEnvelope(ids: [])
+            let method = JSONRPCMessageInspector.method(from: object)
+            let ids = JSONRPCMessageInspector.requestID(from: object).map { [$0.value] } ?? []
+            return RequestEnvelope(method: method, ids: ids)
         }
         if let array = json as? [Any] {
             var ids: [JSONValue] = []
             for item in array {
                 guard let object = item as? [String: Any] else { continue }
-                if let id = object["id"], !(id is NSNull), let jsonID = JSONValue(any: id) {
-                    ids.append(jsonID)
+                if let id = JSONRPCMessageInspector.requestID(from: object) {
+                    ids.append(id.value)
                 }
             }
-            return RequestEnvelope(ids: ids)
+            return RequestEnvelope(method: nil, ids: ids)
         }
-        return RequestEnvelope(ids: [])
+        return RequestEnvelope(method: nil, ids: [])
     }
 
     private func emitError(for envelope: RequestEnvelope, message: String) async {

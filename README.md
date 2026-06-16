@@ -94,6 +94,10 @@ codex mcp add xcode -- xcode-mcp-proxy
 
 ```bash
 claude mcp remove xcode
+# Recommended: Streamable HTTP
+claude mcp add --transport http xcode http://localhost:8765/mcp
+
+# Compatibility mode: STDIO
 claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 ```
 
@@ -171,7 +175,7 @@ python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 
 | Key | Type | Default |
 |-----|------|---------|
-| `upstream_handshake.protocolVersion` | string | `"2025-03-26"` |
+| `upstream_handshake.protocolVersion` | string | `"2025-06-18"` |
 | `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
 | `upstream_handshake.clientVersion` | string | `"dev"` |
 | `upstream_handshake.capabilities` | table | `{}` |
@@ -192,6 +196,8 @@ disabled = ["RunAllTests", "RunSomeTests"]
 Disabled tools are removed from `tools/list` and rejected on direct `tools/call` requests with a tool error. The config is loaded when the proxy starts; restart `xcode-mcp-proxy-server` after editing the file.
 
 ### Adapter: `xcode-mcp-proxy`
+
+Compatibility adapter for MCP clients that still require STDIO. HTTP-capable clients should connect directly to `xcode-mcp-proxy-server` with Streamable HTTP.
 
 #### Options
 

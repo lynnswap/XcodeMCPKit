@@ -98,6 +98,17 @@ public struct ProxyConfig: Sendable {
             logger: logger
         )
     }
+
+    public func validateModernProtocolConfiguration() throws {
+        guard let protocolVersion = initializeParamsOverride?.protocolVersion else {
+            return
+        }
+        guard MCPProtocolVersion.isSupported(protocolVersion) else {
+            throw CLIError.message(
+                "upstream_handshake.protocolVersion must be \(MCPProtocolVersion.current); \(protocolVersion) is not supported"
+            )
+        }
+    }
 }
 
 public enum CLIError: Error, CustomStringConvertible {

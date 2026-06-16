@@ -8,13 +8,37 @@ import ProxyCore
 import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
- import ProxyXcodeSupport
+import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
 @testable import ProxyHTTPGateway
 
 enum HTTPTestError: Error {
     case missingResponseHead
+}
+
+private let httpTestSessionRegistry = NIOLockedValueBox<[String: any RuntimeCoordinating]>([:])
+
+private func registerHTTPTestServer(
+    url: URL,
+    sessionManager: any RuntimeCoordinating
+) {
+    httpTestSessionRegistry.withLockedValue { registry in
+        registry[url.absoluteString] = sessionManager
+    }
+}
+
+private func unregisterHTTPTestServer(url: URL) {
+    _ = httpTestSessionRegistry.withLockedValue { registry in
+        registry.removeValue(forKey: url.absoluteString)
+    }
+}
+
+private func prepareHTTPTestSession(url: URL, sessionID: String) {
+    let sessionManager = httpTestSessionRegistry.withLockedValue { registry in
+        registry[url.absoluteString]
+    }
+    _ = sessionManager?.session(id: sessionID)
 }
 
 struct UpstreamResponsePlan {
@@ -61,6 +85,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
 
         var sessions: [String: SessionContext] = [:]
+        var sessionProtocolVersions: [String: String] = [:]
         var nextUpstreamID: Int64 = 1
         var assignUpstreamIDCount = 0
         var initialized = false
@@ -74,8 +99,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var requestSuccessNotifications = 0
         var pendingResponses: [PendingResponse] = []
         var sentRequests: [SentRequest] = []
+        var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
         var requeuedLeaseCount = 0
+        var serverRequestResponseSendResults: [UpstreamSendResult] = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -143,6 +170,20 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.sessionProtocolVersions[id] = MCPProtocolVersion.current
+            return context
+        }
+    }
+
+    func uninitializedSession(id: String) -> SessionContext {
+        state.withLockedValue { state in
+            if let existing = state.sessions[id] {
+                state.sessionProtocolVersions.removeValue(forKey: id)
+                return existing
+            }
+            let context = SessionContext(id: id, config: config)
+            state.sessions[id] = context
+            state.sessionProtocolVersions.removeValue(forKey: id)
             return context
         }
     }
@@ -153,9 +194,16 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func negotiatedProtocolVersion(id: String) -> String? {
+        state.withLockedValue { state in
+            state.sessionProtocolVersions[id]
+        }
+    }
+
     func removeSession(id: String) {
         let context = state.withLockedValue { state in
-            state.sessions.removeValue(forKey: id)
+            state.sessionProtocolVersions.removeValue(forKey: id)
+            return state.sessions.removeValue(forKey: id)
         }
         context?.notificationHub.closeAll()
     }
@@ -163,9 +211,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func debugReset() {
         state.withLockedValue { state in
             state.sessions.removeAll()
+            state.sessionProtocolVersions.removeAll()
             state.cachedToolsList = nil
             state.pendingResponses.removeAll()
             state.sentRequests.removeAll()
+            state.sentUpstreamPayloads.removeAll()
             state.upstreamIDMapping.removeAll()
         }
     }
@@ -200,14 +250,20 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
+        let negotiatedProtocolVersion =
+            ((requestObject["params"] as? [String: Any])?["protocolVersion"] as? String)
+            ?? MCPProtocolVersion.current
+        _ = session(id: sessionID)
         state.withLockedValue { state in
             state.initialized = true
+            state.sessionProtocolVersions[sessionID] = negotiatedProtocolVersion
         }
         _ = chooseUpstreamIndex()
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalID.value.foundationObject,
             "result": [
+                "protocolVersion": negotiatedProtocolVersion,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -360,6 +416,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = ensureRunning
         state.withLockedValue { state in
             state.upstreamSendCount += 1
+            state.sentUpstreamPayloads.append(data)
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
@@ -371,6 +428,52 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
         if let array = json as? [Any] {
             handleBatchUpstreamRequest(array, upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func forwardServerRequestResponse(
+        responseData: Data,
+        sessionID: String,
+        responseID: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
+        let session = session(id: sessionID)
+        guard let route = session.serverRequestTracker.lookup(clientID: responseID) else {
+            return eventLoop.makeSucceededFuture(.missingRoute)
+        }
+        guard var rewritten = try? JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any] else {
+            return eventLoop.makeSucceededFuture(.invalidResponse)
+        }
+        rewritten["id"] = route.upstreamID.value.foundationObject
+        guard JSONSerialization.isValidJSONObject(rewritten),
+            let data = try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+        else {
+            return eventLoop.makeSucceededFuture(.invalidResponse)
+        }
+
+        let sendResult = state.withLockedValue { state -> UpstreamSendResult in
+            state.upstreamSendCount += 1
+            state.sentUpstreamPayloads.append(data)
+            if state.serverRequestResponseSendResults.isEmpty {
+                return .accepted
+            }
+            return state.serverRequestResponseSendResults.removeFirst()
+        }
+        switch sendResult {
+        case .accepted:
+            _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
+            return eventLoop.makeSucceededFuture(.accepted)
+        case .backpressure, .unavailable:
+            return eventLoop.makeSucceededFuture(.upstreamUnavailable)
+        }
+    }
+
+    func setServerRequestResponseSendResults(_ results: [UpstreamSendResult]) {
+        state.withLockedValue { state in
+            state.serverRequestResponseSendResults = results
         }
     }
 
@@ -699,6 +802,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.upstreamSendCount }
     }
 
+    func sentUpstreamPayloads() -> [Data] {
+        state.withLockedValue { $0.sentUpstreamPayloads }
+    }
+
     func sentToolNames() -> [String] {
         state.withLockedValue { state in
             state.sentRequests.compactMap(\.toolName)
@@ -896,14 +1003,41 @@ func postJSON(
 ) throws {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-    head.headers.add(name: "Accept", value: "application/json")
+    head.headers.add(name: "Accept", value: "application/json, text/event-stream")
     head.headers.add(name: "Content-Type", value: "application/json")
     head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+    head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
     try channel.writeInbound(HTTPServerRequestPart.head(head))
     try channel.writeInbound(HTTPServerRequestPart.body(body))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
+}
+
+func postJSONArray(
+    _ payload: [Any],
+    sessionID: String?,
+    to channel: EmbeddedChannel
+) throws {
+    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+    head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+    head.headers.add(name: "Content-Type", value: "application/json")
+    if let sessionID {
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+    }
+    var body = channel.allocator.buffer(capacity: data.count)
+    body.writeBytes(data)
+    try channel.writeInbound(HTTPServerRequestPart.head(head))
+    try channel.writeInbound(HTTPServerRequestPart.body(body))
+    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+}
+
+func assertBatchRejected(_ response: (head: HTTPResponseHead, body: String)) {
+    #expect(response.head.status == .badRequest)
+    #expect(response.head.headers.first(name: "Content-Type") == "text/plain; charset=utf-8")
+    #expect(response.body == "JSON-RPC batching is not supported")
 }
 
 struct TestHTTPHandlerServer {
@@ -951,6 +1085,7 @@ struct TestHTTPHandlerServer {
         ).wait()
         let port = channel.localAddress?.port ?? 0
         let url = URL(string: "http://\(config.listenHost):\(port)/mcp")!
+        registerHTTPTestServer(url: url, sessionManager: sessionManager)
         return TestHTTPHandlerServer(
             group: group,
             channel: channel,
@@ -961,6 +1096,7 @@ struct TestHTTPHandlerServer {
     }
 
     func shutdown() async throws {
+        unregisterHTTPTestServer(url: url)
         try await shutdownHTTPTestServer(
             listenChannel: channel,
             childChannelTracker: childChannelTracker,
@@ -980,15 +1116,20 @@ struct RawHTTPResponse: Sendable {
 func postHTTPJSON(
     url: URL,
     sessionID: String,
-    payload: [String: Any]
+    payload: [String: Any],
+    prepareSession: Bool = true
 ) async throws -> (HTTPURLResponse, [String: Any]) {
+    if prepareSession {
+        prepareHTTPTestSession(url: url, sessionID: sessionID)
+    }
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1005,15 +1146,20 @@ func postHTTPJSON(
 func postHTTPAnyJSON(
     url: URL,
     sessionID: String,
-    payload: [Any]
+    payload: [Any],
+    prepareSession: Bool = true
 ) async throws -> (HTTPURLResponse, Any) {
+    if prepareSession {
+        prepareHTTPTestSession(url: url, sessionID: sessionID)
+    }
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1028,15 +1174,20 @@ func postHTTPAnyJSON(
 func postHTTPAnyData(
     url: URL,
     sessionID: String,
-    payload: [Any]
+    payload: [Any],
+    prepareSession: Bool = true
 ) async throws -> RawHTTPResponse {
+    if prepareSession {
+        prepareHTTPTestSession(url: url, sessionID: sessionID)
+    }
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1047,18 +1198,40 @@ func postHTTPAnyData(
     }
 }
 
+func assertHTTPBatchRejected(
+    url: URL,
+    sessionID: String,
+    payload: [Any],
+    prepareSession: Bool = true
+) async throws -> RawHTTPResponse {
+    let response = try await postHTTPAnyData(
+        url: url,
+        sessionID: sessionID,
+        payload: payload,
+        prepareSession: prepareSession
+    )
+    #expect(response.statusCode == 400)
+    #expect(String(data: response.bodyData, encoding: .utf8) == "JSON-RPC batching is not supported")
+    return response
+}
+
 func postHTTPData(
     url: URL,
     sessionID: String,
-    payload: [String: Any]
+    payload: [String: Any],
+    prepareSession: Bool = true
 ) async throws -> RawHTTPResponse {
+    if prepareSession {
+        prepareHTTPTestSession(url: url, sessionID: sessionID)
+    }
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1102,7 +1275,7 @@ func initializeHTTPChannel(_ channel: EmbeddedChannel) throws -> String {
     ]
     let initData = try JSONSerialization.data(withJSONObject: initPayload, options: [])
     var initHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-    initHead.headers.add(name: "Accept", value: "application/json")
+    initHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
     initHead.headers.add(name: "Content-Type", value: "application/json")
     var initBody = channel.allocator.buffer(capacity: initData.count)
     initBody.writeBytes(initData)

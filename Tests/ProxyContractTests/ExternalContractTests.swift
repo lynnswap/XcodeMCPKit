@@ -20,7 +20,7 @@ struct ExternalContractTests {
               xcode-mcp-proxy [options]
 
             Description:
-              STDIO adapter that forwards MCP traffic to a running xcode-mcp-proxy-server (HTTP/SSE).
+              STDIO compatibility adapter that forwards MCP traffic to a running xcode-mcp-proxy-server (Streamable HTTP).
 
             Options:
               --request-timeout seconds  Request timeout (default: 300, 0 disables)
@@ -59,8 +59,8 @@ struct ExternalContractTests {
               -h, --help
 
             Notes:
-              - Starts the HTTP/SSE proxy server (and spawns xcrun mcpbridge as upstream processes).
-              - Use xcode-mcp-proxy as a STDIO adapter for Codex / Claude Code.
+              - Starts the Streamable HTTP proxy server (and spawns xcrun mcpbridge as upstream processes).
+              - HTTP-capable clients should connect directly; xcode-mcp-proxy is the STDIO compatibility adapter.
               - Default listen: localhost:8765 (override via --listen / --host / --port or env LISTEN/HOST/PORT).
               - --auto-approve opt-in enables automatic approval of the Xcode permission dialog.
               - Initialize config path: --config or env MCP_XCODE_CONFIG

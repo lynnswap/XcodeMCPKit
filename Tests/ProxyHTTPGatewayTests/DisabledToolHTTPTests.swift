@@ -129,7 +129,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-disabled-notification-mixed",
                 payload: [
@@ -148,23 +148,8 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body: [String: Any]
-            if let object = bodyData as? [String: Any] {
-                body = object
-            } else if let array = bodyData as? [[String: Any]],
-                let first = array.first
-            {
-                body = first
-            } else {
-                Issue.record("expected forwarded allowed tool response payload")
-                return
-            }
-            let result = body["result"] as? [String: Any]
-            let content = result?["content"] as? [[String: Any]]
-            #expect(content?.first?["text"] as? String == "other-tool-result")
-            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -190,7 +175,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-disabled-batch-no-upstream",
                 payload: [
@@ -214,24 +199,9 @@ extension HTTPHandlerTests {
                     ],
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-
-            let blocked = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 211 }
-            let blockedResult = blocked?["result"] as? [String: Any]
-            let blockedContent = blockedResult?["content"] as? [[String: Any]]
-            #expect((blockedResult?["isError"] as? Bool) == true)
-            #expect(blockedContent?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
-
-            let forwarded = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 212 }
-            let forwardedError = forwarded?["error"] as? [String: Any]
-            #expect((forwardedError?["code"] as? NSNumber)?.intValue == -32001)
-            #expect(forwardedError?["message"] as? String == "upstream unavailable")
-
+            #expect(response.statusCode == 400)
             #expect(sessionManager.sentToolNames().isEmpty)
-            #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
         } catch {
             try? await server.shutdown()
             throw error
@@ -267,7 +237,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-disabled-batch",
                 payload: [
@@ -299,20 +269,8 @@ extension HTTPHandlerTests {
                     ],
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-            let blocked = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 201 }
-            let blockedResult = blocked?["result"] as? [String: Any]
-            let blockedContent = blockedResult?["content"] as? [[String: Any]]
-            #expect((blockedResult?["isError"] as? Bool) == true)
-            #expect(blockedContent?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
-            let allowed = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 202 }
-            let allowedResult = allowed?["result"] as? [String: Any]
-            let allowedContent = allowedResult?["content"] as? [[String: Any]]
-            #expect(allowedContent?.first?["text"] as? String == "allowed")
-            #expect(sessionManager.sentToolNames() == ["XcodeListWindows"])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -337,7 +295,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-disabled-all-blocked",
                 payload: [
@@ -360,16 +318,7 @@ extension HTTPHandlerTests {
                     ],
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 1)
-            let blocked = bodyArray.first
-            let result = blocked?["result"] as? [String: Any]
-            let content = result?["content"] as? [[String: Any]]
-            #expect((blocked?["id"] as? NSNumber)?.intValue == 301)
-            #expect((result?["isError"] as? Bool) == true)
-            #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            #expect(response.statusCode == 400)
             #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()

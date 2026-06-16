@@ -29,6 +29,7 @@ package struct ProxyServerCommandRuntime {
 
             let proxyArgs = ["xcode-mcp-proxy"] + options.forwardedArgs
             let config = try CLIParser.parse(args: proxyArgs, environment: environment)
+            try config.validateModernProtocolConfiguration()
 
             let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])
             if isDryRun {

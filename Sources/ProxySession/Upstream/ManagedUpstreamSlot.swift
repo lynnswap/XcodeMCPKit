@@ -79,6 +79,9 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
             }
             return await running.session.send(data)
         } catch {
+            if self.pendingStart === pendingStart {
+                self.pendingStart = nil
+            }
             return .unavailable(.startFailed)
         }
     }

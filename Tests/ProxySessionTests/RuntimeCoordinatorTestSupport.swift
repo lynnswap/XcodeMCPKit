@@ -920,7 +920,7 @@ func makeInitializeRequest(id: Int) -> [String: Any] {
         "id": id,
         "method": "initialize",
         "params": [
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-06-18",
             "capabilities": [String: Any](),
             "clientInfo": [
                 "name": "session-manager-tests",
@@ -945,6 +945,7 @@ func makeInitializeResponse(id: Int64) throws -> Data {
 
 func makeInitializeResponse(id: Int64, serverName: String?) throws -> Data {
     var result: [String: Any] = [
+        "protocolVersion": MCPProtocolVersion.current,
         "capabilities": [String: Any]()
     ]
     if let serverName {
@@ -1046,8 +1047,11 @@ func spinUntilSentCount(
     count: Int,
     description: String
 ) async throws {
-    try await spinUntil(description, maxIterations: 1_000) {
-        await upstream.sentCount() >= count
+    guard count > 0 else {
+        return
+    }
+    _ = try await waitWithTimeout(description, timeout: .seconds(5)) {
+        try await upstream.nextSent(at: count - 1)
     }
 }
 
@@ -1056,8 +1060,11 @@ func spinUntilSentCount(
     count: Int,
     description: String
 ) async throws {
-    try await spinUntil(description, maxIterations: 1_000) {
-        await upstream.sentCount() >= count
+    guard count > 0 else {
+        return
+    }
+    _ = try await waitWithTimeout(description, timeout: .seconds(5)) {
+        try await upstream.nextSent(at: count - 1)
     }
 }
 

@@ -169,6 +169,514 @@ struct RuntimeCoordinatorTests {
         #expect(manager.chooseUpstreamIndex() == 0)
     }
 
+    @Test func sessionManagerRejectsUnsupportedInitializeProtocolBeforeIssuingSession()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-unsupported-protocol"
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": upstreamID,
+            "result": [
+                "protocolVersion": "2025-03-26",
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let responseData = try JSONSerialization.data(withJSONObject: response, options: [])
+        await upstream.yield(.message(responseData))
+
+        let responseObject = try decodeJSON(
+            from: try await waitWithTimeout(
+                "waiting for unsupported initialize response",
+                timeout: .seconds(2)
+            ) {
+                try await future.get()
+            }
+        )
+        let error = try #require(responseObject["error"] as? [String: Any])
+        #expect(error["message"] as? String == "unsupported upstream protocol version")
+        #expect(manager.hasSession(id: sessionID) == false)
+        #expect(manager.isInitialized() == false)
+    }
+
+    @Test func sessionManagerRemovesPendingInitializeSessionOnFailure() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-failed-initialize"
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+
+        manager.failInitPending(error: TimeoutError())
+
+        do {
+            _ = try await future.get()
+            #expect(Bool(false), "initialize future should fail")
+        } catch {
+            #expect(manager.hasSession(id: sessionID) == false)
+        }
+    }
+
+    @Test func sessionManagerRecordsServerInitiatedRequestUpstreamForClientResponses()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-server-request"
+        let session = manager.session(id: sessionID)
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        _ = try await future.get()
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "server-request-1",
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        let serverRequestData = try JSONSerialization.data(
+            withJSONObject: serverRequest,
+            options: []
+        )
+        manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == "server-request-1")
+        #expect(session.serverRequestTracker.consume(clientID: clientID) == nil)
+    }
+
+    @Test func sessionManagerDoesNotTreatServerRequestIDAsPendingResponseID()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-server-request-id-collision"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let originalID = RPCID(any: NSNumber(value: 42))!
+        let responseFuture = session.router.registerRequest(
+            idKey: originalID.key,
+            on: eventLoop
+        )
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: upstreamID),
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: serverRequest, options: []),
+            upstreamIndex: 0
+        )
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == String(upstreamID))
+
+        manager.routeUpstreamMessage(try makeToolListResponse(id: upstreamID), upstreamIndex: 0)
+        _ = try await responseFuture.get()
+    }
+
+    @Test func sessionManagerRoutesServerRequestFromMixedUpstreamBatchThroughTracker()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-mixed-upstream-batch"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let originalID = RPCID(any: NSNumber(value: 42))!
+        let responseFuture = session.router.registerRequest(
+            idKey: originalID.key,
+            on: eventLoop
+        )
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+
+        let batch: [[String: Any]] = [
+            [
+                "jsonrpc": "2.0",
+                "id": NSNumber(value: upstreamID),
+                "result": ["ok": true],
+            ],
+            [
+                "jsonrpc": "2.0",
+                "id": "server-request-1",
+                "method": "sampling/createMessage",
+                "params": [String: Any](),
+            ],
+        ]
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: batch, options: []),
+            upstreamIndex: 0
+        )
+
+        let response = try decodeJSON(from: try await responseFuture.get())
+        #expect((response["id"] as? NSNumber)?.intValue == 42)
+        #expect((response["result"] as? [String: Any])?["ok"] as? Bool == true)
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let route = try #require(session.serverRequestTracker.lookup(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == "server-request-1")
+
+        let clientResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["accepted": true],
+        ]
+        let forwardingResult = try await manager.forwardServerRequestResponse(
+            responseData: try JSONSerialization.data(withJSONObject: clientResponse, options: []),
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+        #expect(forwardingResult == .accepted)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
+
+        let forwarded = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let forwardedObject = try #require(
+            JSONSerialization.jsonObject(with: forwarded, options: []) as? [String: Any]
+        )
+        #expect(forwardedObject["id"] as? String == "server-request-1")
+        #expect((forwardedObject["result"] as? [String: Any])?["accepted"] as? Bool == true)
+    }
+
+    @Test func sessionManagerCompletesMalformedMappedUpstreamResponseWithError()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-malformed-mapped-response"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let originalID = RPCID(any: NSNumber(value: 42))!
+        let responseFuture = session.router.registerRequest(
+            idKey: originalID.key,
+            on: eventLoop
+        )
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+        let malformedResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: upstreamID),
+        ]
+
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: malformedResponse, options: []),
+            upstreamIndex: 0
+        )
+
+        let response = try decodeJSON(from: try await responseFuture.get())
+        #expect((response["id"] as? NSNumber)?.intValue == 42)
+        let error = try #require(response["error"] as? [String: Any])
+        #expect((error["code"] as? NSNumber)?.intValue == -32000)
+        #expect(error["message"] as? String == "invalid upstream response")
+    }
+
+    @Test func sessionManagerPreservesServerRequestRouteUntilForwardingSendAccepted()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-server-response-retry"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await upstream.nextSent(at: 0)
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "server-request-1",
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        manager.routeUnmappedUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: serverRequest, options: []),
+            upstreamIndex: 0
+        )
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
+
+        let clientResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["ok": true],
+        ]
+        let clientResponseData = try JSONSerialization.data(
+            withJSONObject: clientResponse,
+            options: []
+        )
+
+        await upstream.overloadNextSend()
+        let rejectedResult = try await manager.forwardServerRequestResponse(
+            responseData: clientResponseData,
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+        #expect(rejectedResult == .upstreamUnavailable)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
+
+        let acceptedResult = try await manager.forwardServerRequestResponse(
+            responseData: clientResponseData,
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+        #expect(acceptedResult == .accepted)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
+
+        let forwarded = try await upstream.nextSent(at: 3)
+        let forwardedObject = try #require(
+            JSONSerialization.jsonObject(with: forwarded, options: []) as? [String: Any]
+        )
+        #expect(forwardedObject["id"] as? String == "server-request-1")
+    }
+
+    @Test func serverRequestTrackerPreservesDuplicateUpstreamIDsAcrossUpstreams()
+        async throws
+    {
+        let tracker = ServerRequestTracker()
+        let upstreamID = RPCID(any: "duplicate")!
+
+        let firstClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 0)
+        let secondClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 1)
+
+        #expect(firstClientID.key != secondClientID.key)
+        let firstRoute = try #require(tracker.consume(clientID: firstClientID))
+        let secondRoute = try #require(tracker.consume(clientID: secondClientID))
+        #expect(firstRoute.upstreamIndex == 0)
+        #expect(secondRoute.upstreamIndex == 1)
+        #expect(firstRoute.upstreamID.key == "duplicate")
+        #expect(secondRoute.upstreamID.key == "duplicate")
+    }
+
+    @Test func serverRequestTrackerExpiresUnansweredRoutes() async throws {
+        let tracker = ServerRequestTracker(routeTimeout: .seconds(1))
+        let upstreamID = RPCID(any: "stale")!
+        let now = Date()
+
+        let clientID = tracker.record(
+            upstreamID: upstreamID,
+            upstreamIndex: 0,
+            now: now
+        )
+
+        let expired = tracker.consume(
+            clientID: clientID,
+            now: now.addingTimeInterval(2)
+        )
+        #expect(expired == nil)
+    }
+
+    @Test func serverRequestTrackerEvictsOldestRoutesAtCapacity() async throws {
+        let tracker = ServerRequestTracker(routeTimeout: .seconds(60), maxRoutes: 2)
+        let now = Date()
+        let first = tracker.record(
+            upstreamID: RPCID(any: "first")!,
+            upstreamIndex: 0,
+            now: now
+        )
+        let second = tracker.record(
+            upstreamID: RPCID(any: "second")!,
+            upstreamIndex: 0,
+            now: now
+        )
+        let third = tracker.record(
+            upstreamID: RPCID(any: "third")!,
+            upstreamIndex: 0,
+            now: now
+        )
+
+        #expect(tracker.consume(clientID: first, now: now) == nil)
+        #expect(tracker.consume(clientID: second, now: now)?.upstreamID.key == "second")
+        #expect(tracker.consume(clientID: third, now: now)?.upstreamID.key == "third")
+    }
+
+    @Test func sessionManagerRoutesServerInitiatedRequestToOwningSession() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let firstSessionID = "session-server-request-a"
+        let firstSession = manager.session(id: firstSessionID)
+        let firstFuture = manager.registerInitialize(
+            sessionID: firstSessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        _ = try await firstFuture.get()
+
+        let secondSessionID = "session-server-request-b"
+        let secondSession = manager.session(id: secondSessionID)
+        let secondFuture = manager.registerInitialize(
+            sessionID: secondSessionID,
+            originalID: RPCID(any: NSNumber(value: 2))!,
+            requestObject: makeInitializeRequest(id: 2),
+            on: eventLoop
+        )
+        _ = try await secondFuture.get()
+
+        let ownerLeaseID = manager.createRequestLease(
+            descriptor: SessionPipelineRequestDescriptor(
+                sessionID: secondSessionID,
+                label: "tools/call:owner",
+                isBatch: false,
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            ownerLeaseID,
+            requestIDKey: "owner",
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+        defer { manager.completeRequestLease(ownerLeaseID) }
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "server-request-1",
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        let serverRequestData = try JSONSerialization.data(
+            withJSONObject: serverRequest,
+            options: []
+        )
+        manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        #expect(firstSession.serverRequestTracker.consume(clientID: clientID) == nil)
+        let route = try #require(secondSession.serverRequestTracker.consume(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == "server-request-1")
+    }
+
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()
         async throws
     {
@@ -324,7 +832,9 @@ struct RuntimeCoordinatorTests {
         #expect(methodName(from: retriedWarmInitialize) == "initialize")
     }
 
-    @Test func sessionManagerDropsUnmappedNotificationsAfterInitializeCompletes() async throws {
+    @Test func sessionManagerBuffersUnmappedNotificationsAfterInitializeUntilNotificationClientConnects()
+        async throws
+    {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -358,6 +868,12 @@ struct RuntimeCoordinatorTests {
             options: []
         )
         _ = try await future.get()
+        await upstream.yield(.message(notification))
+        let received = try await nextBufferedNotifications(from: session.router)
+        #expect(received.count == 1)
+        #expect(received.first == notification)
+
+        manager.markNotificationClientConnected(sessionID: sessionID)
         await upstream.yield(.message(notification))
         #expect(
             await staysTrue(for: .milliseconds(200)) {
@@ -407,7 +923,9 @@ struct RuntimeCoordinatorTests {
         _ = try await future.get()
     }
 
-    @Test func sessionManagerDropsUnmappedNotificationsForCachedInitializeSessions() async throws {
+    @Test func sessionManagerBuffersUnmappedNotificationsForCachedInitializeSessionsUntilClientConnects()
+        async throws
+    {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -449,6 +967,12 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(notification))
 
         _ = try await cachedFuture.get()
+        let received = try await nextBufferedNotifications(from: session.router)
+        #expect(received.count == 1)
+        #expect(received.first == notification)
+
+        manager.markNotificationClientConnected(sessionID: sessionID)
+        await upstream.yield(.message(notification))
         #expect(
             await staysTrue(for: .milliseconds(200)) {
                 session.router.drainBufferedNotifications().isEmpty
@@ -530,7 +1054,9 @@ struct RuntimeCoordinatorTests {
         )
     }
 
-    @Test func sessionManagerDoesNotRouteUnmappedNotificationsToCachedInitializeSessions() async throws {
+    @Test func sessionManagerRoutesUnmappedNotificationsToCachedInitializeSessionsUntilClientConnects()
+        async throws
+    {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -584,6 +1110,25 @@ struct RuntimeCoordinatorTests {
         await upstream0.yield(.message(notification0))
         await upstream1.yield(.message(notification1))
 
+        let received = try await waitWithTimeout(
+            "waiting for cached initialize notifications",
+            timeout: .seconds(5)
+        ) {
+            var notifications: [Data] = []
+            while notifications.count < 2 {
+                notifications.append(contentsOf: session.router.drainBufferedNotifications())
+                if notifications.count >= 2 {
+                    return notifications
+                }
+                await Task.yield()
+            }
+            return notifications
+        }
+        #expect(Set(received) == Set([notification0, notification1]))
+
+        manager.markNotificationClientConnected(sessionID: sessionID)
+        await upstream0.yield(.message(notification0))
+        await upstream1.yield(.message(notification1))
         #expect(
             await staysTrue(for: .milliseconds(200)) {
                 session.router.drainBufferedNotifications().isEmpty
@@ -1699,7 +2244,7 @@ struct RuntimeCoordinatorTests {
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
         let capabilities = try #require(params["capabilities"] as? [String: Any])
 
-        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == "custom-proxy")
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
         #expect(capabilities["roots"] as? Bool == true)
@@ -1798,7 +2343,7 @@ struct RuntimeCoordinatorTests {
         let params = try #require(object?["params"] as? [String: Any])
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
 
-        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == InitializeHandshakeParams.defaultProxyClientName())
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
@@ -1868,7 +2413,7 @@ struct RuntimeCoordinatorTests {
 
         let snapshot = manager.testStateSnapshot()
         #expect(snapshot.hasInitResult == false)
-        #expect(params["protocolVersion"] as? String == "2025-03-26")
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == "configured-proxy")
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }

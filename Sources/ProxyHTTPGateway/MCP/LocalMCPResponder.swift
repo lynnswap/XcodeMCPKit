@@ -11,10 +11,11 @@ package enum LocalPostHandling {
     case pendingResponse(
         future: EventLoopFuture<ByteBuffer>,
         sessionID: String,
+        errorSessionID: String?,
         originalID: RPCID
     )
     case immediateResponse(data: Data, sessionID: String)
-    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String)
+    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String?)
 }
 
 package struct LocalMCPResponder {
@@ -48,8 +49,7 @@ package struct LocalMCPResponder {
         sessionID: String,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> Data {
-        guard let originalIDValue = object["id"],
-              let originalID = RPCID(any: originalIDValue) else {
+        guard let originalID = JSONRPCMessageInspector.requestID(from: object) else {
             throw ControlPlaneError.invalidResponse("missing id")
         }
         let result = try await sessionManager.sharedToolsList(
@@ -75,17 +75,17 @@ package struct LocalMCPResponder {
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil
     ) -> LocalPostHandling? {
-        guard let method = object["method"] as? String else {
+        guard let method = JSONRPCMessageInspector.method(from: object) else {
             return nil
         }
 
         if method == "initialize" {
-            guard let originalIDValue = object["id"], let originalID = RPCID(any: originalIDValue) else {
+            guard let originalID = JSONRPCMessageInspector.requestID(from: object) else {
                 return .mcpError(
                     id: nil,
                     code: -32600,
                     message: "missing id",
-                    sessionID: headerSessionID ?? UUID().uuidString
+                    sessionID: headerSessionID
                 )
             }
             let sessionID = headerSessionID ?? UUID().uuidString
@@ -99,12 +99,13 @@ package struct LocalMCPResponder {
             return .pendingResponse(
                 future: future,
                 sessionID: sessionID,
+                errorSessionID: nil,
                 originalID: originalID
             )
         }
 
         if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
-            guard let originalIDValue = object["id"], let originalID = RPCID(any: originalIDValue) else {
+            guard let originalID = JSONRPCMessageInspector.requestID(from: object) else {
                 return .mcpError(
                     id: nil,
                     code: -32600,
@@ -137,8 +138,7 @@ package struct LocalMCPResponder {
         if method == "tools/list",
             let headerSessionID,
             sessionManager.isInitialized(),
-            let originalIDValue = object["id"],
-            let originalID = RPCID(any: originalIDValue)
+            let originalID = JSONRPCMessageInspector.requestID(from: object)
         {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
@@ -208,6 +208,7 @@ package struct LocalMCPResponder {
             return .pendingResponse(
                 future: promise.futureResult,
                 sessionID: headerSessionID,
+                errorSessionID: headerSessionID,
                 originalID: originalID
             )
         }
@@ -215,8 +216,7 @@ package struct LocalMCPResponder {
         if method == "tools/call",
             let headerSessionID,
             sessionManager.isInitialized(),
-            let originalIDValue = object["id"],
-            let originalID = RPCID(any: originalIDValue),
+            let originalID = JSONRPCMessageInspector.requestID(from: object),
             let params = object["params"] as? [String: Any],
             let toolName = params["name"] as? String,
             toolName == "XcodeListWindows",
@@ -280,6 +280,7 @@ package struct LocalMCPResponder {
             return .pendingResponse(
                 future: promise.futureResult,
                 sessionID: headerSessionID,
+                errorSessionID: headerSessionID,
                 originalID: originalID
             )
         }

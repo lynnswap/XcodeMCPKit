@@ -10,10 +10,14 @@ package final class SessionContext: Sendable {
     package let id: String
     package let router: ProxyRouter
     package let notificationHub: NotificationHub
+    package let serverRequestTracker: ServerRequestTracker
 
     package init(id: String, config: ProxyConfig) {
         self.id = id
         self.notificationHub = NotificationHub()
+        self.serverRequestTracker = ServerRequestTracker(
+            routeTimeout: makeRequestTimeout(config.requestTimeout) ?? .seconds(300)
+        )
         self.router = ProxyRouter(
             requestTimeout: makeRequestTimeout(config.requestTimeout),
             hasActiveClients: { [weak notificationHub] in
@@ -40,10 +44,19 @@ package enum DocumentationSearchOutcome: Sendable {
     case unavailable(DocumentationProviderUnavailableReason)
 }
 
+package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
+    case accepted
+    case missingRoute
+    case invalidResponse
+    case upstreamUnavailable
+}
+
 package protocol RuntimeCoordinating: Sendable {
     func start()
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
+    func negotiatedProtocolVersion(id: String) -> String?
+    func markNotificationClientConnected(sessionID: String)
     func removeSession(id: String)
     func debugReset()
     func shutdown() async
@@ -82,6 +95,12 @@ package protocol RuntimeCoordinating: Sendable {
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
+    func forwardServerRequestResponse(
+        responseData: Data,
+        sessionID: String,
+        responseID: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult>
     func debugSnapshot() -> ProxyDebugSnapshot
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
     func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID
@@ -115,12 +134,27 @@ package protocol RuntimeCoordinating: Sendable {
 extension RuntimeCoordinating {
     package func start() {}
 
+    package func negotiatedProtocolVersion(id _: String) -> String? {
+        nil
+    }
+
+    package func markNotificationClientConnected(sessionID _: String) {}
+
     package func hasDocumentationProvider() -> Bool {
         false
     }
 
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
+    }
+
+    package func forwardServerRequestResponse(
+        responseData _: Data,
+        sessionID _: String,
+        responseID _: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
+        eventLoop.makeSucceededFuture(.missingRoute)
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(
@@ -429,6 +463,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         sessionRegistry.hasSession(id: id)
     }
 
+    package func negotiatedProtocolVersion(id: String) -> String? {
+        sessionRegistry.negotiatedProtocolVersion(id: id)
+    }
+
     package func removeSession(id: String) {
         let context = sessionRegistry.removeSession(id: id)
         context?.notificationHub.closeAll()
@@ -717,7 +755,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if let cachedResult {
             _ = session(id: sessionID)
-            sessionRegistry.markInitialized(id: sessionID)
+            sessionRegistry.markInitialized(
+                id: sessionID,
+                negotiatedProtocolVersion: Self.supportedProtocolVersion(
+                    fromInitializeResult: cachedResult
+                ),
+                buffersUnmappedNotificationsUntilClientConnects: true
+            )
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
@@ -753,6 +797,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             requestObject: requestObject,
             on: eventLoop
         )
+    }
+
+    package func markNotificationClientConnected(sessionID: String) {
+        sessionRegistry.markNotificationClientConnected(id: sessionID)
     }
 
     package func sharedToolsList(

@@ -18,7 +18,7 @@ extension HTTPPostService {
         forceBatchArray: Bool
     ) -> EventLoopFuture<HTTPPostResolution> {
         switch handling {
-        case .pendingResponse(let future, let sessionID, let originalID):
+        case .pendingResponse(let future, let sessionID, let errorSessionID, let originalID):
             return future.map { buffer in
                 var buffer = buffer
                 guard let data = buffer.readData(length: buffer.readableBytes) else {
@@ -31,9 +31,12 @@ extension HTTPPostService {
                 let responseData = forceBatchArray
                     ? Self.forceBatchArrayResponseDataIfNeeded(data)
                     : data
+                let responseSessionID = Self.isJSONRPCErrorResponse(data)
+                    ? errorSessionID
+                    : sessionID
                 return .responseData(
                     data: responseData,
-                    sessionID: sessionID,
+                    sessionID: responseSessionID,
                     prefersEventStream: prefersEventStream
                 )
             }.flatMapError { _ in
@@ -44,7 +47,7 @@ extension HTTPPostService {
                         code: -32000,
                         message: "upstream timeout",
                         forceBatchArray: forceBatchArray,
-                        sessionID: sessionID,
+                        sessionID: errorSessionID,
                         prefersEventStream: prefersEventStream
                     )
                 )
@@ -102,6 +105,16 @@ extension HTTPPostService {
             return data
         }
         return (try? JSONSerialization.data(withJSONObject: [payload], options: [])) ?? data
+    }
+
+    private static func isJSONRPCErrorResponse(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
+            object["error"] != nil
+        else {
+            return false
+        }
+        return JSONRPCMessageInspector.responseID(from: object) != nil
     }
 
     package struct ToolCallRouting {
@@ -356,8 +369,7 @@ extension HTTPPostService {
             guard !Task.isCancelled else {
                 break
             }
-            guard let idValue = request["id"],
-                  let originalID = RPCID(any: idValue) else {
+            guard let originalID = JSONRPCMessageInspector.requestID(from: request) else {
                 continue
             }
             let requestTimeout = Self.remainingRequestTimeout(until: deadline)
@@ -424,8 +436,7 @@ extension HTTPPostService {
             guard !Task.isCancelled else {
                 break
             }
-            guard let idValue = request["id"],
-                  let originalID = RPCID(any: idValue) else {
+            guard let originalID = JSONRPCMessageInspector.requestID(from: request) else {
                 continue
             }
             guard JSONSerialization.isValidJSONObject(request),
@@ -500,19 +511,18 @@ extension HTTPPostService {
         guard sessionManager.hasDocumentationProvider() else {
             return false
         }
-        guard object["method"] as? String == "tools/call",
-              object["id"] != nil,
-              let params = object["params"] as? [String: Any],
-              params["name"] as? String == DocumentationToolCatalog.toolName,
-              disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+        guard case .request("tools/call", _) = JSONRPCMessageInspector.kind(of: object),
+            let params = object["params"] as? [String: Any],
+            params["name"] as? String == DocumentationToolCatalog.toolName,
+            disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
             return false
         }
         return true
     }
 
     private func isToolsListRequest(_ object: [String: Any]) -> Bool {
-        object["method"] as? String == "tools/list"
-            && object["id"] != nil
+        JSONRPCMessageInspector.requestID(from: object) != nil
+            && JSONRPCMessageInspector.method(from: object) == "tools/list"
             && sessionManager.isInitialized()
     }
 

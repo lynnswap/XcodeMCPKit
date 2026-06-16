@@ -13,7 +13,7 @@ import ProxySession
 package enum HTTPPostResolution {
     case responseData(
         data: Data,
-        sessionID: String,
+        sessionID: String?,
         prefersEventStream: Bool
     )
     case mcpError(
@@ -22,7 +22,7 @@ package enum HTTPPostResolution {
         code: Int,
         message: String,
         forceBatchArray: Bool,
-        sessionID: String,
+        sessionID: String?,
         prefersEventStream: Bool
     )
     case plain(

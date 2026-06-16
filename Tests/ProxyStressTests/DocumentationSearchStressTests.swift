@@ -287,7 +287,7 @@ private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id,
-            "result": ["capabilities": [String: Any]()],
+            "result": ["protocolVersion": MCPProtocolVersion.current, "capabilities": [String: Any]()],
         ]
         return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
@@ -322,7 +322,7 @@ private func initializePayload(id: Int) -> [String: Any] {
         "id": id,
         "method": "initialize",
         "params": [
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-06-18",
             "clientInfo": [
                 "name": "XcodeMCPKitStressTest",
                 "version": "dev",
@@ -361,9 +361,10 @@ private func postJSON(
     var request = URLRequest(url: url, timeoutInterval: 60)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
     request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 

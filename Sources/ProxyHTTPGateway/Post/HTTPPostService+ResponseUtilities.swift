@@ -144,9 +144,10 @@ extension HTTPPostService {
 
     package static func requestRequiresInitialize(_ parsedRequestJSON: Any) -> Bool {
         if let object = parsedRequestJSON as? [String: Any] {
-            let method = object["method"] as? String
-            let expectsResponse = object["id"] != nil
-            return method != "initialize" || !expectsResponse
+            if case .request("initialize", _) = JSONRPCMessageInspector.kind(of: object) {
+                return false
+            }
+            return true
         }
         if parsedRequestJSON is [Any] {
             return true
@@ -395,7 +396,7 @@ extension HTTPPostService {
         requestObject: [String: Any],
         toolName: String
     ) -> [[String: Any]] {
-        guard let requestID = requestObject["id"], let rpcID = RPCID(any: requestID) else {
+        guard let rpcID = JSONRPCMessageInspector.requestID(from: requestObject) else {
             return []
         }
         return [makeToolResultErrorResponseObject(id: rpcID, toolName: toolName)]
@@ -495,7 +496,7 @@ extension HTTPPostService {
 
     package static func extractResponseIDs(from requestJSON: Any) -> [RPCID] {
         if let object = requestJSON as? [String: Any] {
-            guard let rawID = object["id"], let rpcID = RPCID(any: rawID) else {
+            guard let rpcID = JSONRPCMessageInspector.requestID(from: object) else {
                 return []
             }
             return [rpcID]
@@ -505,12 +506,10 @@ extension HTTPPostService {
             return []
         }
         return array.compactMap { item in
-            guard let object = item as? [String: Any],
-                let rawID = object["id"]
-            else {
+            guard let object = item as? [String: Any] else {
                 return nil
             }
-            return RPCID(any: rawID)
+            return JSONRPCMessageInspector.requestID(from: object)
         }
     }
 }

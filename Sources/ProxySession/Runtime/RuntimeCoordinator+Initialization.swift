@@ -78,6 +78,13 @@ extension RuntimeCoordinator {
             return
         }
 
+        guard let negotiatedProtocolVersion = Self.supportedProtocolVersion(
+            fromInitializeResult: result
+        ) else {
+            handleUnsupportedInitializeProtocolVersion(result, upstreamIndex: upstreamIndex)
+            return
+        }
+
         if upstreamIndex != 0 {
             if let canonicalInitialize = canonicalBrokerState.initializeResult(),
                 !initializeResultsEquivalent(canonicalInitialize, result)
@@ -117,14 +124,24 @@ extension RuntimeCoordinator {
                 self.warmUpSecondaryUpstreams()
             }
             self.refreshToolsListIfNeeded()
-            self.completePendingInitializes(pending, result: result)
+            self.completePendingInitializes(
+                pending,
+                result: result,
+                negotiatedProtocolVersion: negotiatedProtocolVersion
+            )
         } onRejected: { [weak self] in
             guard let self else { return }
             if upstreamIndex == 0,
                 self.hasUsableInitializedSecondaryUpstreams(),
                 let completion = self.initializeManager.finishPrimaryInitializeUsingCachedResult()
             {
-                self.completePendingInitializes(completion.pending, result: completion.result)
+                self.completePendingInitializes(
+                    completion.pending,
+                    result: completion.result,
+                    negotiatedProtocolVersion: Self.supportedProtocolVersion(
+                        fromInitializeResult: completion.result
+                    )
+                )
                 self.eventLoop.execute { [weak self] in
                     self?.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
                 }
@@ -137,10 +154,20 @@ extension RuntimeCoordinator {
 
     func completePendingInitializes(
         _ pending: [InitializeManager.PendingInitialize],
-        result: JSONValue
+        result: JSONValue,
+        negotiatedProtocolVersion: String?
     ) {
         for item in pending {
-            sessionRegistry.markInitialized(id: item.sessionID)
+            if sessionRegistry.sessionStillMatchesPendingInitialize(
+                sessionID: item.sessionID,
+                sessionGeneration: item.sessionGeneration
+            ) {
+                sessionRegistry.markInitialized(
+                    id: item.sessionID,
+                    negotiatedProtocolVersion: negotiatedProtocolVersion,
+                    buffersUnmappedNotificationsUntilClientConnects: true
+                )
+            }
             if let buffer = encodeInitializeResponse(
                 originalID: item.originalID,
                 result: result
@@ -172,6 +199,46 @@ extension RuntimeCoordinator {
         return buffer
     }
 
+    static func protocolVersion(fromInitializeResult result: JSONValue) -> String? {
+        guard case .object(let object) = result,
+              case .string(let version)? = object["protocolVersion"]
+        else {
+            return nil
+        }
+        return version
+    }
+
+    static func supportedProtocolVersion(fromInitializeResult result: JSONValue) -> String? {
+        guard let version = protocolVersion(fromInitializeResult: result),
+            MCPProtocolVersion.isSupported(version)
+        else {
+            return nil
+        }
+        return version
+    }
+
+    func handleUnsupportedInitializeProtocolVersion(_ result: JSONValue, upstreamIndex: Int) {
+        let version = Self.protocolVersion(fromInitializeResult: result)
+        let errorObject: [String: Any] = [
+            "code": -32000,
+            "message": "unsupported upstream protocol version",
+            "data": [
+                "protocolVersion": version as Any? ?? NSNull(),
+                "supportedProtocolVersions": [MCPProtocolVersion.current],
+            ],
+        ]
+        if upstreamIndex == 0 {
+            completeInitPendingWithError(errorObject)
+        } else {
+            noteIncompatibleUpstream(
+                upstreamIndex: upstreamIndex,
+                kind: "initialize",
+                reason: "unsupported protocol version"
+            )
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        }
+    }
+
     func encodeInitializeErrorResponse(originalID: RPCID, errorObject: [String: Any])
         -> ByteBuffer?
     {
@@ -200,6 +267,7 @@ extension RuntimeCoordinator {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
+            removePendingInitializeSessionIfCurrent(item)
             if let buffer = encodeInitializeErrorResponse(
                 originalID: item.originalID, errorObject: errorObject)
             {
@@ -307,6 +375,7 @@ extension RuntimeCoordinator {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
+            removePendingInitializeSessionIfCurrent(item)
             item.eventLoop.execute {
                 item.promise.fail(error)
             }
@@ -316,6 +385,19 @@ extension RuntimeCoordinator {
             startEagerInitializePrimary(applyBackoff: true)
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+    }
+
+    private func removePendingInitializeSessionIfCurrent(
+        _ item: InitializeManager.PendingInitialize
+    ) {
+        guard sessionRegistry.sessionStillMatchesPendingInitialize(
+            sessionID: item.sessionID,
+            sessionGeneration: item.sessionGeneration
+        ) else {
+            return
+        }
+        let context = sessionRegistry.removeSession(id: item.sessionID)
+        context?.notificationHub.closeAll()
     }
 
     func markUpstreamInitInFlight(upstreamIndex: Int, upstreamID: Int64) {

@@ -5,6 +5,7 @@ import NIOFoundationCompat
 import NIOHTTP1
 import NIOConcurrencyHelpers
 import ProxyCore
+import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
 
@@ -166,7 +167,14 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        switch HTTPRoute.resolve(method: head.method, path: path) {
+        let route = HTTPRoute.resolve(method: head.method, path: path)
+        if routeRequiresOriginValidation(route),
+            rejectInvalidOriginIfNeeded(context: context, head: head, requestLog: requestLog)
+        {
+            return
+        }
+
+        switch route {
         case .health:
             _ = sendPlain(on: context.channel, status: .ok, body: "ok", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
         case .debugSnapshot:
@@ -270,6 +278,180 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }) == true
     }
 
+    private func routeRequiresOriginValidation(_ route: HTTPRoute) -> Bool {
+        switch route {
+        case .sse, .deleteSession, .post:
+            return true
+        case .health, .debugSnapshot, .debugReset, .notFound:
+            return false
+        }
+    }
+
+    private func rejectInvalidOriginIfNeeded(
+        context: ChannelHandlerContext,
+        head: HTTPRequestHead,
+        requestLog: RequestLogContext
+    ) -> Bool {
+        guard let origin = head.headers.first(name: "Origin"),
+            origin.isEmpty == false
+        else {
+            return false
+        }
+        guard originIsAllowed(origin, requestHead: head) else {
+            _ = sendPlain(
+                on: context.channel,
+                status: .forbidden,
+                body: "origin not allowed",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return true
+        }
+        return false
+    }
+
+    private func originIsAllowed(_ origin: String, requestHead: HTTPRequestHead) -> Bool {
+        guard let components = URLComponents(string: origin),
+            let scheme = components.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            let originHost = components.host
+        else {
+            return false
+        }
+
+        let normalizedOriginHost = Self.normalizedHost(originHost)
+        let hostHeader = requestHead.headers.first(name: "Host")
+        guard Self.originHostIsAllowed(
+            normalizedOriginHost,
+            configuredHost: config.listenHost,
+            hostHeader: hostHeader
+        ) else {
+            return false
+        }
+
+        let originPort = components.port ?? Self.defaultPort(for: scheme)
+        if let hostHeaderPort = Self.port(fromHostHeader: hostHeader),
+            originPort != hostHeaderPort
+        {
+            return false
+        }
+        if config.listenPort > 0,
+            originPort != config.listenPort
+        {
+            return false
+        }
+        return true
+    }
+
+    private static func normalizedHost(_ host: String) -> String {
+        host
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+    }
+
+    private static func defaultPort(for scheme: String) -> Int {
+        scheme == "https" ? 443 : 80
+    }
+
+    private static func originHostIsAllowed(
+        _ originHost: String,
+        configuredHost: String,
+        hostHeader: String?
+    ) -> Bool {
+        if isLoopbackOrConfiguredHost(originHost, configuredHost: configuredHost) {
+            return true
+        }
+        guard isWildcardHost(configuredHost),
+            let requestHost = host(fromHostHeader: hostHeader)
+        else {
+            return false
+        }
+        return originHost == normalizedHost(requestHost)
+    }
+
+    private static func isLoopbackOrConfiguredHost(
+        _ host: String,
+        configuredHost: String
+    ) -> Bool {
+        let configured = normalizedHost(configuredHost)
+        if host == configured {
+            return true
+        }
+        if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        if isIPv4LoopbackHost(host) {
+            return true
+        }
+        return false
+    }
+
+    private static func isWildcardHost(_ host: String) -> Bool {
+        switch normalizedHost(host) {
+        case "0.0.0.0", "::", "0:0:0:0:0:0:0:0":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isIPv4LoopbackHost(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+
+        var octets: [Int] = []
+        for part in parts {
+            guard part.isEmpty == false,
+                part.allSatisfy({ $0.isNumber }),
+                let value = Int(part),
+                (0...255).contains(value)
+            else {
+                return false
+            }
+            octets.append(value)
+        }
+        return octets.first == 127
+    }
+
+    private static func host(fromHostHeader hostHeader: String?) -> String? {
+        guard let hostHeader = hostHeader?.trimmingCharacters(in: .whitespacesAndNewlines),
+            hostHeader.isEmpty == false
+        else {
+            return nil
+        }
+        if hostHeader.hasPrefix("["),
+            let closeBracket = hostHeader.firstIndex(of: "]")
+        {
+            return String(hostHeader[hostHeader.index(after: hostHeader.startIndex)..<closeBracket])
+        }
+        let colonCount = hostHeader.reduce(0) { count, character in
+            character == ":" ? count + 1 : count
+        }
+        if colonCount == 1,
+            let colon = hostHeader.lastIndex(of: ":"),
+            Int(hostHeader[hostHeader.index(after: colon)...]) != nil
+        {
+            return String(hostHeader[..<colon])
+        }
+        return hostHeader
+    }
+
+    private static func port(fromHostHeader hostHeader: String?) -> Int? {
+        guard let hostHeader else { return nil }
+        if hostHeader.hasPrefix("["),
+            let closeBracket = hostHeader.firstIndex(of: "]")
+        {
+            let rest = hostHeader[hostHeader.index(after: closeBracket)...]
+            guard rest.first == ":" else { return nil }
+            return Int(rest.dropFirst())
+        }
+        guard let colon = hostHeader.lastIndex(of: ":") else {
+            return nil
+        }
+        return Int(hostHeader[hostHeader.index(after: colon)...])
+    }
+
     private func handleSSE(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
         let alreadySSE = state.withLockedValue { $0.isSSE }
         if alreadySSE {
@@ -288,15 +470,11 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers) else {
-            _ = sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session id required",
-                keepAlive: head.isKeepAlive,
-                sessionID: nil,
-                requestLog: requestLog
-            )
+        guard let sessionID = validateExistingSession(
+            on: context.channel,
+            head: head,
+            requestLog: requestLog
+        ) else {
             return
         }
 
@@ -332,19 +510,15 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleDelete(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers) else {
-            _ = sendPlain(
-                on: context.channel,
-                status: .unauthorized,
-                body: "session id required",
-                keepAlive: head.isKeepAlive,
-                sessionID: nil,
-                requestLog: requestLog
-            )
+        guard let sessionID = validateDeletableSession(
+            on: context.channel,
+            head: head,
+            requestLog: requestLog
+        ) else {
             return
         }
         controlService.deleteSession(id: sessionID)
-        _ = sendEmpty(on: context.channel, status: .accepted, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
+        _ = sendEmpty(on: context.channel, status: .ok, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
     }
 
     private func handlePost(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
@@ -355,7 +529,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             _ = sendPlain(
                 on: context.channel,
                 status: .notAcceptable,
-                body: "client must accept application/json or text/event-stream",
+                body: "client must accept application/json and text/event-stream",
                 keepAlive: head.isKeepAlive,
                 sessionID: nil,
                 requestLog: requestLog
@@ -398,13 +572,52 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let headerSessionID = HTTPRequestValidator.sessionID(from: head.headers)
-        let headerSessionExists = headerSessionID.map { controlService.hasSession(id: $0) } ?? false
+        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
+        if parsedRequestJSON is [Any] {
+            _ = sendPlain(
+                on: context.channel,
+                status: .badRequest,
+                body: "JSON-RPC batching is not supported",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return
+        }
+
+        let parsedRequestObject = parsedRequestJSON as? [String: Any]
+        let isInitializeRequest = parsedRequestObject?["method"] as? String == "initialize"
+        let hasValidInitializeID: Bool = {
+            guard let parsedRequestObject,
+                case .request("initialize", _) = JSONRPCMessageInspector.kind(
+                    of: parsedRequestObject
+                )
+            else {
+                return false
+            }
+            return true
+        }()
+        let effectiveSessionID: String?
+        let headerSessionExists: Bool
+        if isInitializeRequest {
+            effectiveSessionID = hasValidInitializeID ? UUID().uuidString : nil
+            headerSessionExists = false
+        } else {
+            guard let sessionID = validateExistingSession(
+                on: context.channel,
+                head: head,
+                requestLog: requestLog
+            ) else {
+                return
+            }
+            effectiveSessionID = sessionID
+            headerSessionExists = true
+        }
         let keepAlive = head.isKeepAlive
         let channel = context.channel
         let operation = postService.handle(
             bodyData: bodyData,
-            headerSessionID: headerSessionID,
+            headerSessionID: effectiveSessionID,
             headerSessionExists: headerSessionExists,
             prefersEventStream: prefersEventStream,
             eventLoop: context.eventLoop
@@ -455,12 +668,146 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
                         status: .internalServerError,
                         body: "internal server error",
                         keepAlive: keepAlive,
-                        sessionID: headerSessionID,
+                        sessionID: effectiveSessionID,
                         requestLog: requestLog
                     )
                 }
             }
         }
+    }
+
+    private func validateExistingSession(
+        on channel: Channel,
+        head: HTTPRequestHead,
+        requestLog: RequestLogContext
+    ) -> String? {
+        guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers),
+            sessionID.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "session id required",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard controlService.hasSession(id: sessionID) else {
+            _ = sendPlain(
+                on: channel,
+                status: .notFound,
+                body: "session not found",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard let expectedProtocolVersion = controlService.negotiatedProtocolVersion(id: sessionID),
+            expectedProtocolVersion.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "session is not initialized",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard let protocolVersion = HTTPRequestValidator.protocolVersion(from: head.headers),
+            protocolVersion.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "protocol version required",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard MCPProtocolVersion.isSupported(protocolVersion),
+            protocolVersion == expectedProtocolVersion
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "protocol version mismatch",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        return sessionID
+    }
+
+    private func validateDeletableSession(
+        on channel: Channel,
+        head: HTTPRequestHead,
+        requestLog: RequestLogContext
+    ) -> String? {
+        guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers),
+            sessionID.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "session id required",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard controlService.hasSession(id: sessionID) else {
+            _ = sendPlain(
+                on: channel,
+                status: .notFound,
+                body: "session not found",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard let expectedProtocolVersion = controlService.negotiatedProtocolVersion(id: sessionID),
+            expectedProtocolVersion.isEmpty == false
+        else {
+            return sessionID
+        }
+        guard let protocolVersion = HTTPRequestValidator.protocolVersion(from: head.headers),
+            protocolVersion.isEmpty == false
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "protocol version required",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        guard MCPProtocolVersion.isSupported(protocolVersion),
+            protocolVersion == expectedProtocolVersion
+        else {
+            _ = sendPlain(
+                on: channel,
+                status: .badRequest,
+                body: "protocol version mismatch",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return nil
+        }
+        return sessionID
     }
 
     private func enqueueOrderedWrite(

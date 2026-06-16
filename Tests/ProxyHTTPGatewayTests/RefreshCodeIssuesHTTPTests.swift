@@ -213,7 +213,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-proxy-batch",
                 payload: [
@@ -227,29 +227,8 @@ extension HTTPHandlerTests {
                     )
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body: [String: Any]
-            if let object = bodyData as? [String: Any] {
-                body = object
-            } else if let array = bodyData as? [[String: Any]],
-                let first = array.first
-            {
-                body = first
-            } else {
-                Issue.record("expected single refresh batch response payload")
-                return
-            }
-            let result = body["result"] as? [String: Any]
-            let structuredContent = result?["structuredContent"] as? [String: Any]
-            let issues = structuredContent?["issues"] as? [[String: Any]]
-            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
-            #expect(issues?.count == 1)
-            #expect(issues?.first?["path"] as? String == target.path)
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-            ])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -343,7 +322,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-proxy-mixed",
                 payload: [
@@ -362,20 +341,8 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body = try #require(bodyData as? [[String: Any]])
-            #expect(body.count == 2)
-            let refreshResult = try #require(
-                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 230 })?["result"] as? [String: Any]
-            )
-            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
-            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
-            let otherResult = try #require(
-                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 231 })?["result"] as? [String: Any]
-            )
-            let otherContent = otherResult["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -462,7 +429,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-proxy-scalar-leftover",
                 payload: [
@@ -477,27 +444,8 @@ extension HTTPHandlerTests {
                     NSNull(),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body = try #require(bodyData as? [[String: Any]])
-            #expect(body.count == 2)
-
-            let refreshResult = try #require(
-                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 330 })?["result"] as? [String: Any]
-            )
-            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
-            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
-
-            let invalidRequest = try #require(
-                body.first(where: { $0["id"] is NSNull })
-            )
-            let error = try #require(invalidRequest["error"] as? [String: Any])
-            #expect((error["code"] as? NSNumber)?.intValue == -32600)
-            #expect(error["message"] as? String == "invalid request")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-            ])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -586,7 +534,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-proxy-notification-leftover",
                 payload: [
@@ -608,24 +556,8 @@ extension HTTPHandlerTests {
                     NSNull(),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body = try #require(bodyData as? [[String: Any]])
-            #expect(body.count == 2)
-            #expect(sessionManager.sentMethods().contains("notifications/progress"))
-
-            let refreshResult = try #require(
-                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 340 })?["result"] as? [String: Any]
-            )
-            let structuredContent = refreshResult["structuredContent"] as? [String: Any]
-            #expect((structuredContent?["totalFound"] as? NSNumber)?.intValue == 1)
-
-            let invalidRequest = try #require(
-                body.first(where: { $0["id"] is NSNull })
-            )
-            let error = try #require(invalidRequest["error"] as? [String: Any])
-            #expect((error["code"] as? NSNumber)?.intValue == -32600)
-            #expect(error["message"] as? String == "invalid request")
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentMethods().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -660,7 +592,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-refresh-notification-forwarding",
                 payload: [
@@ -682,15 +614,8 @@ extension HTTPHandlerTests {
                     ],
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body = try #require(bodyData as? [[String: Any]])
-            #expect(body.count == 1)
-            #expect((body.first?["id"] as? NSNumber)?.intValue == 510)
-            #expect(sessionManager.sentToolNames() == [
-                "RunAllTests",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -766,7 +691,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-upstream-mixed-retry",
                 payload: [
@@ -785,22 +710,9 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body = try #require(bodyData as? [[String: Any]])
-            #expect(body.count == 2)
-            let refreshResult = try #require(
-                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 232 })?["result"] as? [String: Any]
-            )
-            let refreshContent = refreshResult["content"] as? [[String: Any]]
-            #expect(refreshContent?.first?["text"] as? String == "refresh-ok")
-            let otherResult = try #require(
-                body.first(where: { ($0["id"] as? NSNumber)?.intValue == 233 })?["result"] as? [String: Any]
-            )
-            let otherContent = otherResult["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
-            #expect(refreshAttempts.withLockedValue { $0 } == 2)
-            #expect(otherAttempts.withLockedValue { $0 } == 1)
+            #expect(response.statusCode == 400)
+            #expect(refreshAttempts.withLockedValue { $0 } == 0)
+            #expect(otherAttempts.withLockedValue { $0 } == 0)
         } catch {
             try? await server.shutdown()
             throw error
@@ -1802,7 +1714,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-retry-batch",
                 payload: [
@@ -1816,22 +1728,9 @@ extension HTTPHandlerTests {
                     )
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let body: [String: Any]
-            if let object = bodyData as? [String: Any] {
-                body = object
-            } else if let array = bodyData as? [[String: Any]],
-                let first = array.first
-            {
-                body = first
-            } else {
-                Issue.record("expected single refresh batch response payload")
-                return
-            }
-            let result = body["result"] as? [String: Any]
-            #expect((result?["isError"] as? Bool) != true)
-            #expect(sessionManager.sentUpstreamCount() == 2)
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentUpstreamCount() == 0)
+            #expect(attempts.withLockedValue { $0 } == 0)
         } catch {
             try? await server.shutdown()
             throw error

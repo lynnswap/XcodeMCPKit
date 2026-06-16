@@ -61,10 +61,42 @@ struct RequestInspectorTests {
         #expect(mapped == false)
     }
 
+    @Test func requestInspectorDoesNotMapJSONRPCResponseIDs() async throws {
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": ["ok": true],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        var mapped = false
+        let transform = try RequestInspector.transform(
+            data,
+            sessionID: "s1",
+            mapID: { _, _ in
+                mapped = true
+                return 42
+            }
+        )
+
+        #expect(transform.expectsResponse == false)
+        #expect(transform.idKey == nil)
+        #expect(transform.responseIDs.isEmpty)
+        #expect(transform.method == nil)
+        #expect(mapped == false)
+
+        let upstream =
+            try JSONSerialization.jsonObject(with: transform.upstreamData, options: [])
+            as? [String: Any]
+        let id = (upstream?["id"] as? NSNumber)?.intValue
+        #expect(id == 5)
+    }
+
     @Test func requestInspectorMapsBatchRequests() async throws {
         let payload: [Any] = [
             ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
             ["jsonrpc": "2.0", "method": "ping"],
+            ["jsonrpc": "2.0", "id": 2, "result": ["ok": true]],
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
@@ -87,6 +119,9 @@ struct RequestInspectorTests {
         let first = upstream?.first as? [String: Any]
         let id = (first?["id"] as? NSNumber)?.intValue
         #expect(id == 77)
+        let third = upstream?[2] as? [String: Any]
+        let responseID = (third?["id"] as? NSNumber)?.intValue
+        #expect(responseID == 2)
         #expect(mappedCount == 1)
         #expect(transform.cacheableToolsListResponseIDKey == "1")
     }

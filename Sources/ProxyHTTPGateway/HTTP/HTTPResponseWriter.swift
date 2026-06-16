@@ -16,7 +16,7 @@ package struct HTTPResponseWriter: Sendable {
         on channel: Channel,
         data: Data,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
     ) -> EventLoopFuture<Void> {
         guard SSECodec.encodeDataEvent(data) != nil else {
@@ -42,7 +42,7 @@ package struct HTTPResponseWriter: Sendable {
         on channel: Channel,
         buffer: ByteBuffer,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
     ) -> EventLoopFuture<Void> {
         logResponse(requestLog, status: .ok, sessionID: sessionID)
@@ -114,7 +114,7 @@ package struct HTTPResponseWriter: Sendable {
         forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
     ) -> EventLoopFuture<Void> {
         guard let data = MCPErrorResponder.errorResponseData(
@@ -150,7 +150,7 @@ package struct HTTPResponseWriter: Sendable {
         forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
     ) -> EventLoopFuture<Void> {
         guard let data = MCPErrorResponder.errorResponseData(
@@ -228,7 +228,7 @@ package struct HTTPResponseWriter: Sendable {
         data: Data,
         prefersEventStream: Bool,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
     ) -> EventLoopFuture<Void> {
         if prefersEventStream {

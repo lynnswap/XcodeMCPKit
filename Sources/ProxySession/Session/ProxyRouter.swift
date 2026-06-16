@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import ProxyMCP
 
 package final class ProxyRouter: Sendable {
     package struct PendingRegistration {
@@ -142,8 +143,13 @@ package final class ProxyRouter: Sendable {
         }
 
         if let array = json as? [Any] {
-            let responseIDKeys = Self.idKeys(from: array)
+            let responseIDKeys = Self.responseIDKeys(from: array)
             if let pending = popBatch(matching: responseIDKeys) {
+                complete(pending: pending, data: data)
+            } else if responseIDKeys.count == 1,
+                let idKey = responseIDKeys.first,
+                let pending = pop(idKey: idKey)
+            {
                 complete(pending: pending, data: data)
             } else {
                 notify(data)
@@ -152,7 +158,11 @@ package final class ProxyRouter: Sendable {
         }
 
         if let object = json as? [String: Any] {
-            if let idKey = Self.idKey(from: object), let pending = pop(idKey: idKey) {
+            if let idKey = Self.responseIDKey(from: object), let pending = pop(idKey: idKey) {
+                complete(pending: pending, data: data)
+            } else if let idKey = Self.responseIDKey(from: object),
+                let pending = popBatch(matching: [idKey])
+            {
                 complete(pending: pending, data: data)
             } else {
                 notify(data)
@@ -238,24 +248,17 @@ package final class ProxyRouter: Sendable {
         }
     }
 
-    private static func idKey(from object: [String: Any]) -> String? {
-        guard let id = object["id"], !(id is NSNull) else { return nil }
-        if let stringID = id as? String {
-            return stringID
-        }
-        if let numberID = id as? NSNumber {
-            return numberID.stringValue
-        }
-        return String(describing: id)
+    private static func responseIDKey(from object: [String: Any]) -> String? {
+        JSONRPCMessageInspector.responseCorrelationID(from: object)?.key
     }
 
-    private static func idKeys(from array: [Any]) -> Set<String> {
+    private static func responseIDKeys(from array: [Any]) -> Set<String> {
         Set(
             array.compactMap { item -> String? in
                 guard let object = item as? [String: Any] else {
                     return nil
                 }
-                return idKey(from: object)
+                return responseIDKey(from: object)
             }
         )
     }

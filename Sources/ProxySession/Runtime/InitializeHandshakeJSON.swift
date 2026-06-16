@@ -20,7 +20,7 @@ package enum InitializeHandshakeJSON {
 
     package static func defaultParams() -> [String: JSONValue] {
         [
-            "protocolVersion": .string("2025-03-26"),
+            "protocolVersion": .string(MCPProtocolVersion.current),
             "capabilities": .object([:]),
             "clientInfo": .object([
                 "name": .string(InitializeHandshakeParams.defaultProxyClientName()),

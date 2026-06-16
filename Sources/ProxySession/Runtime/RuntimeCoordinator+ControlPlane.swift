@@ -147,9 +147,7 @@ extension RuntimeCoordinator {
         let internalSessionID = controlPlaneSessionID(for: purpose, route: route)
         let session = session(id: internalSessionID)
         let router = session.router
-        guard let originalIDValue = requestObject["id"],
-            let originalID = RPCID(any: originalIDValue)
-        else {
+        guard let originalID = JSONRPCMessageInspector.requestID(from: requestObject) else {
             throw ControlPlaneError.invalidResponse("missing request id")
         }
         let requestTemplate = requestObject.reduce(into: [String: JSONValue]()) { partial, entry in

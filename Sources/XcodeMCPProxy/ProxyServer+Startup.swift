@@ -5,6 +5,7 @@ import ProxySession
 
 extension ProxyServer {
     public func start() throws -> Channel {
+        try config.validateModernProtocolConfiguration()
         let preparedRuntime = try prepareRuntimeForStart()
         let sessionManager = preparedRuntime.sessionManager
         let childInitializer = ProxyHTTPChildChannelInitializer(

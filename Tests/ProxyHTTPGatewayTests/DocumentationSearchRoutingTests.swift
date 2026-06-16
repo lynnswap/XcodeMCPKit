@@ -198,7 +198,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-docs-batch-fallthrough",
                 payload: [
@@ -216,19 +216,8 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 63 }
-            let docsResult = docs?["result"] as? [String: Any]
-            let docsContent = docsResult?["content"] as? [[String: Any]]
-            #expect(docsContent?.first?["text"] as? String == "{\"answer\":\"upstream-docs\"}")
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 64 }
-            let otherResult = other?["result"] as? [String: Any]
-            let otherContent = otherResult?["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
-            #expect(sessionManager.sentToolNames() == ["DocumentationSearch", "OtherAllowedTool"])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -275,7 +264,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-docs-batch",
                 payload: [
@@ -293,23 +282,9 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-
-            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 701 }
-            let docsResult = docs?["result"] as? [String: Any]
-            let structuredContent = docsResult?["structuredContent"] as? [String: Any]
-            #expect(structuredContent?["answer"] as? String == "docs")
-
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 702 }
-            let otherResult = other?["result"] as? [String: Any]
-            let otherContent = otherResult?["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
-
-            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
-            #expect(documentationRequests.withLockedValue { $0 } == ["UIView animate"])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(documentationRequests.withLockedValue { $0 }.isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -356,7 +331,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-docs-batch-notification",
                 payload: [
@@ -377,20 +352,8 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 1)
-
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 703 }
-            let otherResult = other?["result"] as? [String: Any]
-            let otherContent = otherResult?["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
-
-            #expect(sessionManager.sentToolNames() == [
-                "DocumentationSearch",
-                "OtherAllowedTool",
-            ])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
             #expect(documentationRequests.withLockedValue { $0 }.isEmpty)
         } catch {
             try? await server.shutdown()
@@ -436,53 +399,26 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let postTask = Task {
-                try await postHTTPAnyData(
-                    url: server.url,
-                    sessionID: "session-docs-batch-forwarding-not-blocked",
-                    payload: [
-                        toolsCallPayload(
-                            id: 721,
-                            name: "DocumentationSearch",
-                            arguments: [
-                                "query": "UIView animate",
-                            ]
-                        ),
-                        toolsCallPayload(
-                            id: 722,
-                            name: "OtherAllowedTool",
-                            arguments: [:]
-                        ),
-                    ]
-                )
-            }
-
-            try await documentationStarted.wait(
-                timeout: .seconds(1),
-                description: "waiting for documentation search to start"
+            let rawResponse = try await assertHTTPBatchRejected(
+                url: server.url,
+                sessionID: "session-docs-batch-forwarding-not-blocked",
+                payload: [
+                    toolsCallPayload(
+                        id: 721,
+                        name: "DocumentationSearch",
+                        arguments: [
+                            "query": "UIView animate",
+                        ]
+                    ),
+                    toolsCallPayload(
+                        id: 722,
+                        name: "OtherAllowedTool",
+                        arguments: [:]
+                    ),
+                ]
             )
-            let didForwardOtherTool = await waitUntil(timeout: .seconds(1)) {
-                sessionManager.sentToolNames() == ["OtherAllowedTool"]
-            }
-            #expect(didForwardOtherTool)
-            await releaseDocumentation.signal()
-
-            let rawResponse = try await postTask.value
-            #expect(rawResponse.statusCode == 200)
-            let bodyData = try JSONSerialization.jsonObject(
-                with: rawResponse.bodyData,
-                options: []
-            )
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 721 }
-            let docsResult = docs?["result"] as? [String: Any]
-            let structuredContent = docsResult?["structuredContent"] as? [String: Any]
-            #expect(structuredContent?["answer"] as? String == "docs")
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 722 }
-            let otherResult = other?["result"] as? [String: Any]
-            let otherContent = otherResult?["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
+            #expect(rawResponse.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             await releaseDocumentation.signal()
             try? await server.shutdown()
@@ -528,7 +464,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-tools-list-batch-local",
                 payload: [
@@ -544,23 +480,9 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-
-            let toolsList = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 731 }
-            let toolsResult = toolsList?["result"] as? [String: Any]
-            let tools = try #require(toolsResult?["tools"] as? [[String: Any]])
-            #expect(tools.map { $0["name"] as? String }.contains("DocumentationSearch"))
-
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 732 }
-            let otherResult = other?["result"] as? [String: Any]
-            let otherContent = otherResult?["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
-
-            #expect(sessionManager.sentMethods() == ["tools/call"])
-            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentMethods().isEmpty)
+            #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -622,7 +544,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-tools-list-activates-docs-route",
                 payload: [
@@ -645,28 +567,9 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 3)
-
-            let toolsList = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 741 }
-            let toolsResult = toolsList?["result"] as? [String: Any]
-            let tools = try #require(toolsResult?["tools"] as? [[String: Any]])
-            #expect(tools.map { $0["name"] as? String }.contains("DocumentationSearch"))
-
-            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 742 }
-            let docsResult = docs?["result"] as? [String: Any]
-            let structuredContent = docsResult?["structuredContent"] as? [String: Any]
-            #expect(structuredContent?["answer"] as? String == "docs")
-
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 743 }
-            let otherResult = other?["result"] as? [String: Any]
-            let otherContent = otherResult?["content"] as? [[String: Any]]
-            #expect(otherContent?.first?["text"] as? String == "other-tool-result")
-
-            #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
-            #expect(documentationRequests.withLockedValue { $0 } == ["UIView same batch"])
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolNames().isEmpty)
+            #expect(documentationRequests.withLockedValue { $0 }.isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -714,7 +617,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-tools-list-docs-unavailable",
                 payload: [
@@ -732,23 +635,9 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-
-            let toolsList = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 751 }
-            let toolsResult = toolsList?["result"] as? [String: Any]
-            let tools = try #require(toolsResult?["tools"] as? [[String: Any]])
-            #expect(tools.map { $0["name"] as? String }.contains("DocumentationSearch") == false)
-
-            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 752 }
-            let docsError = try #require(docs?["error"] as? [String: Any])
-            #expect((docsError["code"] as? NSNumber)?.intValue == -32001)
-            #expect(docsError["message"] as? String == DocumentationProviderUnavailableReason.userFacingMessage)
-
+            #expect(response.statusCode == 400)
             #expect(sessionManager.sentToolNames() == [])
-            #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 0)
         } catch {
             try? await server.shutdown()
             throw error
@@ -796,7 +685,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-docs-unavailable-before-other-timeout",
                 payload: [
@@ -814,24 +703,9 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-
-            let docs = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 761 }
-            let docsError = try #require(docs?["error"] as? [String: Any])
-            #expect((docsError["code"] as? NSNumber)?.intValue == -32001)
-            #expect(docsError["message"] as? String == DocumentationProviderUnavailableReason.userFacingMessage)
-
-            let other = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 762 }
-            let otherError = other?["error"] as? [String: Any]
-            #expect(otherError?["message"] as? String == "upstream timeout")
-
-            #expect(sessionManager.sentToolRequests() == [
-                "OtherAllowedTool@0",
-            ])
-            #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
+            #expect(response.statusCode == 400)
+            #expect(sessionManager.sentToolRequests().isEmpty)
+            #expect(localDocumentationRequests.withLockedValue { $0 } == 0)
         } catch {
             try? await server.shutdown()
             throw error
@@ -870,7 +744,7 @@ extension HTTPHandlerTests {
         )
 
         do {
-            let (response, bodyData) = try await postHTTPAnyJSON(
+            let response = try await assertHTTPBatchRejected(
                 url: server.url,
                 sessionID: "session-docs-batch-deadline",
                 payload: [
@@ -890,19 +764,8 @@ extension HTTPHandlerTests {
                     ),
                 ]
             )
-
-            #expect(response.statusCode == 200)
-            let bodyArray = try #require(bodyData as? [[String: Any]])
-            #expect(bodyArray.count == 2)
-
-            let first = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 711 }
-            #expect(first?["result"] != nil)
-
-            let second = bodyArray.first { ($0["id"] as? NSNumber)?.intValue == 712 }
-            let secondError = try #require(second?["error"] as? [String: Any])
-            #expect((secondError["code"] as? NSNumber)?.intValue == -32000)
-            #expect(secondError["message"] as? String == "upstream timeout")
-            #expect(documentationRequests.withLockedValue { $0 } == ["first"])
+            #expect(response.statusCode == 400)
+            #expect(documentationRequests.withLockedValue { $0 }.isEmpty)
         } catch {
             try? await server.shutdown()
             throw error
@@ -1083,6 +946,7 @@ extension HTTPHandlerTests {
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-1")
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let payload: [String: Any] = [
@@ -1094,9 +958,10 @@ extension HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1117,11 +982,12 @@ extension HTTPHandlerTests {
         #expect(resources?.isEmpty == true)
     }
 
-    @Test func httpSingleItemBatchResourcesListReturnsEmptyArray() async throws {
+    @Test func httpSingleItemBatchResourcesListIsRejected() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-batch-resources")
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let payload: [[String: Any]] = [[
@@ -1130,28 +996,9 @@ extension HTTPHandlerTests {
             "method": "resources/list",
             "params": [String: Any](),
         ]]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-Id", value: "session-batch-resources")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try postJSONArray(payload, sessionID: "session-batch-resources", to: channel)
 
         let response = try collectResponse(from: channel)
-        #expect(response.head.status == .ok)
-
-        let responseArray =
-            try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
-            as? [[String: Any]]
-        let responseObject = try #require(responseArray?.first)
-        #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
-        let result = responseObject["result"] as? [String: Any]
-        let resources = result?["resources"] as? [Any]
-        #expect(resources?.isEmpty == true)
+        assertBatchRejected(response)
     }
 }

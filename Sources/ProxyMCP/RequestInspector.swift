@@ -26,12 +26,16 @@ package enum RequestInspector {
     ) throws -> RequestTransform {
         let json = try parsedJSON ?? JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
-            let method = object["method"] as? String
+            let kind = JSONRPCMessageInspector.kind(of: object)
+            let method = JSONRPCMessageInspector.method(from: object)
             let toolName = toolName(from: object, method: method)
             // We intentionally treat tools/list as stable and cache it regardless of params.
             // Some clients attach pagination-like params even when they expect the full list.
-            let isCacheableToolsListRequest = (method == "tools/list")
-            if let id = object["id"], let rpcID = RPCID(any: id) {
+            let isCacheableToolsListRequest: Bool = {
+                guard case .request(let method, _) = kind else { return false }
+                return method == "tools/list"
+            }()
+            if case .request(let method, let rpcID) = kind {
                 let upstreamID = mapID(sessionID, rpcID)
                 object["id"] = upstreamID
                 let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
@@ -41,7 +45,7 @@ package enum RequestInspector {
                     isBatch: false,
                     idKey: rpcID.key,
                     responseIDs: [rpcID],
-                    responseMethodsByIDKey: method.map { [rpcID.key: $0] } ?? [:],
+                    responseMethodsByIDKey: [rpcID.key: method],
                     responseToolNamesByIDKey: toolName.map { [rpcID.key: $0] } ?? [:],
                     responseOriginalIDsByKey: [rpcID.key: rpcID],
                     method: method,
@@ -80,16 +84,16 @@ package enum RequestInspector {
             responseIDs.reserveCapacity(array.count)
             for item in array {
                 if var object = item as? [String: Any] {
-                    if let id = object["id"], let rpcID = RPCID(any: id) {
+                    if case .request(let method, let rpcID) =
+                        JSONRPCMessageInspector.kind(of: object)
+                    {
                         let upstreamID = mapID(sessionID, rpcID)
                         object["id"] = upstreamID
                         responseIDs.append(rpcID)
                         responseOriginalIDsByKey[rpcID.key] = rpcID
-                        if let method = object["method"] as? String {
-                            responseMethodsByIDKey[rpcID.key] = method
-                            if let toolName = toolName(from: object, method: method) {
-                                responseToolNamesByIDKey[rpcID.key] = toolName
-                            }
+                        responseMethodsByIDKey[rpcID.key] = method
+                        if let toolName = toolName(from: object, method: method) {
+                            responseToolNamesByIDKey[rpcID.key] = toolName
                         }
                     }
                     transformed.append(object)
@@ -100,9 +104,8 @@ package enum RequestInspector {
             let normalizationToolsListResponseIDKey: String? = {
                 for item in array {
                     guard let object = item as? [String: Any],
-                        object["method"] as? String == "tools/list",
-                        let id = object["id"],
-                        let rpcID = RPCID(any: id)
+                        case .request("tools/list", let rpcID) =
+                            JSONRPCMessageInspector.kind(of: object)
                     else {
                         continue
                     }
@@ -116,15 +119,14 @@ package enum RequestInspector {
                 }
                 for item in array {
                     guard let object = item as? [String: Any],
-                        let id = object["id"],
-                        let rpcID = RPCID(any: id)
+                        case .request(let method, _) =
+                            JSONRPCMessageInspector.kind(of: object)
                     else {
                         continue
                     }
-                    guard object["method"] as? String == "tools/list" else {
+                    guard method == "tools/list" else {
                         return nil
                     }
-                    _ = rpcID
                 }
                 return normalizationToolsListResponseIDKey
             }()
