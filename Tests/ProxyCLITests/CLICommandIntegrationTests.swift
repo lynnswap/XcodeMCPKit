@@ -257,6 +257,79 @@ struct CLICommandIntegrationTests {
         try await server.shutdown()
     }
 
+    @Test func cliCommandDeletesUninitializedSessionAfterInitializeWithoutProtocol() async throws {
+        let server = try StubMCPHTTPServer.start(
+            responseMode: .json,
+            initializeProtocolVersion: nil
+        )
+        let errors = CapturedLines()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                makeLogSink: {
+                    CLICommandLogSink(
+                        error: { errors.append($0) },
+                        info: { _, _ in }
+                    )
+                },
+                makeAdapter: { upstreamURL, requestTimeout, input, output in
+                    StdioAdapter(
+                        upstreamURL: upstreamURL,
+                        requestTimeout: requestTimeout,
+                        input: input,
+                        output: output
+                    )
+                },
+                input: inputPipe.fileHandleForReading,
+                output: outputPipe.fileHandleForWriting
+            )
+        )
+
+        do {
+            let initialize =
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+            inputPipe.fileHandleForWriting.write(Data(initialize.utf8) + Data("\n".utf8))
+            inputPipe.fileHandleForWriting.closeFile()
+
+            let exitCode = try await waitWithTimeout(
+                "CLI command should delete uninitialized session after EOF",
+                timeout: .seconds(5)
+            ) {
+                await command.run(
+                    args: [
+                        "xcode-mcp-proxy",
+                        "--url",
+                        server.url.absoluteString,
+                    ],
+                    environment: [:]
+                )
+            }
+            outputPipe.fileHandleForWriting.closeFile()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+
+            #expect(exitCode == 0)
+            #expect(errors.snapshot().isEmpty)
+            let output = String(decoding: outputData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let responseObject = try #require(
+                JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
+            )
+            #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
+
+            let delete = try #require(server.recorder.snapshot().first { $0.httpMethod == "DELETE" })
+            #expect(delete.sessionID == "server-session")
+            #expect(delete.protocolVersion == nil)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
     private func runCLICommandRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
         let server = try StubMCPHTTPServer.start(responseMode: responseMode)
         let errors = CapturedLines()
@@ -371,6 +444,7 @@ private struct StubMCPHTTPServer {
         responseMode: StubMCPHTTPResponseMode,
         delayedResponseMethod: String? = nil,
         hangingResponseMethod: String? = nil,
+        initializeProtocolVersion: String? = MCPProtocolVersion.current,
         hangsDELETE: Bool = false
     ) throws -> StubMCPHTTPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -387,6 +461,7 @@ private struct StubMCPHTTPServer {
                             responseMode: responseMode,
                             delayedResponseMethod: delayedResponseMethod,
                             hangingResponseMethod: hangingResponseMethod,
+                            initializeProtocolVersion: initializeProtocolVersion,
                             hangsDELETE: hangsDELETE
                         )
                     )
@@ -453,6 +528,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
     private let responseMode: StubMCPHTTPResponseMode
     private let delayedResponseMethod: String?
     private let hangingResponseMethod: String?
+    private let initializeProtocolVersion: String?
     private let hangsDELETE: Bool
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBufferAllocator().buffer(capacity: 0)
@@ -462,12 +538,14 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         responseMode: StubMCPHTTPResponseMode,
         delayedResponseMethod: String?,
         hangingResponseMethod: String?,
+        initializeProtocolVersion: String?,
         hangsDELETE: Bool
     ) {
         self.recorder = recorder
         self.responseMode = responseMode
         self.delayedResponseMethod = delayedResponseMethod
         self.hangingResponseMethod = hangingResponseMethod
+        self.initializeProtocolVersion = initializeProtocolVersion
         self.hangsDELETE = hangsDELETE
     }
 
@@ -521,10 +599,13 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             let isInitialize = requestObject?["method"] as? String == "initialize"
             let resultObject: [String: Any]
             if isInitialize {
-                resultObject = [
-                    "protocolVersion": MCPProtocolVersion.current,
+                var initializeResult: [String: Any] = [
                     "capabilities": [String: Any](),
                 ]
+                if let initializeProtocolVersion {
+                    initializeResult["protocolVersion"] = initializeProtocolVersion
+                }
+                resultObject = initializeResult
             } else {
                 resultObject = [
                     "transport": "stub",

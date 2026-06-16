@@ -328,15 +328,13 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             return false
         }
 
-        let originPort = components.port
+        let originPort = components.port ?? Self.defaultPort(for: scheme)
         if let hostHeaderPort = Self.port(fromHostHeader: requestHead.headers.first(name: "Host")),
-            let originPort,
             originPort != hostHeaderPort
         {
             return false
         }
         if config.listenPort > 0,
-            let originPort,
             originPort != config.listenPort
         {
             return false
@@ -348,6 +346,10 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         host
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             .lowercased()
+    }
+
+    private static func defaultPort(for scheme: String) -> Int {
+        scheme == "https" ? 443 : 80
     }
 
     private static func isLoopbackOrConfiguredHost(

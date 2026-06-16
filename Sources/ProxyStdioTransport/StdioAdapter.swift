@@ -351,7 +351,8 @@ public actor StdioAdapter {
     }
 
     private func deleteSessionIfNeeded() async {
-        guard let sessionID, let negotiatedProtocolVersion else { return }
+        guard let sessionID else { return }
+        let negotiatedProtocolVersion = self.negotiatedProtocolVersion
         defer {
             self.sessionID = nil
             self.negotiatedProtocolVersion = nil
@@ -359,7 +360,9 @@ public actor StdioAdapter {
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "DELETE"
         request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
-        request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        if let negotiatedProtocolVersion {
+            request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        }
         applyTimeout(to: &request)
         let urlSession = session
         let deleteRequest = request
