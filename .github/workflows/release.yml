@@ -1,138 +1,173 @@
-name: Release
+name: Release Verification
 
+# Release assets are built and uploaded by scripts/publish-local-release.sh.
+# The local script pushes the tag, creates the draft release, and explicitly
+# dispatches this workflow for that tag ref. Tag pushes alone do not publish.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-verification-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    name: Test
+  package-tests:
+    name: Package Tests
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
-        with:
-          swift-version: "6.2"
-
-      - name: Run general test suites
-        run: >-
-          swift test
-          -Xswiftc -strict-concurrency=minimal
-
-  test-process-io:
-    name: Test (process / pipe)
-    runs-on: macos-15
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
-        with:
-          swift-version: "6.2"
-
-      - name: Run serialized process / pipe test suites
+      - name: Verify release ref
         env:
-          XCODE_MCP_RUN_PROCESS_TESTS: "1"
-        run: >-
-          swift test
-          --no-parallel
-          --filter ProxyProcessTests
-          -Xswiftc -strict-concurrency=minimal
-
-  build-arm64:
-    name: Build (arm64)
-    needs:
-      - test
-      - test-process-io
-    runs-on: macos-15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.2.3." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
+            echo "Release verification must be dispatched against the release tag ref." >&2
+            echo "Expected tag: ${RELEASE_VERSION}" >&2
+            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
 
       - name: Setup Swift 6.2
         uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
         with:
           swift-version: "6.2"
 
-      - name: Build release binaries
-        run: scripts/build-release.sh --arch arm64 --version "${GITHUB_REF_NAME}" --dist-root dist
+      - name: Run package checks
+        run: scripts/check.sh
 
-      - name: Upload arm64 artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: dist-arm64
-          path: dist/arm64
-          if-no-files-found: error
-
-  build-x86_64:
-    name: Build (x86_64)
-    needs:
-      - test
-      - test-process-io
-    runs-on: macos-15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
-        with:
-          swift-version: "6.2"
-
-      - name: Build release binaries
-        run: scripts/build-release.sh --arch x86_64 --version "${GITHUB_REF_NAME}" --dist-root dist
-
-      - name: Upload x86_64 artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: dist-x86_64
-          path: dist/x86_64
-          if-no-files-found: error
-
-  release:
-    name: Package and Publish
-    needs:
-      - build-arm64
-      - build-x86_64
-    runs-on: macos-15
+  publish-release:
+    name: Publish Verified Release
+    needs: package-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify release ref
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.2.3." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
+            echo "Release publishing must be dispatched against the release tag ref." >&2
+            echo "Expected tag: ${RELEASE_VERSION}" >&2
+            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
 
-      - name: Setup Swift 6.2
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
-        with:
-          swift-version: "6.2"
+      - name: Publish verified draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
 
-      - name: Download arm64 artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: dist-arm64
-          path: dist/arm64
+          tag_name="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName')"
+          if [[ "${tag_name}" != "${RELEASE_VERSION}" ]]; then
+            echo "Release tag mismatch." >&2
+            echo "Expected tag: ${RELEASE_VERSION}" >&2
+            echo "Actual tag:   ${tag_name}" >&2
+            exit 1
+          fi
 
-      - name: Download x86_64 artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: dist-x86_64
-          path: dist/x86_64
+          expected_assets=(
+            "xcode-mcp-proxy-darwin-arm64.tar.gz"
+            "SHA256SUMS.txt"
+          )
 
-      - name: Package release archives
-        run: scripts/package-universal.sh --dist-root dist --output-dir release
+          mapfile -t asset_names < <(
+            gh release view "${RELEASE_VERSION}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json assets \
+              --jq '.assets[].name'
+          )
 
-      - name: Publish Draft GitHub Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
-        with:
-          files: |
-            release/*.tar.gz
-            release/SHA256SUMS.txt
-          draft: true
-          generate_release_notes: true
+          is_expected_asset() {
+            local candidate="$1"
+            local expected
+            for expected in "${expected_assets[@]}"; do
+              if [[ "${candidate}" == "${expected}" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          for expected in "${expected_assets[@]}"; do
+            if ! printf '%s\n' "${asset_names[@]}" | grep -Fxq "${expected}"; then
+              echo "Expected uploaded release asset was not found: ${expected}" >&2
+              exit 1
+            fi
+          done
+
+          for asset in "${asset_names[@]}"; do
+            if ! is_expected_asset "${asset}"; then
+              echo "Unexpected release asset found: ${asset}" >&2
+              exit 1
+            fi
+          done
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
+
+          gh release download "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "xcode-mcp-proxy-darwin-arm64.tar.gz" \
+            --dir "${tmp_dir}"
+          gh release download "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "SHA256SUMS.txt" \
+            --dir "${tmp_dir}"
+
+          mapfile -t checksum_lines < <(grep -v '^[[:space:]]*$' "${tmp_dir}/SHA256SUMS.txt")
+          if [[ "${#checksum_lines[@]}" -ne 1 ]]; then
+            echo "SHA256SUMS.txt must contain exactly one checksum entry." >&2
+            exit 1
+          fi
+          if [[ ! "${checksum_lines[0]}" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]xcode-mcp-proxy-darwin-arm64[.]tar[.]gz$ ]]; then
+            echo "SHA256SUMS.txt does not match the expected arm64 archive format." >&2
+            exit 1
+          fi
+
+          (
+            cd "${tmp_dir}"
+            shasum -a 256 -c SHA256SUMS.txt
+          )
+
+          is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
+          is_prerelease="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isPrerelease --jq '.isPrerelease')"
+          if [[ "${is_draft}" != "true" ]]; then
+            if [[ "${is_prerelease}" == "false" ]]; then
+              echo "Release ${RELEASE_VERSION} is already published."
+              exit 0
+            fi
+            echo "Release ${RELEASE_VERSION} is already public but marked as a prerelease." >&2
+            exit 1
+          fi
+
+          gh release edit "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --prerelease=false
