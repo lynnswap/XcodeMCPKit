@@ -140,7 +140,7 @@ package final class HTTPPostService: Sendable {
             let responseID = JSONRPCMessageInspector.responseID(from: responseObject)
         {
             return makeClientResponseForwardingOperation(
-                bodyData: bodyData,
+                responseObject: responseObject,
                 sessionID: sessionID,
                 responseID: responseID,
                 eventLoop: eventLoop
@@ -513,16 +513,31 @@ package final class HTTPPostService: Sendable {
     }
 
     private func makeClientResponseForwardingOperation(
-        bodyData: Data,
+        responseObject: [String: Any],
         sessionID: String,
         responseID: RPCID,
         eventLoop: EventLoop
     ) -> HTTPPostOperation {
         let session = sessionManager.session(id: sessionID)
-        if let upstreamIndex = session.serverRequestTracker.consume(idKey: responseID.key) {
+        if let route = session.serverRequestTracker.consume(clientID: responseID) {
+            guard let upstreamData = Self.rewriteClientResponse(
+                responseObject,
+                id: route.upstreamID
+            ) else {
+                return HTTPPostOperation(
+                    future: eventLoop.makeSucceededFuture(
+                        .plain(
+                            status: .badRequest,
+                            body: "invalid json-rpc response",
+                            sessionID: sessionID
+                        )
+                    ),
+                    cancellationHandle: nil
+                )
+            }
             sessionManager.sendUpstream(
-                bodyData,
-                upstreamIndex: upstreamIndex,
+                upstreamData,
+                upstreamIndex: route.upstreamIndex,
                 ensureRunning: false
             )
         } else {
@@ -540,5 +555,17 @@ package final class HTTPPostService: Sendable {
             ),
             cancellationHandle: nil
         )
+    }
+
+    private static func rewriteClientResponse(
+        _ responseObject: [String: Any],
+        id: RPCID
+    ) -> Data? {
+        var rewritten = responseObject
+        rewritten["id"] = id.value.foundationObject
+        guard JSONSerialization.isValidJSONObject(rewritten) else {
+            return nil
+        }
+        return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
     }
 }

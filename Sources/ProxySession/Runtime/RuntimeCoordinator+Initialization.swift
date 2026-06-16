@@ -267,13 +267,7 @@ extension RuntimeCoordinator {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
-            if sessionRegistry.sessionStillMatchesPendingInitialize(
-                sessionID: item.sessionID,
-                sessionGeneration: item.sessionGeneration
-            ) {
-                let context = sessionRegistry.removeSession(id: item.sessionID)
-                context?.notificationHub.closeAll()
-            }
+            removePendingInitializeSessionIfCurrent(item)
             if let buffer = encodeInitializeErrorResponse(
                 originalID: item.originalID, errorObject: errorObject)
             {
@@ -381,6 +375,7 @@ extension RuntimeCoordinator {
         }
         clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
+            removePendingInitializeSessionIfCurrent(item)
             item.eventLoop.execute {
                 item.promise.fail(error)
             }
@@ -390,6 +385,19 @@ extension RuntimeCoordinator {
             startEagerInitializePrimary(applyBackoff: true)
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+    }
+
+    private func removePendingInitializeSessionIfCurrent(
+        _ item: InitializeManager.PendingInitialize
+    ) {
+        guard sessionRegistry.sessionStillMatchesPendingInitialize(
+            sessionID: item.sessionID,
+            sessionGeneration: item.sessionGeneration
+        ) else {
+            return
+        }
+        let context = sessionRegistry.removeSession(id: item.sessionID)
+        context?.notificationHub.closeAll()
     }
 
     func markUpstreamInitInFlight(upstreamIndex: Int, upstreamID: Int64) {

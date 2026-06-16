@@ -721,14 +721,14 @@ struct HTTPHandlerTests {
 
         let sessionID = try initializeHTTPChannel(channel)
         let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
-        sessionManager.session(id: sessionID).serverRequestTracker.record(
-            idKey: "99",
+        let clientID = sessionManager.session(id: sessionID).serverRequestTracker.record(
+            upstreamID: RPCID(any: NSNumber(value: 99))!,
             upstreamIndex: 0
         )
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": 99,
+            "id": clientID.value.foundationObject,
             "result": ["ok": true],
         ]
         try postJSON(payload, sessionID: sessionID, to: channel)

@@ -214,6 +214,34 @@ struct RuntimeCoordinatorTests {
         #expect(manager.isInitialized() == false)
     }
 
+    @Test func sessionManagerRemovesPendingInitializeSessionOnFailure() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-failed-initialize"
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+
+        manager.failInitPending(error: TimeoutError())
+
+        do {
+            _ = try await future.get()
+            #expect(Bool(false), "initialize future should fail")
+        } catch {
+            #expect(manager.hasSession(id: sessionID) == false)
+        }
+    }
+
     @Test func sessionManagerRecordsServerInitiatedRequestUpstreamForClientResponses()
         async throws
     {
@@ -250,8 +278,29 @@ struct RuntimeCoordinatorTests {
         )
         manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
 
-        #expect(session.serverRequestTracker.consume(idKey: "server-request-1") == 0)
-        #expect(session.serverRequestTracker.consume(idKey: "server-request-1") == nil)
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == "server-request-1")
+        #expect(session.serverRequestTracker.consume(clientID: clientID) == nil)
+    }
+
+    @Test func serverRequestTrackerPreservesDuplicateUpstreamIDsAcrossUpstreams()
+        async throws
+    {
+        let tracker = ServerRequestTracker()
+        let upstreamID = RPCID(any: "duplicate")!
+
+        let firstClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 0)
+        let secondClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 1)
+
+        #expect(firstClientID.key != secondClientID.key)
+        let firstRoute = try #require(tracker.consume(clientID: firstClientID))
+        let secondRoute = try #require(tracker.consume(clientID: secondClientID))
+        #expect(firstRoute.upstreamIndex == 0)
+        #expect(secondRoute.upstreamIndex == 1)
+        #expect(firstRoute.upstreamID.key == "duplicate")
+        #expect(secondRoute.upstreamID.key == "duplicate")
     }
 
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()

@@ -517,7 +517,28 @@ extension RuntimeCoordinator {
 
         struct ServerInitiatedPayload {
             let data: Data
-            let responseIDKey: String?
+            let object: [String: Any]
+
+            func routedData(
+                for session: SessionContext,
+                upstreamIndex: Int
+            ) -> Data? {
+                guard case .request(_, let upstreamID) =
+                    JSONRPCMessageInspector.kind(of: object)
+                else {
+                    return data
+                }
+                var rewritten = object
+                let clientID = session.serverRequestTracker.record(
+                    upstreamID: upstreamID,
+                    upstreamIndex: upstreamIndex
+                )
+                rewritten["id"] = clientID.value.foundationObject
+                guard JSONSerialization.isValidJSONObject(rewritten) else {
+                    return nil
+                }
+                return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+            }
         }
 
         let serverInitiatedPayloads: [ServerInitiatedPayload] = {
@@ -526,7 +547,7 @@ extension RuntimeCoordinator {
                 return [
                     ServerInitiatedPayload(
                         data: data,
-                        responseIDKey: object["id"].flatMap { RPCID(any: $0)?.key }
+                        object: object
                     )
                 ]
             }
@@ -545,7 +566,7 @@ extension RuntimeCoordinator {
                     payloads.append(
                         ServerInitiatedPayload(
                             data: encoded,
-                            responseIDKey: object["id"].flatMap { RPCID(any: $0)?.key }
+                            object: object
                         )
                     )
                 }
@@ -600,13 +621,13 @@ extension RuntimeCoordinator {
         if !routedTargets.isEmpty {
             for payload in serverInitiatedPayloads {
                 for session in routedTargets {
-                    if let responseIDKey = payload.responseIDKey {
-                        session.serverRequestTracker.record(
-                            idKey: responseIDKey,
-                            upstreamIndex: upstreamIndex
-                        )
+                    guard let routedData = payload.routedData(
+                        for: session,
+                        upstreamIndex: upstreamIndex
+                    ) else {
+                        continue
                     }
-                    session.router.handleIncoming(payload.data)
+                    session.router.handleIncoming(routedData)
                 }
             }
             return
