@@ -67,6 +67,33 @@ package final class ServerRequestTracker: Sendable {
         }
     }
 
+    package func lookup(clientID: RPCID, now: Date = Date()) -> ServerRequestRoute? {
+        state.withLockedValue { state in
+            Self.removeExpiredRoutes(now: now, state: &state)
+            return state.routesByClientIDKey[clientID.key]?.route
+        }
+    }
+
+    @discardableResult
+    package func complete(
+        clientID: RPCID,
+        route: ServerRequestRoute,
+        now: Date = Date()
+    ) -> Bool {
+        state.withLockedValue { state in
+            Self.removeExpiredRoutes(now: now, state: &state)
+            guard let stored = state.routesByClientIDKey[clientID.key],
+                stored.route.upstreamIndex == route.upstreamIndex,
+                stored.route.upstreamID.key == route.upstreamID.key
+            else {
+                return false
+            }
+            state.routesByClientIDKey.removeValue(forKey: clientID.key)
+            state.clientIDKeysInOrder.removeAll { $0 == clientID.key }
+            return true
+        }
+    }
+
     private static func expirationDate(now: Date, timeout: TimeAmount) -> Date {
         let seconds = Double(max(timeout.nanoseconds, 0)) / 1_000_000_000
         return now.addingTimeInterval(seconds)

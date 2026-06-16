@@ -44,6 +44,13 @@ package enum DocumentationSearchOutcome: Sendable {
     case unavailable(DocumentationProviderUnavailableReason)
 }
 
+package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
+    case accepted
+    case missingRoute
+    case invalidResponse
+    case upstreamUnavailable
+}
+
 package protocol RuntimeCoordinating: Sendable {
     func start()
     func session(id: String) -> SessionContext
@@ -88,6 +95,12 @@ package protocol RuntimeCoordinating: Sendable {
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
+    func forwardServerRequestResponse(
+        responseData: Data,
+        sessionID: String,
+        responseID: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult>
     func debugSnapshot() -> ProxyDebugSnapshot
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
     func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID
@@ -133,6 +146,15 @@ extension RuntimeCoordinating {
 
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
+    }
+
+    package func forwardServerRequestResponse(
+        responseData _: Data,
+        sessionID _: String,
+        responseID _: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
+        eventLoop.makeSucceededFuture(.missingRoute)
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(

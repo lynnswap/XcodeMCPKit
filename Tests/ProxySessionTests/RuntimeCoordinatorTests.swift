@@ -340,6 +340,215 @@ struct RuntimeCoordinatorTests {
         _ = try await responseFuture.get()
     }
 
+    @Test func sessionManagerRoutesServerRequestFromMixedUpstreamBatchThroughTracker()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-mixed-upstream-batch"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let originalID = RPCID(any: NSNumber(value: 42))!
+        let responseFuture = session.router.registerRequest(
+            idKey: originalID.key,
+            on: eventLoop
+        )
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+
+        let batch: [[String: Any]] = [
+            [
+                "jsonrpc": "2.0",
+                "id": NSNumber(value: upstreamID),
+                "result": ["ok": true],
+            ],
+            [
+                "jsonrpc": "2.0",
+                "id": "server-request-1",
+                "method": "sampling/createMessage",
+                "params": [String: Any](),
+            ],
+        ]
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: batch, options: []),
+            upstreamIndex: 0
+        )
+
+        let response = try decodeJSON(from: try await responseFuture.get())
+        #expect((response["id"] as? NSNumber)?.intValue == 42)
+        #expect((response["result"] as? [String: Any])?["ok"] as? Bool == true)
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let route = try #require(session.serverRequestTracker.lookup(clientID: clientID))
+        #expect(route.upstreamIndex == 0)
+        #expect(route.upstreamID.key == "server-request-1")
+
+        let clientResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["accepted": true],
+        ]
+        let forwardingResult = try await manager.forwardServerRequestResponse(
+            responseData: try JSONSerialization.data(withJSONObject: clientResponse, options: []),
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+        #expect(forwardingResult == .accepted)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
+
+        let forwarded = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let forwardedObject = try #require(
+            JSONSerialization.jsonObject(with: forwarded, options: []) as? [String: Any]
+        )
+        #expect(forwardedObject["id"] as? String == "server-request-1")
+        #expect((forwardedObject["result"] as? [String: Any])?["accepted"] as? Bool == true)
+    }
+
+    @Test func sessionManagerCompletesMalformedMappedUpstreamResponseWithError()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-malformed-mapped-response"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let originalID = RPCID(any: NSNumber(value: 42))!
+        let responseFuture = session.router.registerRequest(
+            idKey: originalID.key,
+            on: eventLoop
+        )
+        let upstreamID = manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            upstreamIndex: 0
+        )
+        let malformedResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNumber(value: upstreamID),
+        ]
+
+        manager.routeUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: malformedResponse, options: []),
+            upstreamIndex: 0
+        )
+
+        let response = try decodeJSON(from: try await responseFuture.get())
+        #expect((response["id"] as? NSNumber)?.intValue == 42)
+        let error = try #require(response["error"] as? [String: Any])
+        #expect((error["code"] as? NSNumber)?.intValue == -32000)
+        #expect(error["message"] as? String == "invalid upstream response")
+    }
+
+    @Test func sessionManagerPreservesServerRequestRouteUntilForwardingSendAccepted()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-server-response-retry"
+        let session = manager.session(id: sessionID)
+        let initializeFuture = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: RPCID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sentInitialize = try await upstream.nextSent(at: 0)
+        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
+        _ = try await initializeFuture.get()
+
+        let serverRequest: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "server-request-1",
+            "method": "sampling/createMessage",
+            "params": [String: Any](),
+        ]
+        manager.routeUnmappedUpstreamMessage(
+            try JSONSerialization.data(withJSONObject: serverRequest, options: []),
+            upstreamIndex: 0
+        )
+
+        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
+
+        let clientResponse: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["ok": true],
+        ]
+        let clientResponseData = try JSONSerialization.data(
+            withJSONObject: clientResponse,
+            options: []
+        )
+
+        await upstream.overloadNextSend()
+        let rejectedResult = try await manager.forwardServerRequestResponse(
+            responseData: clientResponseData,
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+        #expect(rejectedResult == .upstreamUnavailable)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
+
+        let acceptedResult = try await manager.forwardServerRequestResponse(
+            responseData: clientResponseData,
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+        #expect(acceptedResult == .accepted)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
+
+        let forwarded = try await upstream.nextSent(at: 3)
+        let forwardedObject = try #require(
+            JSONSerialization.jsonObject(with: forwarded, options: []) as? [String: Any]
+        )
+        #expect(forwardedObject["id"] as? String == "server-request-1")
+    }
+
     @Test func serverRequestTrackerPreservesDuplicateUpstreamIDsAcrossUpstreams()
         async throws
     {

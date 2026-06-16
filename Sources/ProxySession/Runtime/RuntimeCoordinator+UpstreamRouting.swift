@@ -17,39 +17,160 @@ extension RuntimeCoordinator {
         upstreamSlotScheduler.failQueuedRequests()
     }
 
+    private enum MappedResponseRoutingOutcome {
+        case routed(sessionID: String, object: [String: Any])
+        case handled
+        case late
+        case unmappedResponse
+        case notResponse
+    }
+
+    private struct ServerInitiatedPayload {
+        let data: Data
+        let object: [String: Any]
+        let expectsResponse: Bool
+
+        func routedData(
+            for session: SessionContext,
+            upstreamIndex: Int
+        ) -> Data? {
+            guard case .request(_, let upstreamID) =
+                JSONRPCMessageInspector.kind(of: object)
+            else {
+                return data
+            }
+            var rewritten = object
+            let clientID = session.serverRequestTracker.record(
+                upstreamID: upstreamID,
+                upstreamIndex: upstreamIndex
+            )
+            rewritten["id"] = clientID.value.foundationObject
+            guard JSONSerialization.isValidJSONObject(rewritten) else {
+                return nil
+            }
+            return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+        }
+    }
+
     func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
             return
         }
 
-        if var object = json as? [String: Any],
-            let responseID = JSONRPCMessageInspector.responseID(from: object),
-            let upstreamID = upstreamID(from: responseID)
-        {
-            if let mapping = upstreamRouter.consume(
-                upstreamIndex: upstreamIndex,
-                upstreamID: upstreamID
-            ) {
-                if mapping.isInitialize {
-                    handleInitializeResponse(object, upstreamIndex: upstreamIndex)
+        if let object = json as? [String: Any] {
+            switch mappedResponseRoutingOutcome(object, upstreamIndex: upstreamIndex) {
+            case .routed(let sessionID, let object):
+                if deliverClientResponseObjects([object], sessionID: sessionID, upstreamIndex: upstreamIndex) {
                     return
                 }
-                if let sessionID = mapping.sessionID, let originalID = mapping.originalID {
-                    object["id"] = originalID.value.foundationObject
-                    if let rewritten = try? JSONSerialization.data(withJSONObject: object, options: [])
-                    {
-                        recordTraffic(
-                            upstreamIndex: upstreamIndex,
-                            direction: "inbound",
-                            data: rewritten
-                        )
-                        let target = session(id: sessionID)
-                        target.router.handleIncoming(rewritten)
-                        return
-                    }
+            case .handled, .late:
+                return
+            case .unmappedResponse, .notResponse:
+                break
+            }
+            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+            return
+        }
+
+        if let array = json as? [Any] {
+            routeUpstreamBatch(array, originalData: data, upstreamIndex: upstreamIndex)
+            return
+        }
+
+        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+    }
+
+    private func routeUpstreamBatch(
+        _ array: [Any],
+        originalData: Data,
+        upstreamIndex: Int
+    ) {
+        var responseObjectsBySessionID: [String: [Any]] = [:]
+        var mappedSessionIDs = Set<String>()
+        var serverInitiatedPayloads: [ServerInitiatedPayload] = []
+        var unmappedItems: [Any] = []
+        var droppedLateResponse = false
+
+        for item in array {
+            guard let object = item as? [String: Any] else {
+                unmappedItems.append(item)
+                continue
+            }
+
+            switch mappedResponseRoutingOutcome(object, upstreamIndex: upstreamIndex) {
+            case .routed(let sessionID, let object):
+                responseObjectsBySessionID[sessionID, default: []].append(object)
+                mappedSessionIDs.insert(sessionID)
+            case .handled:
+                continue
+            case .late:
+                droppedLateResponse = true
+            case .unmappedResponse:
+                unmappedItems.append(item)
+            case .notResponse:
+                if let payload = serverInitiatedPayload(from: object) {
+                    serverInitiatedPayloads.append(payload)
+                } else {
+                    unmappedItems.append(item)
                 }
-            } else if upstreamRouter.consumeReleasedResponseMarker(
+            }
+        }
+
+        let owningTargetOverride: SessionContext? = {
+            guard mappedSessionIDs.count == 1,
+                let sessionID = mappedSessionIDs.first
+            else {
+                return nil
+            }
+            return sessionRegistry.contextIfPresent(id: sessionID)
+        }()
+        let routedServerInitiated = routeServerInitiatedPayloads(
+            serverInitiatedPayloads,
+            upstreamIndex: upstreamIndex,
+            sourceByteCount: originalData.count,
+            owningTargetOverride: owningTargetOverride
+        )
+        let routedClientResponses = routeClientResponses(
+            responseObjectsBySessionID,
+            upstreamIndex: upstreamIndex
+        )
+
+        if unmappedItems.isEmpty {
+            if droppedLateResponse && !routedClientResponses && !routedServerInitiated {
+                logger.debug(
+                    "Dropping late upstream batch response",
+                    metadata: [
+                        "upstream": .string("\(upstreamIndex)"),
+                    ]
+                )
+            }
+            return
+        }
+
+        if routedClientResponses || routedServerInitiated || droppedLateResponse {
+            routeUnmappedBatchItems(unmappedItems, upstreamIndex: upstreamIndex)
+            return
+        }
+
+        routeUnmappedUpstreamMessage(originalData, upstreamIndex: upstreamIndex)
+    }
+
+    private func mappedResponseRoutingOutcome(
+        _ object: [String: Any],
+        upstreamIndex: Int
+    ) -> MappedResponseRoutingOutcome {
+        guard let responseID = JSONRPCMessageInspector.responseCorrelationID(from: object),
+            let upstreamID = upstreamID(from: responseID)
+        else {
+            return .notResponse
+        }
+
+        guard let mapping = upstreamRouter.consume(
+            upstreamIndex: upstreamIndex,
+            upstreamID: upstreamID
+        ) else {
+            if upstreamRouter.consumeReleasedResponseMarker(
                 upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID
             ) {
@@ -61,85 +182,85 @@ extension RuntimeCoordinator {
                     ]
                 )
                 debugRecorder.recordLateResponse(upstreamIndex: upstreamIndex)
-                return
+                return .late
             }
+            return .unmappedResponse
         }
 
-        if let array = json as? [Any] {
-            var sessionID: String?
-            var rewrittenAny = false
-            var droppedLateResponse = false
-            var transformed: [Any] = []
-            for item in array {
-                guard var object = item as? [String: Any] else {
-                    transformed.append(item)
-                    continue
-                }
-                guard let responseID = JSONRPCMessageInspector.responseID(from: object),
-                    let upstreamID = upstreamID(from: responseID)
-                else {
-                    transformed.append(item)
-                    continue
-                }
-                guard let mapping = upstreamRouter.consume(
-                    upstreamIndex: upstreamIndex,
-                    upstreamID: upstreamID
-                ) else {
-                    if upstreamRouter.consumeReleasedResponseMarker(
-                        upstreamIndex: upstreamIndex,
-                        upstreamID: upstreamID
-                    ) {
-                        droppedLateResponse = true
-                        debugRecorder.recordLateResponse(upstreamIndex: upstreamIndex)
-                        continue
-                    }
-                    transformed.append(item)
-                    continue
-                }
-                if mapping.isInitialize {
-                    handleInitializeResponse(object, upstreamIndex: upstreamIndex)
-                    continue
-                }
-                guard let originalID = mapping.originalID else {
-                    transformed.append(item)
-                    continue
-                }
-                object["id"] = originalID.value.foundationObject
-                sessionID = sessionID ?? mapping.sessionID
-                rewrittenAny = true
-                transformed.append(object)
-            }
-            if rewrittenAny, let sessionID,
-                let rewritten = try? JSONSerialization.data(
-                    withJSONObject: transformed, options: [])
-            {
-                recordTraffic(
-                    upstreamIndex: upstreamIndex,
-                    direction: "inbound",
-                    data: rewritten
-                )
-                let target = session(id: sessionID)
-                target.router.handleIncoming(rewritten)
-                return
-            }
-            if droppedLateResponse, transformed.isEmpty {
-                logger.debug(
-                    "Dropping late upstream batch response",
-                    metadata: [
-                        "upstream": .string("\(upstreamIndex)"),
-                    ]
-                )
-                return
-            }
-            if droppedLateResponse,
-                let rewritten = try? JSONSerialization.data(withJSONObject: transformed, options: [])
-            {
-                routeUnmappedUpstreamMessage(rewritten, upstreamIndex: upstreamIndex)
-                return
-            }
+        if mapping.isInitialize {
+            handleInitializeResponse(object, upstreamIndex: upstreamIndex)
+            return .handled
         }
 
-        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+        guard let sessionID = mapping.sessionID,
+            let originalID = mapping.originalID
+        else {
+            return .handled
+        }
+        return .routed(
+            sessionID: sessionID,
+            object: clientResponseObject(from: object, originalID: originalID)
+        )
+    }
+
+    private func clientResponseObject(
+        from object: [String: Any],
+        originalID: RPCID
+    ) -> [String: Any] {
+        if case .malformed = JSONRPCMessageInspector.kind(of: object) {
+            return [
+                "jsonrpc": "2.0",
+                "id": originalID.value.foundationObject,
+                "error": [
+                    "code": -32000,
+                    "message": "invalid upstream response",
+                ],
+            ]
+        }
+        var rewritten = object
+        rewritten["id"] = originalID.value.foundationObject
+        return rewritten
+    }
+
+    private func routeClientResponses(
+        _ responseObjectsBySessionID: [String: [Any]],
+        upstreamIndex: Int
+    ) -> Bool {
+        var routedAny = false
+        for (sessionID, objects) in responseObjectsBySessionID {
+            if deliverClientResponseObjects(
+                objects,
+                sessionID: sessionID,
+                upstreamIndex: upstreamIndex
+            ) {
+                routedAny = true
+            }
+        }
+        return routedAny
+    }
+
+    private func deliverClientResponseObjects(
+        _ objects: [Any],
+        sessionID: String,
+        upstreamIndex: Int
+    ) -> Bool {
+        guard !objects.isEmpty else {
+            return false
+        }
+        let payload: Any = objects.count == 1 ? objects[0] : objects
+        guard JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [])
+        else {
+            return false
+        }
+        recordTraffic(
+            upstreamIndex: upstreamIndex,
+            direction: "inbound",
+            data: data
+        )
+        let target = session(id: sessionID)
+        target.router.handleIncoming(data)
+        return true
     }
 
     /// The staleness rule for the canonical tools catalog: it must not
@@ -275,6 +396,106 @@ extension RuntimeCoordinator {
                 )
             }
         }
+    }
+
+    package func forwardServerRequestResponse(
+        responseData: Data,
+        sessionID: String,
+        responseID: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
+        let promise = eventLoop.makePromise(of: ServerRequestResponseForwardingResult.self)
+        Task { [weak self] in
+            guard let self else {
+                promise.succeed(.upstreamUnavailable)
+                return
+            }
+            let result = await self.performServerRequestResponseForwarding(
+                responseData: responseData,
+                sessionID: sessionID,
+                responseID: responseID
+            )
+            promise.succeed(result)
+        }
+        return promise.futureResult
+    }
+
+    private func performServerRequestResponseForwarding(
+        responseData: Data,
+        sessionID: String,
+        responseID: RPCID
+    ) async -> ServerRequestResponseForwardingResult {
+        guard let session = sessionRegistry.contextIfPresent(id: sessionID) else {
+            return .missingRoute
+        }
+        guard let route = session.serverRequestTracker.lookup(clientID: responseID) else {
+            logger.debug(
+                "Acknowledging client JSON-RPC response without a routed upstream request",
+                metadata: [
+                    "session": .string(sessionID),
+                    "id": .string(responseID.key),
+                ]
+            )
+            return .missingRoute
+        }
+        guard let responseObject = try? JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any] else {
+            return .invalidResponse
+        }
+        guard let upstreamData = Self.rewriteServerRequestResponse(
+            responseObject,
+            id: route.upstreamID
+        ) else {
+            return .invalidResponse
+        }
+
+        switch await sendServerRequestResponseUpstream(
+            upstreamData,
+            upstreamIndex: route.upstreamIndex
+        ) {
+        case .accepted:
+            _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
+            return .accepted
+        case .backpressure, .unavailable:
+            return .upstreamUnavailable
+        }
+    }
+
+    private func sendServerRequestResponseUpstream(
+        _ data: Data,
+        upstreamIndex: Int
+    ) async -> UpstreamSendResult {
+        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+            return .unavailable(.notStarted)
+        }
+        switch await upstreams[upstreamIndex].send(data) {
+        case .accepted:
+            recordTraffic(
+                upstreamIndex: upstreamIndex,
+                direction: "outbound",
+                data: data
+            )
+            return .accepted
+        case .backpressure:
+            markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+            return .backpressure
+        case .unavailable(let reason):
+            return .unavailable(reason)
+        }
+    }
+
+    private static func rewriteServerRequestResponse(
+        _ responseObject: [String: Any],
+        id: RPCID
+    ) -> Data? {
+        var rewritten = responseObject
+        rewritten["id"] = id.value.foundationObject
+        guard JSONSerialization.isValidJSONObject(rewritten) else {
+            return nil
+        }
+        return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
     }
 
     package func debugSnapshot() -> ProxyDebugSnapshot {
@@ -531,72 +752,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        struct ServerInitiatedPayload {
-            let data: Data
-            let object: [String: Any]
-            let expectsResponse: Bool
-
-            func routedData(
-                for session: SessionContext,
-                upstreamIndex: Int
-            ) -> Data? {
-                guard case .request(_, let upstreamID) =
-                    JSONRPCMessageInspector.kind(of: object)
-                else {
-                    return data
-                }
-                var rewritten = object
-                let clientID = session.serverRequestTracker.record(
-                    upstreamID: upstreamID,
-                    upstreamIndex: upstreamIndex
-                )
-                rewritten["id"] = clientID.value.foundationObject
-                guard JSONSerialization.isValidJSONObject(rewritten) else {
-                    return nil
-                }
-                return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
-            }
-        }
-
-        let serverInitiatedPayloads: [ServerInitiatedPayload] = {
-            if let object = any as? [String: Any] {
-                let kind = JSONRPCMessageInspector.kind(of: object)
-                guard kind.isServerInitiated else { return [] }
-                return [
-                    ServerInitiatedPayload(
-                        data: data,
-                        object: object,
-                        expectsResponse: kind.requestID != nil
-                    )
-                ]
-            }
-            if let array = any as? [Any] {
-                var payloads: [ServerInitiatedPayload] = []
-                payloads.reserveCapacity(array.count)
-                for item in array {
-                    guard let object = item as? [String: Any],
-                        JSONSerialization.isValidJSONObject(object),
-                        let encoded = try? JSONSerialization.data(
-                            withJSONObject: object, options: [])
-                    else {
-                        continue
-                    }
-                    let kind = JSONRPCMessageInspector.kind(of: object)
-                    guard kind.isServerInitiated else {
-                        continue
-                    }
-                    payloads.append(
-                        ServerInitiatedPayload(
-                            data: encoded,
-                            object: object,
-                            expectsResponse: kind.requestID != nil
-                        )
-                    )
-                }
-                return payloads
-            }
-            return []
-        }()
+        let serverInitiatedPayloads = serverInitiatedPayloads(from: any, originalData: data)
 
         guard !serverInitiatedPayloads.isEmpty else {
             logger.debug(
@@ -607,6 +763,88 @@ extension RuntimeCoordinator {
                 ]
             )
             return
+        }
+
+        if routeServerInitiatedPayloads(
+            serverInitiatedPayloads,
+            upstreamIndex: upstreamIndex,
+            sourceByteCount: data.count,
+            owningTargetOverride: nil
+        ) {
+            return
+        }
+    }
+
+    private func serverInitiatedPayload(from object: [String: Any]) -> ServerInitiatedPayload? {
+        guard JSONSerialization.isValidJSONObject(object),
+            let encoded = try? JSONSerialization.data(withJSONObject: object, options: [])
+        else {
+            return nil
+        }
+        let kind = JSONRPCMessageInspector.kind(of: object)
+        guard kind.isServerInitiated else {
+            return nil
+        }
+        return ServerInitiatedPayload(
+            data: encoded,
+            object: object,
+            expectsResponse: kind.requestID != nil
+        )
+    }
+
+    private func serverInitiatedPayloads(
+        from any: Any,
+        originalData: Data
+    ) -> [ServerInitiatedPayload] {
+        if let object = any as? [String: Any] {
+            let kind = JSONRPCMessageInspector.kind(of: object)
+            guard kind.isServerInitiated else { return [] }
+            return [
+                ServerInitiatedPayload(
+                    data: originalData,
+                    object: object,
+                    expectsResponse: kind.requestID != nil
+                )
+            ]
+        }
+        if let array = any as? [Any] {
+            var payloads: [ServerInitiatedPayload] = []
+            payloads.reserveCapacity(array.count)
+            for item in array {
+                guard let object = item as? [String: Any],
+                    let payload = serverInitiatedPayload(from: object)
+                else {
+                    continue
+                }
+                payloads.append(payload)
+            }
+            return payloads
+        }
+        return []
+    }
+
+    private func routeUnmappedBatchItems(_ items: [Any], upstreamIndex: Int) {
+        guard !items.isEmpty else {
+            return
+        }
+        let payload: Any = items.count == 1 ? items[0] : items
+        guard JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [])
+        else {
+            return
+        }
+        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+    }
+
+    @discardableResult
+    private func routeServerInitiatedPayloads(
+        _ serverInitiatedPayloads: [ServerInitiatedPayload],
+        upstreamIndex: Int,
+        sourceByteCount: Int,
+        owningTargetOverride: SessionContext?
+    ) -> Bool {
+        guard !serverInitiatedPayloads.isEmpty else {
+            return false
         }
 
         var routedTargets: [SessionContext] = []
@@ -643,7 +881,8 @@ extension RuntimeCoordinator {
             routedTargets.append(target)
         }
 
-        let owningTarget = activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
+        let owningTarget =
+            owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
         var routedAnyPayload = false
 
         for payload in serverInitiatedPayloads {
@@ -675,18 +914,19 @@ extension RuntimeCoordinator {
             }
         }
 
-        if routedAnyPayload {
-            return
+        guard routedAnyPayload else {
+            logger.debug(
+                "Dropping unmapped upstream message (no routed target sessions)",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(sourceByteCount)"),
+                ]
+            )
+            debugRecorder.recordDroppedUnmappedNotification(upstreamIndex: upstreamIndex)
+            return false
         }
 
-        logger.debug(
-            "Dropping unmapped upstream message (no routed target sessions)",
-            metadata: [
-                "upstream": .string("\(upstreamIndex)"),
-                "bytes": .string("\(data.count)"),
-            ]
-        )
-        debugRecorder.recordDroppedUnmappedNotification(upstreamIndex: upstreamIndex)
+        return true
     }
 
     private func activeLeaseSessionTarget(upstreamIndex: Int) -> SessionContext? {

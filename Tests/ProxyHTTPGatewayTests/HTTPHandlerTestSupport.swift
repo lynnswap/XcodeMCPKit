@@ -102,6 +102,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
         var requeuedLeaseCount = 0
+        var serverRequestResponseSendResults: [UpstreamSendResult] = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -427,6 +428,52 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
         if let array = json as? [Any] {
             handleBatchUpstreamRequest(array, upstreamIndex: upstreamIndex)
+        }
+    }
+
+    func forwardServerRequestResponse(
+        responseData: Data,
+        sessionID: String,
+        responseID: RPCID,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
+        let session = session(id: sessionID)
+        guard let route = session.serverRequestTracker.lookup(clientID: responseID) else {
+            return eventLoop.makeSucceededFuture(.missingRoute)
+        }
+        guard var rewritten = try? JSONSerialization.jsonObject(
+            with: responseData,
+            options: []
+        ) as? [String: Any] else {
+            return eventLoop.makeSucceededFuture(.invalidResponse)
+        }
+        rewritten["id"] = route.upstreamID.value.foundationObject
+        guard JSONSerialization.isValidJSONObject(rewritten),
+            let data = try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+        else {
+            return eventLoop.makeSucceededFuture(.invalidResponse)
+        }
+
+        let sendResult = state.withLockedValue { state -> UpstreamSendResult in
+            state.upstreamSendCount += 1
+            state.sentUpstreamPayloads.append(data)
+            if state.serverRequestResponseSendResults.isEmpty {
+                return .accepted
+            }
+            return state.serverRequestResponseSendResults.removeFirst()
+        }
+        switch sendResult {
+        case .accepted:
+            _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
+            return eventLoop.makeSucceededFuture(.accepted)
+        case .backpressure, .unavailable:
+            return eventLoop.makeSucceededFuture(.upstreamUnavailable)
+        }
+    }
+
+    func setServerRequestResponseSendResults(_ results: [UpstreamSendResult]) {
+        state.withLockedValue { state in
+            state.serverRequestResponseSendResults = results
         }
     }
 

@@ -146,6 +146,11 @@ package final class ProxyRouter: Sendable {
             let responseIDKeys = Self.responseIDKeys(from: array)
             if let pending = popBatch(matching: responseIDKeys) {
                 complete(pending: pending, data: data)
+            } else if responseIDKeys.count == 1,
+                let idKey = responseIDKeys.first,
+                let pending = pop(idKey: idKey)
+            {
+                complete(pending: pending, data: data)
             } else {
                 notify(data)
             }
@@ -154,6 +159,10 @@ package final class ProxyRouter: Sendable {
 
         if let object = json as? [String: Any] {
             if let idKey = Self.responseIDKey(from: object), let pending = pop(idKey: idKey) {
+                complete(pending: pending, data: data)
+            } else if let idKey = Self.responseIDKey(from: object),
+                let pending = popBatch(matching: [idKey])
+            {
                 complete(pending: pending, data: data)
             } else {
                 notify(data)
@@ -240,7 +249,7 @@ package final class ProxyRouter: Sendable {
     }
 
     private static func responseIDKey(from object: [String: Any]) -> String? {
-        JSONRPCMessageInspector.responseID(from: object)?.key
+        JSONRPCMessageInspector.responseCorrelationID(from: object)?.key
     }
 
     private static func responseIDKeys(from array: [Any]) -> Set<String> {

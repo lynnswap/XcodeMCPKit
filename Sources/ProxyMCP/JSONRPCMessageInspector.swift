@@ -22,6 +22,17 @@ package enum JSONRPCMessageKind: Sendable {
         return id
     }
 
+    package var responseCorrelationID: RPCID? {
+        switch self {
+        case .response(let id):
+            return id
+        case .malformed(let id):
+            return id
+        case .request, .notification, .other:
+            return nil
+        }
+    }
+
     package var isServerInitiated: Bool {
         switch self {
         case .request, .notification:
@@ -81,6 +92,10 @@ package enum JSONRPCMessageInspector {
 
     package static func responseID(from object: [String: Any]) -> RPCID? {
         kind(of: object).responseID
+    }
+
+    package static func responseCorrelationID(from object: [String: Any]) -> RPCID? {
+        kind(of: object).responseCorrelationID
     }
 
     package static func invalidMessageID(from object: [String: Any]) -> RPCID? {

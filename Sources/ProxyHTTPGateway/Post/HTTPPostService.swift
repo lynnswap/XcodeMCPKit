@@ -536,54 +536,46 @@ package final class HTTPPostService: Sendable {
         responseID: RPCID,
         eventLoop: EventLoop
     ) -> HTTPPostOperation {
-        let session = sessionManager.session(id: sessionID)
-        if let route = session.serverRequestTracker.consume(clientID: responseID) {
-            guard let upstreamData = Self.rewriteClientResponse(
-                responseObject,
-                id: route.upstreamID
-            ) else {
-                return HTTPPostOperation(
-                    future: eventLoop.makeSucceededFuture(
-                        .plain(
-                            status: .badRequest,
-                            body: "invalid json-rpc response",
-                            sessionID: sessionID
-                        )
-                    ),
-                    cancellationHandle: nil
+        guard JSONSerialization.isValidJSONObject(responseObject),
+            let responseData = try? JSONSerialization.data(withJSONObject: responseObject, options: [])
+        else {
+            return HTTPPostOperation(
+                future: eventLoop.makeSucceededFuture(
+                    .plain(
+                        status: .badRequest,
+                        body: "invalid json-rpc response",
+                        sessionID: sessionID
+                    )
+                ),
+                cancellationHandle: nil
+            )
+        }
+        let future = sessionManager.forwardServerRequestResponse(
+            responseData: responseData,
+            sessionID: sessionID,
+            responseID: responseID,
+            on: eventLoop
+        ).map { forwardingResult -> HTTPPostResolution in
+            switch forwardingResult {
+            case .accepted, .missingRoute:
+                return .empty(status: .accepted, sessionID: sessionID)
+            case .invalidResponse:
+                return .plain(
+                    status: .badRequest,
+                    body: "invalid json-rpc response",
+                    sessionID: sessionID
+                )
+            case .upstreamUnavailable:
+                return .plain(
+                    status: .serviceUnavailable,
+                    body: "upstream unavailable",
+                    sessionID: sessionID
                 )
             }
-            sessionManager.sendUpstream(
-                upstreamData,
-                upstreamIndex: route.upstreamIndex,
-                ensureRunning: false
-            )
-        } else {
-            logger.debug(
-                "Acknowledging client JSON-RPC response without a routed upstream request",
-                metadata: [
-                    "session": .string(sessionID),
-                    "id": .string(responseID.key),
-                ]
-            )
         }
         return HTTPPostOperation(
-            future: eventLoop.makeSucceededFuture(
-                .empty(status: .accepted, sessionID: sessionID)
-            ),
+            future: future,
             cancellationHandle: nil
         )
-    }
-
-    private static func rewriteClientResponse(
-        _ responseObject: [String: Any],
-        id: RPCID
-    ) -> Data? {
-        var rewritten = responseObject
-        rewritten["id"] = id.value.foundationObject
-        guard JSONSerialization.isValidJSONObject(rewritten) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
     }
 }

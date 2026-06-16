@@ -815,6 +815,61 @@ struct HTTPHandlerTests {
         #expect((sentObject["result"] as? [String: Any])?["ok"] as? Bool == true)
     }
 
+    @Test func httpJSONRPCResponseForwardingFailureKeepsRouteForRetry() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let sessionID = try initializeHTTPChannel(channel)
+        let session = sessionManager.session(id: sessionID)
+        let clientID = session.serverRequestTracker.record(
+            upstreamID: RPCID(any: NSNumber(value: 99))!,
+            upstreamIndex: 0
+        )
+        sessionManager.setServerRequestResponseSendResults([.backpressure, .accepted])
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["ok": true],
+        ]
+        try postJSON(payload, sessionID: sessionID, to: channel)
+        let rejected = try collectResponse(from: channel)
+        #expect(rejected.head.status == .serviceUnavailable)
+        #expect(rejected.body == "upstream unavailable")
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
+
+        try postJSON(payload, sessionID: sessionID, to: channel)
+        let accepted = try collectResponse(from: channel)
+        #expect(accepted.head.status == .accepted)
+        #expect(accepted.body.isEmpty)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
+        #expect(sessionManager.sentUpstreamCount() == 2)
+    }
+
+    @Test func httpUnknownJSONRPCResponseRouteIsAcknowledgedWithoutForwarding() async throws {
+        let config = makeConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        let sessionID = try initializeHTTPChannel(channel)
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": "xcode-mcp-proxy.server-request.999",
+            "result": ["ok": true],
+        ]
+        try postJSON(payload, sessionID: sessionID, to: channel)
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .accepted)
+        #expect(response.body.isEmpty)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+    }
+
     @Test func httpMalformedJSONRPCObjectWithIDReturnsInvalidRequestError() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
