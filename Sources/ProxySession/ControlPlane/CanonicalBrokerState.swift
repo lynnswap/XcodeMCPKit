@@ -2,58 +2,58 @@ import Foundation
 import NIOConcurrencyHelpers
 import ProxyMCP
 
-package struct CanonicalBrokerIncompatibility: Codable, Sendable {
-    package let upstreamIndex: Int
-    package let kind: String
-    package let reason: String
-    package let observedAt: Date
-
-    package init(
-        upstreamIndex: Int,
-        kind: String,
-        reason: String,
-        observedAt: Date = Date()
-    ) {
-        self.upstreamIndex = upstreamIndex
-        self.kind = kind
-        self.reason = reason
-        self.observedAt = observedAt
-    }
-}
-
-package struct CanonicalBrokerSnapshot: Sendable {
-    package let initializeResult: JSONValue?
-    package let initializeSourceUpstream: Int?
-    package let toolsCatalogRaw: JSONValue?
-    package let toolsSourceUpstream: Int?
-    package let lastIncompatibility: CanonicalBrokerIncompatibility?
-
-    package init(
-        initializeResult: JSONValue?,
-        initializeSourceUpstream: Int?,
-        toolsCatalogRaw: JSONValue?,
-        toolsSourceUpstream: Int?,
-        lastIncompatibility: CanonicalBrokerIncompatibility?
-    ) {
-        self.initializeResult = initializeResult
-        self.initializeSourceUpstream = initializeSourceUpstream
-        self.toolsCatalogRaw = toolsCatalogRaw
-        self.toolsSourceUpstream = toolsSourceUpstream
-        self.lastIncompatibility = lastIncompatibility
-    }
-
-    package var canonicalReady: Bool {
-        initializeResult != nil && toolsCatalogRaw != nil
-    }
-}
-
 package final class CanonicalBrokerState: Sendable {
+    package struct Incompatibility: Codable, Sendable {
+        package let upstreamIndex: Int
+        package let kind: String
+        package let reason: String
+        package let observedAt: Date
+
+        package init(
+            upstreamIndex: Int,
+            kind: String,
+            reason: String,
+            observedAt: Date = Date()
+        ) {
+            self.upstreamIndex = upstreamIndex
+            self.kind = kind
+            self.reason = reason
+            self.observedAt = observedAt
+        }
+    }
+
+    package struct Snapshot: Sendable {
+        package let initializeResult: JSONValue?
+        package let initializeSourceUpstream: Int?
+        package let toolsCatalogRaw: JSONValue?
+        package let toolsSourceUpstream: Int?
+        package let lastIncompatibility: CanonicalBrokerState.Incompatibility?
+
+        package init(
+            initializeResult: JSONValue?,
+            initializeSourceUpstream: Int?,
+            toolsCatalogRaw: JSONValue?,
+            toolsSourceUpstream: Int?,
+            lastIncompatibility: CanonicalBrokerState.Incompatibility?
+        ) {
+            self.initializeResult = initializeResult
+            self.initializeSourceUpstream = initializeSourceUpstream
+            self.toolsCatalogRaw = toolsCatalogRaw
+            self.toolsSourceUpstream = toolsSourceUpstream
+            self.lastIncompatibility = lastIncompatibility
+        }
+
+        package var canonicalReady: Bool {
+            initializeResult != nil && toolsCatalogRaw != nil
+        }
+    }
+
     private struct State: Sendable {
         var initializeResult: JSONValue?
         var initializeSourceUpstream: Int?
         var toolsCatalogRaw: JSONValue?
         var toolsSourceUpstream: Int?
-        var lastIncompatibility: CanonicalBrokerIncompatibility?
+        var lastIncompatibility: CanonicalBrokerState.Incompatibility?
         /// Bumped on every clear/reset. Asynchronous load completions
         /// captured under an older generation must not write back, which
         /// is what allows invalidation to clear synchronously without
@@ -65,9 +65,9 @@ package final class CanonicalBrokerState: Sendable {
 
     package init() {}
 
-    package func snapshot() -> CanonicalBrokerSnapshot {
+    package func snapshot() -> CanonicalBrokerState.Snapshot {
         state.withLockedValue { state in
-            CanonicalBrokerSnapshot(
+            CanonicalBrokerState.Snapshot(
                 initializeResult: state.initializeResult,
                 initializeSourceUpstream: state.initializeSourceUpstream,
                 toolsCatalogRaw: state.toolsCatalogRaw,
@@ -154,7 +154,7 @@ package final class CanonicalBrokerState: Sendable {
         reason: String
     ) {
         state.withLockedValue { state in
-            state.lastIncompatibility = CanonicalBrokerIncompatibility(
+            state.lastIncompatibility = CanonicalBrokerState.Incompatibility(
                 upstreamIndex: upstreamIndex,
                 kind: kind,
                 reason: reason

@@ -3,12 +3,12 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
-import Testing
 import ProxyCore
 import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
- import ProxyXcodeSupport
+import ProxyXcodeSupport
+import Testing
 import XcodeMCPTestSupport
 
 @testable import ProxyHTTPGateway
@@ -56,7 +56,8 @@ extension HTTPHandlerTests {
                                 "content": [
                                     [
                                         "type": "text",
-                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"},{\"path\":\"\(temporaryRoot)/Other.swift\",\"message\":\"other warning\",\"line\":99,\"severity\":\"warning\"}],\"totalFound\":2,\"truncated\":false}"
+                                        "text":
+                                            "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"},{\"path\":\"\(temporaryRoot)/Other.swift\",\"message\":\"other warning\",\"line\":99,\"severity\":\"warning\"}],\"totalFound\":2,\"truncated\":false}",
                                     ]
                                 ],
                                 "structuredContent": [
@@ -119,10 +120,11 @@ extension HTTPHandlerTests {
             #expect(issues?.count == 1)
             #expect(issues?.first?["path"] as? String == target.path)
             #expect(issues?.first?["message"] as? String == "target warning")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-            ])
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeListNavigatorIssues",
+                ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
             let sentToolRequests = sessionManager.sentToolRequests()
             #expect(sentToolRequests.count == 2)
@@ -135,7 +137,9 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpSingleElementBatchRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
+    @Test func httpSingleElementBatchRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault()
+        async throws
+    {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
@@ -177,7 +181,8 @@ extension HTTPHandlerTests {
                                 "content": [
                                     [
                                         "type": "text",
-                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        "text":
+                                            "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
                                     ]
                                 ],
                                 "structuredContent": [
@@ -278,7 +283,8 @@ extension HTTPHandlerTests {
                                     "content": [
                                         [
                                             "type": "text",
-                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                            "text":
+                                                "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
                                         ]
                                     ],
                                     "structuredContent": [
@@ -350,7 +356,8 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpMixedBatchReturnsInvalidRequestForScalarLeftoverAfterRefreshSplit() async throws {
+    @Test func httpMixedBatchReturnsInvalidRequestForScalarLeftoverAfterRefreshSplit() async throws
+    {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
@@ -392,7 +399,8 @@ extension HTTPHandlerTests {
                                     "content": [
                                         [
                                             "type": "text",
-                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                            "text":
+                                                "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
                                         ]
                                     ],
                                     "structuredContent": [
@@ -496,7 +504,8 @@ extension HTTPHandlerTests {
                                     "content": [
                                         [
                                             "type": "text",
-                                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                            "text":
+                                                "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
                                         ]
                                     ],
                                     "structuredContent": [
@@ -720,7 +729,9 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenWindowLookupFailsAfterPreviousSuccess() async throws {
+    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenWindowLookupFailsAfterPreviousSuccess()
+        async throws
+    {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
@@ -775,7 +786,8 @@ extension HTTPHandlerTests {
                                 "content": [
                                     [
                                         "type": "text",
-                                        "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                                        "text":
+                                            "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
                                     ]
                                 ],
                                 "structuredContent": [
@@ -851,13 +863,15 @@ extension HTTPHandlerTests {
             #expect(secondResponse.statusCode == 200)
             let secondResult = secondBody["result"] as? [String: Any]
             let secondContent = secondResult?["content"] as? [[String: Any]]
-            #expect(secondContent?.first?["text"] as? String == "upstream-after-window-lookup-failure")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-                "XcodeListWindows",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(
+                secondContent?.first?["text"] as? String == "upstream-after-window-lookup-failure")
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeListNavigatorIssues",
+                    "XcodeListWindows",
+                    "XcodeRefreshCodeIssuesInFile",
+                ])
         } catch {
             try? await server.shutdown()
             throw error
@@ -865,7 +879,9 @@ extension HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesAreTruncated() async throws {
+    @Test func httpRefreshCodeIssuesFallsBackToUpstreamWhenNavigatorIssuesAreTruncated()
+        async throws
+    {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .proxy
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
@@ -907,7 +923,8 @@ extension HTTPHandlerTests {
                                 "content": [
                                     [
                                         "type": "text",
-                                        "text": "{\"issues\":[],\"totalFound\":0,\"truncated\":true}"
+                                        "text":
+                                            "{\"issues\":[],\"totalFound\":0,\"truncated\":true}",
                                     ]
                                 ],
                                 "structuredContent": [
@@ -959,11 +976,12 @@ extension HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             let content = result?["content"] as? [[String: Any]]
             #expect(content?.first?["text"] as? String == "upstream-after-truncated-navigator")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeListNavigatorIssues",
+                    "XcodeRefreshCodeIssuesInFile",
+                ])
         } catch {
             try? await server.shutdown()
             throw error
@@ -1035,10 +1053,11 @@ extension HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             let content = result?["content"] as? [[String: Any]]
             #expect(content?.first?["text"] as? String == "upstream-result")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeRefreshCodeIssuesInFile",
+                ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             try? await server.shutdown()
@@ -1090,7 +1109,8 @@ extension HTTPHandlerTests {
                     )
                 case "XcodeRefreshCodeIssuesInFile":
                     return .immediate(
-                        try makeToolSuccessResponse(id: originalID, text: "upstream-after-navigator-failure")
+                        try makeToolSuccessResponse(
+                            id: originalID, text: "upstream-after-navigator-failure")
                     )
                 default:
                     return .immediate(
@@ -1126,11 +1146,12 @@ extension HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             let content = result?["content"] as? [[String: Any]]
             #expect(content?.first?["text"] as? String == "upstream-after-navigator-failure")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeListNavigatorIssues",
+                    "XcodeRefreshCodeIssuesInFile",
+                ])
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
         } catch {
             try? await server.shutdown()
@@ -1239,7 +1260,9 @@ extension HTTPHandlerTests {
         #expect(observedTimeouts.withLockedValue { $0.first } == 50_000_000)
     }
 
-    @Test func refreshWorkflowDoesNotFabricateNavigatorTimeoutWhenRequestTimeoutIsDisabled() async throws {
+    @Test func refreshWorkflowDoesNotFabricateNavigatorTimeoutWhenRequestTimeoutIsDisabled()
+        async throws
+    {
         let temporaryRoot = makeHTTPTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: temporaryRoot) }
 
@@ -1317,7 +1340,8 @@ extension HTTPHandlerTests {
                     "content": [
                         [
                             "type": "text",
-                            "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
+                            "text":
+                                "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"target warning\",\"line\":12,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
                         ]
                     ],
                     "structuredContent": [
@@ -1516,7 +1540,7 @@ extension HTTPHandlerTests {
                     "content": [
                         [
                             "type": "text",
-                            "text": "{\"issues\":[],\"totalFound\":0,\"truncated\":false}"
+                            "text": "{\"issues\":[],\"totalFound\":0,\"truncated\":false}",
                         ]
                     ],
                     "structuredContent": [
@@ -1615,12 +1639,14 @@ extension HTTPHandlerTests {
             #expect(response.statusCode == 200)
             let result = body["result"] as? [String: Any]
             let content = result?["content"] as? [[String: Any]]
-            #expect(content?.first?["text"] as? String == "upstream-after-unlimited-timeout-fallback")
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(
+                content?.first?["text"] as? String == "upstream-after-unlimited-timeout-fallback")
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeListNavigatorIssues",
+                    "XcodeRefreshCodeIssuesInFile",
+                ])
         } catch {
             try? await server.shutdown()
             throw error
@@ -1913,7 +1939,9 @@ extension HTTPHandlerTests {
             let result = body["result"] as? [String: Any]
             #expect((result?["isError"] as? Bool) == true)
             let content = result?["content"] as? [[String: Any]]
-            #expect(content?.first?["text"] as? String == "tool 'RunAllTests' is disabled by proxy config")
+            #expect(
+                content?.first?["text"] as? String
+                    == "tool 'RunAllTests' is disabled by proxy config")
             #expect(sessionManager.sentToolNames().isEmpty)
         } catch {
             try? await server.shutdown()
@@ -2028,17 +2056,22 @@ extension HTTPHandlerTests {
                         try makeToolResultResponse(
                             id: originalID,
                             result: [
-                                "content": [[
-                                    "type": "text",
-                                    "text": "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"warn\",\"line\":1,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}"
-                                ]],
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text":
+                                            "{\"issues\":[{\"path\":\"\(target.path)\",\"message\":\"warn\",\"line\":1,\"severity\":\"warning\"}],\"totalFound\":1,\"truncated\":false}",
+                                    ]
+                                ],
                                 "structuredContent": [
-                                    "issues": [[
-                                        "path": target.path,
-                                        "message": "warn",
-                                        "line": 1,
-                                        "severity": "warning",
-                                    ]],
+                                    "issues": [
+                                        [
+                                            "path": target.path,
+                                            "message": "warn",
+                                            "line": 1,
+                                            "severity": "warning",
+                                        ]
+                                    ],
                                     "totalFound": 1,
                                     "truncated": false,
                                 ],
@@ -2046,7 +2079,8 @@ extension HTTPHandlerTests {
                         )
                     )
                 default:
-                    return .immediate(try makeToolErrorResponse(id: originalID, text: "unexpected tool"))
+                    return .immediate(
+                        try makeToolErrorResponse(id: originalID, text: "unexpected tool"))
                 }
             }
         )
@@ -2270,11 +2304,12 @@ extension HTTPHandlerTests {
             #expect(response.statusCode == 200)
             let error = body["error"] as? [String: Any]
             #expect(error != nil)
-            #expect(sessionManager.sentToolNames() == [
-                "XcodeListWindows",
-                "XcodeListNavigatorIssues",
-                "XcodeRefreshCodeIssuesInFile",
-            ])
+            #expect(
+                sessionManager.sentToolNames() == [
+                    "XcodeListWindows",
+                    "XcodeListNavigatorIssues",
+                    "XcodeRefreshCodeIssuesInFile",
+                ])
             #expect(sessionManager.requestSuccessNotificationCount() == 2)
             #expect(sessionManager.requestTimeoutNotificationCount() == 1)
             #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)

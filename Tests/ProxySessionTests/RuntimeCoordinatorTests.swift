@@ -1951,8 +1951,8 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func controlPlaneRPCHandleCancelBeforeQueueStartCapturesQueuedState() {
-        let handle = ControlPlaneRPCHandle()
-        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let handle = ControlPlane.RPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
 
         handle.installCancel { snapshot in
             cancellation.withLockedValue { $0 = snapshot }
@@ -1967,8 +1967,8 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func controlPlaneRPCHandleCancelAfterRegisterCapturesRegistrationState() {
-        let handle = ControlPlaneRPCHandle()
-        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let handle = ControlPlane.RPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
         let token = UUID()
 
         handle.installCancel { snapshot in
@@ -1986,8 +1986,8 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func controlPlaneRPCHandleCancelAfterAssignCapturesRequestMappingState() {
-        let handle = ControlPlaneRPCHandle()
-        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let handle = ControlPlane.RPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
         let token = UUID()
 
         handle.installCancel { snapshot in
@@ -2005,8 +2005,8 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func controlPlaneRPCHandleCancelAfterSendUsesAssignedSnapshotUntilFinished() {
-        let handle = ControlPlaneRPCHandle()
-        let cancellation = NIOLockedValueBox<ControlPlaneRPCCancelSnapshot?>(nil)
+        let handle = ControlPlane.RPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
         let token = UUID()
 
         handle.installCancel { snapshot in
@@ -2064,7 +2064,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func controlPlaneDoesNotReturnStaleToolsCatalogAfterGenerationClear() async throws {
         let brokerState = CanonicalBrokerState()
-        let debugMirror = ControlPlaneDebugMirror()
+        let debugMirror = ControlPlane.DebugMirror()
         let loadStarted = TestSignal()
         let releaseLoad = AsyncGate()
         let coordinator = ControlPlaneCoordinator(
@@ -2103,7 +2103,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func controlPlaneDoesNotReturnStaleWindowsAfterGenerationClear() async throws {
         let brokerState = CanonicalBrokerState()
-        let debugMirror = ControlPlaneDebugMirror()
+        let debugMirror = ControlPlane.DebugMirror()
         let loadStarted = TestSignal()
         let releaseLoad = AsyncGate()
         let coordinator = ControlPlaneCoordinator(
@@ -2146,7 +2146,7 @@ struct RuntimeCoordinatorTests {
         async throws
     {
         let brokerState = CanonicalBrokerState()
-        let debugMirror = ControlPlaneDebugMirror()
+        let debugMirror = ControlPlane.DebugMirror()
         let loadIndexBox = NIOLockedValueBox(0)
         let firstLoadStarted = TestSignal()
         let secondLoadStarted = TestSignal()
@@ -3348,7 +3348,7 @@ struct RuntimeCoordinatorTests {
             eventLoop.makeSucceededFuture(())
         }
 
-        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             try await future.get()
         }
 
@@ -4757,7 +4757,7 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
 
-        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             try await queuedFuture.get()
         }
         activePromise.fail(CancellationError())
@@ -4818,7 +4818,7 @@ struct RuntimeCoordinatorTests {
             .message(try JSONSerialization.data(withJSONObject: errorResponse, options: []))
         )
 
-        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             try await queuedFuture.get()
         }
     }
@@ -4911,7 +4911,7 @@ struct RuntimeCoordinatorTests {
                 manager.debugSnapshot().queuedRequestCount == 0
             }
         )
-        await #expect(throws: UpstreamSlotAcquisitionError.self) {
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             try await queuedFuture.get()
         }
 

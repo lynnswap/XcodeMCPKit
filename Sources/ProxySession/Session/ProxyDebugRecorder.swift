@@ -5,9 +5,9 @@ import ProxyMCP
 
 package final class ProxyDebugRecorder: Sendable {
     private struct DebugUpstreamState: Sendable {
-        var recentStderr: [ProxyDebugEvent] = []
-        var lastDecodeError: ProxyDebugEvent?
-        var lastBridgeError: ProxyDebugEvent?
+        var recentStderr: [ProxyDebug.Event] = []
+        var lastDecodeError: ProxyDebug.Event?
+        var lastBridgeError: ProxyDebug.Event?
         var protocolViolationCount = 0
         var lastProtocolViolationAt: Date?
         var lastProtocolViolationReason: String?
@@ -22,7 +22,7 @@ package final class ProxyDebugRecorder: Sendable {
 
     private struct State: Sendable {
         var upstreams: [DebugUpstreamState] = []
-        var recentTraffic: [ProxyDebugTrafficEvent] = []
+        var recentTraffic: [ProxyDebug.TrafficEvent] = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -57,7 +57,7 @@ package final class ProxyDebugRecorder: Sendable {
     }
 
     package func recordStderr(_ message: String, upstreamIndex: Int) {
-        let event = ProxyDebugEvent(timestamp: Date(), message: message)
+        let event = ProxyDebug.Event(timestamp: Date(), message: message)
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex].recentStderr.append(event)
@@ -117,8 +117,10 @@ package final class ProxyDebugRecorder: Sendable {
         }
     }
 
-    package func recordTraffic(upstreamIndex: Int, direction: String, data: Data, redactedText: String) {
-        let event = ProxyDebugTrafficEvent(
+    package func recordTraffic(
+        upstreamIndex: Int, direction: String, data: Data, redactedText: String
+    ) {
+        let event = ProxyDebug.TrafficEvent(
             timestamp: Date(),
             upstreamIndex: upstreamIndex,
             direction: direction,
@@ -136,15 +138,15 @@ package final class ProxyDebugRecorder: Sendable {
     package func snapshot(
         proxyInitialized: Bool,
         cachedToolsListAvailable: Bool,
-        controlPlane: ProxyControlPlaneDebugSnapshot?,
+        controlPlane: ControlPlane.DebugSnapshot?,
         upstreamStates: [UpstreamHealthManager.UpstreamState],
         sessionSnapshots: [SessionRequestPipeline.DebugSnapshot],
         leaseSnapshots: [LeaseManager.DebugSnapshot],
         queuedRequestCount: Int,
         redactedText: String,
         includeSensitiveDebugPayloads: Bool,
-        healthFormatter: (UpstreamHealthState) -> String
-    ) -> ProxyDebugSnapshot {
+        healthFormatter: (Upstream.HealthState) -> String
+    ) -> ProxyDebug.Snapshot {
         let recordedState = state.withLockedValue { state in
             (upstreams: state.upstreams, recentTraffic: state.recentTraffic)
         }
@@ -154,8 +156,10 @@ package final class ProxyDebugRecorder: Sendable {
         }
 
         let upstreamSnapshots = upstreamStates.enumerated().map { index, upstream in
-            let debug = index < recordedState.upstreams.count ? recordedState.upstreams[index] : DebugUpstreamState()
-            return ProxyUpstreamDebugSnapshot(
+            let debug =
+                index < recordedState.upstreams.count
+                ? recordedState.upstreams[index] : DebugUpstreamState()
+            return ProxyDebug.UpstreamSnapshot(
                 upstreamIndex: index,
                 isInitialized: upstream.isInitialized,
                 initInFlight: upstream.initInFlight,
@@ -165,13 +169,13 @@ package final class ProxyDebugRecorder: Sendable {
                 consecutiveToolsListFailures: upstream.consecutiveToolsListFailures,
                 lastToolsListSuccessUptimeNs: upstream.lastToolsListSuccessUptimeNs,
                 recentStderr: debug.recentStderr.map { event in
-                    ProxyDebugEvent(timestamp: event.timestamp, message: redactedText)
+                    ProxyDebug.Event(timestamp: event.timestamp, message: redactedText)
                 },
                 lastDecodeError: debug.lastDecodeError.map {
-                    ProxyDebugEvent(timestamp: $0.timestamp, message: redactedText)
+                    ProxyDebug.Event(timestamp: $0.timestamp, message: redactedText)
                 },
                 lastBridgeError: debug.lastBridgeError.map {
-                    ProxyDebugEvent(timestamp: $0.timestamp, message: redactedText)
+                    ProxyDebug.Event(timestamp: $0.timestamp, message: redactedText)
                 },
                 protocolViolationCount: debug.protocolViolationCount,
                 lastProtocolViolationAt: debug.lastProtocolViolationAt,
@@ -195,7 +199,7 @@ package final class ProxyDebugRecorder: Sendable {
             )
         }
 
-        return ProxyDebugSnapshot(
+        return ProxyDebug.Snapshot(
             generatedAt: Date(),
             proxyInitialized: proxyInitialized,
             cachedToolsListAvailable: cachedToolsListAvailable,
@@ -203,7 +207,7 @@ package final class ProxyDebugRecorder: Sendable {
             controlPlane: controlPlane,
             upstreams: upstreamSnapshots,
             recentTraffic: recordedState.recentTraffic.map {
-                ProxyDebugTrafficEvent(
+                ProxyDebug.TrafficEvent(
                     timestamp: $0.timestamp,
                     upstreamIndex: $0.upstreamIndex,
                     direction: $0.direction,

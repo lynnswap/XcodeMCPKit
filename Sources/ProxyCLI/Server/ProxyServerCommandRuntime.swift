@@ -75,6 +75,10 @@ extension XcodeMCPProxyServerCommand {
             dependencies.stderr(error.description)
             dependencies.stderr(XcodeMCPProxyServerCommand.serverUsage())
             return 1
+        } catch let error as ProxyConfig.ValidationError {
+            dependencies.stderr(error.description)
+            dependencies.stderr(XcodeMCPProxyServerCommand.serverUsage())
+            return 1
         } catch {
             dependencies.stderr("error: \(error)")
             return 1

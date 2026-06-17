@@ -50,7 +50,7 @@ package struct LocalMCPResponder {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> Data {
         guard let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
-            throw ControlPlaneError.invalidResponse("missing id")
+            throw ControlPlane.Error.invalidResponse("missing id")
         }
         let result = try await sessionManager.sharedToolsList(
             sessionID: sessionID,
@@ -321,7 +321,7 @@ package struct LocalMCPResponder {
         id: JSONRPC.ID,
         error: Error
     ) throws -> Data {
-        let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
+        let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,

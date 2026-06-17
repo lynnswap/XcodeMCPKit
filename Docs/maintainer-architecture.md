@@ -33,8 +33,8 @@
 ## Dependency Direction
 
 - `ProxyCore` must not depend on gateway/session/Xcode modules.
-  - Current exception: config handshake shaping reuses `ProxyMCP` JSON value types.
-- `ProxyMCP` may depend only on `ProxyCore`-level primitives conceptually; avoid introducing gateway/session/Xcode knowledge.
+- `ProxyMCP` depends on `ProxyCore` for shared protocol primitives and extends the `MCP` namespace for JSON-RPC / MCP helpers.
+  Avoid introducing gateway/session/Xcode knowledge here.
 - `ProxySession` depends on `ProxyCore` and `ProxyMCP`.
 - `ProxyXcodeSupport` depends on `ProxyCore`.
 - `ProxyXcodeFeatures` depends on `ProxyCore`, `ProxyMCP`, and `ProxyXcodeSupport`.

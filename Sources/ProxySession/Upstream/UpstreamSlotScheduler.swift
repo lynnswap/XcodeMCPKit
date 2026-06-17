@@ -5,6 +5,10 @@ import NIOConcurrencyHelpers
 import ProxyCore
 
 package final class UpstreamSlotScheduler: Sendable {
+    package enum AcquisitionError: Error {
+        case unavailable
+    }
+
     package struct DebugSnapshot: Codable, Sendable {
         package let queuedRequestCount: Int
         package let activeLeaseCountByUpstream: [Int: Int]
@@ -124,8 +128,11 @@ package final class UpstreamSlotScheduler: Sendable {
                 .filter { $0.hasStarted == false }
                 .map(\.request)
 
-            for reservation in state.reservationsByLeaseID.values where reservation.hasStarted == false {
-                if state.activeLeaseIDsByUpstream[reservation.upstreamIndex] == reservation.request.leaseID {
+            for reservation in state.reservationsByLeaseID.values
+            where reservation.hasStarted == false {
+                if state.activeLeaseIDsByUpstream[reservation.upstreamIndex]
+                    == reservation.request.leaseID
+                {
                     state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
                 }
                 if reservation.request.descriptor.isTopLevelClientRequest,
@@ -166,8 +173,10 @@ package final class UpstreamSlotScheduler: Sendable {
         }
 
         let removed = state.withLockedValue { state -> CancelledRequest? in
-            guard let index = state.pendingRequests.firstIndex(where: { $0.leaseID == leaseID }) else {
-                guard let reservation = state.reservationsByLeaseID[leaseID], reservation.hasStarted == false
+            guard let index = state.pendingRequests.firstIndex(where: { $0.leaseID == leaseID })
+            else {
+                guard let reservation = state.reservationsByLeaseID[leaseID],
+                    reservation.hasStarted == false
                 else {
                     return nil
                 }
@@ -201,7 +210,7 @@ package final class UpstreamSlotScheduler: Sendable {
         logger.debug(
             "Cancelled queued request before upstream dispatch",
             metadata: [
-                "lease_id": .string(leaseID.uuidString),
+                "lease_id": .string(leaseID.uuidString)
             ]
         )
         request.eventLoop.execute {
@@ -216,7 +225,8 @@ package final class UpstreamSlotScheduler: Sendable {
         state.withLockedValue { state in
             UpstreamSlotScheduler.DebugSnapshot(
                 queuedRequestCount: state.pendingRequests.count,
-                activeLeaseCountByUpstream: state.activeLeaseIDsByUpstream.reduce(into: [:]) { counts, item in
+                activeLeaseCountByUpstream: state.activeLeaseIDsByUpstream.reduce(into: [:]) {
+                    counts, item in
                     counts[item.key] = 1
                 }
             )
@@ -259,10 +269,11 @@ package final class UpstreamSlotScheduler: Sendable {
     }
 
     private func dispatchQueuedRequestsIfPossible() {
-        let dispatch = state.withLockedValue { state -> (
-            starts: [(PendingRequest, Int)],
-            healthEffects: [UpstreamHealthManager.Effect]
-        ) in
+        let dispatch = state.withLockedValue {
+            state -> (
+                starts: [(PendingRequest, Int)],
+                healthEffects: [UpstreamHealthManager.Effect]
+            ) in
             var ready: [(PendingRequest, Int)] = []
             var healthEffects: [UpstreamHealthManager.Effect] = []
 

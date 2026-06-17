@@ -4,51 +4,59 @@ import NIOConcurrencyHelpers
 import ProxyCore
 import ProxyMCP
 
-package enum ControlPlaneError: Error, Sendable {
-    case invalidResponse(String)
-    case upstreamRPC(code: Int, message: String)
+extension ControlPlane {
+    package enum Error: Swift.Error, Sendable {
+        case invalidResponse(String)
+        case upstreamRPC(code: Int, message: String)
+    }
 }
 
-package struct ControlPlaneRequestError: Error, Sendable {
-    package let route: ControlPlaneRoute
-    package let upstreamIndex: Int?
-    package let underlying: any Error
+extension ControlPlane {
+    package struct RequestError: Swift.Error, Sendable {
+        package let route: ControlPlane.Route
+        package let upstreamIndex: Int?
+        package let underlying: any Swift.Error
+    }
 }
 
-package struct ControlPlaneRPCResponse: Sendable {
-    package let responseData: Data
-    package let upstreamIndex: Int
+extension ControlPlane {
+    package struct RPCResponse: Sendable {
+        package let responseData: Data
+        package let upstreamIndex: Int
+    }
 }
 
 /// The one place that decides which JSON-RPC error a control-plane or
 /// upstream-acquisition failure surfaces as.
-package enum ControlPlaneErrorMapper {
-    package static func jsonRPCError(for error: Error) -> (code: Int, message: String) {
-        if let error = error as? DocumentationProviderUnavailableReason {
-            return (-32001, error.message)
-        }
-        if error is UpstreamSlotAcquisitionError {
-            return (-32001, "upstream unavailable")
-        }
-        if let error = error as? ControlPlaneRequestError {
-            return jsonRPCError(for: error.underlying)
-        }
-        if let error = error as? ControlPlaneError {
-            switch error {
-            case .invalidResponse:
-                return (-32000, "upstream timeout")
-            case .upstreamRPC(let code, let message):
-                return (code, message)
+extension ControlPlane {
+    package enum ErrorMapper {
+        package static func jsonRPCError(for error: Swift.Error) -> (code: Int, message: String) {
+            if let error = error as? DocumentationProvider.UnavailableReason {
+                return (-32001, error.message)
             }
+            if error is UpstreamSlotScheduler.AcquisitionError {
+                return (-32001, "upstream unavailable")
+            }
+            if let error = error as? ControlPlane.RequestError {
+                return jsonRPCError(for: error.underlying)
+            }
+            if let error = error as? ControlPlane.Error {
+                switch error {
+                case .invalidResponse:
+                    return (-32000, "upstream timeout")
+                case .upstreamRPC(let code, let message):
+                    return (code, message)
+                }
+            }
+            return (-32000, "upstream timeout")
         }
-        return (-32000, "upstream timeout")
     }
 }
 
 extension RuntimeCoordinator {
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlaneRPCHandle
+        rpcHandle: ControlPlane.RPCHandle
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         let effectiveRequestTimeout =
@@ -77,7 +85,7 @@ extension RuntimeCoordinator {
                     nowUptimeNs: nowUptimeNs,
                     reason: "invalid_response"
                 )
-                throw ControlPlaneError.invalidResponse("invalid tools/list result")
+                throw ControlPlane.Error.invalidResponse("invalid tools/list result")
             }
             markToolsListRefreshSucceeded(
                 upstreamIndex: response.upstreamIndex,
@@ -88,7 +96,7 @@ extension RuntimeCoordinator {
                 sourceUpstream: response.upstreamIndex,
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
             )
-        } catch let error as ControlPlaneRequestError {
+        } catch let error as ControlPlane.RequestError {
             if error.underlying is CancellationError {
                 throw error.underlying
             }
@@ -104,9 +112,9 @@ extension RuntimeCoordinator {
     }
 
     func loadLiveXcodeListWindows(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlaneRPCHandle
+        rpcHandle: ControlPlane.RPCHandle
     ) async throws -> JSONValue {
         let effectiveRequestTimeout =
             requestTimeout
@@ -131,24 +139,24 @@ extension RuntimeCoordinator {
                 rpcHandle: rpcHandle
             )
             return try extractJSONRPCResult(from: response.responseData)
-        } catch let error as ControlPlaneRequestError {
+        } catch let error as ControlPlane.RequestError {
             throw error.underlying
         }
     }
 
     func performControlPlaneRPC(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         purpose: String,
         label: String,
         requestObject: [String: Any],
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlaneRPCHandle? = nil
-    ) async throws -> ControlPlaneRPCResponse {
+        rpcHandle: ControlPlane.RPCHandle? = nil
+    ) async throws -> ControlPlane.RPCResponse {
         let internalSessionID = controlPlaneSessionID(for: purpose, route: route)
         let session = session(id: internalSessionID)
         let router = session.router
         guard let originalID = JSONRPC.Message.Inspector.requestID(from: requestObject) else {
-            throw ControlPlaneError.invalidResponse("missing request id")
+            throw ControlPlane.Error.invalidResponse("missing request id")
         }
         let requestTemplate = requestObject.reduce(into: [String: JSONValue]()) { partial, entry in
             if entry.key == "id" { return }
@@ -164,12 +172,13 @@ extension RuntimeCoordinator {
             isTopLevelClientRequest: false
         )
         let leaseID = createRequestLease(descriptor: descriptor)
-        let preferredUpstreamIndex: Int? = switch route {
-        case .anyHealthy:
-            nil
-        case .pinnedUpstream(let upstreamIndex):
-            upstreamIndex
-        }
+        let preferredUpstreamIndex: Int? =
+            switch route {
+            case .anyHealthy:
+                nil
+            case .pinnedUpstream(let upstreamIndex):
+                upstreamIndex
+            }
         rpcHandle?.installCancel { [self, router] snapshot in
             if let registrationToken = snapshot.registrationToken {
                 _ = router.cancelPending(token: registrationToken)
@@ -195,7 +204,7 @@ extension RuntimeCoordinator {
         }
 
         do {
-            let future: EventLoopFuture<ControlPlaneRPCResponse> = enqueueOnUpstreamSlot(
+            let future: EventLoopFuture<ControlPlane.RPCResponse> = enqueueOnUpstreamSlot(
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
@@ -274,10 +283,10 @@ extension RuntimeCoordinator {
                         reason: .invalidUpstreamResponse
                     )
                     return self.eventLoop.makeFailedFuture(
-                        ControlPlaneRequestError(
+                        ControlPlane.RequestError(
                             route: route,
                             upstreamIndex: selectedUpstreamIndex,
-                            underlying: ControlPlaneError.invalidResponse(
+                            underlying: ControlPlane.Error.invalidResponse(
                                 "invalid control-plane request"
                             )
                         )
@@ -307,14 +316,14 @@ extension RuntimeCoordinator {
                 return registration.future.flatMapThrowing { buffer in
                     var buffer = buffer
                     guard let responseData = buffer.readData(length: buffer.readableBytes) else {
-                        throw ControlPlaneError.invalidResponse("missing response data")
+                        throw ControlPlane.Error.invalidResponse("missing response data")
                     }
-                    return ControlPlaneRPCResponse(
+                    return ControlPlane.RPCResponse(
                         responseData: responseData,
                         upstreamIndex: selectedUpstreamIndex
                     )
                 }.flatMapErrorThrowing { error in
-                    throw ControlPlaneRequestError(
+                    throw ControlPlane.RequestError(
                         route: route,
                         upstreamIndex: selectedUpstreamIndex,
                         underlying: error
@@ -333,12 +342,13 @@ extension RuntimeCoordinator {
                     terminalState: .failed,
                     reason: .invalidUpstreamResponse
                 )
-                throw ControlPlaneRequestError(
+                throw ControlPlane.RequestError(
                     route: route,
                     upstreamIndex: response.upstreamIndex,
-                    underlying: ControlPlaneError.upstreamRPC(
+                    underlying: ControlPlane.Error.upstreamRPC(
                         code: extractJSONRPCErrorCode(from: responseObject) ?? -32000,
-                        message: extractJSONRPCErrorMessage(from: responseObject) ?? "upstream error"
+                        message: extractJSONRPCErrorMessage(from: responseObject)
+                            ?? "upstream error"
                     )
                 )
             }
@@ -350,7 +360,7 @@ extension RuntimeCoordinator {
             throw CancellationError()
         } catch is TimeoutError {
             throw TimeoutError()
-        } catch let error as UpstreamSlotAcquisitionError {
+        } catch let error as UpstreamSlotScheduler.AcquisitionError {
             failRequestLease(
                 leaseID,
                 terminalState: .failed,
@@ -369,7 +379,7 @@ extension RuntimeCoordinator {
 
     func controlPlaneSessionID(
         for purpose: String,
-        route: ControlPlaneRoute?
+        route: ControlPlane.Route?
     ) -> String {
         let suffix: String
         switch route {
@@ -384,7 +394,7 @@ extension RuntimeCoordinator {
     func extractJSONRPCResult(from responseData: Data) throws -> JSONValue {
         let object = try extractJSONRPCResponseObject(from: responseData)
         if let errorObject = object["error"] as? [String: Any] {
-            throw ControlPlaneError.upstreamRPC(
+            throw ControlPlane.Error.upstreamRPC(
                 code: (errorObject["code"] as? NSNumber)?.intValue ?? -32000,
                 message: errorObject["message"] as? String ?? "upstream error"
             )
@@ -392,17 +402,19 @@ extension RuntimeCoordinator {
         guard let resultAny = object["result"],
             let result = JSONValue(any: resultAny)
         else {
-            throw ControlPlaneError.invalidResponse("missing result")
+            throw ControlPlane.Error.invalidResponse("missing result")
         }
         return result
     }
 
     func extractJSONRPCResponseObject(from responseData: Data) throws -> [String: Any] {
-        guard let responseObject = try JSONSerialization.jsonObject(
-            with: responseData,
-            options: []
-        ) as? [String: Any] else {
-            throw ControlPlaneError.invalidResponse("response was not an object")
+        guard
+            let responseObject = try JSONSerialization.jsonObject(
+                with: responseData,
+                options: []
+            ) as? [String: Any]
+        else {
+            throw ControlPlane.Error.invalidResponse("response was not an object")
         }
         return responseObject
     }
@@ -419,7 +431,7 @@ extension RuntimeCoordinator {
         if error is TimeoutError {
             return "timeout"
         }
-        if let error = error as? ControlPlaneError {
+        if let error = error as? ControlPlane.Error {
             switch error {
             case .invalidResponse(let reason):
                 return reason

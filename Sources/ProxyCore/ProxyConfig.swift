@@ -18,6 +18,17 @@ public struct ProxyConfig: Sendable {
         case upstream
     }
 
+    public enum ValidationError: Error, CustomStringConvertible {
+        case unsupportedProtocolVersion(String)
+
+        public var description: String {
+            switch self {
+            case .unsupportedProtocolVersion(let protocolVersion):
+                return "upstream_handshake.protocolVersion must be \(MCP.ProtocolVersion.current); \(protocolVersion) is not supported"
+            }
+        }
+    }
+
     package enum File {}
 
     public var listenHost: String
@@ -106,9 +117,7 @@ public struct ProxyConfig: Sendable {
             return
         }
         guard MCP.ProtocolVersion.isSupported(protocolVersion) else {
-            throw CLIError.message(
-                "upstream_handshake.protocolVersion must be \(MCP.ProtocolVersion.current); \(protocolVersion) is not supported"
-            )
+            throw ValidationError.unsupportedProtocolVersion(protocolVersion)
         }
     }
 }

@@ -6,13 +6,13 @@ import ProxyMCP
 
 package actor ControlPlaneCoordinator {
     package typealias ToolsCatalogLoader =
-        @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlaneRPCHandle) async throws
+        @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlane.RPCHandle) async throws
             -> CanonicalToolsCatalogLoadResult
     package typealias WindowsLoader =
         @Sendable (
-            _ route: ControlPlaneRoute,
+            _ route: ControlPlane.Route,
             _ requestTimeout: TimeAmount?,
-            _ rpcHandle: ControlPlaneRPCHandle
+            _ rpcHandle: ControlPlane.RPCHandle
         ) async throws -> JSONValue
     package typealias UpstreamHandshakeStatesProvider = @Sendable () -> [String: String]
 
@@ -52,7 +52,7 @@ package actor ControlPlaneCoordinator {
         let origin: ToolsCatalogLoadOrigin
         let requestTimeout: TimeAmount?
         let requestDeadlineUptimeNs: UInt64?
-        let rpcHandle: ControlPlaneRPCHandle
+        let rpcHandle: ControlPlane.RPCHandle
         let task: Task<CanonicalToolsCatalogLoadResult, Error>
         let startGeneration: UInt64
         var waiters: [WaiterID: ToolsCatalogWaiterRecord] = [:]
@@ -61,17 +61,17 @@ package actor ControlPlaneCoordinator {
 
     struct WindowLoadState {
         let loadID: UUID
-        let route: ControlPlaneRoute
+        let route: ControlPlane.Route
         let requestTimeout: TimeAmount?
         let requestDeadlineUptimeNs: UInt64?
-        let rpcHandle: ControlPlaneRPCHandle
+        let rpcHandle: ControlPlane.RPCHandle
         let task: Task<JSONValue, Error>
         let startGeneration: UInt64
         var waiters: [WaiterID: WindowWaiterRecord] = [:]
     }
 
     let brokerState: CanonicalBrokerState
-    let debugMirror: ControlPlaneDebugMirror
+    let debugMirror: ControlPlane.DebugMirror
     let toolsCatalogLoader: ToolsCatalogLoader
     let windowsLoader: WindowsLoader
     let upstreamHandshakeStates: UpstreamHandshakeStatesProvider
@@ -81,11 +81,11 @@ package actor ControlPlaneCoordinator {
 
     var toolsCatalogLoad: ToolsCatalogLoadState?
     var prewarmToolsCatalogLoad: ToolsCatalogLoadState?
-    var windowLoads: [ControlPlaneRoute: WindowLoadState] = [:]
+    var windowLoads: [ControlPlane.Route: WindowLoadState] = [:]
 
     package init(
         brokerState: CanonicalBrokerState,
-        debugMirror: ControlPlaneDebugMirror,
+        debugMirror: ControlPlane.DebugMirror,
         toolsCatalogLoader: @escaping ToolsCatalogLoader,
         windowsLoader: @escaping WindowsLoader,
         upstreamHandshakeStates: @escaping UpstreamHandshakeStatesProvider,
@@ -137,7 +137,7 @@ package actor ControlPlaneCoordinator {
     }
 
     package func listWindows(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
         cancelInvalidatedLoads()
@@ -245,7 +245,7 @@ package actor ControlPlaneCoordinator {
         requestTimeout: TimeAmount?
     ) -> UUID {
         let loadID = UUID()
-        let rpcHandle = ControlPlaneRPCHandle()
+        let rpcHandle = ControlPlane.RPCHandle()
         let requestDeadlineUptimeNs = requestDeadline(for: requestTimeout)
         let task = Task.detached {
             try await self.toolsCatalogLoader(requestTimeout, rpcHandle)
@@ -279,11 +279,11 @@ package actor ControlPlaneCoordinator {
     }
 
     func startWindowLoad(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         requestTimeout: TimeAmount?
     ) -> UUID {
         let loadID = UUID()
-        let rpcHandle = ControlPlaneRPCHandle()
+        let rpcHandle = ControlPlane.RPCHandle()
         let requestDeadlineUptimeNs = requestDeadline(for: requestTimeout)
         let task = Task.detached {
             try await self.windowsLoader(route, requestTimeout, rpcHandle)
@@ -336,7 +336,7 @@ package actor ControlPlaneCoordinator {
     }
 
     func ensureWindowLoad(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         requestTimeout: TimeAmount?,
         requestedPromotionDeadlineUptimeNs: UInt64?
     ) -> UUID {
@@ -388,7 +388,7 @@ package actor ControlPlaneCoordinator {
     }
 
     func registerWindowWaiter(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         loadID: UUID,
         waiterID: WaiterID,
         deadlineUptimeNs: UInt64?,
@@ -455,7 +455,7 @@ package actor ControlPlaneCoordinator {
     }
 
     func timeoutWindowWaiter(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         loadID: UUID,
         waiterID: WaiterID
     ) {
@@ -463,7 +463,7 @@ package actor ControlPlaneCoordinator {
     }
 
     func cancelWindowWaiter(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         loadID: UUID,
         waiterID: WaiterID
     ) {
@@ -476,7 +476,7 @@ package actor ControlPlaneCoordinator {
     }
 
     private func removeWindowWaiter(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         loadID: UUID,
         waiterID: WaiterID,
         failingWith error: any Error
@@ -495,7 +495,7 @@ package actor ControlPlaneCoordinator {
     }
 
     func cancelWindowWaiter(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         waiterID: WaiterID
     ) {
         guard let load = windowLoads[route], load.waiters[waiterID] != nil else { return }
@@ -531,7 +531,7 @@ package actor ControlPlaneCoordinator {
     }
 
     func completeWindowLoad(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         loadID: UUID,
         result: Result<JSONValue, Error>
     ) {

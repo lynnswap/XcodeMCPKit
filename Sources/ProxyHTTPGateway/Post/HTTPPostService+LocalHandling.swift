@@ -395,7 +395,7 @@ extension HTTPPostService {
                     contentsOf: Self.responseObjects(from: responseData)
                 )
             } catch {
-                let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
+                let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
                 if let responseData = Self.responseDataForBatchResolution(
                     .mcpError(
                         id: originalID,
@@ -471,7 +471,7 @@ extension HTTPPostService {
                 case .handled(let responseData):
                     let normalizedData = normalizer.normalizeResponseDataIfNeeded(
                         method: "tools/call",
-                        toolName: DocumentationToolCatalog.toolName,
+                        toolName: DocumentationProvider.ToolCatalog.toolName,
                         upstreamData: responseData
                     )
                     responseObjects.append(
@@ -487,7 +487,7 @@ extension HTTPPostService {
                     )
                 }
             } catch {
-                let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
+                let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
                 responseObjects.append(
                     Self.makeJSONRPCErrorResponseObject(
                         id: originalID,
@@ -513,8 +513,8 @@ extension HTTPPostService {
         }
         guard case .request("tools/call", _) = JSONRPC.Message.Inspector.kind(of: object),
             let params = object["params"] as? [String: Any],
-            params["name"] as? String == DocumentationToolCatalog.toolName,
-            disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+            params["name"] as? String == DocumentationProvider.ToolCatalog.toolName,
+            disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false else {
             return false
         }
         return true
