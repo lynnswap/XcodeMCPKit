@@ -4,14 +4,14 @@ import XcodeMCPTestSupport
 @testable import ProxySession
 
 actor TestUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let sentMessages = RecordedValues<Data>()
     private var startCountValue = 0
     private var stopCountValue = 0
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -27,12 +27,12 @@ actor TestUpstreamClient: UpstreamSlotControlling {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         await sentMessages.append(data)
         return .accepted
     }
 
-    func yield(_ event: UpstreamEvent) async {
+    func yield(_ event: Upstream.Event) async {
         continuation.yield(event)
     }
 

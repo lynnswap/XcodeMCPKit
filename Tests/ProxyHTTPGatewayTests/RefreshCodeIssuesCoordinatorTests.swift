@@ -8,7 +8,7 @@ import XcodeMCPTestSupport
 struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorSerializesRequestsForSameKey() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
 
@@ -44,7 +44,7 @@ struct RefreshCodeIssuesCoordinatorTests {
     }
 
     @Test func refreshCoordinatorAllowsDifferentKeysToAcquireConcurrently() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator()
+        let coordinator = RefreshCodeIssues.Coordinator()
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
 
@@ -82,7 +82,7 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorAcceptsManyQueuedWaitersForSameKey() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let completionCount = RecordedValues<String>()
 
@@ -132,7 +132,7 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorTimeoutRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
@@ -159,7 +159,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                     await outcomes.append("success")
                 }
                 await outcomes.append("unexpected-success")
-            } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
+            } catch RefreshCodeIssues.Coordinator.AcquireError.queueWaitTimedOut {
                 await outcomes.append("timed-out")
             } catch {
                 await outcomes.append("unexpected")
@@ -191,7 +191,7 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorNilRequestTimeoutKeepsQueuedWaiterWaiting() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let firstAcquired = AsyncGate()
         let outcomes = RecordedValues<String>()
@@ -234,7 +234,7 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorCancellationRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
@@ -292,7 +292,7 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorResetCancelsQueuedWaiters() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
@@ -348,7 +348,7 @@ struct RefreshCodeIssuesCoordinatorTests {
     }
 
     @Test func refreshCoordinatorResetCancelsActiveExecution() async throws {
-        let coordinator = RefreshCodeIssuesCoordinator()
+        let coordinator = RefreshCodeIssues.Coordinator()
         let started = TestSignal()
         let releaseActive = AsyncGate()
         let outcomes = RecordedValues<String>()
@@ -383,7 +383,7 @@ struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorResetKeepsSameKeySerializedUntilCancelledExecutionExits()
         async throws
     {
-        let coordinator = RefreshCodeIssuesCoordinator()
+        let coordinator = RefreshCodeIssues.Coordinator()
         let activeStarted = TestSignal()
         let activeCancellationObserved = TestSignal()
         let releaseActive = AsyncGate()

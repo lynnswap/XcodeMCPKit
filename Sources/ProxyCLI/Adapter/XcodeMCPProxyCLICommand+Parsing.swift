@@ -3,9 +3,9 @@ import Foundation
 import XcodeMCPProxy
 
 extension XcodeMCPProxyCLICommand {
-    package static func scanInvocation(_ args: [String]) -> CLICommandInvocation {
-        let scan = ProxyCLIInvocationScanner.scanAdapter(args)
-        var invocation = CLICommandInvocation()
+    package static func scanInvocation(_ args: [String]) -> XcodeMCPProxyCLICommand.Invocation {
+        let scan = CLI.InvocationScanner.scanAdapter(args)
+        var invocation = XcodeMCPProxyCLICommand.Invocation()
         invocation.showHelp = scan.showHelp
         invocation.showVersion = scan.showVersion
         invocation.usesRemovedURLHelper = scan.usesRemovedURLHelper
@@ -89,6 +89,6 @@ extension XcodeMCPProxyCLICommand {
     }
 
     static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
-        ProxyCLIInvocationScanner.shouldConsumeRequestTimeoutValue(token)
+        CLI.InvocationScanner.shouldConsumeRequestTimeoutValue(token)
     }
 }

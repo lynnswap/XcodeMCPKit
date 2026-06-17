@@ -1,23 +1,25 @@
 import Foundation
 
-public enum ProxyTransport: String, CaseIterable, Sendable {
-    case http
-    case stdio
-}
-
-public enum StdioUpstreamSource: String, Sendable {
-    case explicit
-    case environment
-    case discovery
-    case fallback
-}
-
-public enum RefreshCodeIssuesMode: String, Sendable {
-    case proxy
-    case upstream
-}
-
 public struct ProxyConfig: Sendable {
+    public enum Transport: String, CaseIterable, Sendable {
+        case http
+        case stdio
+    }
+
+    public enum StdioUpstreamSource: String, Sendable {
+        case explicit
+        case environment
+        case discovery
+        case fallback
+    }
+
+    public enum RefreshCodeIssuesMode: String, Sendable {
+        case proxy
+        case upstream
+    }
+
+    package enum File {}
+
     public var listenHost: String
     public var listenPort: Int
     public var upstreamCommand: String
@@ -27,15 +29,15 @@ public struct ProxyConfig: Sendable {
     public var maxBodyBytes: Int
     public var requestTimeout: TimeInterval
     public var configPath: String?
-    public var transport: ProxyTransport
+    public var transport: ProxyConfig.Transport
     public var stdioUpstreamURL: URL?
-    public var stdioUpstreamSource: StdioUpstreamSource?
+    public var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
     public var discoveryFileURL: URL?
     public var prewarmToolsList: Bool
     public var autoApproveXcodeDialog: Bool
-    public var refreshCodeIssuesMode: RefreshCodeIssuesMode
+    public var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
     public var disabledToolNames: Set<String>
-    package var initializeParamsOverride: ProxyInitializeHandshakeOverride?
+    package var initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
 
     public init(
         listenHost: String,
@@ -47,13 +49,13 @@ public struct ProxyConfig: Sendable {
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
         configPath: String? = nil,
-        transport: ProxyTransport = .http,
+        transport: ProxyConfig.Transport = .http,
         stdioUpstreamURL: URL? = nil,
-        stdioUpstreamSource: StdioUpstreamSource? = nil,
+        stdioUpstreamSource: ProxyConfig.StdioUpstreamSource? = nil,
         discoveryFileURL: URL? = nil,
         prewarmToolsList: Bool = true,
         autoApproveXcodeDialog: Bool = false,
-        refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy,
+        refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode = .proxy,
         disabledToolNames: Set<String>? = nil
     ) {
         self.listenHost = listenHost
@@ -88,12 +90,12 @@ public struct ProxyConfig: Sendable {
     private mutating func loadFileConfig(preserveDisabledToolNames: Bool) {
         let logger = ProxyLogging.make("config")
         if preserveDisabledToolNames == false {
-            disabledToolNames = ProxyFileConfigLoader.loadDisabledToolNames(
+            disabledToolNames = ProxyConfig.File.Loader.loadDisabledToolNames(
                 configPath: configPath,
                 logger: logger
             )
         }
-        initializeParamsOverride = ProxyFileConfigLoader.loadInitializeParamsOverride(
+        initializeParamsOverride = ProxyConfig.File.Loader.loadInitializeParamsOverride(
             configPath: configPath,
             logger: logger
         )
@@ -103,9 +105,9 @@ public struct ProxyConfig: Sendable {
         guard let protocolVersion = initializeParamsOverride?.protocolVersion else {
             return
         }
-        guard MCPProtocolVersion.isSupported(protocolVersion) else {
+        guard MCP.ProtocolVersion.isSupported(protocolVersion) else {
             throw CLIError.message(
-                "upstream_handshake.protocolVersion must be \(MCPProtocolVersion.current); \(protocolVersion) is not supported"
+                "upstream_handshake.protocolVersion must be \(MCP.ProtocolVersion.current); \(protocolVersion) is not supported"
             )
         }
     }
@@ -157,15 +159,15 @@ public struct CLIParser {
         var requestTimeout: TimeInterval = 300
         var configPath: String?
         var stdioUpstreamURL: URL?
-        var stdioUpstreamSource: StdioUpstreamSource?
+        var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
         var autoApproveXcodeDialog = false
-        var refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
+        var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode = .proxy
         var hasExplicitRefreshCodeIssuesMode = false
 
         var index = 1
         while index < args.count {
             let arg = args[index]
-            guard let flag = ProxyCLIFlag(rawValue: arg) else {
+            guard let flag = CLI.Flag(rawValue: arg) else {
                 throw CLIError.message("Unknown argument: \(arg)")
             }
             switch flag {
@@ -258,7 +260,7 @@ public struct CLIParser {
                 guard index + 1 < args.count else {
                     throw CLIError.message("--refresh-code-issues-mode requires proxy|upstream")
                 }
-                guard let parsed = RefreshCodeIssuesMode(rawValue: args[index + 1]) else {
+                guard let parsed = ProxyConfig.RefreshCodeIssuesMode(rawValue: args[index + 1]) else {
                     throw CLIError.message("--refresh-code-issues-mode must be proxy or upstream")
                 }
                 refreshCodeIssuesMode = parsed
@@ -296,7 +298,7 @@ public struct CLIParser {
         if let value = nonEmpty(environment[refreshCodeIssuesModeEnv]),
             hasExplicitRefreshCodeIssuesMode == false
         {
-            guard let parsed = RefreshCodeIssuesMode(rawValue: value) else {
+            guard let parsed = ProxyConfig.RefreshCodeIssuesMode(rawValue: value) else {
                 throw CLIError.message(
                     "\(refreshCodeIssuesModeEnv) must be proxy or upstream"
                 )
@@ -306,7 +308,7 @@ public struct CLIParser {
         if configPath == nil, let value = nonEmpty(environment[configPathEnv]) {
             configPath = value
         }
-        let transport: ProxyTransport = stdioUpstreamURL == nil ? .http : .stdio
+        let transport: ProxyConfig.Transport = stdioUpstreamURL == nil ? .http : .stdio
 
         return ProxyConfig(
             listenHost: listenHost,
@@ -353,7 +355,7 @@ public struct CLIParser {
         environment: [String: String],
         discoveryOverrideURL: URL? = nil,
         discoveryClient: DiscoveryClient
-    ) throws -> (url: URL, source: StdioUpstreamSource) {
+    ) throws -> (url: URL, source: ProxyConfig.StdioUpstreamSource) {
         if let raw = nonEmpty(environment[Self.stdioEndpointEnv]) {
             return (try parseHTTPURL(raw, label: Self.stdioEndpointEnv), .environment)
         }

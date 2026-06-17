@@ -5,7 +5,10 @@ import ProxyCore
 import ProxyMCP
 import ProxyXcodeSupport
 
-package struct RefreshCodeIssuesRequest: Sendable {
+package enum RefreshCodeIssues {}
+
+extension RefreshCodeIssues {
+    package struct Request: Sendable {
     package static let toolName = "XcodeRefreshCodeIssuesInFile"
     package static let globalQueueKey = "__global__"
 
@@ -53,25 +56,27 @@ package struct RefreshCodeIssuesRequest: Sendable {
         }
         return tabIdentifier
     }
+    }
 }
 
-package enum RefreshForwardAttemptResult: Sendable {
-    case success(Data)
-    case timeout(responseIDs: [RPCID], isBatch: Bool)
-    case upstreamUnavailable(responseIDs: [RPCID], isBatch: Bool)
-    case cancelled(responseIDs: [RPCID], isBatch: Bool)
-    case invalidRequest
-    case invalidUpstreamResponse
-}
+extension RefreshCodeIssues {
+    package struct Workflow {
+        package enum ForwardAttemptResult: Sendable {
+            case success(Data)
+            case timeout(responseIDs: [JSONRPC.ID], isBatch: Bool)
+            case upstreamUnavailable(responseIDs: [JSONRPC.ID], isBatch: Bool)
+            case cancelled(responseIDs: [JSONRPC.ID], isBatch: Bool)
+            case invalidRequest
+            case invalidUpstreamResponse
+        }
 
-package enum RefreshInternalToolResult {
-    case success([String: Any])
-    case timeout
-    case cancelled
-    case unavailable
-}
+        package enum InternalToolResult {
+            case success([String: Any])
+            case timeout
+            case cancelled
+            case unavailable
+        }
 
-package struct RefreshCodeIssuesWorkflow {
     package typealias WindowsProvider =
         @Sendable (
             _ sessionID: String,
@@ -88,17 +93,17 @@ package struct RefreshCodeIssuesWorkflow {
             _ eventLoop: EventLoop,
             _ upstreamIndexOverride: Int?,
             _ requestTimeoutOverride: TimeAmount?
-        ) async -> RefreshInternalToolResult
+        ) async -> RefreshCodeIssues.Workflow.InternalToolResult
     package typealias Forwarder =
         @Sendable (
             _ bodyData: Data,
             _ sessionID: String,
-            _ requestIDs: [RPCID],
+            _ requestIDs: [JSONRPC.ID],
             _ requestIsBatch: Bool,
             _ shouldRequeueLeaseOnRetryableFailure: @Sendable () -> Bool,
             _ eventLoop: EventLoop,
             _ requestTimeoutOverride: TimeAmount?
-        ) async -> RefreshForwardAttemptResult
+        ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult
 
     package static let retryDelaysNanos: [UInt64] = [
         200_000_000,
@@ -201,22 +206,22 @@ package struct RefreshCodeIssuesWorkflow {
         }
     }
 
-    package let mode: RefreshCodeIssuesMode
+    package let mode: ProxyConfig.RefreshCodeIssuesMode
     package let requestTimeout: TimeInterval
-    package let coordinator: RefreshCodeIssuesCoordinator
-    package let targetResolver: RefreshCodeIssuesTargetResolver
-    package let debugState: RefreshCodeIssuesDebugState
+    package let coordinator: RefreshCodeIssues.Coordinator
+    package let targetResolver: RefreshCodeIssues.TargetResolver
+    package let debugState: RefreshCodeIssues.DebugState
     package let windowLookupTimeoutSeconds: TimeInterval
     package let navigatorIssuesTimeoutSeconds: TimeInterval
     package let clock: ClockClient
     package let logger: Logger
 
     package init(
-        mode: RefreshCodeIssuesMode,
+        mode: ProxyConfig.RefreshCodeIssuesMode,
         requestTimeout: TimeInterval,
-        coordinator: RefreshCodeIssuesCoordinator,
-        targetResolver: RefreshCodeIssuesTargetResolver,
-        debugState: RefreshCodeIssuesDebugState,
+        coordinator: RefreshCodeIssues.Coordinator,
+        targetResolver: RefreshCodeIssues.TargetResolver,
+        debugState: RefreshCodeIssues.DebugState,
         windowLookupTimeout: TimeInterval = 5,
         navigatorIssuesTimeout: TimeInterval = 15,
         clock: ClockClient = .liveValue,
@@ -234,10 +239,10 @@ package struct RefreshCodeIssuesWorkflow {
     }
 
     package func run(
-        refreshRequest: RefreshCodeIssuesRequest,
+        refreshRequest: RefreshCodeIssues.Request,
         bodyData: Data,
         sessionID: String,
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         requestTimeoutOverride: TimeAmount? = nil,
         eventLoop: EventLoop,
@@ -245,7 +250,7 @@ package struct RefreshCodeIssuesWorkflow {
         internalUpstreamChooser: @escaping InternalUpstreamChooser,
         internalToolCaller: @escaping InternalToolCaller,
         forwarder: @escaping Forwarder
-    ) async -> RefreshForwardAttemptResult {
+    ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
         let executionBudget = ExecutionBudget(
             requestTimeout: requestTimeout,
             requestTimeoutOverride: requestTimeoutOverride,
@@ -340,7 +345,7 @@ package struct RefreshCodeIssuesWorkflow {
                     ]
                 )
 
-                let result: RefreshForwardAttemptResult
+                let result: RefreshCodeIssues.Workflow.ForwardAttemptResult
                 if mode == .proxy,
                     let proxyResponseData = try await runProxyRefresh(
                         refreshRequest: refreshRequest,
@@ -385,7 +390,7 @@ package struct RefreshCodeIssuesWorkflow {
                 )
                 return result
             }
-        } catch RefreshCodeIssuesCoordinator.AcquireError.queueWaitTimedOut {
+        } catch RefreshCodeIssues.Coordinator.AcquireError.queueWaitTimedOut {
             logger.warning(
                 "Refresh code issues request timed out while waiting for permit",
                 metadata: [
@@ -438,4 +443,5 @@ package struct RefreshCodeIssuesWorkflow {
         }
     }
 
+    }
 }

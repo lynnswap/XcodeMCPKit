@@ -1,7 +1,8 @@
 import Foundation
 import ProxyCore
 
-package struct RefreshCodeIssuesQueueDebugSnapshot: Codable, Sendable {
+extension RefreshCodeIssues {
+    package struct QueueSnapshot: Codable, Sendable {
     package let defaultRequestTimeoutSeconds: Double
     package let activeByQueueKey: [String: Int]
     package let waitingByQueueKey: [String: Int]
@@ -26,7 +27,7 @@ package struct RefreshCodeIssuesQueueDebugSnapshot: Codable, Sendable {
 /// A refresh request's terminal outcome. The diagnostic final state is
 /// derived here, so the outcome-to-state mapping cannot drift between the
 /// workflow and the debug snapshot.
-package enum RefreshCodeIssuesOutcome: String, Sendable {
+package enum Outcome: String, Sendable {
     case success
     case timeout
     case queueWaitTimedOut = "queue_wait_timed_out"
@@ -35,7 +36,7 @@ package enum RefreshCodeIssuesOutcome: String, Sendable {
     case upstreamUnavailable = "upstream_unavailable"
     case invalidUpstreamResponse = "invalid_upstream_response"
 
-    package var finalState: RefreshCodeIssuesDebugRequestState {
+    package var finalState: RefreshCodeIssues.RequestState {
         switch self {
         case .success:
             return .completed
@@ -49,7 +50,7 @@ package enum RefreshCodeIssuesOutcome: String, Sendable {
     }
 }
 
-package enum RefreshCodeIssuesDebugRequestState: String, Sendable {
+package enum RequestState: String, Sendable {
     case waitingForPermit = "waiting_for_permit"
     case running
     case completed
@@ -58,7 +59,7 @@ package enum RefreshCodeIssuesDebugRequestState: String, Sendable {
     case failed
 }
 
-package enum RefreshCodeIssuesDebugStep: Sendable, Equatable {
+package enum Step: Sendable, Equatable {
     case waitingForPermit
     case permitAcquired
     case requestTimeoutExhausted
@@ -147,7 +148,7 @@ package enum RefreshCodeIssuesDebugStep: Sendable, Equatable {
     }
 }
 
-package struct RefreshCodeIssuesRequestDebugSnapshot: Codable, Sendable {
+package struct RequestSnapshot: Codable, Sendable {
     package let id: String
     package let sessionID: String
     package let queueKey: String
@@ -190,7 +191,7 @@ package struct RefreshCodeIssuesRequestDebugSnapshot: Codable, Sendable {
     }
 }
 
-package struct RefreshCodeIssuesCompletedRequestDebugSnapshot: Codable, Sendable {
+package struct CompletedRequestSnapshot: Codable, Sendable {
     package let id: String
     package let sessionID: String
     package let queueKey: String
@@ -236,15 +237,15 @@ package struct RefreshCodeIssuesCompletedRequestDebugSnapshot: Codable, Sendable
     }
 }
 
-package struct RefreshCodeIssuesDebugSnapshot: Codable, Sendable {
-    package let queue: RefreshCodeIssuesQueueDebugSnapshot
-    package let activeRequests: [RefreshCodeIssuesRequestDebugSnapshot]
-    package let recentCompletedRequests: [RefreshCodeIssuesCompletedRequestDebugSnapshot]
+package struct DebugSnapshot: Codable, Sendable {
+    package let queue: RefreshCodeIssues.QueueSnapshot
+    package let activeRequests: [RefreshCodeIssues.RequestSnapshot]
+    package let recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot]
 
     package init(
-        queue: RefreshCodeIssuesQueueDebugSnapshot,
-        activeRequests: [RefreshCodeIssuesRequestDebugSnapshot],
-        recentCompletedRequests: [RefreshCodeIssuesCompletedRequestDebugSnapshot]
+        queue: RefreshCodeIssues.QueueSnapshot,
+        activeRequests: [RefreshCodeIssues.RequestSnapshot],
+        recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot]
     ) {
         self.queue = queue
         self.activeRequests = activeRequests
@@ -252,7 +253,7 @@ package struct RefreshCodeIssuesDebugSnapshot: Codable, Sendable {
     }
 }
 
-package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
+package final class DebugState: @unchecked Sendable {
     private struct RequestRecord: Sendable {
         let id: String
         let sessionID: String
@@ -262,15 +263,15 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         let mode: String
         let startedAt: Date
         var lastUpdatedAt: Date
-        var state: RefreshCodeIssuesDebugRequestState
-        var step: RefreshCodeIssuesDebugStep
+        var state: RefreshCodeIssues.RequestState
+        var step: RefreshCodeIssues.Step
         var lastQueuePosition: Int?
         var metadata: [String: String]
     }
 
     private struct State {
         var activeRequests: [String: RequestRecord] = [:]
-        var recentCompletedRequests: [RefreshCodeIssuesCompletedRequestDebugSnapshot] = []
+        var recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot] = []
     }
 
     private let lock = NSLock()
@@ -336,8 +337,8 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
 
     package func updateStep(
         requestID: String,
-        step: RefreshCodeIssuesDebugStep,
-        state overrideState: RefreshCodeIssuesDebugRequestState? = nil,
+        step: RefreshCodeIssues.Step,
+        state overrideState: RefreshCodeIssues.RequestState? = nil,
         metadata: [String: String] = [:]
     ) {
         updateRequest(requestID: requestID) { record, now in
@@ -354,7 +355,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
 
     package func finishRequest(
         requestID: String,
-        outcome: RefreshCodeIssuesOutcome,
+        outcome: RefreshCodeIssues.Outcome,
         metadata: [String: String] = [:]
     ) {
         let now = clock.now()
@@ -368,7 +369,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         for (key, value) in metadata {
             record.metadata[key] = value
         }
-        let completed = RefreshCodeIssuesCompletedRequestDebugSnapshot(
+        let completed = RefreshCodeIssues.CompletedRequestSnapshot(
             id: record.id,
             sessionID: record.sessionID,
             queueKey: record.queueKey,
@@ -392,7 +393,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         lock.unlock()
     }
 
-    package func snapshot() -> RefreshCodeIssuesDebugSnapshot {
+    package func snapshot() -> RefreshCodeIssues.DebugSnapshot {
         lock.lock()
         let activeRecords = Array(state.activeRequests.values)
         let recentCompleted = state.recentCompletedRequests
@@ -416,7 +417,7 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
                 return lhs.startedAt < rhs.startedAt
             }
             .map { record in
-                RefreshCodeIssuesRequestDebugSnapshot(
+                RefreshCodeIssues.RequestSnapshot(
                     id: record.id,
                     sessionID: record.sessionID,
                     queueKey: record.queueKey,
@@ -431,14 +432,14 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
                     metadata: record.metadata
                 )
             }
-        let queue = RefreshCodeIssuesQueueDebugSnapshot(
+        let queue = RefreshCodeIssues.QueueSnapshot(
             defaultRequestTimeoutSeconds: defaultRequestTimeoutSeconds,
             activeByQueueKey: activeByQueueKey,
             waitingByQueueKey: waitingByQueueKey,
-            activeRequestCount: activeRequests.filter { $0.state == RefreshCodeIssuesDebugRequestState.running.rawValue }.count,
-            waitingRequestCount: activeRequests.filter { $0.state != RefreshCodeIssuesDebugRequestState.running.rawValue }.count
+            activeRequestCount: activeRequests.filter { $0.state == RefreshCodeIssues.RequestState.running.rawValue }.count,
+            waitingRequestCount: activeRequests.filter { $0.state != RefreshCodeIssues.RequestState.running.rawValue }.count
         )
-        return RefreshCodeIssuesDebugSnapshot(
+        return RefreshCodeIssues.DebugSnapshot(
             queue: queue,
             activeRequests: activeRequests,
             recentCompletedRequests: recentCompleted
@@ -464,5 +465,6 @@ package final class RefreshCodeIssuesDebugState: @unchecked Sendable {
         mutate(&record, now)
         state.activeRequests[requestID] = record
         lock.unlock()
+    }
     }
 }

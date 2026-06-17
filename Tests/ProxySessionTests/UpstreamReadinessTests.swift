@@ -245,7 +245,7 @@ extension RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -320,7 +320,7 @@ extension RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -332,7 +332,7 @@ extension RuntimeCoordinatorTests {
         #expect(await upstream.sentCount() == 0)
 
         let retryFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )

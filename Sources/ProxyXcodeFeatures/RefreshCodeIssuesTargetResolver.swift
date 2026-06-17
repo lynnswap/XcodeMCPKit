@@ -3,21 +3,22 @@ import NIO
 import ProxyCore
 import ProxyXcodeSupport
 
-package struct RefreshCodeIssuesResolvedTarget: Sendable, Equatable {
-    package let workspacePath: String
-    package let workspaceRoot: String
-    package let resolvedFilePath: String
-    package let workspaceRelativePath: String
-}
+extension RefreshCodeIssues {
+    package struct ResolvedTarget: Sendable, Equatable {
+        package let workspacePath: String
+        package let workspaceRoot: String
+        package let resolvedFilePath: String
+        package let workspaceRelativePath: String
+    }
 
-package struct RefreshCodeIssuesTargetResolution: Sendable, Equatable {
-    package let target: RefreshCodeIssuesResolvedTarget?
-    package let workspacePath: String?
-    package let resolvedFilePath: String?
-    package let failureReason: String?
-}
+    package struct TargetResolution: Sendable, Equatable {
+        package let target: RefreshCodeIssues.ResolvedTarget?
+        package let workspacePath: String?
+        package let resolvedFilePath: String?
+        package let failureReason: String?
+    }
 
-package actor RefreshCodeIssuesTargetResolver {
+    package actor TargetResolver {
     package typealias WindowsProvider =
         @Sendable (_ sessionID: String, _ eventLoop: EventLoop) async throws -> [XcodeWindowInfo]?
 
@@ -39,9 +40,9 @@ package actor RefreshCodeIssuesTargetResolver {
         sessionID: String,
         eventLoop: EventLoop,
         windowsProvider: WindowsProvider
-    ) async throws -> RefreshCodeIssuesTargetResolution {
+    ) async throws -> RefreshCodeIssues.TargetResolution {
         guard let tabIdentifier, tabIdentifier.isEmpty == false else {
-            return RefreshCodeIssuesTargetResolution(
+            return RefreshCodeIssues.TargetResolution(
                 target: nil,
                 workspacePath: nil,
                 resolvedFilePath: nil,
@@ -49,7 +50,7 @@ package actor RefreshCodeIssuesTargetResolver {
             )
         }
         guard let filePath, filePath.isEmpty == false else {
-            return RefreshCodeIssuesTargetResolution(
+            return RefreshCodeIssues.TargetResolution(
                 target: nil,
                 workspacePath: nil,
                 resolvedFilePath: nil,
@@ -64,7 +65,7 @@ package actor RefreshCodeIssuesTargetResolver {
             windowsProvider: windowsProvider
         )
         guard let workspacePath else {
-            return RefreshCodeIssuesTargetResolution(
+            return RefreshCodeIssues.TargetResolution(
                 target: nil,
                 workspacePath: nil,
                 resolvedFilePath: nil,
@@ -78,7 +79,7 @@ package actor RefreshCodeIssuesTargetResolver {
             workspaceRoot: workspaceRoot,
             requestedFilePath: filePath
         ) else {
-            return RefreshCodeIssuesTargetResolution(
+            return RefreshCodeIssues.TargetResolution(
                 target: nil,
                 workspacePath: workspacePath,
                 resolvedFilePath: nil,
@@ -89,7 +90,7 @@ package actor RefreshCodeIssuesTargetResolver {
             for: resolvedFilePath,
             within: workspaceRoot
         ) else {
-            return RefreshCodeIssuesTargetResolution(
+            return RefreshCodeIssues.TargetResolution(
                 target: nil,
                 workspacePath: workspacePath,
                 resolvedFilePath: resolvedFilePath,
@@ -97,8 +98,8 @@ package actor RefreshCodeIssuesTargetResolver {
             )
         }
 
-        return RefreshCodeIssuesTargetResolution(
-            target: RefreshCodeIssuesResolvedTarget(
+        return RefreshCodeIssues.TargetResolution(
+            target: RefreshCodeIssues.ResolvedTarget(
                 workspacePath: workspacePath,
                 workspaceRoot: workspaceRoot,
                 resolvedFilePath: resolvedFilePath,
@@ -322,5 +323,6 @@ package actor RefreshCodeIssuesTargetResolver {
             score += 1
         }
         return score
+    }
     }
 }

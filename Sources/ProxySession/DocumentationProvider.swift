@@ -227,11 +227,11 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
 }
 
 private final class DocumentationPendingResponse: @unchecked Sendable {
-    let originalID: RPCID
+    let originalID: JSONRPC.ID
     let continuation: CheckedContinuation<Data, Error>
     var timeoutTask: Task<Void, Never>?
 
-    init(originalID: RPCID, continuation: CheckedContinuation<Data, Error>) {
+    init(originalID: JSONRPC.ID, continuation: CheckedContinuation<Data, Error>) {
         self.originalID = originalID
         self.continuation = continuation
     }
@@ -281,7 +281,7 @@ package actor DocumentationProviderConnection {
     package func call(_ requestData: Data, timeout: TimeAmount?) async throws -> Data {
         guard var object = try JSONSerialization.jsonObject(with: requestData, options: [])
             as? [String: Any],
-            let originalID = JSONRPCMessageInspector.requestID(from: object) else {
+            let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
             throw ControlPlaneError.invalidResponse("missing DocumentationSearch request id")
         }
 
@@ -335,7 +335,7 @@ package actor DocumentationProviderConnection {
         }
     }
 
-    private func handle(_ event: UpstreamEvent) {
+    private func handle(_ event: Upstream.Event) {
         switch event {
         case .message(let data):
             handleMessage(data)
@@ -348,7 +348,7 @@ package actor DocumentationProviderConnection {
 
     private func handleMessage(_ data: Data) {
         guard var object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-              let responseID = JSONRPCMessageInspector.responseID(from: object),
+              let responseID = JSONRPC.Message.Inspector.responseID(from: object),
               let pending = pendingResponses.removeValue(forKey: responseID.key) else {
             return
         }

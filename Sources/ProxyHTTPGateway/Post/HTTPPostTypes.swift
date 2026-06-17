@@ -10,15 +10,16 @@ import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import ProxySession
 
-package enum HTTPPostResolution {
+extension HTTPPostService {
+    package enum Resolution {
     case responseData(
         data: Data,
         sessionID: String?,
         prefersEventStream: Bool
     )
     case mcpError(
-        id: RPCID?,
-        ids: [RPCID],
+        id: JSONRPC.ID?,
+        ids: [JSONRPC.ID],
         code: Int,
         message: String,
         forceBatchArray: Bool,
@@ -34,48 +35,48 @@ package enum HTTPPostResolution {
         status: HTTPResponseStatus,
         sessionID: String
     )
-}
+    }
 
-package struct HTTPPostOperation {
-    package let future: EventLoopFuture<HTTPPostResolution>
-    package let cancellationHandle: HTTPPostCancellationHandle?
-}
+    package struct Operation {
+    package let future: EventLoopFuture<HTTPPostService.Resolution>
+    package let cancellationHandle: HTTPPostService.CancellationHandle?
+    }
 
-package struct RefreshRequestRoute: Sendable {
-    let request: RefreshCodeIssuesRequest
+    package struct RefreshRoute: Sendable {
+    let request: RefreshCodeIssues.Request
     let bodyData: Data
-    let requestIDs: [RPCID]
+    let requestIDs: [JSONRPC.ID]
     let requestIsBatch: Bool
-}
+    }
 
-package struct RefreshRequestRouting: Sendable {
-    let refreshRoutes: [RefreshRequestRoute]
+    package struct RefreshRouting: Sendable {
+    let refreshRoutes: [HTTPPostService.RefreshRoute]
     let remainingBodyData: Data?
-    let remainingRequestIDs: [RPCID]
+    let remainingRequestIDs: [JSONRPC.ID]
     let remainingLocalResponseData: Data?
-}
+    }
 
-package enum HTTPPostCancellationSource: String, Sendable {
+    package enum CancellationSource: String, Sendable {
     case channelInactive
     case responseWriteFailure
-}
+    }
 
-package final class HTTPPostCancellationHandle: @unchecked Sendable {
+    package final class CancellationHandle: @unchecked Sendable {
     private struct State: Sendable {
         var requestIDKeys: [String]
         var upstreamIndex: Int?
         var routerPendingToken: UUID?
         var refreshTask: Task<Void, Never>?
-        var childHandles: [HTTPPostCancellationHandle] = []
+        var childHandles: [HTTPPostService.CancellationHandle] = []
         var isTerminal = false
     }
 
-    package let leaseID: RequestLeaseID
+    package let leaseID: LeaseManager.ID
     package let sessionID: String
     private let state: NIOLockedValueBox<State>
 
     package init(
-        leaseID: RequestLeaseID,
+        leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String]
     ) {
@@ -135,7 +136,7 @@ package final class HTTPPostCancellationHandle: @unchecked Sendable {
     }
 
     @discardableResult
-    package func bindChildHandle(_ handle: HTTPPostCancellationHandle) -> Bool {
+    package func bindChildHandle(_ handle: HTTPPostService.CancellationHandle) -> Bool {
         state.withLockedValue { state in
             guard !state.isTerminal else { return false }
             state.childHandles.append(handle)
@@ -145,7 +146,7 @@ package final class HTTPPostCancellationHandle: @unchecked Sendable {
 
     package func cancel(using runtime: any RuntimeCoordinating) {
         let snapshot = state.withLockedValue {
-            state -> (Int?, UUID?, Task<Void, Never>?, [HTTPPostCancellationHandle], [String])? in
+            state -> (Int?, UUID?, Task<Void, Never>?, [HTTPPostService.CancellationHandle], [String])? in
             guard !state.isTerminal else { return nil }
             state.isTerminal = true
             let snapshot = (
@@ -173,5 +174,6 @@ package final class HTTPPostCancellationHandle: @unchecked Sendable {
             requestIDKeys: snapshot.4,
             upstreamIndex: snapshot.0
         )
+    }
     }
 }

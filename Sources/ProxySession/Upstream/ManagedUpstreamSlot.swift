@@ -18,8 +18,8 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
     }
 
-    package nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    package nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let factory: any UpstreamSessionFactory
     private var pendingStart: StartAttempt?
     private var current: RunningSessionBox?
@@ -28,7 +28,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
     package init(factory: any UpstreamSessionFactory) {
         self.factory = factory
 
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -56,7 +56,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
     }
 
-    package func send(_ data: Data) async -> UpstreamSendResult {
+    package func send(_ data: Data) async -> Upstream.SendResult {
         guard !isShutdown else {
             return .unavailable(.shuttingDown)
         }
@@ -146,7 +146,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
     }
 
     private func handleSessionEvent(
-        _ event: UpstreamEvent,
+        _ event: Upstream.Event,
         from running: RunningSessionBox
     ) {
         guard current === running else {

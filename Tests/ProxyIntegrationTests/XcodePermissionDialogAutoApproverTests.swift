@@ -17,7 +17,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -37,7 +37,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 500,
             assistantNameCandidates: ["Custom MCP"],
@@ -57,7 +57,7 @@ struct XcodePermissionDialogAutoApproverTests {
             defaultButton: makeButton(title: "許可")
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -74,13 +74,13 @@ struct XcodePermissionDialogAutoApproverTests {
             textValues: [
                 "The agent XcodeMCPKit wants to use Xcode's tools."
             ],
-            defaultButton: XcodePermissionDialogButtonSnapshot(
+            defaultButton: XcodePermissionDialog.ButtonSnapshot(
                 role: "AXButton",
                 identifier: "action-button-1"
             )
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -100,7 +100,7 @@ struct XcodePermissionDialogAutoApproverTests {
             defaultButton: makeButton(title: "許可")
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -120,7 +120,7 @@ struct XcodePermissionDialogAutoApproverTests {
             defaultButton: makeButton(title: "許可")
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
@@ -141,7 +141,7 @@ struct XcodePermissionDialogAutoApproverTests {
             defaultButton: makeButton(title: "OK")
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -160,7 +160,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -180,7 +180,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -203,7 +203,7 @@ struct XcodePermissionDialogAutoApproverTests {
             defaultButton: makeButton(title: "Allow")
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 1036,
             agentPathCandidates: [
@@ -226,7 +226,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -245,7 +245,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -264,7 +264,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
@@ -284,7 +284,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
@@ -304,7 +304,7 @@ struct XcodePermissionDialogAutoApproverTests {
             ]
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -327,7 +327,7 @@ struct XcodePermissionDialogAutoApproverTests {
             hasProxy: true
         )
 
-        let decision = XcodePermissionDialogMatcher.decision(
+        let decision = XcodePermissionDialog.Matcher.decision(
             for: snapshot,
             processID: 4317,
             assistantNameCandidates: ["XcodeMCPKit"],
@@ -338,8 +338,8 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test func openWindowsFailureClassifierTreatsExternalViewServiceAXWindowsCannotCompleteAsBenign() {
-        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
-            XcodePermissionDialogAXError.copyAttributeFailed(
+        let isBenign = XcodePermissionDialog.AXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialog.AXError.copyAttributeFailed(
                 attribute: kAXWindowsAttribute as String,
                 error: .cannotComplete
             ),
@@ -350,8 +350,8 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test func openWindowsFailureClassifierRejectsXcodeAXWindowsCannotComplete() {
-        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
-            XcodePermissionDialogAXError.copyAttributeFailed(
+        let isBenign = XcodePermissionDialog.AXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialog.AXError.copyAttributeFailed(
                 attribute: kAXWindowsAttribute as String,
                 error: .cannotComplete
             ),
@@ -362,8 +362,8 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test func openWindowsFailureClassifierRejectsExternalViewServiceForDifferentAttribute() {
-        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
-            XcodePermissionDialogAXError.copyAttributeFailed(
+        let isBenign = XcodePermissionDialog.AXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialog.AXError.copyAttributeFailed(
                 attribute: kAXTitleAttribute as String,
                 error: .cannotComplete
             ),
@@ -374,8 +374,8 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test func openWindowsFailureClassifierRejectsExternalViewServiceForDifferentAXError() {
-        let isBenign = XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
-            XcodePermissionDialogAXError.copyAttributeFailed(
+        let isBenign = XcodePermissionDialog.AXFailureClassifier.isBenignOpenWindowsFailure(
+            XcodePermissionDialog.AXError.copyAttributeFailed(
                 attribute: kAXWindowsAttribute as String,
                 error: .attributeUnsupported
             ),
@@ -399,7 +399,7 @@ struct XcodePermissionDialogAutoApproverTests {
         let symlinkExecutable = temporaryDirectory.appendingPathComponent("link-server")
         try fileManager.createSymbolicLink(at: symlinkExecutable, withDestinationURL: realExecutable)
 
-        let candidates = XcodePermissionDialogAutoApprover.defaultAgentPathCandidates(
+        let candidates = XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
             arguments: [symlinkExecutable.path],
             executableURL: realExecutable
         )
@@ -410,7 +410,7 @@ struct XcodePermissionDialogAutoApproverTests {
 
     @Test func autoApproverPromptsAccessibilityOnceAndRemainsInactiveWhenUntrusted() async {
         let axClient = RecordingAXClient(status: .untrusted)
-        let approver = XcodePermissionDialogAutoApprover(
+        let approver = XcodePermissionDialog.AutoApprover(
             dependencies: .init(
                 axClient: axClient,
                 agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
@@ -445,10 +445,10 @@ private func makeSnapshot(
     document: String? = nil,
     childCount: Int = 3,
     hasProxy: Bool = false,
-    defaultButton: XcodePermissionDialogButtonSnapshot? = makeButton(title: "Allow"),
-    cancelButton: XcodePermissionDialogButtonSnapshot? = makeButton(title: "Cancel")
-) -> XcodePermissionDialogWindowSnapshot {
-    XcodePermissionDialogWindowSnapshot(
+    defaultButton: XcodePermissionDialog.ButtonSnapshot? = makeButton(title: "Allow"),
+    cancelButton: XcodePermissionDialog.ButtonSnapshot? = makeButton(title: "Cancel")
+) -> XcodePermissionDialog.WindowSnapshot {
+    XcodePermissionDialog.WindowSnapshot(
         processBundleIdentifier: processBundleIdentifier,
         title: title,
         textValues: textValues,
@@ -471,8 +471,8 @@ private func makeButton(
     role: String = "AXButton",
     subrole: String? = nil,
     identifier: String? = nil
-) -> XcodePermissionDialogButtonSnapshot {
-    XcodePermissionDialogButtonSnapshot(
+) -> XcodePermissionDialog.ButtonSnapshot {
+    XcodePermissionDialog.ButtonSnapshot(
         title: title,
         role: role,
         subrole: subrole,
@@ -480,17 +480,17 @@ private func makeButton(
     )
 }
 
-private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialogAXAccessing {
-    private let status: XcodePermissionDialogAccessibilityStatus
+private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialog.AXAccessing {
+    private let status: XcodePermissionDialog.AccessibilityStatus
     private let lock = NSLock()
     private var promptCalls = 0
     private var windowScanCalls = 0
 
-    init(status: XcodePermissionDialogAccessibilityStatus) {
+    init(status: XcodePermissionDialog.AccessibilityStatus) {
         self.status = status
     }
 
-    func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialogAccessibilityStatus {
+    func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus {
         lock.withLock {
             if promptIfNeeded {
                 promptCalls += 1
@@ -506,11 +506,11 @@ private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialo
         }
     }
 
-    func openWindows(for processID: pid_t) throws -> [XcodePermissionDialogAXWindow] {
+    func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
         []
     }
 
-    func pressDefaultButton(in window: XcodePermissionDialogAXWindow) throws {}
+    func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws {}
 
     func snapshot() -> (promptCalls: Int, windowScanCalls: Int) {
         lock.withLock {

@@ -5,9 +5,9 @@ import ProxyCore
 import ProxyMCP
 import ProxyXcodeSupport
 
-extension RefreshCodeIssuesWorkflow {
+extension RefreshCodeIssues.Workflow {
     package static func makeToolResponseData(
-        id: RPCID,
+        id: JSONRPC.ID,
         result: [String: Any],
         forceBatchArray: Bool
     ) -> Data? {
@@ -39,7 +39,7 @@ extension RefreshCodeIssuesWorkflow {
 
         let filteredIssues = issues.filter { issue in
             guard let path = issue["path"] as? String else { return false }
-            return RefreshCodeIssuesPathMatcher.matches(
+            return RefreshCodeIssues.PathMatcher.matches(
                 issuePath: path,
                 resolvedFilePath: resolvedFilePath
             )
@@ -106,8 +106,8 @@ extension RefreshCodeIssuesWorkflow {
     }
 
     package static func debugOutcome(
-        for result: RefreshForwardAttemptResult
-    ) -> RefreshCodeIssuesOutcome {
+        for result: RefreshCodeIssues.Workflow.ForwardAttemptResult
+    ) -> RefreshCodeIssues.Outcome {
         switch result {
         case .success:
             return .success
@@ -153,7 +153,7 @@ extension RefreshCodeIssuesWorkflow {
     }
 
     package static func throwIfCancelled(
-        debugState: RefreshCodeIssuesDebugState,
+        debugState: RefreshCodeIssues.DebugState,
         requestID: String
     ) throws {
         guard !Task.isCancelled else {

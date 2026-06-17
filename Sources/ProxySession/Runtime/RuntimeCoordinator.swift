@@ -65,7 +65,7 @@ package protocol RuntimeCoordinating: Sendable {
     func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
     func registerInitialize(
         sessionID: String,
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer>
@@ -84,13 +84,13 @@ package protocol RuntimeCoordinating: Sendable {
     func hasDocumentationProvider() -> Bool
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
-        leaseID: RequestLeaseID,
-        descriptor: SessionPipelineRequestDescriptor,
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
-    func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64
+    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
@@ -98,33 +98,33 @@ package protocol RuntimeCoordinating: Sendable {
     func forwardServerRequestResponse(
         responseData: Data,
         sessionID: String,
-        responseID: RPCID,
+        responseID: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult>
     func debugSnapshot() -> ProxyDebugSnapshot
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
-    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID
+    func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID
     func activateRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
         timeout: TimeAmount?
     )
-    func completeRequestLease(_ leaseID: RequestLeaseID)
-    func requeueRequestLease(_ leaseID: RequestLeaseID)
+    func completeRequestLease(_ leaseID: LeaseManager.ID)
+    func requeueRequestLease(_ leaseID: LeaseManager.ID)
     func failRequestLease(
-        _ leaseID: RequestLeaseID,
-        terminalState: RequestLeaseState,
-        reason: RequestLeaseReleaseReason
+        _ leaseID: LeaseManager.ID,
+        terminalState: LeaseManager.State,
+        reason: LeaseManager.ReleaseReason
     )
     func handleRequestLeaseTimeout(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int
     )
     func abandonRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int?
@@ -151,15 +151,15 @@ extension RuntimeCoordinating {
     package func forwardServerRequestResponse(
         responseData _: Data,
         sessionID _: String,
-        responseID _: RPCID,
+        responseID _: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
         eventLoop.makeSucceededFuture(.missingRoute)
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(
-        leaseID: RequestLeaseID,
-        descriptor: SessionPipelineRequestDescriptor,
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
@@ -219,7 +219,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let config: ProxyConfig
     package let logger: Logger = ProxyLogging.make("session")
     package let upstreams: [any UpstreamSlotControlling]
-    package let initializeParamsOverride: ProxyInitializeHandshakeOverride?
+    package let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     package let canonicalBrokerState: CanonicalBrokerState
     package let controlPlaneDebugMirror = ControlPlaneDebugMirror()
 
@@ -344,7 +344,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             canUseUpstream: { [weak upstreamHealthManager = self.upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
                 guard let upstreamHealthManager else {
-                    return UpstreamUseEvaluation(isUsable: false, effects: [])
+                    return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
                 }
                 return upstreamHealthManager.evaluateUsableInitialized(
                     index: upstreamIndex,
@@ -356,7 +356,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 return upstreamHealthManager?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
                     occupiedUpstreams: occupied
-                ) ?? UpstreamSelectionResult(upstreamIndex: nil, effects: [])
+                ) ?? UpstreamHealthManager.SelectionResult(upstreamIndex: nil, effects: [])
             },
             applyHealthEffects: { [runtimeBox] effects in
                 runtimeBox.value?.applyHealthEffects(effects)
@@ -401,7 +401,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 })
             },
             logger: ProxyLogging.make("control-plane"),
-            controlPlaneDefaultTimeout: MCPMethodDispatcher.timeoutForControlPlane(
+            controlPlaneDefaultTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             ),
             clock: runtimeClock
@@ -584,7 +584,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package func refreshToolsListIfNeeded() {
         guard config.prewarmToolsList, isInitialized() else { return }
         let deadline = timeoutDeadline(
-            for: MCPMethodDispatcher.timeoutForControlPlane(
+            for: MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
         )
@@ -600,7 +600,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let timeoutSeconds = config.requestTimeout > 0
             ? min(config.requestTimeout, 30)
             : 30
-        let timeout = MCPMethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
+        let timeout = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
         let task = Task { [weak self, documentationProviderManager, logger] in
             guard !Task.isCancelled else { return }
             logger.debug(
@@ -640,7 +640,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return chosen
     }
 
-    private func applyHealthEffects(_ effects: [UpstreamHealthEffect]) {
+    private func applyHealthEffects(_ effects: [UpstreamHealthManager.Effect]) {
         for effect in effects {
             switch effect {
             case .cancelInitTimeout(let timeout):
@@ -658,7 +658,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    private func startHealthProbes(_ probes: [HealthProbeRequest]) {
+    private func startHealthProbes(_ probes: [UpstreamHealthManager.ProbeRequest]) {
         for probe in probes {
             probeUpstreamHealth(
                 upstreamIndex: probe.upstreamIndex,
@@ -668,8 +668,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package func enqueueOnUpstreamSlot<Output: Sendable>(
-        leaseID: RequestLeaseID,
-        descriptor: SessionPipelineRequestDescriptor,
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int? = nil,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
@@ -717,7 +717,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func registerInitialize(
         sessionID: String,
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
@@ -731,7 +731,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func registerInitializeWaiter(
         sessionID: String,
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
@@ -787,7 +787,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package func registerInitialize(
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
@@ -810,7 +810,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         _ = session(id: sessionID)
         let timeout =
             requestTimeoutOverride
-            ?? MCPMethodDispatcher.timeoutForMethod(
+            ?? MCP.MethodDispatcher.timeoutForMethod(
                 "tools/list",
                 defaultSeconds: config.requestTimeout
             )
@@ -858,7 +858,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) async throws -> JSONValue {
         let timeout =
             requestTimeoutOverride
-            ?? MCPMethodDispatcher.timeoutForMethod(
+            ?? MCP.MethodDispatcher.timeoutForMethod(
                 "tools/call",
                 defaultSeconds: config.requestTimeout
             )
@@ -880,7 +880,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         let timeout =
             requestTimeoutOverride
-            ?? MCPMethodDispatcher.timeoutForMethod(
+            ?? MCP.MethodDispatcher.timeoutForMethod(
                 "tools/call",
                 defaultSeconds: config.requestTimeout
             )
@@ -967,7 +967,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func encodeJSONRPCResultBuffer(
-        id: RPCID,
+        id: JSONRPC.ID,
         result: JSONValue
     ) throws -> ByteBuffer {
         let response: [String: Any] = [
@@ -985,7 +985,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func encodeControlPlaneErrorBuffer(
-        id: RPCID,
+        id: JSONRPC.ID,
         error: Error
     ) throws -> ByteBuffer {
         let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)

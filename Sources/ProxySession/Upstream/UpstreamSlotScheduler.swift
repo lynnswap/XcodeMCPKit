@@ -4,23 +4,23 @@ import NIO
 import NIOConcurrencyHelpers
 import ProxyCore
 
-package struct UpstreamSlotSchedulerDebugSnapshot: Codable, Sendable {
-    package let queuedRequestCount: Int
-    package let activeLeaseCountByUpstream: [Int: Int]
-
-    package init(
-        queuedRequestCount: Int,
-        activeLeaseCountByUpstream: [Int: Int]
-    ) {
-        self.queuedRequestCount = queuedRequestCount
-        self.activeLeaseCountByUpstream = activeLeaseCountByUpstream
-    }
-}
-
 package final class UpstreamSlotScheduler: Sendable {
+    package struct DebugSnapshot: Codable, Sendable {
+        package let queuedRequestCount: Int
+        package let activeLeaseCountByUpstream: [Int: Int]
+
+        package init(
+            queuedRequestCount: Int,
+            activeLeaseCountByUpstream: [Int: Int]
+        ) {
+            self.queuedRequestCount = queuedRequestCount
+            self.activeLeaseCountByUpstream = activeLeaseCountByUpstream
+        }
+    }
+
     private struct PendingRequest: Sendable {
-        let leaseID: RequestLeaseID
-        let descriptor: SessionPipelineRequestDescriptor
+        let leaseID: LeaseManager.ID
+        let descriptor: SessionRequestPipeline.Descriptor
         let eventLoop: EventLoop
         let preferredUpstreamIndex: Int?
         let start: @Sendable (Int) -> Void
@@ -36,22 +36,22 @@ package final class UpstreamSlotScheduler: Sendable {
 
     private struct State: Sendable {
         var pendingRequests: [PendingRequest] = []
-        var activeLeaseIDsByUpstream: [Int: RequestLeaseID] = [:]
-        var activeTopLevelLeaseIDsBySession: [String: RequestLeaseID] = [:]
-        var reservationsByLeaseID: [RequestLeaseID: Reservation] = [:]
+        var activeLeaseIDsByUpstream: [Int: LeaseManager.ID] = [:]
+        var activeTopLevelLeaseIDsBySession: [String: LeaseManager.ID] = [:]
+        var reservationsByLeaseID: [LeaseManager.ID: Reservation] = [:]
     }
 
     private let logger: Logger
     private let state: NIOLockedValueBox<State>
-    private let canUseUpstream: @Sendable (Int) -> UpstreamUseEvaluation
-    private let selectUpstream: @Sendable (Set<Int>) -> UpstreamSelectionResult
-    private let applyHealthEffects: @Sendable ([UpstreamHealthEffect]) -> Void
+    private let canUseUpstream: @Sendable (Int) -> UpstreamHealthManager.UseEvaluation
+    private let selectUpstream: @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult
+    private let applyHealthEffects: @Sendable ([UpstreamHealthManager.Effect]) -> Void
 
     package init(
         logger: Logger = ProxyLogging.make("upstream.scheduler"),
-        canUseUpstream: @escaping @Sendable (Int) -> UpstreamUseEvaluation,
-        selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamSelectionResult,
-        applyHealthEffects: @escaping @Sendable ([UpstreamHealthEffect]) -> Void = { _ in }
+        canUseUpstream: @escaping @Sendable (Int) -> UpstreamHealthManager.UseEvaluation,
+        selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult,
+        applyHealthEffects: @escaping @Sendable ([UpstreamHealthManager.Effect]) -> Void = { _ in }
     ) {
         self.logger = logger
         self.canUseUpstream = canUseUpstream
@@ -66,8 +66,8 @@ package final class UpstreamSlotScheduler: Sendable {
     }
 
     package func enqueueRequest(
-        leaseID: RequestLeaseID,
-        descriptor: SessionPipelineRequestDescriptor,
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int? = nil,
         starter: @escaping @Sendable (Int) -> Void,
@@ -90,7 +90,7 @@ package final class UpstreamSlotScheduler: Sendable {
         dispatchQueuedRequestsIfPossible()
     }
 
-    package func releaseUpstreamSlot(upstreamIndex: Int, leaseID: RequestLeaseID) {
+    package func releaseUpstreamSlot(upstreamIndex: Int, leaseID: LeaseManager.ID) {
         let released = state.withLockedValue { state -> Bool in
             guard state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID else { return false }
             state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
@@ -159,7 +159,7 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func cancelQueuedRequest(leaseID: RequestLeaseID) {
+    package func cancelQueuedRequest(leaseID: LeaseManager.ID) {
         enum CancelledRequest {
             case pending(PendingRequest)
             case reserved(PendingRequest, Int)
@@ -212,9 +212,9 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func debugSnapshot() -> UpstreamSlotSchedulerDebugSnapshot {
+    package func debugSnapshot() -> UpstreamSlotScheduler.DebugSnapshot {
         state.withLockedValue { state in
-            UpstreamSlotSchedulerDebugSnapshot(
+            UpstreamSlotScheduler.DebugSnapshot(
                 queuedRequestCount: state.pendingRequests.count,
                 activeLeaseCountByUpstream: state.activeLeaseIDsByUpstream.reduce(into: [:]) { counts, item in
                     counts[item.key] = 1
@@ -261,10 +261,10 @@ package final class UpstreamSlotScheduler: Sendable {
     private func dispatchQueuedRequestsIfPossible() {
         let dispatch = state.withLockedValue { state -> (
             starts: [(PendingRequest, Int)],
-            healthEffects: [UpstreamHealthEffect]
+            healthEffects: [UpstreamHealthManager.Effect]
         ) in
             var ready: [(PendingRequest, Int)] = []
-            var healthEffects: [UpstreamHealthEffect] = []
+            var healthEffects: [UpstreamHealthManager.Effect] = []
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)

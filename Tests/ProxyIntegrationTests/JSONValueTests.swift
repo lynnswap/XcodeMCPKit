@@ -7,13 +7,13 @@ import ProxyMCP
 @Suite
 struct JSONValueTests {
     @Test func rpcIDFromString() async throws {
-        let rpcID = RPCID(any: "abc")
+        let rpcID = JSONRPC.ID(any: "abc")
         #expect(rpcID?.key == "abc")
         #expect(rpcID?.value.foundationObject as? String == "abc")
     }
 
     @Test func rpcIDFromNumber() async throws {
-        let rpcID = RPCID(any: NSNumber(value: 42))
+        let rpcID = JSONRPC.ID(any: NSNumber(value: 42))
         #expect(rpcID?.key == "42")
         #expect((rpcID?.value.foundationObject as? NSNumber)?.intValue == 42)
     }

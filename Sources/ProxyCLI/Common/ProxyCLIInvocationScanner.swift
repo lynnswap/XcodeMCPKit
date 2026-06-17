@@ -2,7 +2,9 @@ import ProxyCore
 import Foundation
 import XcodeMCPProxy
 
-package struct ProxyCLIAdapterScan {
+extension CLI {
+    package enum InvocationScanner {
+        package struct AdapterScan {
     package var showHelp = false
     package var showVersion = false
     package var usesRemovedURLHelper = false
@@ -10,9 +12,9 @@ package struct ProxyCLIAdapterScan {
     package var hasExplicitURL = false
     package var hasStdioFlag = false
     package var serverOnlyFlag: String?
-}
+        }
 
-package struct ProxyCLIServerScan {
+        package struct ServerScan {
     package var forwardedArgs: [String] = []
     package var showHelp = false
     package var showVersion = false
@@ -24,22 +26,21 @@ package struct ProxyCLIServerScan {
     package var hasRefreshCodeIssuesModeFlag = false
     package var forceRestart = false
     package var dryRun = false
-}
+        }
 
-package struct ProxyCLIInstallScan {
+        package struct InstallScan {
     package var showHelp = false
     package var showVersion = false
-}
+        }
 
-package enum ProxyCLIInvocationScanner {
-    private static let serverOnlyFlags = ProxyCLIFlag.serverOnlyFlagNames
-    private static let serverOnlyValueFlags = ProxyCLIFlag.serverOnlyValueFlagNames
-    private static let serverForwardedValueFlags = ProxyCLIFlag.serverForwardedValueFlagNames
+    private static let serverOnlyFlags = CLI.Flag.serverOnlyFlagNames
+    private static let serverOnlyValueFlags = CLI.Flag.serverOnlyValueFlagNames
+    private static let serverForwardedValueFlags = CLI.Flag.serverForwardedValueFlagNames
 
-    package static func scanAdapter(_ args: [String]) -> ProxyCLIAdapterScan {
-        var scan = ProxyCLIAdapterScan()
+    package static func scanAdapter(_ args: [String]) -> CLI.InvocationScanner.AdapterScan {
+        var scan = CLI.InvocationScanner.AdapterScan()
         scan.showVersion = containsVersionFlag(args)
-        var cursor = CLIArgumentCursor(args: args)
+        var cursor = CLI.ArgumentCursor(args: args)
 
         while let arg = cursor.current {
             switch arg {
@@ -93,10 +94,10 @@ package enum ProxyCLIInvocationScanner {
         return scan
     }
 
-    package static func scanServer(_ args: [String]) throws -> ProxyCLIServerScan {
-        var scan = ProxyCLIServerScan()
+    package static func scanServer(_ args: [String]) throws -> CLI.InvocationScanner.ServerScan {
+        var scan = CLI.InvocationScanner.ServerScan()
         scan.showVersion = containsVersionFlag(args)
-        var cursor = CLIArgumentCursor(args: args)
+        var cursor = CLI.ArgumentCursor(args: args)
 
         while let arg = cursor.current {
             if scan.showVersion {
@@ -135,17 +136,17 @@ package enum ProxyCLIInvocationScanner {
                 cursor.advance()
                 continue
             case "--stdio":
-                throw ProxyServerCommandError.message(
+                throw XcodeMCPProxyServerCommand.Error.message(
                     "--stdio is not supported in server mode (use xcode-mcp-proxy)"
                 )
             case "--url":
-                throw ProxyServerCommandError.message(
+                throw XcodeMCPProxyServerCommand.Error.message(
                     "--url is not supported in server mode (use xcode-mcp-proxy)"
                 )
             case "--xcode-pid":
-                throw ProxyServerCommandError.message(CLIParser.removedXcodePIDMessage)
+                throw XcodeMCPProxyServerCommand.Error.message(CLIParser.removedXcodePIDMessage)
             case "--lazy-init":
-                throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
+                throw XcodeMCPProxyServerCommand.Error.message(CLIParser.removedLazyInitMessage)
             case "--listen":
                 scan.hasListenFlag = true
             case "--host":
@@ -166,7 +167,7 @@ package enum ProxyCLIInvocationScanner {
             if serverForwardedValueFlags.contains(arg) {
                 let value = try cursor.requiredValue(
                     for: arg,
-                    error: { ProxyServerCommandError.message("\($0) requires a value") }
+                    error: { XcodeMCPProxyServerCommand.Error.message("\($0) requires a value") }
                 )
                 scan.forwardedArgs.append(value)
             } else {
@@ -177,10 +178,10 @@ package enum ProxyCLIInvocationScanner {
         return scan
     }
 
-    package static func scanInstall(_ args: [String]) -> ProxyCLIInstallScan {
-        var scan = ProxyCLIInstallScan()
+    package static func scanInstall(_ args: [String]) -> CLI.InvocationScanner.InstallScan {
+        var scan = CLI.InvocationScanner.InstallScan()
         scan.showVersion = containsVersionFlag(args)
-        var cursor = CLIArgumentCursor(args: args)
+        var cursor = CLI.ArgumentCursor(args: args)
 
         while let arg = cursor.current {
             switch arg {
@@ -214,5 +215,6 @@ package enum ProxyCLIInvocationScanner {
 
     private static func containsVersionFlag(_ args: [String]) -> Bool {
         args.dropFirst().contains("--version")
+    }
     }
 }

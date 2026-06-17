@@ -1,61 +1,61 @@
 import Foundation
 
-package struct StdioFramerProtocolViolation: Sendable {
-    package enum Reason: String, Codable, Sendable {
-        case unexpectedLeadingByte
-        case invalidContentLengthHeader
-        case invalidJSON
-        case bufferLimitExceeded
-    }
-
-    package let reason: Reason
-    package let bufferedByteCount: Int
-    package let preview: String
-    package let previewHex: String
-    package let leadingByteHex: String?
-
-    package init(
-        reason: Reason,
-        bufferedByteCount: Int,
-        preview: String,
-        previewHex: String,
-        leadingByteHex: String?
-    ) {
-        self.reason = reason
-        self.bufferedByteCount = bufferedByteCount
-        self.preview = preview
-        self.previewHex = previewHex
-        self.leadingByteHex = leadingByteHex
-    }
-
-    package init(reason: Reason, bufferedByteCount: Int, preview: String) {
-        self.init(
-            reason: reason,
-            bufferedByteCount: bufferedByteCount,
-            preview: preview,
-            previewHex: "",
-            leadingByteHex: nil
-        )
-    }
-}
-
-package struct StdioFramerAppendResult: Sendable {
-    package let messages: [Data]
-    package let protocolViolation: StdioFramerProtocolViolation?
-    package let bufferedByteCount: Int
-
-    package init(
-        messages: [Data],
-        protocolViolation: StdioFramerProtocolViolation?,
-        bufferedByteCount: Int
-    ) {
-        self.messages = messages
-        self.protocolViolation = protocolViolation
-        self.bufferedByteCount = bufferedByteCount
-    }
-}
-
 package final class StdioFramer {
+    package struct ProtocolViolation: Sendable {
+        package enum Reason: String, Codable, Sendable {
+            case unexpectedLeadingByte
+            case invalidContentLengthHeader
+            case invalidJSON
+            case bufferLimitExceeded
+        }
+
+        package let reason: Reason
+        package let bufferedByteCount: Int
+        package let preview: String
+        package let previewHex: String
+        package let leadingByteHex: String?
+
+        package init(
+            reason: Reason,
+            bufferedByteCount: Int,
+            preview: String,
+            previewHex: String,
+            leadingByteHex: String?
+        ) {
+            self.reason = reason
+            self.bufferedByteCount = bufferedByteCount
+            self.preview = preview
+            self.previewHex = previewHex
+            self.leadingByteHex = leadingByteHex
+        }
+
+        package init(reason: Reason, bufferedByteCount: Int, preview: String) {
+            self.init(
+                reason: reason,
+                bufferedByteCount: bufferedByteCount,
+                preview: preview,
+                previewHex: "",
+                leadingByteHex: nil
+            )
+        }
+    }
+
+    package struct AppendResult: Sendable {
+        package let messages: [Data]
+        package let protocolViolation: StdioFramer.ProtocolViolation?
+        package let bufferedByteCount: Int
+
+        package init(
+            messages: [Data],
+            protocolViolation: StdioFramer.ProtocolViolation?,
+            bufferedByteCount: Int
+        ) {
+            self.messages = messages
+            self.protocolViolation = protocolViolation
+            self.bufferedByteCount = bufferedByteCount
+        }
+    }
+
     private enum JSONPrefixParseResult {
         case complete(Data.Index)
         case incomplete
@@ -69,7 +69,7 @@ package final class StdioFramer {
 
     package init() {}
 
-    package func append(_ data: Data) -> StdioFramerAppendResult {
+    package func append(_ data: Data) -> StdioFramer.AppendResult {
         if !data.isEmpty {
             buffer.append(data)
         }
@@ -88,7 +88,7 @@ package final class StdioFramer {
         }
 
         let protocolViolation = protocolViolationIfNeeded()
-        return StdioFramerAppendResult(
+        return StdioFramer.AppendResult(
             messages: messages,
             protocolViolation: protocolViolation,
             bufferedByteCount: buffer.count
@@ -149,7 +149,7 @@ package final class StdioFramer {
         return message
     }
 
-    private func protocolViolationIfNeeded() -> StdioFramerProtocolViolation? {
+    private func protocolViolationIfNeeded() -> StdioFramer.ProtocolViolation? {
         guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
             if buffer.count > bufferHardLimit {
                 return makeProtocolViolation(reason: .bufferLimitExceeded)
@@ -210,10 +210,10 @@ package final class StdioFramer {
         }
     }
 
-    private func makeProtocolViolation(reason: StdioFramerProtocolViolation.Reason)
-        -> StdioFramerProtocolViolation
+    private func makeProtocolViolation(reason: StdioFramer.ProtocolViolation.Reason)
+        -> StdioFramer.ProtocolViolation
     {
-        StdioFramerProtocolViolation(
+        StdioFramer.ProtocolViolation(
             reason: reason,
             bufferedByteCount: buffer.count,
             preview: preview(of: buffer),

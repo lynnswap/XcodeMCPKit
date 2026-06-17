@@ -1,7 +1,8 @@
 import Foundation
 import ProxyCore
 
-package enum RefreshCodeIssuesPathMatcher {
+extension RefreshCodeIssues {
+    package enum PathMatcher {
     package static func matches(
         issuePath: String,
         resolvedFilePath: String,
@@ -99,5 +100,6 @@ package enum RefreshCodeIssuesPathMatcher {
             }
             currentURL = parentURL
         }
+    }
     }
 }

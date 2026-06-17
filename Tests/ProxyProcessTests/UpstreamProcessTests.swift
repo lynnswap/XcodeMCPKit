@@ -335,7 +335,7 @@ struct UpstreamProcessTests {
                     "final stdout should be drained before exit even when the process exits immediately",
                     timeout: .seconds(5)
                 ) {
-                    var observedEvents: [UpstreamEvent] = []
+                    var observedEvents: [Upstream.Event] = []
                     for await event in session.events {
                         observedEvents.append(event)
 
@@ -405,7 +405,7 @@ struct UpstreamProcessTests {
                 "exit should not wait indefinitely for descendant-held pipe descriptors",
                 timeout: .seconds(1)
             ) {
-                var observedEvents: [UpstreamEvent] = []
+                var observedEvents: [Upstream.Event] = []
                 for await event in session.events {
                     observedEvents.append(event)
 

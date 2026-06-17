@@ -35,7 +35,7 @@ extension RuntimeCoordinator {
             upstreamIndex: Int
         ) -> Data? {
             guard case .request(_, let upstreamID) =
-                JSONRPCMessageInspector.kind(of: object)
+                JSONRPC.Message.Inspector.kind(of: object)
             else {
                 return data
             }
@@ -160,7 +160,7 @@ extension RuntimeCoordinator {
         _ object: [String: Any],
         upstreamIndex: Int
     ) -> MappedResponseRoutingOutcome {
-        guard let responseID = JSONRPCMessageInspector.responseCorrelationID(from: object),
+        guard let responseID = JSONRPC.Message.Inspector.responseCorrelationID(from: object),
             let upstreamID = upstreamID(from: responseID)
         else {
             return .notResponse
@@ -205,9 +205,9 @@ extension RuntimeCoordinator {
 
     private func clientResponseObject(
         from object: [String: Any],
-        originalID: RPCID
+        originalID: JSONRPC.ID
     ) -> [String: Any] {
-        if case .malformed = JSONRPCMessageInspector.kind(of: object) {
+        if case .malformed = JSONRPC.Message.Inspector.kind(of: object) {
             return [
                 "jsonrpc": "2.0",
                 "id": originalID.value.foundationObject,
@@ -336,7 +336,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64 {
+    package func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
         upstreamRouter.assign(
             upstreamIndex: upstreamIndex, sessionID: sessionID, originalID: originalID,
             isInitialize: false)
@@ -401,7 +401,7 @@ extension RuntimeCoordinator {
     package func forwardServerRequestResponse(
         responseData: Data,
         sessionID: String,
-        responseID: RPCID,
+        responseID: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
         let promise = eventLoop.makePromise(of: ServerRequestResponseForwardingResult.self)
@@ -423,7 +423,7 @@ extension RuntimeCoordinator {
     private func performServerRequestResponseForwarding(
         responseData: Data,
         sessionID: String,
-        responseID: RPCID
+        responseID: JSONRPC.ID
     ) async -> ServerRequestResponseForwardingResult {
         guard let session = sessionRegistry.contextIfPresent(id: sessionID) else {
             return .missingRoute
@@ -466,7 +466,7 @@ extension RuntimeCoordinator {
     private func sendServerRequestResponseUpstream(
         _ data: Data,
         upstreamIndex: Int
-    ) async -> UpstreamSendResult {
+    ) async -> Upstream.SendResult {
         guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
             return .unavailable(.notStarted)
         }
@@ -488,7 +488,7 @@ extension RuntimeCoordinator {
 
     private static func rewriteServerRequestResponse(
         _ responseObject: [String: Any],
-        id: RPCID
+        id: JSONRPC.ID
     ) -> Data? {
         var rewritten = responseObject
         rewritten["id"] = id.value.foundationObject
@@ -528,13 +528,13 @@ extension RuntimeCoordinator {
     }
 
     package func createRequestLease(
-        descriptor: SessionPipelineRequestDescriptor
-    ) -> RequestLeaseID {
+        descriptor: SessionRequestPipeline.Descriptor
+    ) -> LeaseManager.ID {
         leaseManager.createLease(descriptor: descriptor)
     }
 
     package func activateRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
         timeout: TimeAmount?
@@ -550,18 +550,18 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func completeRequestLease(_ leaseID: RequestLeaseID) {
+    package func completeRequestLease(_ leaseID: LeaseManager.ID) {
         releaseLeases([leaseManager.completeLease(leaseID)].compactMap { $0 })
     }
 
-    package func requeueRequestLease(_ leaseID: RequestLeaseID) {
+    package func requeueRequestLease(_ leaseID: LeaseManager.ID) {
         releaseLeases([leaseManager.requeueLease(leaseID)].compactMap { $0 })
     }
 
     package func failRequestLease(
-        _ leaseID: RequestLeaseID,
-        terminalState: RequestLeaseState,
-        reason: RequestLeaseReleaseReason
+        _ leaseID: LeaseManager.ID,
+        terminalState: LeaseManager.State,
+        reason: LeaseManager.ReleaseReason
     ) {
         releaseLeases(
             [leaseManager.failLease(leaseID, terminalState: terminalState, reason: reason)]
@@ -570,7 +570,7 @@ extension RuntimeCoordinator {
     }
 
     package func handleRequestLeaseTimeout(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int
@@ -593,7 +593,7 @@ extension RuntimeCoordinator {
     }
 
     package func abandonRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int?
@@ -660,7 +660,7 @@ extension RuntimeCoordinator {
 
         let responseAny: Any? = {
             if let object = any as? [String: Any] {
-                guard let id = JSONRPCMessageInspector.requestID(from: object) else { return nil }
+                guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return nil }
                 return [
                     "jsonrpc": "2.0",
                     "id": id.value.foundationObject,
@@ -670,7 +670,7 @@ extension RuntimeCoordinator {
             if let array = any as? [Any] {
                 let objects = array.compactMap { item -> [String: Any]? in
                     guard let object = item as? [String: Any],
-                        let id = JSONRPCMessageInspector.requestID(from: object)
+                        let id = JSONRPC.Message.Inspector.requestID(from: object)
                     else {
                         return nil
                     }
@@ -708,13 +708,13 @@ extension RuntimeCoordinator {
         return nil
     }
 
-    func upstreamID(from id: RPCID) -> Int64? {
+    func upstreamID(from id: JSONRPC.ID) -> Int64? {
         upstreamID(from: id.value.foundationObject)
     }
 
     func isServerInitiatedMessage(_ value: Any) -> Bool {
         if let object = value as? [String: Any] {
-            switch JSONRPCMessageInspector.kind(of: object) {
+            switch JSONRPC.Message.Inspector.kind(of: object) {
             case .request, .notification:
                 return true
             case .response, .malformed, .other:
@@ -724,7 +724,7 @@ extension RuntimeCoordinator {
         if let array = value as? [Any] {
             return array.contains { item in
                 guard let object = item as? [String: Any] else { return false }
-                switch JSONRPCMessageInspector.kind(of: object) {
+                switch JSONRPC.Message.Inspector.kind(of: object) {
                 case .request, .notification:
                     return true
                 case .response, .malformed, .other:
@@ -781,7 +781,7 @@ extension RuntimeCoordinator {
         else {
             return nil
         }
-        let kind = JSONRPCMessageInspector.kind(of: object)
+        let kind = JSONRPC.Message.Inspector.kind(of: object)
         guard kind.isServerInitiated else {
             return nil
         }
@@ -797,7 +797,7 @@ extension RuntimeCoordinator {
         originalData: Data
     ) -> [ServerInitiatedPayload] {
         if let object = any as? [String: Any] {
-            let kind = JSONRPCMessageInspector.kind(of: object)
+            let kind = JSONRPC.Message.Inspector.kind(of: object)
             guard kind.isServerInitiated else { return [] }
             return [
                 ServerInitiatedPayload(
@@ -991,7 +991,7 @@ extension RuntimeCoordinator {
     }
 
     func handleUpstreamProtocolViolation(
-        _ protocolViolation: StdioFramerProtocolViolation,
+        _ protocolViolation: StdioFramer.ProtocolViolation,
         upstreamIndex: Int
     ) {
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
@@ -1061,7 +1061,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func releaseLeases(_ actions: [RequestLeaseReleaseAction]) {
+    private func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
         for action in actions {
             if let upstreamIndex = action.upstreamIndex {
                 upstreamSlotScheduler.releaseUpstreamSlot(

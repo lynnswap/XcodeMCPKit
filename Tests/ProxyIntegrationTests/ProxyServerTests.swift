@@ -161,13 +161,13 @@ private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermi
 
 private final class RecordingUpstreamSlot: @unchecked Sendable, UpstreamSlotControlling {
     private let startCountBox = NIOLockedValueBox(0)
-    private let eventStream: AsyncStream<UpstreamEvent>
+    private let eventStream: AsyncStream<Upstream.Event>
 
     var startCount: Int {
         startCountBox.withLockedValue { $0 }
     }
 
-    var events: AsyncStream<UpstreamEvent> {
+    var events: AsyncStream<Upstream.Event> {
         eventStream
     }
 
@@ -181,7 +181,7 @@ private final class RecordingUpstreamSlot: @unchecked Sendable, UpstreamSlotCont
 
     func stop() async {}
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         _ = data
         return .accepted
     }

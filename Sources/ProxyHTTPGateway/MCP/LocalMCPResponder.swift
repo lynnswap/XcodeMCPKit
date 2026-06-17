@@ -12,17 +12,17 @@ package enum LocalPostHandling {
         future: EventLoopFuture<ByteBuffer>,
         sessionID: String,
         errorSessionID: String?,
-        originalID: RPCID
+        originalID: JSONRPC.ID
     )
     case immediateResponse(data: Data, sessionID: String)
-    case mcpError(id: RPCID?, code: Int, message: String, sessionID: String?)
+    case mcpError(id: JSONRPC.ID?, code: Int, message: String, sessionID: String?)
 }
 
 package struct LocalMCPResponder {
     private struct EmbeddedTestResolutionError: Error {}
 
     private let sessionManager: any RuntimeCoordinating
-    private let refreshCodeIssuesMode: RefreshCodeIssuesMode
+    private let refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
     private let disabledToolNames: Set<String>
     /// EmbeddedChannel-based tests cannot complete promises from another
     /// thread, so they opt in to a synchronous resolution path explicitly
@@ -32,7 +32,7 @@ package struct LocalMCPResponder {
 
     package init(
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesMode: RefreshCodeIssuesMode,
+        refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
         usesSynchronousLocalResolution: Bool = false,
         logger: Logger
@@ -49,14 +49,14 @@ package struct LocalMCPResponder {
         sessionID: String,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> Data {
-        guard let originalID = JSONRPCMessageInspector.requestID(from: object) else {
+        guard let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
             throw ControlPlaneError.invalidResponse("missing id")
         }
         let result = try await sessionManager.sharedToolsList(
             sessionID: sessionID,
             requestTimeoutOverride: requestTimeoutOverride
         )
-        let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+        let rewrittenResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
             result,
             mode: refreshCodeIssuesMode,
             hiddenToolNames: disabledToolNames
@@ -75,12 +75,12 @@ package struct LocalMCPResponder {
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil
     ) -> LocalPostHandling? {
-        guard let method = JSONRPCMessageInspector.method(from: object) else {
+        guard let method = JSONRPC.Message.Inspector.method(from: object) else {
             return nil
         }
 
         if method == "initialize" {
-            guard let originalID = JSONRPCMessageInspector.requestID(from: object) else {
+            guard let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
                 return .mcpError(
                     id: nil,
                     code: -32600,
@@ -105,7 +105,7 @@ package struct LocalMCPResponder {
         }
 
         if (method == "resources/list" || method == "resources/templates/list") && sessionManager.isInitialized() == false {
-            guard let originalID = JSONRPCMessageInspector.requestID(from: object) else {
+            guard let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
                 return .mcpError(
                     id: nil,
                     code: -32600,
@@ -138,7 +138,7 @@ package struct LocalMCPResponder {
         if method == "tools/list",
             let headerSessionID,
             sessionManager.isInitialized(),
-            let originalID = JSONRPCMessageInspector.requestID(from: object)
+            let originalID = JSONRPC.Message.Inspector.requestID(from: object)
         {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
@@ -151,7 +151,7 @@ package struct LocalMCPResponder {
                             requestTimeoutOverride: requestTimeoutOverride
                         )
                     }
-                    let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+                    let rewrittenResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
                         result,
                         mode: refreshCodeIssuesMode,
                         hiddenToolNames: disabledToolNames
@@ -180,7 +180,7 @@ package struct LocalMCPResponder {
                         sessionID: headerSessionID,
                         requestTimeoutOverride: requestTimeoutOverride
                     )
-                    let rewrittenResult = RefreshCodeIssuesToolsListRewriter.rewriteResult(
+                    let rewrittenResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
                         result,
                         mode: refreshCodeIssuesMode,
                         hiddenToolNames: disabledToolNames
@@ -216,7 +216,7 @@ package struct LocalMCPResponder {
         if method == "tools/call",
             let headerSessionID,
             sessionManager.isInitialized(),
-            let originalID = JSONRPCMessageInspector.requestID(from: object),
+            let originalID = JSONRPC.Message.Inspector.requestID(from: object),
             let params = object["params"] as? [String: Any],
             let toolName = params["name"] as? String,
             toolName == "XcodeListWindows",
@@ -289,7 +289,7 @@ package struct LocalMCPResponder {
     }
 
     private static func encodeResultBuffer(
-        id: RPCID,
+        id: JSONRPC.ID,
         result: JSONValue
     ) throws -> ByteBuffer {
         struct EncodingError: Error {}
@@ -308,7 +308,7 @@ package struct LocalMCPResponder {
     }
 
     private static func encodeErrorBuffer(
-        id: RPCID,
+        id: JSONRPC.ID,
         error: Error
     ) throws -> ByteBuffer {
         let data = try encodeErrorData(id: id, error: error)
@@ -318,7 +318,7 @@ package struct LocalMCPResponder {
     }
 
     private static func encodeErrorData(
-        id: RPCID,
+        id: JSONRPC.ID,
         error: Error
     ) throws -> Data {
         let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
@@ -338,7 +338,7 @@ package struct LocalMCPResponder {
     }
 
     private static func fallbackLocalError(
-        id: RPCID,
+        id: JSONRPC.ID,
         sessionID: String
     ) -> LocalPostHandling {
         .mcpError(

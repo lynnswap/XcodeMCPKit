@@ -5,7 +5,7 @@ import Foundation
 /// in ProxySession so ProxyCore stays independent of ProxyMCP.
 package enum InitializeHandshakeParams {
     package static func hasExplicitClientVersionOverride(
-        initializeParamsOverride: ProxyInitializeHandshakeOverride?
+        initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     ) -> Bool {
         initializeParamsOverride?.clientVersion != nil
     }

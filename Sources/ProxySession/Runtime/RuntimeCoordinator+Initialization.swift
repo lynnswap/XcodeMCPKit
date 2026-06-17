@@ -183,7 +183,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    func encodeInitializeResponse(originalID: RPCID, result: JSONValue) -> ByteBuffer? {
+    func encodeInitializeResponse(originalID: JSONRPC.ID, result: JSONValue) -> ByteBuffer? {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": originalID.value.foundationObject,
@@ -210,7 +210,7 @@ extension RuntimeCoordinator {
 
     static func supportedProtocolVersion(fromInitializeResult result: JSONValue) -> String? {
         guard let version = protocolVersion(fromInitializeResult: result),
-            MCPProtocolVersion.isSupported(version)
+            MCP.ProtocolVersion.isSupported(version)
         else {
             return nil
         }
@@ -224,7 +224,7 @@ extension RuntimeCoordinator {
             "message": "unsupported upstream protocol version",
             "data": [
                 "protocolVersion": version as Any? ?? NSNull(),
-                "supportedProtocolVersions": [MCPProtocolVersion.current],
+                "supportedProtocolVersions": [MCP.ProtocolVersion.current],
             ],
         ]
         if upstreamIndex == 0 {
@@ -239,7 +239,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    func encodeInitializeErrorResponse(originalID: RPCID, errorObject: [String: Any])
+    func encodeInitializeErrorResponse(originalID: JSONRPC.ID, errorObject: [String: Any])
         -> ByteBuffer?
     {
         let response: [String: Any] = [
@@ -352,7 +352,7 @@ extension RuntimeCoordinator {
 
     func scheduleInitTimeout() {
         guard
-            let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(
+            let timeoutAmount = MCP.MethodDispatcher.timeoutForInitialize(
                 defaultSeconds: config.requestTimeout)
         else {
             return

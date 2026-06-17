@@ -38,7 +38,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -126,7 +126,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -201,7 +201,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -283,7 +283,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -352,7 +352,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -409,7 +409,7 @@ struct CLICommandIntegrationTests {
                 }
             )
             #expect(responsePost.sessionID == "server-session")
-            #expect(responsePost.protocolVersion == MCPProtocolVersion.current)
+            #expect(responsePost.protocolVersion == MCP.ProtocolVersion.current)
         } catch {
             try? await server.shutdown()
             throw error
@@ -431,7 +431,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -493,7 +493,7 @@ struct CLICommandIntegrationTests {
 
             let delete = try #require(server.recorder.snapshot().first { $0.httpMethod == "DELETE" })
             #expect(delete.sessionID == "server-session")
-            #expect(delete.protocolVersion == MCPProtocolVersion.current)
+            #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
         } catch {
             try? await server.shutdown()
             throw error
@@ -515,7 +515,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -585,7 +585,7 @@ struct CLICommandIntegrationTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -649,18 +649,18 @@ struct CLICommandIntegrationTests {
             let toolsPost = try #require(requests.first { $0.bodyMethod == "tools/list" })
             #expect(toolsPost.httpMethod == "POST")
             #expect(toolsPost.sessionID == "server-session")
-            #expect(toolsPost.protocolVersion == MCPProtocolVersion.current)
+            #expect(toolsPost.protocolVersion == MCP.ProtocolVersion.current)
             #expect(toolsPost.accept == "application/json, text/event-stream")
             #expect(toolsPost.contentType == "application/json")
 
             let sseGet = try #require(requests.first { $0.httpMethod == "GET" })
             #expect(sseGet.sessionID == "server-session")
-            #expect(sseGet.protocolVersion == MCPProtocolVersion.current)
+            #expect(sseGet.protocolVersion == MCP.ProtocolVersion.current)
             #expect(sseGet.accept == "text/event-stream")
 
             let delete = try #require(requests.first { $0.httpMethod == "DELETE" })
             #expect(delete.sessionID == "server-session")
-            #expect(delete.protocolVersion == MCPProtocolVersion.current)
+            #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
         } catch {
             try? await server.shutdown()
             throw error
@@ -695,7 +695,7 @@ private struct StubMCPHTTPServer {
         delayedResponseMethod: String? = nil,
         delayedResponseMilliseconds: Int = 250,
         hangingResponseMethod: String? = nil,
-        initializeProtocolVersion: String? = MCPProtocolVersion.current,
+        initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
         hangsDELETE: Bool = false,
         postSSEPreludeEventsByMethod: [String: [[String: Any]]] = [:],
         getSSEEvents: [[String: Any]] = []
@@ -1000,7 +1000,7 @@ private func stubSSEEventData(for object: [String: Any]) -> Data? {
 private func stubIsJSONRPCResponse(_ object: [String: Any]) -> Bool {
     guard object["method"] == nil,
         let id = object["id"],
-        RPCID(any: id) != nil
+        JSONRPC.ID(any: id) != nil
     else {
         return false
     }

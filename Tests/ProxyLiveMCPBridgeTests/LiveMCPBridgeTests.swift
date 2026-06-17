@@ -27,10 +27,10 @@ struct LiveMCPBridgeTests {
 
         let assistantName = "XcodeMCPKitLiveDirectTest"
         let directMCPBridgeProcessID = session.processIdentifier
-        let approver = XcodePermissionDialogAutoApprover(
+        let approver = XcodePermissionDialog.AutoApprover(
             dependencies: .live(
                 agentPathCandidates: {
-                    XcodePermissionDialogAutoApprover.defaultAgentPathCandidates(
+                    XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
                         additionalExecutableCandidates: [mcpbridgePath]
                     )
                 },
@@ -38,7 +38,7 @@ struct LiveMCPBridgeTests {
                     ["XcodeMCPKit", assistantName]
                 },
                 serverProcessIDCandidates: {
-                    XcodePermissionDialogAutoApprover.defaultServerProcessIDCandidates()
+                    XcodePermissionDialog.AutoApprover.defaultServerProcessIDCandidates()
                         .union([directMCPBridgeProcessID])
                 }
             )
@@ -312,7 +312,7 @@ private func postJSON(
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+        request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
     request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 

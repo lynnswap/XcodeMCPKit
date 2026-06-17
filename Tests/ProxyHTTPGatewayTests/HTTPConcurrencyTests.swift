@@ -586,7 +586,7 @@ struct HTTPConcurrencyTests {
             request.httpMethod = "GET"
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-            request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+            request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
             let sseTask = Task<(HTTPURLResponse, String), Error> {
                 try await withTestURLSession { session in
@@ -680,7 +680,7 @@ private struct TestHTTPServer {
     let sessionManager: RuntimeCoordinator
     let upstream: any UpstreamSlotControlling
     let childChannelTracker: HTTPTestServerChannelTracker
-    let refreshDebugState: RefreshCodeIssuesDebugState
+    let refreshDebugState: RefreshCodeIssues.DebugState
 
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
@@ -705,7 +705,7 @@ private struct TestHTTPServer {
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
             config: config, eventLoop: group.next(), upstreams: [upstream])
-        let refreshDebugState = RefreshCodeIssuesDebugState(
+        let refreshDebugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
 
@@ -755,11 +755,11 @@ private struct TestHTTPServer {
 }
 
 private actor EchoUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -772,7 +772,7 @@ private actor EchoUpstreamClient: UpstreamSlotControlling {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return .accepted
         }
@@ -804,7 +804,7 @@ private actor EchoUpstreamClient: UpstreamSlotControlling {
         let result: [String: Any]
         if method == "initialize" {
             result = [
-                "protocolVersion": MCPProtocolVersion.current,
+                "protocolVersion": MCP.ProtocolVersion.current,
                 "capabilities": [String: Any](),
             ]
         } else {
@@ -825,13 +825,13 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         let responseData: Data?
     }
 
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private var sentRequests: [SentRequest] = []
     private var requestHistory: [String] = []
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -844,7 +844,7 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return .accepted
         }
@@ -919,7 +919,7 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id,
-            "result": ["protocolVersion": MCPProtocolVersion.current, "capabilities": [String: Any]()],
+            "result": ["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [String: Any]()],
         ]
         return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
@@ -962,15 +962,15 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
 }
 
 private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let refreshStarts = RecordedValues<String>()
     private let releaseResponses = AsyncGate()
     private var activeTabs: Set<String> = []
     private var emittedErrorFive = false
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -996,7 +996,7 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
         await releaseResponses.signal()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return .accepted
         }
@@ -1069,7 +1069,7 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
-                "protocolVersion": MCPProtocolVersion.current,
+                "protocolVersion": MCP.ProtocolVersion.current,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -1137,15 +1137,15 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
 }
 
 private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let refreshStarts = RecordedValues<Int>()
     private let releaseResponses = AsyncGate()
     private var hasActiveRefresh = false
     private var emittedConcurrentRefreshError = false
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -1171,7 +1171,7 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
         await releaseResponses.signal()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return .accepted
         }
@@ -1239,7 +1239,7 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
-                "protocolVersion": MCPProtocolVersion.current,
+                "protocolVersion": MCP.ProtocolVersion.current,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -1306,11 +1306,11 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
 }
 
 private actor NotifyingUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -1323,7 +1323,7 @@ private actor NotifyingUpstreamClient: UpstreamSlotControlling {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard
             let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
             let method = object["method"] as? String
@@ -1347,7 +1347,7 @@ private actor NotifyingUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
-                "protocolVersion": MCPProtocolVersion.current,
+                "protocolVersion": MCP.ProtocolVersion.current,
                 "capabilities": [String: Any]()
             ],
         ]
@@ -1447,7 +1447,7 @@ private func postJSON(
     }
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+        request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
 
     return try await withTestURLSession(timeout: timeout ?? 5) { session in
@@ -1479,7 +1479,7 @@ private func postStatusOnly(
     }
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+        request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
 
     return try await withTestURLSession(timeout: timeout ?? 5) { session in
@@ -1527,7 +1527,7 @@ private func postEmbeddedJSON(
     head.headers.add(name: "Content-Type", value: "application/json")
     if let sessionID {
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
     }
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)

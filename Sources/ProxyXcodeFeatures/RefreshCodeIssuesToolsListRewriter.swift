@@ -2,10 +2,11 @@ import Foundation
 import ProxyCore
 import ProxyMCP
 
-package enum RefreshCodeIssuesToolsListRewriter {
+extension RefreshCodeIssues {
+    package enum ToolsListRewriter {
     package static func rewriteResult(
         _ result: JSONValue,
-        mode: RefreshCodeIssuesMode,
+        mode: ProxyConfig.RefreshCodeIssuesMode,
         hiddenToolNames: Set<String> = []
     ) -> JSONValue {
         guard case .object(var resultObject) = result,
@@ -24,7 +25,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
             guard hiddenToolNames.contains(name) == false else {
                 return nil
             }
-            guard name == RefreshCodeIssuesRequest.toolName else {
+            guard name == RefreshCodeIssues.Request.toolName else {
                 return toolValue
             }
             toolObject["description"] = .string(description(for: mode))
@@ -38,7 +39,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
         _ responseData: Data,
         method: String? = nil,
         responseMethodsByIDKey: [String: String] = [:],
-        mode: RefreshCodeIssuesMode,
+        mode: ProxyConfig.RefreshCodeIssuesMode,
         hiddenToolNames: Set<String> = []
     ) -> Data {
         guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
@@ -106,7 +107,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
         if let explicitMethod {
             return explicitMethod
         }
-        guard let responseID = JSONRPCMessageInspector.responseID(from: object) else {
+        guard let responseID = JSONRPC.Message.Inspector.responseID(from: object) else {
             return nil
         }
         return responseMethodsByIDKey[responseID.key]
@@ -114,7 +115,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
 
     private static func rewriteResponseObject(
         _ object: [String: Any],
-        mode: RefreshCodeIssuesMode,
+        mode: ProxyConfig.RefreshCodeIssuesMode,
         hiddenToolNames: Set<String>
     ) -> [String: Any]? {
         guard let result = object["result"],
@@ -137,7 +138,7 @@ package enum RefreshCodeIssuesToolsListRewriter {
         return rewrittenObject
     }
 
-    private static func description(for mode: RefreshCodeIssuesMode) -> String {
+    private static func description(for mode: ProxyConfig.RefreshCodeIssuesMode) -> String {
         switch mode {
         case .proxy:
             return """
@@ -148,5 +149,6 @@ package enum RefreshCodeIssuesToolsListRewriter {
             Returns file-scoped diagnostics for a source file. This proxy is configured to pass through to Xcode's native live diagnostics path.
             """
         }
+    }
     }
 }

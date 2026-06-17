@@ -3,9 +3,9 @@ import Foundation
 import XcodeMCPProxy
 
 extension XcodeMCPProxyServerCommand {
-    package static func parseOptions(args: [String]) throws -> ProxyServerOptions {
-        let scan = try ProxyCLIInvocationScanner.scanServer(args)
-        return ProxyServerOptions(
+    package static func parseOptions(args: [String]) throws -> XcodeMCPProxyServerCommand.Options {
+        let scan = try CLI.InvocationScanner.scanServer(args)
+        return XcodeMCPProxyServerCommand.Options(
             forwardedArgs: scan.forwardedArgs,
             showHelp: scan.showHelp,
             showVersion: scan.showVersion,
@@ -22,7 +22,7 @@ extension XcodeMCPProxyServerCommand {
 
     package static func applyDefaults(
         from environment: [String: String],
-        to options: inout ProxyServerOptions
+        to options: inout XcodeMCPProxyServerCommand.Options
     ) throws {
         if !options.hasListenFlag && !options.hasHostFlag && !options.hasPortFlag {
             if let listen = nonEmpty(environment["LISTEN"]) {
@@ -45,7 +45,7 @@ extension XcodeMCPProxyServerCommand {
         }
 
         if isTruthy(environment["LAZY_INIT"]) {
-            throw ProxyServerCommandError.message(CLIParser.removedLazyInitMessage)
+            throw XcodeMCPProxyServerCommand.Error.message(CLIParser.removedLazyInitMessage)
         }
 
         // MCP_XCODE_CONFIG and MCP_XCODE_REFRESH_CODE_ISSUES_MODE are
@@ -57,7 +57,7 @@ extension XcodeMCPProxyServerCommand {
     /// parser pulled from the environment stay visible even though they
     /// never existed as argv flags.
     package static func dryRunCommandLine(
-        options: ProxyServerOptions,
+        options: XcodeMCPProxyServerCommand.Options,
         config: ProxyConfig
     ) -> String {
         var parts = ["xcode-mcp-proxy-server"] + options.forwardedArgs
@@ -138,7 +138,7 @@ extension XcodeMCPProxyServerCommand {
         return ["1", "true", "yes", "on"].contains(raw.lowercased())
     }
 
-    package static func isAddressAlreadyInUse(_ error: Error) -> Bool {
+    package static func isAddressAlreadyInUse(_ error: Swift.Error) -> Bool {
         let text = String(describing: error)
         if text.localizedCaseInsensitiveContains("Address already in use") {
             return true

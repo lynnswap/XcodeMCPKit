@@ -63,9 +63,9 @@ struct UpstreamResponsePlan {
 }
 
 final class TestRuntimeCoordinator: RuntimeCoordinating {
-    private struct UpstreamMapping: Sendable {
+    private struct UpstreamIDMapping: Sendable {
         let sessionID: String
-        let originalID: RPCID
+        let originalID: JSONRPC.ID
     }
 
     private struct ChooseUpstreamCall: Sendable {
@@ -92,7 +92,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var cachedToolsList: JSONValue?
         var refreshToolsListCalls = 0
         var upstreamSendCount = 0
-        var upstreamIDMapping: [Int64: UpstreamMapping] = [:]
+        var upstreamIDMapping: [Int64: UpstreamIDMapping] = [:]
         var chooseUpstreamCalls: [ChooseUpstreamCall] = []
         var availableUpstreamIndex: Int? = 0
         var requestTimeoutNotifications = 0
@@ -102,17 +102,17 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
         var requeuedLeaseCount = 0
-        var serverRequestResponseSendResults: [UpstreamSendResult] = []
+        var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
 
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
     private let upstreamRequestResponder:
-        (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
+        (@Sendable (_ method: String, _ toolName: String?, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?
     private let upstreamResponder:
-        (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?
+        (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
-        (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)?
+        (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> Data)?
     private let documentationSearchResponder:
         (@Sendable (_ requestData: Data) async throws -> Data)?
     private let cancelAfterStartingEnqueueRequest: Bool
@@ -120,7 +120,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     init(
         config: ProxyConfig,
-        upstreamResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> Data)? = nil,
+        upstreamResponder: (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> Data)? = nil,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
@@ -135,7 +135,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     init(
         config: ProxyConfig,
-        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
@@ -150,7 +150,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     init(
         config: ProxyConfig,
-        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: RPCID) throws -> UpstreamResponsePlan)?,
+        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?,
         documentationSearchResponder:
             (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
@@ -170,7 +170,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
-            state.sessionProtocolVersions[id] = MCPProtocolVersion.current
+            state.sessionProtocolVersions[id] = MCP.ProtocolVersion.current
             return context
         }
     }
@@ -246,13 +246,13 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func registerInitialize(
         sessionID: String,
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
         let negotiatedProtocolVersion =
             ((requestObject["params"] as? [String: Any])?["protocolVersion"] as? String)
-            ?? MCPProtocolVersion.current
+            ?? MCP.ProtocolVersion.current
         _ = session(id: sessionID)
         state.withLockedValue { state in
             state.initialized = true
@@ -357,8 +357,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(
-        leaseID _: RequestLeaseID,
-        descriptor _: SessionPipelineRequestDescriptor,
+        leaseID _: LeaseManager.ID,
+        descriptor _: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
@@ -376,12 +376,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         return starter(upstreamIndex)
     }
 
-    func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex _: Int) -> Int64 {
+    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex _: Int) -> Int64 {
         state.withLockedValue { state in
             state.assignUpstreamIDCount += 1
             let id = state.nextUpstreamID
             state.nextUpstreamID += 1
-            state.upstreamIDMapping[id] = UpstreamMapping(
+            state.upstreamIDMapping[id] = UpstreamIDMapping(
                 sessionID: sessionID, originalID: originalID)
             return id
         }
@@ -434,7 +434,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func forwardServerRequestResponse(
         responseData: Data,
         sessionID: String,
-        responseID: RPCID,
+        responseID: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
         let session = session(id: sessionID)
@@ -454,7 +454,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             return eventLoop.makeSucceededFuture(.invalidResponse)
         }
 
-        let sendResult = state.withLockedValue { state -> UpstreamSendResult in
+        let sendResult = state.withLockedValue { state -> Upstream.SendResult in
             state.upstreamSendCount += 1
             state.sentUpstreamPayloads.append(data)
             if state.serverRequestResponseSendResults.isEmpty {
@@ -471,7 +471,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func setServerRequestResponseSendResults(_ results: [UpstreamSendResult]) {
+    func setServerRequestResponseSendResults(_ results: [Upstream.SendResult]) {
         state.withLockedValue { state in
             state.serverRequestResponseSendResults = results
         }
@@ -594,7 +594,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     private func responsePlan(
         method: String,
         toolName: String?,
-        originalID: RPCID
+        originalID: JSONRPC.ID
     ) -> UpstreamResponsePlan {
         if let upstreamRequestResponder,
             let planned = try? upstreamRequestResponder(method, toolName, originalID)
@@ -634,7 +634,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             )
         }
 
-        let originalID = RPCID(any: "__shared-\(method)-\(UUID().uuidString)")!
+        let originalID = JSONRPC.ID(any: "__shared-\(method)-\(UUID().uuidString)")!
         let plan = responsePlan(
             method: method,
             toolName: toolName,
@@ -668,12 +668,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
 
-    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID {
+    func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID {
         requestLeaseRegistry.createLease(descriptor: descriptor)
     }
 
     func activateRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
         timeout: TimeAmount?
@@ -688,11 +688,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         )
     }
 
-    func completeRequestLease(_ leaseID: RequestLeaseID) {
+    func completeRequestLease(_ leaseID: LeaseManager.ID) {
         _ = requestLeaseRegistry.completeLease(leaseID)
     }
 
-    func requeueRequestLease(_ leaseID: RequestLeaseID) {
+    func requeueRequestLease(_ leaseID: LeaseManager.ID) {
         state.withLockedValue { state in
             state.requeuedLeaseCount += 1
         }
@@ -700,9 +700,9 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func failRequestLease(
-        _ leaseID: RequestLeaseID,
-        terminalState: RequestLeaseState,
-        reason: RequestLeaseReleaseReason
+        _ leaseID: LeaseManager.ID,
+        terminalState: LeaseManager.State,
+        reason: LeaseManager.ReleaseReason
     ) {
         _ = requestLeaseRegistry.failLease(
             leaseID,
@@ -712,7 +712,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func handleRequestLeaseTimeout(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int
@@ -736,7 +736,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
     func abandonRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int?
@@ -794,7 +794,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         )
     }
 
-    func leaseDebugSnapshots() -> [RequestLeaseDebugSnapshot] {
+    func leaseDebugSnapshots() -> [LeaseManager.DebugSnapshot] {
         requestLeaseRegistry.debugSnapshots()
     }
 
@@ -932,9 +932,9 @@ func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: ProxyConfig,
     sessionManager: any RuntimeCoordinating,
-    refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-    refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-    refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil
+    refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
+    refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
+    refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil
 ) throws {
     let handler = HTTPHandler(
         config: config,
@@ -1006,7 +1006,7 @@ func postJSON(
     head.headers.add(name: "Accept", value: "application/json, text/event-stream")
     head.headers.add(name: "Content-Type", value: "application/json")
     head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-    head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+    head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
     try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1025,7 +1025,7 @@ func postJSONArray(
     head.headers.add(name: "Content-Type", value: "application/json")
     if let sessionID {
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
     }
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
@@ -1050,15 +1050,15 @@ struct TestHTTPHandlerServer {
     static func start(
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
+        refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
+        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver()
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault()
-        let refreshDebugState = RefreshCodeIssuesDebugState(
+            ?? RefreshCodeIssues.Coordinator.makeDefault()
+        let refreshDebugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
         let bootstrap = ServerBootstrap(group: group)
@@ -1129,7 +1129,7 @@ func postHTTPJSON(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1159,7 +1159,7 @@ func postHTTPAnyJSON(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1187,7 +1187,7 @@ func postHTTPAnyData(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1231,7 +1231,7 @@ func postHTTPData(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-    request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
 
     return try await withTestURLSession { session in
         let (responseData, response) = try await session.data(for: request)
@@ -1287,7 +1287,7 @@ func initializeHTTPChannel(_ channel: EmbeddedChannel) throws -> String {
     return try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 }
 
-func makeToolSuccessResponse(id: RPCID, text: String) throws -> Data {
+func makeToolSuccessResponse(id: JSONRPC.ID, text: String) throws -> Data {
     let response: [String: Any] = [
         "jsonrpc": "2.0",
         "id": id.value.foundationObject,
@@ -1303,7 +1303,7 @@ func makeToolSuccessResponse(id: RPCID, text: String) throws -> Data {
     return try JSONSerialization.data(withJSONObject: response, options: [])
 }
 
-func makeToolResultResponse(id: RPCID, result: [String: Any]) throws -> Data {
+func makeToolResultResponse(id: JSONRPC.ID, result: [String: Any]) throws -> Data {
     let response: [String: Any] = [
         "jsonrpc": "2.0",
         "id": id.value.foundationObject,
@@ -1312,7 +1312,7 @@ func makeToolResultResponse(id: RPCID, result: [String: Any]) throws -> Data {
     return try JSONSerialization.data(withJSONObject: response, options: [])
 }
 
-func makeToolErrorResponse(id: RPCID, text: String) throws -> Data {
+func makeToolErrorResponse(id: JSONRPC.ID, text: String) throws -> Data {
     let response: [String: Any] = [
         "jsonrpc": "2.0",
         "id": id.value.foundationObject,

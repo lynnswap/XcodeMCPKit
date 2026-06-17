@@ -4,9 +4,10 @@ import Foundation
 import Logging
 import ProxyCore
 
-package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
+extension XcodePermissionDialog {
+    package final class AutoApprover: @unchecked Sendable {
     package struct Dependencies: DependencyClient {
-        package var axClient: any XcodePermissionDialogAXAccessing
+        package var axClient: any XcodePermissionDialog.AXAccessing
         package var agentPathCandidates: @Sendable () -> Set<String>
         package var assistantNameCandidates: @Sendable () -> Set<String>
         package var serverProcessIDCandidates: @Sendable () -> Set<pid_t>
@@ -15,7 +16,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
         package var logger: Logger
 
         package init(
-            axClient: any XcodePermissionDialogAXAccessing,
+            axClient: any XcodePermissionDialog.AXAccessing,
             agentPathCandidates: @escaping @Sendable () -> Set<String>,
             assistantNameCandidates: @escaping @Sendable () -> Set<String>,
             serverProcessIDCandidates: @escaping @Sendable () -> Set<pid_t>,
@@ -34,17 +35,17 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
         package static func live(
             agentPathCandidates: @escaping @Sendable () -> Set<String> = {
-                XcodePermissionDialogAutoApprover.defaultAgentPathCandidates()
+                XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates()
             },
             assistantNameCandidates: @escaping @Sendable () -> Set<String> = {
                 ["XcodeMCPKit"]
             },
             serverProcessIDCandidates: @escaping @Sendable () -> Set<pid_t> = {
-                XcodePermissionDialogAutoApprover.defaultServerProcessIDCandidates()
+                XcodePermissionDialog.AutoApprover.defaultServerProcessIDCandidates()
             }
         ) -> Self {
             Self(
-                axClient: LiveXcodePermissionDialogAXClient(),
+                axClient: XcodePermissionDialog.AXClient(),
                 agentPathCandidates: agentPathCandidates,
                 assistantNameCandidates: assistantNameCandidates,
                 serverProcessIDCandidates: serverProcessIDCandidates,
@@ -83,8 +84,8 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
     private struct MatchedWindow {
         let processID: pid_t
-        let window: XcodePermissionDialogAXWindow
-        let decision: XcodePermissionDialogMatchDecision
+        let window: XcodePermissionDialog.AXWindow
+        let decision: XcodePermissionDialog.MatchDecision
     }
 
     private let dependencies: Dependencies
@@ -240,11 +241,11 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
         for processID in processIDs {
             let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
-            let windows: [XcodePermissionDialogAXWindow]
+            let windows: [XcodePermissionDialog.AXWindow]
             do {
                 windows = try dependencies.axClient.openWindows(for: processID)
             } catch {
-                if XcodePermissionDialogAXFailureClassifier.isBenignOpenWindowsFailure(
+                if XcodePermissionDialog.AXFailureClassifier.isBenignOpenWindowsFailure(
                     error,
                     processBundleIdentifier: processBundleIdentifier
                 ) {
@@ -272,8 +273,8 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
                     inspectedWindowTitles.append(trimmedTitle)
                 }
                 let isStructurallyEligible =
-                    XcodePermissionDialogMatcher.passesStructuralChecks(window.snapshot)
-                guard let decision = XcodePermissionDialogMatcher.decision(
+                    XcodePermissionDialog.Matcher.passesStructuralChecks(window.snapshot)
+                guard let decision = XcodePermissionDialog.Matcher.decision(
                     for: window.snapshot,
                     processID: processID,
                     agentPathCandidates: agentPathCandidates,
@@ -378,7 +379,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
     private func logStructurallyEligibleWindowIfNeeded(
         processID: pid_t,
-        snapshot: XcodePermissionDialogWindowSnapshot,
+        snapshot: XcodePermissionDialog.WindowSnapshot,
         agentPathCandidates: Set<String>,
         assistantNameCandidates: Set<String>,
         dependencies: Dependencies
@@ -429,7 +430,7 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
     private func inspectionMetadata(
         processID: pid_t,
-        snapshot: XcodePermissionDialogWindowSnapshot,
+        snapshot: XcodePermissionDialog.WindowSnapshot,
         agentPathCandidates: Set<String>,
         assistantNameCandidates: Set<String>,
         serverProcessIDCandidates: Set<pid_t>
@@ -459,9 +460,9 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
     private func inspectionFingerprint(
         processID: pid_t,
-        snapshot: XcodePermissionDialogWindowSnapshot
+        snapshot: XcodePermissionDialog.WindowSnapshot
     ) -> String {
-        "candidate|\(XcodePermissionDialogMatcher.fingerprint(for: snapshot, processID: processID))"
+        "candidate|\(XcodePermissionDialog.Matcher.fingerprint(for: snapshot, processID: processID))"
     }
 
     private static func childProcessIDs(of parentProcessID: pid_t) -> [pid_t] {
@@ -484,10 +485,11 @@ package final class XcodePermissionDialogAutoApprover: @unchecked Sendable {
 
         return childProcessIDs.prefix(Int(copiedCount)).filter { $0 > 0 }
     }
+    }
 }
 
-private struct NoopXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessing {
-    func authorizationStatus(promptIfNeeded _: Bool) -> XcodePermissionDialogAccessibilityStatus {
+private struct NoopXcodePermissionDialogAXClient: XcodePermissionDialog.AXAccessing {
+    func authorizationStatus(promptIfNeeded _: Bool) -> XcodePermissionDialog.AccessibilityStatus {
         .untrusted
     }
 
@@ -495,11 +497,11 @@ private struct NoopXcodePermissionDialogAXClient: XcodePermissionDialogAXAccessi
         []
     }
 
-    func openWindows(for _: pid_t) throws -> [XcodePermissionDialogAXWindow] {
+    func openWindows(for _: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
         []
     }
 
-    func pressDefaultButton(in _: XcodePermissionDialogAXWindow) throws {}
+    func pressDefaultButton(in _: XcodePermissionDialog.AXWindow) throws {}
 }
 
 private extension NSLock {

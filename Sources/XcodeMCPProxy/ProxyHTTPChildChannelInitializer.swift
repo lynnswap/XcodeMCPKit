@@ -9,17 +9,17 @@ import ProxyXcodeFeatures
 final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {
     private let config: ProxyConfig
     private let sessionManager: any RuntimeCoordinating
-    private let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
-    private let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
-    private let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState
+    private let refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator
+    private let refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver
+    private let refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState
     private let logger: Logger
 
     init(
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver,
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
+        refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
+        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver,
+        refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,
         logger: Logger
     ) {
         self.config = config

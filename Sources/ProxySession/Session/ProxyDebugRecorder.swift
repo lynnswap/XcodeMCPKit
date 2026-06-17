@@ -76,7 +76,7 @@ package final class ProxyDebugRecorder: Sendable {
     }
 
     package func recordProtocolViolation(
-        _ protocolViolation: StdioFramerProtocolViolation,
+        _ protocolViolation: StdioFramer.ProtocolViolation,
         upstreamIndex: Int
     ) {
         state.withLockedValue { state in
@@ -138,8 +138,8 @@ package final class ProxyDebugRecorder: Sendable {
         cachedToolsListAvailable: Bool,
         controlPlane: ProxyControlPlaneDebugSnapshot?,
         upstreamStates: [UpstreamHealthManager.UpstreamState],
-        sessionSnapshots: [SessionDebugSnapshot],
-        leaseSnapshots: [RequestLeaseDebugSnapshot],
+        sessionSnapshots: [SessionRequestPipeline.DebugSnapshot],
+        leaseSnapshots: [LeaseManager.DebugSnapshot],
         queuedRequestCount: Int,
         redactedText: String,
         includeSensitiveDebugPayloads: Bool,

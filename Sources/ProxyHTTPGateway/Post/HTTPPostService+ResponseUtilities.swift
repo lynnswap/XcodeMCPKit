@@ -15,7 +15,7 @@ extension HTTPPostService {
         method: String?,
         defaultSeconds: TimeInterval
     ) -> TimeAmount? {
-        MCPMethodDispatcher.timeoutForMethod(method, defaultSeconds: defaultSeconds)
+        MCP.MethodDispatcher.timeoutForMethod(method, defaultSeconds: defaultSeconds)
     }
 
     package static func minimumRequestTimeout(
@@ -47,7 +47,7 @@ extension HTTPPostService {
     }
 
     package static func makeRequestTimeoutResponseData(
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         forceBatchArray: Bool
     ) -> Data? {
         makeJSONRPCErrorResponseData(
@@ -60,11 +60,11 @@ extension HTTPPostService {
 
     package static func makeMissingInitializeResolution(
         parsedRequestJSON: Any,
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostResolution? {
+    ) -> HTTPPostService.Resolution? {
         guard requestRequiresInitialize(parsedRequestJSON) else {
             return nil
         }
@@ -80,12 +80,12 @@ extension HTTPPostService {
     /// keeps any locally-produced responses, a plain request degrades to 503.
     package static func makeUpstreamUnavailableResolution(
         localResponseData: Data?,
-        responseIDs: [RPCID],
+        responseIDs: [JSONRPC.ID],
         forceBatchArray: Bool,
         requestIsBatch: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostResolution {
+    ) -> HTTPPostService.Resolution {
         if localResponseData != nil {
             return makePartialBatchErrorResolution(
                 localResponseData: localResponseData,
@@ -119,11 +119,11 @@ extension HTTPPostService {
 
     /// The one canonical "expected initialize request" rejection shape.
     package static func makeExpectedInitializeResolution(
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostResolution {
+    ) -> HTTPPostService.Resolution {
         if requestIDs.isEmpty {
             return .plain(
                 status: .unprocessableEntity,
@@ -144,7 +144,7 @@ extension HTTPPostService {
 
     package static func requestRequiresInitialize(_ parsedRequestJSON: Any) -> Bool {
         if let object = parsedRequestJSON as? [String: Any] {
-            if case .request("initialize", _) = JSONRPCMessageInspector.kind(of: object) {
+            if case .request("initialize", _) = JSONRPC.Message.Inspector.kind(of: object) {
                 return false
             }
             return true
@@ -160,7 +160,7 @@ extension HTTPPostService {
         sessionID: String,
         prefersEventStream: Bool,
         emptyStatus: HTTPResponseStatus
-    ) -> HTTPPostResolution {
+    ) -> HTTPPostService.Resolution {
         guard let responseData else {
             return .empty(status: emptyStatus, sessionID: sessionID)
         }
@@ -173,7 +173,7 @@ extension HTTPPostService {
 
     package static func makePartialBatchErrorResolution(
         localResponseData: Data?,
-        responseIDs: [RPCID],
+        responseIDs: [JSONRPC.ID],
         code: Int,
         message: String,
         sessionID: String,
@@ -181,7 +181,7 @@ extension HTTPPostService {
         forceBatchArray: Bool,
         fallbackStatus: HTTPResponseStatus,
         fallbackBody: String
-    ) -> HTTPPostResolution {
+    ) -> HTTPPostService.Resolution {
         guard let localResponseData else {
             if responseIDs.isEmpty {
                 return .plain(
@@ -307,12 +307,12 @@ extension HTTPPostService {
 
     package static func mergeLocalToolResponseData(
         _ localResponseData: Data?,
-        into resolution: HTTPPostResolution,
-        fallbackRequestIDs: [RPCID],
+        into resolution: HTTPPostService.Resolution,
+        fallbackRequestIDs: [JSONRPC.ID],
         forceBatchArray: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostResolution {
+    ) -> HTTPPostService.Resolution {
         guard localResponseData != nil else {
             return resolution
         }
@@ -363,8 +363,8 @@ extension HTTPPostService {
     }
 
     package static func responseDataForBatchResolution(
-        _ resolution: HTTPPostResolution?,
-        fallbackRequestIDs: [RPCID],
+        _ resolution: HTTPPostService.Resolution?,
+        fallbackRequestIDs: [JSONRPC.ID],
         forceBatchArray: Bool
     ) -> Data? {
         guard let resolution else {
@@ -396,14 +396,14 @@ extension HTTPPostService {
         requestObject: [String: Any],
         toolName: String
     ) -> [[String: Any]] {
-        guard let rpcID = JSONRPCMessageInspector.requestID(from: requestObject) else {
+        guard let rpcID = JSONRPC.Message.Inspector.requestID(from: requestObject) else {
             return []
         }
         return [makeToolResultErrorResponseObject(id: rpcID, toolName: toolName)]
     }
 
     package static func makeToolResultErrorResponseObject(
-        id: RPCID,
+        id: JSONRPC.ID,
         toolName: String
     ) -> [String: Any] {
         [
@@ -422,7 +422,7 @@ extension HTTPPostService {
     }
 
     package static func makeJSONRPCErrorResponseObject(
-        id: RPCID,
+        id: JSONRPC.ID,
         code: Int,
         message: String
     ) -> [String: Any] {
@@ -449,7 +449,7 @@ extension HTTPPostService {
     }
 
     package static func makeJSONRPCErrorResponseData(
-        ids: [RPCID],
+        ids: [JSONRPC.ID],
         code: Int,
         message: String,
         forceBatchArray: Bool
@@ -494,9 +494,9 @@ extension HTTPPostService {
         return []
     }
 
-    package static func extractResponseIDs(from requestJSON: Any) -> [RPCID] {
+    package static func extractResponseIDs(from requestJSON: Any) -> [JSONRPC.ID] {
         if let object = requestJSON as? [String: Any] {
-            guard let rpcID = JSONRPCMessageInspector.requestID(from: object) else {
+            guard let rpcID = JSONRPC.Message.Inspector.requestID(from: object) else {
                 return []
             }
             return [rpcID]
@@ -509,7 +509,7 @@ extension HTTPPostService {
             guard let object = item as? [String: Any] else {
                 return nil
             }
-            return JSONRPCMessageInspector.requestID(from: object)
+            return JSONRPC.Message.Inspector.requestID(from: object)
         }
     }
 }

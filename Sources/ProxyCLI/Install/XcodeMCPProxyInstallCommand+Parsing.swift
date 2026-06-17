@@ -2,9 +2,9 @@ import ProxyCore
 import Foundation
 
 extension XcodeMCPProxyInstallCommand {
-    package static func scanInvocation(_ args: [String]) -> InstallCommandInvocation {
-        let scan = ProxyCLIInvocationScanner.scanInstall(args)
-        var invocation = InstallCommandInvocation()
+    package static func scanInvocation(_ args: [String]) -> XcodeMCPProxyInstallCommand.Invocation {
+        let scan = CLI.InvocationScanner.scanInstall(args)
+        var invocation = XcodeMCPProxyInstallCommand.Invocation()
         invocation.showHelp = scan.showHelp
         invocation.showVersion = scan.showVersion
         return invocation
@@ -38,14 +38,14 @@ extension XcodeMCPProxyInstallCommand {
     package static func parseOptions(
         _ args: [String],
         environment: [String: String]
-    ) throws -> InstallOptions {
-        var options = InstallOptions(
+    ) throws -> XcodeMCPProxyInstallCommand.Options {
+        var options = XcodeMCPProxyInstallCommand.Options(
             prefix: environment["PREFIX"],
             bindir: environment["BINDIR"],
             dryRun: false
         )
 
-        var cursor = CLIArgumentCursor(args: args)
+        var cursor = CLI.ArgumentCursor(args: args)
         while let arg = cursor.current {
             switch arg {
             case "-h", "--help":
@@ -54,18 +54,18 @@ extension XcodeMCPProxyInstallCommand {
             case "--prefix":
                 options.prefix = try cursor.requiredValue(
                     for: arg,
-                    error: { InstallCommandError.message("\($0) requires a value") }
+                    error: { XcodeMCPProxyInstallCommand.Error.message("\($0) requires a value") }
                 )
             case "--bindir":
                 options.bindir = try cursor.requiredValue(
                     for: arg,
-                    error: { InstallCommandError.message("\($0) requires a value") }
+                    error: { XcodeMCPProxyInstallCommand.Error.message("\($0) requires a value") }
                 )
             case "--dry-run":
                 options.dryRun = true
                 cursor.advance()
             default:
-                throw InstallCommandError.message("unknown option: \(arg)")
+                throw XcodeMCPProxyInstallCommand.Error.message("unknown option: \(arg)")
             }
         }
 

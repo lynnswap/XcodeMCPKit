@@ -113,8 +113,8 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
     package let controlPlane: ProxyControlPlaneDebugSnapshot?
     package let upstreams: [ProxyUpstreamDebugSnapshot]
     package let recentTraffic: [ProxyDebugTrafficEvent]
-    package let sessions: [SessionDebugSnapshot]
-    package let leases: [RequestLeaseDebugSnapshot]
+    package let sessions: [SessionRequestPipeline.DebugSnapshot]
+    package let leases: [LeaseManager.DebugSnapshot]
     package let queuedRequestCount: Int
 
     package init(
@@ -125,8 +125,8 @@ package struct ProxyDebugSnapshot: Codable, Sendable {
         controlPlane: ProxyControlPlaneDebugSnapshot? = nil,
         upstreams: [ProxyUpstreamDebugSnapshot],
         recentTraffic: [ProxyDebugTrafficEvent],
-        sessions: [SessionDebugSnapshot],
-        leases: [RequestLeaseDebugSnapshot],
+        sessions: [SessionRequestPipeline.DebugSnapshot],
+        leases: [LeaseManager.DebugSnapshot],
         queuedRequestCount: Int
     ) {
         self.generatedAt = generatedAt

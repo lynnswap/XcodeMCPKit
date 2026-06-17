@@ -3,7 +3,8 @@ import Foundation
 import Logging
 import XcodeMCPProxy
 
-package struct CLICommandRuntime {
+extension XcodeMCPProxyCLICommand {
+    package struct Runtime {
     private let dependencies: XcodeMCPProxyCLICommand.Dependencies
 
     package init(dependencies: XcodeMCPProxyCLICommand.Dependencies) {
@@ -93,7 +94,7 @@ package struct CLICommandRuntime {
     private func logResolvedUpstream(
         config: ProxyConfig,
         upstreamURL: URL,
-        logSink: CLICommandLogSink
+        logSink: XcodeMCPProxyCLICommand.LogSink
     ) {
         let url = upstreamURL.absoluteString
         guard let source = config.stdioUpstreamSource else {
@@ -125,5 +126,6 @@ package struct CLICommandRuntime {
                 ["url": "\(url)"]
             )
         }
+    }
     }
 }

@@ -1,6 +1,8 @@
 import Foundation
+import ProxyCore
 
-package struct CLIArgumentCursor {
+extension CLI {
+    package struct ArgumentCursor {
     private let args: [String]
     package private(set) var index: Int
 
@@ -43,5 +45,6 @@ package struct CLIArgumentCursor {
         }
         advance(by: 2)
         return value
+    }
     }
 }

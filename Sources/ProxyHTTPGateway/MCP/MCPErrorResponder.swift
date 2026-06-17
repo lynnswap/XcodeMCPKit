@@ -4,7 +4,7 @@ import ProxyMCP
 
 enum MCPErrorResponder {
     static func errorResponseData(
-        id: RPCID?,
+        id: JSONRPC.ID?,
         code: Int,
         message: String,
         data: JSONValue? = nil,
@@ -24,7 +24,7 @@ enum MCPErrorResponder {
     }
 
     static func errorResponseData(
-        ids: [RPCID],
+        ids: [JSONRPC.ID],
         code: Int,
         message: String,
         data: JSONValue? = nil,
@@ -62,12 +62,12 @@ enum MCPErrorResponder {
         return try? JSONSerialization.data(withJSONObject: responses, options: [])
     }
 
-    static func requestMetadata(from data: Data) -> (ids: [RPCID], isBatch: Bool) {
+    static func requestMetadata(from data: Data) -> (ids: [JSONRPC.ID], isBatch: Bool) {
         requestMetadata(fromParsed: try? JSONSerialization.jsonObject(with: data, options: []))
     }
 
-    static func requestMetadata(fromParsed json: Any?) -> (ids: [RPCID], isBatch: Bool) {
-        let metadata = JSONRPCMessageInspector.requestMetadata(fromParsed: json)
+    static func requestMetadata(fromParsed json: Any?) -> (ids: [JSONRPC.ID], isBatch: Bool) {
+        let metadata = JSONRPC.Message.Inspector.requestMetadata(fromParsed: json)
         return (metadata.ids, metadata.isBatch)
     }
 

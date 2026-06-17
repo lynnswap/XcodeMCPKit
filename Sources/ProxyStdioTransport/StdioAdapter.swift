@@ -243,7 +243,7 @@ public actor StdioAdapter {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
             let result = object["result"] as? [String: Any],
             let protocolVersion = result["protocolVersion"] as? String,
-            MCPProtocolVersion.isSupported(protocolVersion)
+            MCP.ProtocolVersion.isSupported(protocolVersion)
         else {
             return nil
         }
@@ -417,15 +417,15 @@ public actor StdioAdapter {
             return RequestEnvelope(method: nil, ids: [])
         }
         if let object = json as? [String: Any] {
-            let method = JSONRPCMessageInspector.method(from: object)
-            let ids = JSONRPCMessageInspector.requestID(from: object).map { [$0.value] } ?? []
+            let method = JSONRPC.Message.Inspector.method(from: object)
+            let ids = JSONRPC.Message.Inspector.requestID(from: object).map { [$0.value] } ?? []
             return RequestEnvelope(method: method, ids: ids)
         }
         if let array = json as? [Any] {
             var ids: [JSONValue] = []
             for item in array {
                 guard let object = item as? [String: Any] else { continue }
-                if let id = JSONRPCMessageInspector.requestID(from: object) {
+                if let id = JSONRPC.Message.Inspector.requestID(from: object) {
                     ids.append(id.value)
                 }
             }

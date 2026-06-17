@@ -4,13 +4,13 @@ import ProxyMCP
 import ProxySession
 import ProxyXcodeFeatures
 
-package struct ToolSurfaceRewriteResult: Sendable {
-    package let responseData: Data
-    package let cacheableToolsListResult: JSONValue?
-}
-
 package struct ToolSurface: Sendable {
-    private let refreshCodeIssuesMode: RefreshCodeIssuesMode
+    package struct RewriteResult: Sendable {
+        package let responseData: Data
+        package let cacheableToolsListResult: JSONValue?
+    }
+
+    private let refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
     private let callNormalizer: ToolCallNormalizer
     private let hiddenToolNames: Set<String>
 
@@ -26,14 +26,14 @@ package struct ToolSurface: Sendable {
     package func rewriteForwardedResponse(
         method: String?,
         toolName: String?,
-        originalID: RPCID?,
+        originalID: JSONRPC.ID?,
         responseMethodsByIDKey: [String: String] = [:],
         responseToolNamesByIDKey: [String: String] = [:],
-        responseOriginalIDsByKey: [String: RPCID] = [:],
+        responseOriginalIDsByKey: [String: JSONRPC.ID] = [:],
         normalizationToolsListResponseIDKey: String? = nil,
         cacheableToolsListResponseIDKey: String? = nil,
         upstreamData: Data
-    ) -> ToolSurfaceRewriteResult {
+    ) -> ToolSurface.RewriteResult {
         let rewrittenResourcesData = rewriteUnsupportedResourcesListResponseIfNeeded(
             method: method,
             originalID: originalID,
@@ -69,7 +69,7 @@ package struct ToolSurface: Sendable {
             responseMethodsByIDKey: responseMethodsByIDKey,
             hiddenToolNames: hiddenToolNames
         )
-        return ToolSurfaceRewriteResult(
+        return ToolSurface.RewriteResult(
             responseData: responseData,
             cacheableToolsListResult: cacheableToolsListResult
         )
@@ -97,9 +97,9 @@ package struct ToolSurface: Sendable {
 
     private func rewriteUnsupportedResourcesListResponseIfNeeded(
         method: String?,
-        originalID: RPCID?,
+        originalID: JSONRPC.ID?,
         responseMethodsByIDKey: [String: String],
-        responseOriginalIDsByKey: [String: RPCID],
+        responseOriginalIDsByKey: [String: JSONRPC.ID],
         upstreamData: Data
     ) -> Data {
         guard let payload = try? JSONSerialization.jsonObject(with: upstreamData, options: []) else {
@@ -107,11 +107,11 @@ package struct ToolSurface: Sendable {
         }
 
         if let object = payload as? [String: Any] {
-            let resolvedRequest: (method: String, originalID: RPCID)? = {
+            let resolvedRequest: (method: String, originalID: JSONRPC.ID)? = {
                 if let method, let originalID {
                     return (method, originalID)
                 }
-                guard let responseID = JSONRPCMessageInspector.responseID(from: object),
+                guard let responseID = JSONRPC.Message.Inspector.responseID(from: object),
                     let method = responseMethodsByIDKey[responseID.key],
                     let originalID = responseOriginalIDsByKey[responseID.key]
                 else {
@@ -143,7 +143,7 @@ package struct ToolSurface: Sendable {
         var rewroteAny = false
         let rewrittenArray = array.map { item -> Any in
             guard let object = item as? [String: Any],
-                let responseID = JSONRPCMessageInspector.responseID(from: object),
+                let responseID = JSONRPC.Message.Inspector.responseID(from: object),
                 let method = responseMethodsByIDKey[responseID.key],
                 let originalID = responseOriginalIDsByKey[responseID.key]
             else {
@@ -176,7 +176,7 @@ package struct ToolSurface: Sendable {
     private func rewriteUnsupportedResourcesListResponseObjectIfNeeded(
         _ object: [String: Any],
         method: String,
-        originalID: RPCID
+        originalID: JSONRPC.ID
     ) -> [String: Any] {
         guard method == "resources/list" || method == "resources/templates/list" else {
             return object
@@ -204,7 +204,7 @@ package struct ToolSurface: Sendable {
         return object
     }
 
-    private func emptyResourcesListResponseObject(method: String, originalID: RPCID) -> [String: Any] {
+    private func emptyResourcesListResponseObject(method: String, originalID: JSONRPC.ID) -> [String: Any] {
         let result: [String: Any] = method == "resources/list"
             ? ["resources": [Any]()]
             : ["resourceTemplates": [Any]()]
@@ -262,7 +262,7 @@ package struct ToolSurface: Sendable {
         responseMethodsByIDKey: [String: String] = [:],
         hiddenToolNames: Set<String> = []
     ) -> Data {
-        RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
+        RefreshCodeIssues.ToolsListRewriter.rewriteResponseDataIfNeeded(
             responseData,
             method: method,
             responseMethodsByIDKey: responseMethodsByIDKey,
@@ -279,7 +279,7 @@ package struct ToolSurface: Sendable {
             return nil
         }
         if let object = payload as? [String: Any] {
-            guard let responseID = JSONRPCMessageInspector.responseID(from: object),
+            guard let responseID = JSONRPC.Message.Inspector.responseID(from: object),
                 responseID.key == responseIDKey
             else {
                 return nil
@@ -291,7 +291,7 @@ package struct ToolSurface: Sendable {
         }
         for item in array {
             guard let object = item as? [String: Any],
-                let responseID = JSONRPCMessageInspector.responseID(from: object),
+                let responseID = JSONRPC.Message.Inspector.responseID(from: object),
                 responseID.key == responseIDKey
             else {
                 continue

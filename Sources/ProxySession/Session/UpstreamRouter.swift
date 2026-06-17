@@ -52,7 +52,7 @@ package final class UpstreamRouter: Sendable {
 
     private struct State: Sendable {
         var nextID: Int64 = 1
-        var mappingsByUpstream: [[Int64: UpstreamMapping]] = []
+        var mappingsByUpstream: [[Int64: UpstreamRouter.Mapping]] = []
         var upstreamIDByRequestKeyByUpstream: [[RequestLookupKey: Int64]] = []
         var recentlyReleasedResponseIDsByUpstream: [[Int64]] = []
     }
@@ -68,7 +68,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func assign(upstreamIndex: Int, sessionID: String, originalID: RPCID, isInitialize: Bool)
+    func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
         -> Int64
     {
         state.withLockedValue { state in
@@ -77,7 +77,7 @@ package final class UpstreamRouter: Sendable {
             }
             let id = state.nextID
             state.nextID += 1
-            state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
+            state.mappingsByUpstream[upstreamIndex][id] = UpstreamRouter.Mapping(
                 sessionID: sessionID,
                 originalID: originalID,
                 isInitialize: isInitialize
@@ -98,7 +98,7 @@ package final class UpstreamRouter: Sendable {
             }
             let id = state.nextID
             state.nextID += 1
-            state.mappingsByUpstream[upstreamIndex][id] = UpstreamMapping(
+            state.mappingsByUpstream[upstreamIndex][id] = UpstreamRouter.Mapping(
                 sessionID: nil,
                 originalID: nil,
                 isInitialize: true
@@ -107,7 +107,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamMapping? {
+    func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamRouter.Mapping? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return nil
@@ -233,10 +233,9 @@ package final class UpstreamRouter: Sendable {
             )
         }
     }
-}
-
-package struct UpstreamMapping: Sendable {
-    package let sessionID: String?
-    package let originalID: RPCID?
-    package let isInitialize: Bool
+    package struct Mapping: Sendable {
+        package let sessionID: String?
+        package let originalID: JSONRPC.ID?
+        package let isInitialize: Bool
+    }
 }

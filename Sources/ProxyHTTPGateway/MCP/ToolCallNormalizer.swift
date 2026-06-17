@@ -138,7 +138,7 @@ package struct ToolCallNormalizer: Sendable {
         if let explicitMethod {
             return explicitMethod
         }
-        guard let responseID = JSONRPCMessageInspector.responseID(from: object) else {
+        guard let responseID = JSONRPC.Message.Inspector.responseID(from: object) else {
             return nil
         }
         return responseMethodsByIDKey[responseID.key]
@@ -148,7 +148,7 @@ package struct ToolCallNormalizer: Sendable {
         for object: [String: Any],
         responseToolNamesByIDKey: [String: String]
     ) -> String? {
-        guard let responseID = JSONRPCMessageInspector.responseID(from: object) else {
+        guard let responseID = JSONRPC.Message.Inspector.responseID(from: object) else {
             return nil
         }
         return responseToolNamesByIDKey[responseID.key]
