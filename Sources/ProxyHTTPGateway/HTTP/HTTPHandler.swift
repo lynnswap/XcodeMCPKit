@@ -324,8 +324,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         let hostHeader = requestHead.headers.first(name: "Host")
         guard Self.originHostIsAllowed(
             normalizedOriginHost,
-            configuredHost: config.listenHost,
-            hostHeader: hostHeader
+            configuredHost: config.listenHost
         ) else {
             return false
         }
@@ -356,28 +355,21 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     private static func originHostIsAllowed(
         _ originHost: String,
-        configuredHost: String,
-        hostHeader: String?
-    ) -> Bool {
-        if isLoopbackOrConfiguredHost(originHost, configuredHost: configuredHost) {
-            return true
-        }
-        guard isWildcardHost(configuredHost),
-            let requestHost = host(fromHostHeader: hostHeader)
-        else {
-            return false
-        }
-        return originHost == normalizedHost(requestHost)
-    }
-
-    private static func isLoopbackOrConfiguredHost(
-        _ host: String,
         configuredHost: String
     ) -> Bool {
-        let configured = normalizedHost(configuredHost)
-        if host == configured {
+        if isLoopbackHost(originHost) {
             return true
         }
+
+        let configured = normalizedHost(configuredHost)
+        guard isWildcardHost(configured) == false else {
+            return false
+        }
+
+        return originHost == configured
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
         if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" {
             return true
         }
@@ -412,29 +404,6 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             octets.append(value)
         }
         return octets.first == 127
-    }
-
-    private static func host(fromHostHeader hostHeader: String?) -> String? {
-        guard let hostHeader = hostHeader?.trimmingCharacters(in: .whitespacesAndNewlines),
-            hostHeader.isEmpty == false
-        else {
-            return nil
-        }
-        if hostHeader.hasPrefix("["),
-            let closeBracket = hostHeader.firstIndex(of: "]")
-        {
-            return String(hostHeader[hostHeader.index(after: hostHeader.startIndex)..<closeBracket])
-        }
-        let colonCount = hostHeader.reduce(0) { count, character in
-            character == ":" ? count + 1 : count
-        }
-        if colonCount == 1,
-            let colon = hostHeader.lastIndex(of: ":"),
-            Int(hostHeader[hostHeader.index(after: colon)...]) != nil
-        {
-            return String(hostHeader[..<colon])
-        }
-        return hostHeader
     }
 
     private static func port(fromHostHeader hostHeader: String?) -> Int? {
