@@ -42,10 +42,10 @@ public final class ProxyServer {
                         config: config,
                         executableLookupClient: executableLookupClient
                     )
-                    return XcodePermissionDialogAutoApprover(
+                    return XcodePermissionDialog.AutoApprover(
                         dependencies: .live(
                             agentPathCandidates: {
-                                XcodePermissionDialogAutoApprover.defaultAgentPathCandidates(
+                                XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
                                     additionalExecutableCandidates: additionalCandidates
                                 )
                             },
@@ -71,9 +71,9 @@ public final class ProxyServer {
     package let config: ProxyConfig
     package let dependencies: Dependencies
     package let group: EventLoopGroup
-    package let refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator
-    package let refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver
-    package let refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState
+    package let refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator
+    package let refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver
+    package let refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState
     private var channels: [Channel] = []
     package let logger: Logger = ProxyLogging.make("server")
     package let runtimeLock = NSLock()
@@ -90,9 +90,9 @@ public final class ProxyServer {
         self.config = config
         self.dependencies = dependencies
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.refreshCodeIssuesCoordinator = RefreshCodeIssuesCoordinator.makeDefault()
-        self.refreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver()
-        self.refreshCodeIssuesDebugState = RefreshCodeIssuesDebugState(
+        self.refreshCodeIssuesCoordinator = RefreshCodeIssues.Coordinator.makeDefault()
+        self.refreshCodeIssuesTargetResolver = RefreshCodeIssues.TargetResolver()
+        self.refreshCodeIssuesDebugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
     }
@@ -390,7 +390,7 @@ package protocol ProxyServerPermissionDialogAutoApprover: Sendable {
     func stop()
 }
 
-extension XcodePermissionDialogAutoApprover: ProxyServerPermissionDialogAutoApprover {}
+extension XcodePermissionDialog.AutoApprover: ProxyServerPermissionDialogAutoApprover {}
 
 package extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {

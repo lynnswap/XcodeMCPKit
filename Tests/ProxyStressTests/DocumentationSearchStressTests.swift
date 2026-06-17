@@ -208,12 +208,12 @@ private struct StressHTTPServer {
 }
 
 private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private var countsBySessionIndex: [Int]
 
     init(sessionCount: Int) {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -227,7 +227,7 @@ private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return .accepted
         }
@@ -287,7 +287,7 @@ private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id,
-            "result": ["protocolVersion": MCPProtocolVersion.current, "capabilities": [String: Any]()],
+            "result": ["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [String: Any]()],
         ]
         return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
@@ -364,7 +364,7 @@ private func postJSON(
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     if let sessionID {
         request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-        request.setValue(MCPProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+        request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
     }
     request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 

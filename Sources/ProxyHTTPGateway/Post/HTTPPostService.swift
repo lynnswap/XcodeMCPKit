@@ -11,7 +11,7 @@ package final class HTTPPostService: Sendable {
     package struct FilteredToolCallRequest: Sendable {
         let bodyData: Data?
         let localResponseData: Data?
-        let forwardedResponseIDs: [RPCID]
+        let forwardedResponseIDs: [JSONRPC.ID]
         let forceBatchArray: Bool
     }
 
@@ -22,13 +22,13 @@ package final class HTTPPostService: Sendable {
 
     private struct LocalToolFallbackForwardingResult {
         let request: FilteredToolCallRequest
-        let resolution: HTTPPostResolution
+        let resolution: HTTPPostService.Resolution
     }
 
     package struct LocalToolFilterOperation {
         let localResponseFuture: EventLoopFuture<LocalToolBatchResult>
         let forwardedRequest: FilteredToolCallRequest
-        let cancellationHandle: HTTPPostCancellationHandle
+        let cancellationHandle: HTTPPostService.CancellationHandle
         let deadline: Date?
     }
 
@@ -37,16 +37,16 @@ package final class HTTPPostService: Sendable {
     package let usesSynchronousLocalResolution: Bool
     package let localResponder: LocalMCPResponder
     package let forwardingService: MCPForwardingService
-    package let refreshWorkflow: RefreshCodeIssuesWorkflow
+    package let refreshWorkflow: RefreshCodeIssues.Workflow
     package let requestTimeoutSeconds: TimeInterval
     package let logger: Logger
 
     package init(
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState,
+        refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
+        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
+        refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,
         usesSynchronousLocalResolution: Bool = false,
         logger: Logger = ProxyLogging.make("http")
     ) {
@@ -65,7 +65,7 @@ package final class HTTPPostService: Sendable {
             config: config,
             sessionManager: sessionManager
         )
-        self.refreshWorkflow = RefreshCodeIssuesWorkflow(
+        self.refreshWorkflow = RefreshCodeIssues.Workflow(
             mode: config.refreshCodeIssuesMode,
             requestTimeout: config.requestTimeout,
             coordinator: refreshCodeIssuesCoordinator,
@@ -83,8 +83,8 @@ package final class HTTPPostService: Sendable {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil,
-        parentCancellationHandle: HTTPPostCancellationHandle? = nil
-    ) -> HTTPPostOperation {
+        parentCancellationHandle: HTTPPostService.CancellationHandle? = nil
+    ) -> HTTPPostService.Operation {
         let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
         let requestMetadata = MCPErrorResponder.requestMetadata(fromParsed: parsedRequestJSON)
         let requestIDs = requestMetadata.ids
@@ -99,7 +99,7 @@ package final class HTTPPostService: Sendable {
                 requestTimeoutOverride: requestTimeoutOverride
             )
         {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: resolveLocalHandling(
                     localHandling,
                     prefersEventStream: prefersEventStream,
@@ -111,7 +111,7 @@ package final class HTTPPostService: Sendable {
         }
 
         guard let sessionID = headerSessionID, sessionID.isEmpty == false else {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .plain(
                         status: .badRequest,
@@ -124,7 +124,7 @@ package final class HTTPPostService: Sendable {
         }
 
         guard headerSessionExists else {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .plain(
                         status: .notFound,
@@ -137,9 +137,9 @@ package final class HTTPPostService: Sendable {
         }
 
         if let requestObject = parsedRequestJSON as? [String: Any] {
-            switch JSONRPCMessageInspector.kind(of: requestObject) {
+            switch JSONRPC.Message.Inspector.kind(of: requestObject) {
             case .malformed(let invalidID):
-                return HTTPPostOperation(
+                return HTTPPostService.Operation(
                     future: eventLoop.makeSucceededFuture(
                         .mcpError(
                             id: invalidID,
@@ -166,7 +166,7 @@ package final class HTTPPostService: Sendable {
         }
 
         if sessionManager.isInitialized() == false {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     Self.makeExpectedInitializeResolution(
                         requestIDs: requestIDs,
@@ -180,7 +180,7 @@ package final class HTTPPostService: Sendable {
         }
 
         guard let parsedRequestJSON else {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .mcpError(
                         id: nil,
@@ -205,7 +205,7 @@ package final class HTTPPostService: Sendable {
                 prefersEventStream: prefersEventStream
             )
         {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(initializeResolution),
                 cancellationHandle: nil
             )
@@ -221,7 +221,7 @@ package final class HTTPPostService: Sendable {
                 requestTimeoutOverride: requestTimeoutOverride
             )
         } catch {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .mcpError(
                         id: nil,
@@ -242,7 +242,7 @@ package final class HTTPPostService: Sendable {
                 parentCancellationHandle.bindChildHandle(localToolFilter.cancellationHandle) == false
             {
                 localToolFilter.cancellationHandle.cancel(using: sessionManager)
-                return HTTPPostOperation(
+                return HTTPPostService.Operation(
                     future: eventLoop.makeSucceededFuture(
                         .empty(status: .accepted, sessionID: sessionID)
                     ),
@@ -321,7 +321,7 @@ package final class HTTPPostService: Sendable {
                 localToolFilter.cancellationHandle.markCompleted()
                 self.sessionManager.completeRequestLease(localToolFilter.cancellationHandle.leaseID)
             }
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: future,
                 cancellationHandle: localToolFilter.cancellationHandle
             )
@@ -347,8 +347,8 @@ package final class HTTPPostService: Sendable {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         deadline: Date?,
-        cancellationHandle: HTTPPostCancellationHandle
-    ) -> EventLoopFuture<HTTPPostResolution> {
+        cancellationHandle: HTTPPostService.CancellationHandle
+    ) -> EventLoopFuture<HTTPPostService.Resolution> {
         let forwardingTimeout = Self.remainingRequestTimeout(until: deadline)
         if deadline != nil,
             forwardingTimeout == nil,
@@ -386,10 +386,10 @@ package final class HTTPPostService: Sendable {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
-        parentCancellationHandle: HTTPPostCancellationHandle?
-    ) -> HTTPPostOperation {
+        parentCancellationHandle: HTTPPostService.CancellationHandle?
+    ) -> HTTPPostService.Operation {
         guard let forwardedBodyData = filteredRequest.bodyData else {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     Self.makeLocalResponseResolution(
                         responseData: filteredRequest.localResponseData,
@@ -406,7 +406,7 @@ package final class HTTPPostService: Sendable {
         do {
             forwardedRequestJSON = try JSONSerialization.jsonObject(with: forwardedBodyData, options: [])
         } catch {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .mcpError(
                         id: nil,
@@ -431,7 +431,7 @@ package final class HTTPPostService: Sendable {
             requestIDs: forwardedRequestIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = HTTPPostCancellationHandle(
+        let cancellationHandle = HTTPPostService.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: forwardedRequestIDs.map(\.key)
@@ -440,7 +440,7 @@ package final class HTTPPostService: Sendable {
             parentCancellationHandle.bindChildHandle(cancellationHandle) == false
         {
             cancellationHandle.cancel(using: sessionManager)
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .empty(status: .accepted, sessionID: sessionID)
                 ),
@@ -460,7 +460,7 @@ package final class HTTPPostService: Sendable {
                         defaultSeconds: requestTimeoutSeconds
                     )
             )
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: makeTopLevelRequestFuture(
                     filteredRequest: filteredRequest,
                     sessionID: sessionID,
@@ -524,7 +524,7 @@ package final class HTTPPostService: Sendable {
                 )
             )
         }
-        return HTTPPostOperation(
+        return HTTPPostService.Operation(
             future: future,
             cancellationHandle: cancellationHandle
         )
@@ -533,13 +533,13 @@ package final class HTTPPostService: Sendable {
     private func makeClientResponseForwardingOperation(
         responseObject: [String: Any],
         sessionID: String,
-        responseID: RPCID,
+        responseID: JSONRPC.ID,
         eventLoop: EventLoop
-    ) -> HTTPPostOperation {
+    ) -> HTTPPostService.Operation {
         guard JSONSerialization.isValidJSONObject(responseObject),
             let responseData = try? JSONSerialization.data(withJSONObject: responseObject, options: [])
         else {
-            return HTTPPostOperation(
+            return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .plain(
                         status: .badRequest,
@@ -555,7 +555,7 @@ package final class HTTPPostService: Sendable {
             sessionID: sessionID,
             responseID: responseID,
             on: eventLoop
-        ).map { forwardingResult -> HTTPPostResolution in
+        ).map { forwardingResult -> HTTPPostService.Resolution in
             switch forwardingResult {
             case .accepted, .missingRoute:
                 return .empty(status: .accepted, sessionID: sessionID)
@@ -573,7 +573,7 @@ package final class HTTPPostService: Sendable {
                 )
             }
         }
-        return HTTPPostOperation(
+        return HTTPPostService.Operation(
             future: future,
             cancellationHandle: nil
         )

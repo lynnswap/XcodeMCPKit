@@ -3,14 +3,14 @@ import NIO
 import NIOConcurrencyHelpers
 import ProxyMCP
 
-package struct ServerRequestRoute: Sendable {
-    package let upstreamIndex: Int
-    package let upstreamID: RPCID
-}
-
 package final class ServerRequestTracker: Sendable {
+    package struct Route: Sendable {
+        package let upstreamIndex: Int
+        package let upstreamID: JSONRPC.ID
+    }
+
     private struct StoredRoute: Sendable {
-        let route: ServerRequestRoute
+        let route: ServerRequestTracker.Route
         let expiresAt: Date
     }
 
@@ -33,18 +33,18 @@ package final class ServerRequestTracker: Sendable {
     }
 
     package func record(
-        upstreamID: RPCID,
+        upstreamID: JSONRPC.ID,
         upstreamIndex: Int,
         now: Date = Date()
-    ) -> RPCID {
+    ) -> JSONRPC.ID {
         state.withLockedValue { state in
             Self.removeExpiredRoutes(now: now, state: &state)
             state.nextClientID += 1
-            let clientID = RPCID(
+            let clientID = JSONRPC.ID(
                 any: "xcode-mcp-proxy.server-request.\(state.nextClientID)"
             )!
             state.routesByClientIDKey[clientID.key] = StoredRoute(
-                route: ServerRequestRoute(
+                route: ServerRequestTracker.Route(
                     upstreamIndex: upstreamIndex,
                     upstreamID: upstreamID
                 ),
@@ -56,7 +56,7 @@ package final class ServerRequestTracker: Sendable {
         }
     }
 
-    package func consume(clientID: RPCID, now: Date = Date()) -> ServerRequestRoute? {
+    package func consume(clientID: JSONRPC.ID, now: Date = Date()) -> ServerRequestTracker.Route? {
         state.withLockedValue { state in
             Self.removeExpiredRoutes(now: now, state: &state)
             guard let stored = state.routesByClientIDKey.removeValue(forKey: clientID.key) else {
@@ -67,7 +67,7 @@ package final class ServerRequestTracker: Sendable {
         }
     }
 
-    package func lookup(clientID: RPCID, now: Date = Date()) -> ServerRequestRoute? {
+    package func lookup(clientID: JSONRPC.ID, now: Date = Date()) -> ServerRequestTracker.Route? {
         state.withLockedValue { state in
             Self.removeExpiredRoutes(now: now, state: &state)
             return state.routesByClientIDKey[clientID.key]?.route
@@ -76,8 +76,8 @@ package final class ServerRequestTracker: Sendable {
 
     @discardableResult
     package func complete(
-        clientID: RPCID,
-        route: ServerRequestRoute,
+        clientID: JSONRPC.ID,
+        route: ServerRequestTracker.Route,
         now: Date = Date()
     ) -> Bool {
         state.withLockedValue { state in

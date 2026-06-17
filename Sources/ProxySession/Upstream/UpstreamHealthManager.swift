@@ -2,50 +2,50 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-package struct HealthProbeRequest: Sendable {
-    package let upstreamIndex: Int
-    package let probeGeneration: UInt64
-}
-
-package enum UpstreamHealthEffect: Sendable {
-    case cancelInitTimeout(RuntimeScheduledTimeout)
-    case startHealthProbe(HealthProbeRequest)
-    case clearPins
-    case failQueuedIfNoRecovery
-}
-
-package struct UpstreamUseEvaluation: Sendable {
-    package let isUsable: Bool
-    package let effects: [UpstreamHealthEffect]
-
-    package init(isUsable: Bool, effects: [UpstreamHealthEffect]) {
-        self.isUsable = isUsable
-        self.effects = effects
-    }
-}
-
-package struct UpstreamSelectionResult: Sendable {
-    package let upstreamIndex: Int?
-    package let effects: [UpstreamHealthEffect]
-
-    package init(upstreamIndex: Int?, effects: [UpstreamHealthEffect]) {
-        self.upstreamIndex = upstreamIndex
-        self.effects = effects
-    }
-}
-
-package struct ProtocolViolationTransition: Sendable {
-    package let quarantineUntil: UInt64
-    package let cancelledInitTimeout: RuntimeScheduledTimeout?
-}
-
-package struct IncompatibilityTransition: Sendable {
-    package let quarantineUntil: UInt64
-    package let cancelledInitTimeout: RuntimeScheduledTimeout?
-    package let initUpstreamID: Int64?
-}
-
 package final class UpstreamHealthManager: Sendable {
+    package struct ProbeRequest: Sendable {
+        package let upstreamIndex: Int
+        package let probeGeneration: UInt64
+    }
+
+    package enum Effect: Sendable {
+        case cancelInitTimeout(RuntimeScheduledTimeout)
+        case startHealthProbe(UpstreamHealthManager.ProbeRequest)
+        case clearPins
+        case failQueuedIfNoRecovery
+    }
+
+    package struct UseEvaluation: Sendable {
+        package let isUsable: Bool
+        package let effects: [UpstreamHealthManager.Effect]
+
+        package init(isUsable: Bool, effects: [UpstreamHealthManager.Effect]) {
+            self.isUsable = isUsable
+            self.effects = effects
+        }
+    }
+
+    package struct SelectionResult: Sendable {
+        package let upstreamIndex: Int?
+        package let effects: [UpstreamHealthManager.Effect]
+
+        package init(upstreamIndex: Int?, effects: [UpstreamHealthManager.Effect]) {
+            self.upstreamIndex = upstreamIndex
+            self.effects = effects
+        }
+    }
+
+    package struct ProtocolViolationTransition: Sendable {
+        package let quarantineUntil: UInt64
+        package let cancelledInitTimeout: RuntimeScheduledTimeout?
+    }
+
+    package struct IncompatibilityTransition: Sendable {
+        package let quarantineUntil: UInt64
+        package let cancelledInitTimeout: RuntimeScheduledTimeout?
+        package let initUpstreamID: Int64?
+    }
+
     package enum InitPhase: Sendable, Equatable {
         case idle
         case initializing(upstreamID: Int64?)
@@ -193,8 +193,8 @@ package final class UpstreamHealthManager: Sendable {
     package func evaluateUsableInitialized(
         index: Int,
         nowUptimeNs: UInt64
-    ) -> UpstreamUseEvaluation {
-        var effects: [UpstreamHealthEffect] = []
+    ) -> UpstreamHealthManager.UseEvaluation {
+        var effects: [UpstreamHealthManager.Effect] = []
         let usable = state.withLockedValue { state in
             guard index >= 0, index < state.upstreamStates.count else { return false }
             let health = Self.classifyHealthAndCollectEffectsIfNeeded(
@@ -212,14 +212,14 @@ package final class UpstreamHealthManager: Sendable {
             }
             return isHealthyEnough && state.upstreamStates[index].isInitialized
         }
-        return UpstreamUseEvaluation(isUsable: usable, effects: effects)
+        return UpstreamHealthManager.UseEvaluation(isUsable: usable, effects: effects)
     }
 
     package func chooseBestInitializedUpstream(
         nowUptimeNs: UInt64,
         occupiedUpstreams: Set<Int>
-    ) -> UpstreamSelectionResult {
-        var effects: [UpstreamHealthEffect] = []
+    ) -> UpstreamHealthManager.SelectionResult {
+        var effects: [UpstreamHealthManager.Effect] = []
         let chosen = state.withLockedValue { state -> Int? in
             let count = state.upstreamStates.count
             guard count > 0 else { return nil }
@@ -258,7 +258,7 @@ package final class UpstreamHealthManager: Sendable {
             }
             return degradedCandidate
         }
-        return UpstreamSelectionResult(upstreamIndex: chosen, effects: effects)
+        return UpstreamHealthManager.SelectionResult(upstreamIndex: chosen, effects: effects)
     }
 
     package func markRequestSucceeded(upstreamIndex: Int) {
@@ -292,7 +292,7 @@ package final class UpstreamHealthManager: Sendable {
     package func markProtocolViolation(
         upstreamIndex: Int,
         nowUptimeNs: UInt64
-    ) -> ProtocolViolationTransition? {
+    ) -> UpstreamHealthManager.ProtocolViolationTransition? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             let quarantineUntil = nowUptimeNs &+ 15_000_000_000
@@ -307,7 +307,7 @@ package final class UpstreamHealthManager: Sendable {
             )
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
-            return ProtocolViolationTransition(
+            return UpstreamHealthManager.ProtocolViolationTransition(
                 quarantineUntil: quarantineUntil,
                 cancelledInitTimeout: cancelledInitTimeout
             )
@@ -317,7 +317,7 @@ package final class UpstreamHealthManager: Sendable {
     package func quarantineIncompatibleUpstream(
         upstreamIndex: Int,
         nowUptimeNs: UInt64
-    ) -> IncompatibilityTransition? {
+    ) -> UpstreamHealthManager.IncompatibilityTransition? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             let quarantineUntil = nowUptimeNs &+ 30_000_000_000
@@ -334,7 +334,7 @@ package final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-            return IncompatibilityTransition(
+            return UpstreamHealthManager.IncompatibilityTransition(
                 quarantineUntil: quarantineUntil,
                 cancelledInitTimeout: cancelledInitTimeout,
                 initUpstreamID: initUpstreamID
@@ -509,7 +509,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func apply(event: Event) -> [UpstreamHealthEffect] {
+    package func apply(event: Event) -> [UpstreamHealthManager.Effect] {
         state.withLockedValue { state in
             switch event {
             case .requestSucceeded(let upstreamIndex):
@@ -570,7 +570,7 @@ package final class UpstreamHealthManager: Sendable {
         upstreamIndex: Int,
         nowUptimeNs: UInt64,
         state: inout State,
-        effects: inout [UpstreamHealthEffect]
+        effects: inout [UpstreamHealthManager.Effect]
     ) -> UpstreamHealthState {
         guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
             return .quarantined(untilUptimeNs: nowUptimeNs)
@@ -589,7 +589,7 @@ package final class UpstreamHealthManager: Sendable {
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = true
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
                 effects.append(
-                    .startHealthProbe(HealthProbeRequest(
+                    .startHealthProbe(UpstreamHealthManager.ProbeRequest(
                         upstreamIndex: upstreamIndex,
                         probeGeneration: state.upstreamStates[upstreamIndex].healthProbeGeneration
                     ))

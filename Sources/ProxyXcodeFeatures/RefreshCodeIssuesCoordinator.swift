@@ -1,7 +1,8 @@
 import Foundation
 import NIO
 
-package actor RefreshCodeIssuesCoordinator {
+extension RefreshCodeIssues {
+    package actor Coordinator {
     private enum WaiterState: Sendable {
         case active
         case cancelled
@@ -42,8 +43,8 @@ package actor RefreshCodeIssuesCoordinator {
     private var activeExecutionsByKey: [String: ActiveExecution] = [:]
     private var waitersByKey: [String: [Waiter]] = [:]
 
-    package static func makeDefault() -> RefreshCodeIssuesCoordinator {
-        RefreshCodeIssuesCoordinator()
+    package static func makeDefault() -> RefreshCodeIssues.Coordinator {
+        RefreshCodeIssues.Coordinator()
     }
 
     package init(
@@ -304,5 +305,6 @@ package actor RefreshCodeIssuesCoordinator {
             return .zero
         }
         return .nanoseconds(nanoseconds)
+    }
     }
 }

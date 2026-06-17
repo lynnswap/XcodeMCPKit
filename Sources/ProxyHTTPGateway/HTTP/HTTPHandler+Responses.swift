@@ -6,7 +6,7 @@ import ProxyMCP
 
 extension HTTPHandler {
     func sendPostResolution(
-        _ resolution: HTTPPostResolution,
+        _ resolution: HTTPPostService.Resolution,
         on channel: Channel,
         keepAlive: Bool,
         requestLog: RequestLogContext
@@ -152,7 +152,7 @@ extension HTTPHandler {
 
     func sendMCPError(
         on channel: Channel,
-        id: RPCID?,
+        id: JSONRPC.ID?,
         code: Int,
         message: String,
         forceBatchArray: Bool = false,
@@ -176,7 +176,7 @@ extension HTTPHandler {
 
     func sendMCPError(
         on channel: Channel,
-        ids: [RPCID],
+        ids: [JSONRPC.ID],
         code: Int,
         message: String,
         forceBatchArray: Bool = false,

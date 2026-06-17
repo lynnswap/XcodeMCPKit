@@ -7,7 +7,7 @@ import Testing
 struct RefreshCodeIssuesPathMatcherTests {
     @Test func matcherTreatsCaseOnlyDifferencesAsEqualOnCaseInsensitiveFileSystems() {
         #expect(
-            RefreshCodeIssuesPathMatcher.matches(
+            RefreshCodeIssues.PathMatcher.matches(
                 issuePath: "/tmp/Workspace/Foo.swift",
                 resolvedFilePath: "/tmp/workspace/foo.swift",
                 caseSensitiveFileSystemOverride: false
@@ -17,7 +17,7 @@ struct RefreshCodeIssuesPathMatcherTests {
 
     @Test func matcherPreservesCaseSensitivePathDifferences() {
         #expect(
-            RefreshCodeIssuesPathMatcher.matches(
+            RefreshCodeIssues.PathMatcher.matches(
                 issuePath: "/tmp/Workspace/Foo.swift",
                 resolvedFilePath: "/tmp/workspace/foo.swift",
                 caseSensitiveFileSystemOverride: true
@@ -49,7 +49,7 @@ struct RefreshCodeIssuesPathMatcherTests {
         )
 
         #expect(
-            RefreshCodeIssuesPathMatcher.matches(
+            RefreshCodeIssues.PathMatcher.matches(
                 issuePath: symlinkPath.path,
                 resolvedFilePath: target.path
             )

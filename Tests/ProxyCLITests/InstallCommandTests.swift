@@ -130,9 +130,9 @@ struct InstallCommandTests {
 
         let executableURL = tempDir.appendingPathComponent("xcode-mcp-proxy-install")
 
-        #expect(throws: InstallCommandError.self) {
+        #expect(throws: XcodeMCPProxyInstallCommand.Error.self) {
             try XcodeMCPProxyInstallCommand.install(
-                options: InstallOptions(prefix: nil, bindir: tempDir.path, dryRun: false),
+                options: XcodeMCPProxyInstallCommand.Options(prefix: nil, bindir: tempDir.path, dryRun: false),
                 executableURL: executableURL,
                 buildProducts: { _, _ in },
                 stdout: { _ in }

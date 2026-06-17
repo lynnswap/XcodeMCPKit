@@ -40,7 +40,7 @@ package final class InitializeManager: Sendable {
         package let promise: EventLoopPromise<ByteBuffer>
         package let sessionID: String
         package let sessionGeneration: UInt64
-        package let originalID: RPCID
+        package let originalID: JSONRPC.ID
     }
 
     package struct RegisterDecision: Sendable {
@@ -147,7 +147,7 @@ package final class InitializeManager: Sendable {
     package func registerInitialize(
         sessionID: String,
         sessionGeneration: UInt64,
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> RegisterDecision {
         state.withLockedValue { state in

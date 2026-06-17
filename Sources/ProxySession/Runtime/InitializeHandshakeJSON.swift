@@ -4,7 +4,7 @@ import ProxyMCP
 
 package enum InitializeHandshakeJSON {
     package static func resolved(
-        initializeParamsOverride: ProxyInitializeHandshakeOverride?
+        initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     ) -> [String: JSONValue] {
         let mergedParams = mergeJSONObjects(
             defaultParams(),
@@ -20,7 +20,7 @@ package enum InitializeHandshakeJSON {
 
     package static func defaultParams() -> [String: JSONValue] {
         [
-            "protocolVersion": .string(MCPProtocolVersion.current),
+            "protocolVersion": .string(MCP.ProtocolVersion.current),
             "capabilities": .object([:]),
             "clientInfo": .object([
                 "name": .string(InitializeHandshakeParams.defaultProxyClientName()),
@@ -30,7 +30,7 @@ package enum InitializeHandshakeJSON {
     }
 
     private static func jsonObject(
-        from override: ProxyInitializeHandshakeOverride?
+        from override: ProxyConfig.File.InitializeHandshakeOverride?
     ) -> [String: JSONValue]? {
         guard let override else { return nil }
         var params: [String: JSONValue] = [:]
@@ -56,7 +56,7 @@ package enum InitializeHandshakeJSON {
         return params.isEmpty ? nil : params
     }
 
-    private static func jsonValue(from value: ProxyConfigValue) -> JSONValue {
+    private static func jsonValue(from value: ProxyConfig.File.Value) -> JSONValue {
         switch value {
         case .object(let object):
             return .object(object.mapValues(jsonValue(from:)))

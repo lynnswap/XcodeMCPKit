@@ -2,7 +2,8 @@ import ProxyCore
 import Foundation
 import XcodeMCPProxy
 
-package struct ProxyServerCommandRuntime {
+extension XcodeMCPProxyServerCommand {
+    package struct Runtime {
     private let dependencies: XcodeMCPProxyServerCommand.Dependencies
 
     package init(dependencies: XcodeMCPProxyServerCommand.Dependencies) {
@@ -66,7 +67,7 @@ package struct ProxyServerCommandRuntime {
                 }
                 throw error
             }
-        } catch let error as ProxyServerCommandError {
+        } catch let error as XcodeMCPProxyServerCommand.Error {
             dependencies.stderr("error: \(error.description)")
             dependencies.stderr("run with --help for usage")
             return 1
@@ -78,5 +79,6 @@ package struct ProxyServerCommandRuntime {
             dependencies.stderr("error: \(error)")
             return 1
         }
+    }
     }
 }

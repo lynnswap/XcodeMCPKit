@@ -4,7 +4,8 @@ import Foundation
 import Logging
 import ProxyCore
 
-package enum XcodePermissionDialogMatcher {
+extension XcodePermissionDialog {
+    package enum Matcher {
     private static let allowedProcessBundleIdentifiers = normalizedCandidates([
         "com.apple.dt.Xcode",
         "com.apple.dt.ExternalViewService",
@@ -19,12 +20,12 @@ package enum XcodePermissionDialogMatcher {
     ])
 
     package static func decision(
-        for snapshot: XcodePermissionDialogWindowSnapshot,
+        for snapshot: XcodePermissionDialog.WindowSnapshot,
         processID: pid_t,
         agentPathCandidates: Set<String> = [],
         assistantNameCandidates: Set<String>,
         serverProcessIDCandidates: Set<pid_t> = [ProcessInfo.processInfo.processIdentifier]
-    ) -> XcodePermissionDialogMatchDecision? {
+    ) -> XcodePermissionDialog.MatchDecision? {
         guard passesStructuralChecks(snapshot) else {
             return nil
         }
@@ -44,14 +45,14 @@ package enum XcodePermissionDialogMatcher {
             return nil
         }
 
-        return XcodePermissionDialogMatchDecision(
+        return XcodePermissionDialog.MatchDecision(
             fingerprint: fingerprint(for: snapshot, processID: processID),
             defaultButtonTitle: defaultButtonDescription
         )
     }
 
     package static func fingerprint(
-        for snapshot: XcodePermissionDialogWindowSnapshot,
+        for snapshot: XcodePermissionDialog.WindowSnapshot,
         processID: pid_t
     ) -> String {
         let textFingerprint = normalizedTextNodes(for: snapshot).joined(separator: "\u{1F}")
@@ -68,7 +69,7 @@ package enum XcodePermissionDialogMatcher {
         ].joined(separator: "|")
     }
 
-    package static func passesStructuralChecks(_ snapshot: XcodePermissionDialogWindowSnapshot) -> Bool {
+    package static func passesStructuralChecks(_ snapshot: XcodePermissionDialog.WindowSnapshot) -> Bool {
         guard
             let normalizedBundleIdentifier = normalizedText(snapshot.processBundleIdentifier),
             allowedProcessBundleIdentifiers.contains(normalizedBundleIdentifier)
@@ -98,12 +99,12 @@ package enum XcodePermissionDialogMatcher {
         return true
     }
 
-    private static func looksLikeNormalWorkspaceWindow(_ snapshot: XcodePermissionDialogWindowSnapshot) -> Bool {
+    private static func looksLikeNormalWorkspaceWindow(_ snapshot: XcodePermissionDialog.WindowSnapshot) -> Bool {
         let hasDocument = normalizedText(snapshot.document) != nil
         return snapshot.isMain == true && (hasDocument || snapshot.hasProxy)
     }
 
-    private static func normalizedTextNodes(for snapshot: XcodePermissionDialogWindowSnapshot) -> [String] {
+    private static func normalizedTextNodes(for snapshot: XcodePermissionDialog.WindowSnapshot) -> [String] {
         ([snapshot.title] + snapshot.textValues).compactMap(normalizedText)
     }
 
@@ -192,7 +193,7 @@ package enum XcodePermissionDialogMatcher {
     }
 
     private static func normalizedButtonDescription(
-        _ button: XcodePermissionDialogButtonSnapshot?
+        _ button: XcodePermissionDialog.ButtonSnapshot?
     ) -> String {
         normalizedText(button?.title)
             ?? normalizedText(button?.identifier)
@@ -261,5 +262,6 @@ package enum XcodePermissionDialogMatcher {
             return nil
         }
         return trimmed.lowercased()
+    }
     }
 }

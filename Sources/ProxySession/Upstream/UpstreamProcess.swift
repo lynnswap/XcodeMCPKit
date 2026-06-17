@@ -30,7 +30,7 @@ private final class StdinWriter: @unchecked Sendable {
         self.onComplete = onComplete
     }
 
-    func send(_ payload: Data) -> UpstreamSendResult {
+    func send(_ payload: Data) -> Upstream.SendResult {
         state.lock()
         defer { state.unlock() }
 
@@ -108,8 +108,8 @@ package struct UpstreamProcess: UpstreamSessionFactory {
 }
 
 package actor ProcessBackedUpstreamSession: UpstreamSession {
-    package nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    package nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
 
     private let config: UpstreamProcess.Config
     private let logger: Logger = ProxyLogging.make("upstream")
@@ -146,14 +146,14 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private init(config: UpstreamProcess.Config) {
         self.config = config
 
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
         self.continuation = streamContinuation
     }
 
-    package func send(_ data: Data) async -> UpstreamSendResult {
+    package func send(_ data: Data) async -> Upstream.SendResult {
         if isStopping {
             logger.warning("Upstream send skipped because session is stopping")
             return .unavailable(.shuttingDown)

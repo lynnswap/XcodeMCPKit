@@ -249,7 +249,7 @@ package final class ProxyRouter: Sendable {
     }
 
     private static func responseIDKey(from object: [String: Any]) -> String? {
-        JSONRPCMessageInspector.responseCorrelationID(from: object)?.key
+        JSONRPC.Message.Inspector.responseCorrelationID(from: object)?.key
     }
 
     private static func responseIDKeys(from array: [Any]) -> Set<String> {

@@ -16,7 +16,7 @@ extension HTTPPostService {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         forceBatchArray: Bool
-    ) -> EventLoopFuture<HTTPPostResolution> {
+    ) -> EventLoopFuture<HTTPPostService.Resolution> {
         switch handling {
         case .pendingResponse(let future, let sessionID, let errorSessionID, let originalID):
             return future.map { buffer in
@@ -114,7 +114,7 @@ extension HTTPPostService {
         else {
             return false
         }
-        return JSONRPCMessageInspector.responseID(from: object) != nil
+        return JSONRPC.Message.Inspector.responseID(from: object) != nil
     }
 
     package struct ToolCallRouting {
@@ -243,7 +243,7 @@ extension HTTPPostService {
             requestIDs: routedResponseIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = HTTPPostCancellationHandle(
+        let cancellationHandle = HTTPPostService.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: routedResponseIDs.map(\.key)
@@ -369,7 +369,7 @@ extension HTTPPostService {
             guard !Task.isCancelled else {
                 break
             }
-            guard let originalID = JSONRPCMessageInspector.requestID(from: request) else {
+            guard let originalID = JSONRPC.Message.Inspector.requestID(from: request) else {
                 continue
             }
             let requestTimeout = Self.remainingRequestTimeout(until: deadline)
@@ -436,7 +436,7 @@ extension HTTPPostService {
             guard !Task.isCancelled else {
                 break
             }
-            guard let originalID = JSONRPCMessageInspector.requestID(from: request) else {
+            guard let originalID = JSONRPC.Message.Inspector.requestID(from: request) else {
                 continue
             }
             guard JSONSerialization.isValidJSONObject(request),
@@ -511,7 +511,7 @@ extension HTTPPostService {
         guard sessionManager.hasDocumentationProvider() else {
             return false
         }
-        guard case .request("tools/call", _) = JSONRPCMessageInspector.kind(of: object),
+        guard case .request("tools/call", _) = JSONRPC.Message.Inspector.kind(of: object),
             let params = object["params"] as? [String: Any],
             params["name"] as? String == DocumentationToolCatalog.toolName,
             disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
@@ -521,8 +521,8 @@ extension HTTPPostService {
     }
 
     private func isToolsListRequest(_ object: [String: Any]) -> Bool {
-        JSONRPCMessageInspector.requestID(from: object) != nil
-            && JSONRPCMessageInspector.method(from: object) == "tools/list"
+        JSONRPC.Message.Inspector.requestID(from: object) != nil
+            && JSONRPC.Message.Inspector.method(from: object) == "tools/list"
             && sessionManager.isInitialized()
     }
 
@@ -538,22 +538,22 @@ extension HTTPPostService {
         return toolName
     }
 
-    package func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssuesRequest? {
-        guard let object = RefreshCodeIssuesRequest.singleRequestObject(from: requestJSON) else {
+    package func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssues.Request? {
+        guard let object = RefreshCodeIssues.Request.singleRequestObject(from: requestJSON) else {
             return nil
         }
-        return RefreshCodeIssuesRequest(requestObject: object)
+        return RefreshCodeIssues.Request(requestObject: object)
     }
 
-    package func refreshRequestRouting(from requestJSON: Any) -> RefreshRequestRouting? {
+    package func refreshRequestRouting(from requestJSON: Any) -> HTTPPostService.RefreshRouting? {
         if let object = requestJSON as? [String: Any],
-            let refreshRequest = RefreshCodeIssuesRequest(requestObject: object),
+            let refreshRequest = RefreshCodeIssues.Request(requestObject: object),
             Self.extractResponseIDs(from: object).isEmpty == false,
             let bodyData = try? JSONSerialization.data(withJSONObject: object, options: [])
         {
-            return RefreshRequestRouting(
+            return HTTPPostService.RefreshRouting(
                 refreshRoutes: [
-                    RefreshRequestRoute(
+                    HTTPPostService.RefreshRoute(
                         request: refreshRequest,
                         bodyData: bodyData,
                         requestIDs: Self.extractResponseIDs(from: object),
@@ -569,7 +569,7 @@ extension HTTPPostService {
         guard let requests = requestJSON as? [Any] else {
             return nil
         }
-        var refreshRoutes: [RefreshRequestRoute] = []
+        var refreshRoutes: [HTTPPostService.RefreshRoute] = []
         var remainingRequestObjects: [[String: Any]] = []
         var remainingInvalidResponseObjects: [[String: Any]] = []
         for item in requests {
@@ -583,7 +583,7 @@ extension HTTPPostService {
                 )
                 continue
             }
-            guard let candidate = RefreshCodeIssuesRequest(requestObject: object) else {
+            guard let candidate = RefreshCodeIssues.Request(requestObject: object) else {
                 remainingRequestObjects.append(object)
                 continue
             }
@@ -597,7 +597,7 @@ extension HTTPPostService {
                 return nil
             }
             refreshRoutes.append(
-                RefreshRequestRoute(
+                HTTPPostService.RefreshRoute(
                     request: candidate,
                     bodyData: bodyData,
                     requestIDs: responseIDs,
@@ -626,7 +626,7 @@ extension HTTPPostService {
             from: remainingInvalidResponseObjects,
             forceBatchArray: remainingInvalidResponseObjects.count > 1
         )
-        return RefreshRequestRouting(
+        return HTTPPostService.RefreshRouting(
             refreshRoutes: refreshRoutes,
             remainingBodyData: remainingBodyData,
             remainingRequestIDs: Self.extractResponseIDs(from: remainingPayload as Any),

@@ -11,9 +11,9 @@ import XcodeMCPTestSupport
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
     UpstreamSlotScheduler(
-        canUseUpstream: { _ in UpstreamUseEvaluation(isUsable: true, effects: []) },
+        canUseUpstream: { _ in UpstreamHealthManager.UseEvaluation(isUsable: true, effects: []) },
         selectUpstream: { occupied in
-            UpstreamSelectionResult(
+            UpstreamHealthManager.SelectionResult(
                 upstreamIndex: (0..<upstreamCount).first { occupied.contains($0) == false },
                 effects: []
             )
@@ -284,8 +284,8 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
 }
 
 actor ScriptedDocumentationSession: UpstreamSession {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let processID: pid_t
     private let plan: ScriptedDocumentationSessionPlan
     private let recorder: ScriptedDocumentationSessionFactory
@@ -301,14 +301,14 @@ actor ScriptedDocumentationSession: UpstreamSession {
         self.plan = plan
         self.recorder = recorder
         self.remainingUserCallResponses = plan.userCallResponses
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
         self.continuation = streamContinuation
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
             as? [String: Any],
             let method = object["method"] as? String else {
@@ -596,12 +596,12 @@ func withEnvironmentVariables<T>(
 }
 
 actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let sentMessages = RecordedValues<Data>()
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -614,7 +614,7 @@ actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         await sentMessages.append(data)
         return .backpressure
     }
@@ -637,15 +637,15 @@ actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
 }
 
 actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<UpstreamEvent>
-    private let continuation: AsyncStream<UpstreamEvent>.Continuation
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let sentMessages = RecordedValues<Data>()
     private var overloaded = false
     private var overloadBudget = 0
     private var overloadNextInitializedNotification = false
 
     init() {
-        var streamContinuation: AsyncStream<UpstreamEvent>.Continuation!
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -670,7 +670,7 @@ actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
         overloadNextInitializedNotification = true
     }
 
-    func send(_ data: Data) async -> UpstreamSendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         await sentMessages.append(data)
         if overloadNextInitializedNotification,
             methodName(from: data) == "notifications/initialized"
@@ -685,7 +685,7 @@ actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
         return overloaded ? .backpressure : .accepted
     }
 
-    func yield(_ event: UpstreamEvent) async {
+    func yield(_ event: Upstream.Event) async {
         continuation.yield(event)
     }
 
@@ -945,7 +945,7 @@ func makeInitializeResponse(id: Int64) throws -> Data {
 
 func makeInitializeResponse(id: Int64, serverName: String?) throws -> Data {
     var result: [String: Any] = [
-        "protocolVersion": MCPProtocolVersion.current,
+        "protocolVersion": MCP.ProtocolVersion.current,
         "capabilities": [String: Any]()
     ]
     if let serverName {

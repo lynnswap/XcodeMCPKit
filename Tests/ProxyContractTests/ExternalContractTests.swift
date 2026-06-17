@@ -117,7 +117,7 @@ struct ExternalContractTests {
         ]
         let responseData = try JSONSerialization.data(withJSONObject: responseObject, options: [])
 
-        let rewritten = RefreshCodeIssuesToolsListRewriter.rewriteResponseDataIfNeeded(
+        let rewritten = RefreshCodeIssues.ToolsListRewriter.rewriteResponseDataIfNeeded(
             responseData,
             method: "tools/list",
             mode: .proxy,
@@ -143,7 +143,7 @@ struct ExternalContractTests {
     @Test func errorWireShapeRemainsStable() throws {
         let responseData = try #require(
             MCPErrorResponder.errorResponseData(
-                id: RPCID(any: 9),
+                id: JSONRPC.ID(any: 9),
                 code: -32001,
                 message: "upstream unavailable",
                 data: .object([

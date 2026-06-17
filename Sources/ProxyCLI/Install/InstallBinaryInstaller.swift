@@ -3,7 +3,7 @@ import Foundation
 
 package enum InstallBinaryInstaller {
     package static func install(
-        options: InstallOptions,
+        options: XcodeMCPProxyInstallCommand.Options,
         executableURL: URL,
         binaryNames: [String],
         fileManager: FileManager = .default,
@@ -34,7 +34,7 @@ package enum InstallBinaryInstaller {
         for name in binaryNames {
             let sourceURL = baseURL.appendingPathComponent(name)
             guard fileManager.fileExists(atPath: sourceURL.path) else {
-                throw InstallCommandError.message(
+                throw XcodeMCPProxyInstallCommand.Error.message(
                     "\(name) not found next to installer (run with `swift run -c release` from the repo root)"
                 )
             }
@@ -75,7 +75,7 @@ package enum InstallBinaryInstaller {
             try process.run()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
-                throw InstallCommandError.message(
+                throw XcodeMCPProxyInstallCommand.Error.message(
                     "swift build failed; run from the repo root and try again"
                 )
             }

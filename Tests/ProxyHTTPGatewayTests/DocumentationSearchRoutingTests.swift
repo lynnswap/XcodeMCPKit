@@ -84,7 +84,7 @@ extension HTTPHandlerTests {
                     requests.append(arguments["query"] as? String ?? "")
                 }
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"cold-docs\"}"
@@ -250,7 +250,7 @@ extension HTTPHandlerTests {
                     requests.append(arguments["query"] as? String ?? "")
                 }
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"docs\"}"
@@ -317,7 +317,7 @@ extension HTTPHandlerTests {
                     requests.append(arguments["query"] as? String ?? "")
                 }
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"docs\"}"
@@ -385,7 +385,7 @@ extension HTTPHandlerTests {
                     JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
                 )
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"docs\"}"
@@ -515,7 +515,7 @@ extension HTTPHandlerTests {
                     requests.append(arguments["query"] as? String ?? "")
                 }
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"docs\"}"
@@ -730,7 +730,7 @@ extension HTTPHandlerTests {
                 }
                 try await Task.sleep(for: .milliseconds(200))
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"\(query)\"}"
@@ -787,7 +787,7 @@ extension HTTPHandlerTests {
                     JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
                 )
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"cancelled\"}"
@@ -802,7 +802,7 @@ extension HTTPHandlerTests {
                 config: config,
                 sessionManager: sessionManager,
                 refreshCodeIssuesCoordinator: .makeDefault(),
-                refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState(
+                refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
                     defaultRequestTimeoutSeconds: config.requestTimeout
                 )
             )
@@ -872,7 +872,7 @@ extension HTTPHandlerTests {
                     JSONSerialization.jsonObject(with: requestData, options: []) as? [String: Any]
                 )
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"cancelled\"}"
@@ -887,7 +887,7 @@ extension HTTPHandlerTests {
                 config: config,
                 sessionManager: sessionManager,
                 refreshCodeIssuesCoordinator: .makeDefault(),
-                refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState(
+                refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
                     defaultRequestTimeoutSeconds: config.requestTimeout
                 )
             )
@@ -961,7 +961,7 @@ extension HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: "session-1")
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))

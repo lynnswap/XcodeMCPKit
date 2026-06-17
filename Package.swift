@@ -52,6 +52,7 @@ let package = Package(
         .target(
             name: "ProxyMCP",
             dependencies: [
+                "ProxyCore",
                 .product(name: "NIO", package: "swift-nio"),
             ],
             path: "Sources/ProxyMCP",

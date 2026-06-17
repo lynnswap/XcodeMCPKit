@@ -1,7 +1,11 @@
-public enum MCPProtocolVersion {
-    public static let current = "2025-06-18"
+public enum MCP {}
 
-    public static func isSupported(_ version: String) -> Bool {
-        version == current
+extension MCP {
+    public enum ProtocolVersion {
+        public static let current = "2025-06-18"
+
+        public static func isSupported(_ version: String) -> Bool {
+            version == current
+        }
     }
 }

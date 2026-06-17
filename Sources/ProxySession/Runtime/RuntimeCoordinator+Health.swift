@@ -38,7 +38,7 @@ extension RuntimeCoordinator {
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
-        let originalID = RPCID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
+        let originalID = JSONRPC.ID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
         let future = probeSession.router.registerRequest(
             idKey: originalID.key,
             on: eventLoop,
@@ -194,7 +194,7 @@ extension RuntimeCoordinator {
 
     func scheduleUpstreamInitTimeout(upstreamIndex: Int, upstreamID: Int64) {
         guard
-            let timeoutAmount = MCPMethodDispatcher.timeoutForInitialize(
+            let timeoutAmount = MCP.MethodDispatcher.timeoutForInitialize(
                 defaultSeconds: config.requestTimeout)
         else {
             return

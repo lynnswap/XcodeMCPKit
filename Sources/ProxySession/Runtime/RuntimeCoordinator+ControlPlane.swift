@@ -53,7 +53,7 @@ extension RuntimeCoordinator {
         let startedAt = nowUptimeNanoseconds()
         let effectiveRequestTimeout =
             requestTimeout
-            ?? MCPMethodDispatcher.timeoutForControlPlane(
+            ?? MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
         let nowUptimeNs = nowUptimeNanoseconds()
@@ -110,7 +110,7 @@ extension RuntimeCoordinator {
     ) async throws -> JSONValue {
         let effectiveRequestTimeout =
             requestTimeout
-            ?? MCPMethodDispatcher.timeoutForControlPlane(
+            ?? MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
         do {
@@ -147,7 +147,7 @@ extension RuntimeCoordinator {
         let internalSessionID = controlPlaneSessionID(for: purpose, route: route)
         let session = session(id: internalSessionID)
         let router = session.router
-        guard let originalID = JSONRPCMessageInspector.requestID(from: requestObject) else {
+        guard let originalID = JSONRPC.Message.Inspector.requestID(from: requestObject) else {
             throw ControlPlaneError.invalidResponse("missing request id")
         }
         let requestTemplate = requestObject.reduce(into: [String: JSONValue]()) { partial, entry in
@@ -156,7 +156,7 @@ extension RuntimeCoordinator {
                 partial[entry.key] = value
             }
         }
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: internalSessionID,
             label: label,
             isBatch: false,

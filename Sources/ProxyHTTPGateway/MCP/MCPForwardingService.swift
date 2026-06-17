@@ -71,13 +71,13 @@ package struct MCPForwardingService: Sendable {
         session: SessionContext,
         on eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil,
-        leaseID: RequestLeaseID? = nil,
-        cancellationHandle: HTTPPostCancellationHandle? = nil,
+        leaseID: LeaseManager.ID? = nil,
+        cancellationHandle: HTTPPostService.CancellationHandle? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
         let requestTimeout =
             requestTimeoutOverride
-            ?? MCPMethodDispatcher.timeoutForMethod(
+            ?? MCP.MethodDispatcher.timeoutForMethod(
                 prepared.transform.method,
                 defaultSeconds: config.requestTimeout
             )
@@ -204,10 +204,10 @@ package struct MCPForwardingService: Sendable {
         arguments: [String: Any],
         sessionID: String,
         eventLoop: EventLoop,
-        cancellationHandle: HTTPPostCancellationHandle? = nil,
+        cancellationHandle: HTTPPostService.CancellationHandle? = nil,
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshInternalToolResult {
+    ) async -> RefreshCodeIssues.Workflow.InternalToolResult {
         let requestObject: [String: Any] = [
             "jsonrpc": "2.0",
             "id": "__internal-\(UUID().uuidString)",
@@ -217,7 +217,7 @@ package struct MCPForwardingService: Sendable {
                 "arguments": arguments,
             ],
         ]
-        let internalRequestID = RPCID(any: requestObject["id"]!)!
+        let internalRequestID = JSONRPC.ID(any: requestObject["id"]!)!
 
         guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
         else {
@@ -227,7 +227,7 @@ package struct MCPForwardingService: Sendable {
             return .unavailable
         }
 
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:\(name)",
             isBatch: false,
@@ -235,7 +235,7 @@ package struct MCPForwardingService: Sendable {
             isTopLevelClientRequest: false
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let internalCancellationHandle = HTTPPostCancellationHandle(
+        let internalCancellationHandle = HTTPPostService.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: []

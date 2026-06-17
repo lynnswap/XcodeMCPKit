@@ -26,7 +26,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         package var isSSE = false
         package var sseSessionID: String?
         package var bodyTooLarge = false
-        package var activePostRequestHandles: [String: HTTPPostCancellationHandle] = [:]
+        package var activePostRequestHandles: [String: HTTPPostService.CancellationHandle] = [:]
         package var responseWriteTail: EventLoopFuture<Void>?
     }
 
@@ -40,17 +40,17 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package init(
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssuesCoordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssuesTargetResolver = RefreshCodeIssuesTargetResolver(),
-        refreshCodeIssuesDebugState: RefreshCodeIssuesDebugState? = nil,
+        refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
+        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
+        refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil,
         usesSynchronousLocalResolution: Bool = false
     ) {
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssuesCoordinator.makeDefault()
+            ?? RefreshCodeIssues.Coordinator.makeDefault()
         let refreshDebugState =
             refreshCodeIssuesDebugState
-            ?? RefreshCodeIssuesDebugState(
+            ?? RefreshCodeIssues.DebugState(
                 defaultRequestTimeoutSeconds: config.requestTimeout
             )
         self.config = config
@@ -558,7 +558,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         let isInitializeRequest = parsedRequestObject?["method"] as? String == "initialize"
         let hasValidInitializeID: Bool = {
             guard let parsedRequestObject,
-                case .request("initialize", _) = JSONRPCMessageInspector.kind(
+                case .request("initialize", _) = JSONRPC.Message.Inspector.kind(
                     of: parsedRequestObject
                 )
             else {
@@ -700,7 +700,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return nil
         }
-        guard MCPProtocolVersion.isSupported(protocolVersion),
+        guard MCP.ProtocolVersion.isSupported(protocolVersion),
             protocolVersion == expectedProtocolVersion
         else {
             _ = sendPlain(
@@ -763,7 +763,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return nil
         }
-        guard MCPProtocolVersion.isSupported(protocolVersion),
+        guard MCP.ProtocolVersion.isSupported(protocolVersion),
             protocolVersion == expectedProtocolVersion
         else {
             _ = sendPlain(

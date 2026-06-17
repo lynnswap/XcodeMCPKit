@@ -19,7 +19,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -40,7 +40,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             withIntermediateDirectories: true
         )
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -69,7 +69,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: unrelatedFile, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -91,7 +91,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let first = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -122,7 +122,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -149,7 +149,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             try "".write(to: url, atomically: true, encoding: .utf8)
         }
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -171,7 +171,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: firstCandidate, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let first = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -220,7 +220,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: validFallback, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -260,7 +260,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: validFallback, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -293,7 +293,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             withDestinationPath: target.path
         )
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -315,7 +315,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -341,7 +341,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             .appendingPathComponent("Outside.swift")
         try "".write(to: outsideFile, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -363,7 +363,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -397,7 +397,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             withDestinationPath: target.path
         )
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -428,7 +428,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: unrelatedFile, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -442,7 +442,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         let root = makeTemporaryWorkspaceRoot()
         defer { try? FileManager.default.removeItem(atPath: root) }
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -470,7 +470,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             withDestinationPath: outsideRoot
         )
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -504,7 +504,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             withDestinationPath: outsideFile.path
         )
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolved = await resolver.resolveAbsoluteFilePath(
             workspacePath: root,
             workspaceRoot: root,
@@ -532,7 +532,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolution = try await resolver.resolve(
             tabIdentifier: "windowtab2",
             filePath: "SampleProject/Feature/Scene/PrimaryView.swift",
@@ -578,7 +578,7 @@ struct RefreshCodeIssuesTargetResolverTests {
             withDestinationPath: target.path
         )
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let resolution = try await resolver.resolve(
             tabIdentifier: "windowtab2",
             filePath: "Feature/Scene/PrimaryView.swift",
@@ -614,7 +614,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let relativePath = await resolver.relativePath(
             for: target.path,
             within: rootAlias.path
@@ -653,7 +653,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         try "".write(to: targetA, atomically: true, encoding: .utf8)
         try "".write(to: targetB, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let eventLoop = EmbeddedEventLoop()
 
         let first = try await resolver.resolve(
@@ -696,7 +696,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let eventLoop = EmbeddedEventLoop()
 
         let first = try await resolver.resolve(
@@ -740,7 +740,7 @@ struct RefreshCodeIssuesTargetResolverTests {
         )
         try "".write(to: target, atomically: true, encoding: .utf8)
 
-        let resolver = RefreshCodeIssuesTargetResolver()
+        let resolver = RefreshCodeIssues.TargetResolver()
         let eventLoop = EmbeddedEventLoop()
 
         let first = try await resolver.resolve(

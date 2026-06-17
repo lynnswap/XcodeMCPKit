@@ -19,11 +19,11 @@ extension HTTPPostService {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         session: SessionContext,
-        leaseID: RequestLeaseID,
+        leaseID: LeaseManager.ID,
         upstreamIndex: Int,
-        cancellationHandle: HTTPPostCancellationHandle?,
+        cancellationHandle: HTTPPostService.CancellationHandle?,
         requestTimeoutOverride: TimeAmount?
-    ) -> EventLoopFuture<HTTPPostResolution> {
+    ) -> EventLoopFuture<HTTPPostService.Resolution> {
         guard let forwardedBodyData = filteredRequest.bodyData
         else {
             return makeImmediateLeaseResolution(
@@ -81,7 +81,7 @@ extension HTTPPostService {
                 refreshRouting.remainingLocalResponseData == nil,
                 let route = refreshRouting.refreshRoutes.first
             {
-                let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
+                let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
                 let refreshTask = Task { [self] in
                     let result = await forwardRefreshCodeIssuesRequest(
                         route.request,
@@ -132,7 +132,7 @@ extension HTTPPostService {
                 return promise.futureResult
             }
 
-            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
+            let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
             let refreshTask = Task { [self] in
                 var payloads: [Data?] = []
                 let splitDeadline = Self.timeoutDeadline(
@@ -362,7 +362,7 @@ extension HTTPPostService {
                 )
             }
 
-            let promise = eventLoop.makePromise(of: HTTPPostResolution.self)
+            let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
             started.future.whenComplete { result in
                 let resolution = self.forwardingService.resolveResponse(
                     result,

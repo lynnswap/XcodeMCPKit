@@ -4,12 +4,15 @@ import Foundation
 import Logging
 import ProxyCore
 
-package enum XcodePermissionDialogAccessibilityStatus: Sendable {
-    case trusted
-    case untrusted
-}
+package enum XcodePermissionDialog {}
 
-package struct XcodePermissionDialogButtonSnapshot: Equatable, Sendable {
+extension XcodePermissionDialog {
+    package enum AccessibilityStatus: Sendable {
+        case trusted
+        case untrusted
+    }
+
+    package struct ButtonSnapshot: Equatable, Sendable {
     package let title: String?
     package let role: String?
     package let subrole: String?
@@ -26,9 +29,9 @@ package struct XcodePermissionDialogButtonSnapshot: Equatable, Sendable {
         self.subrole = subrole
         self.identifier = identifier
     }
-}
+    }
 
-package struct XcodePermissionDialogWindowSnapshot: Equatable, Sendable {
+    package struct WindowSnapshot: Equatable, Sendable {
     package let processBundleIdentifier: String?
     package let title: String
     package let textValues: [String]
@@ -41,8 +44,8 @@ package struct XcodePermissionDialogWindowSnapshot: Equatable, Sendable {
     package let document: String?
     package let childCount: Int
     package let hasProxy: Bool
-    package let defaultButton: XcodePermissionDialogButtonSnapshot?
-    package let cancelButton: XcodePermissionDialogButtonSnapshot?
+    package let defaultButton: XcodePermissionDialog.ButtonSnapshot?
+    package let cancelButton: XcodePermissionDialog.ButtonSnapshot?
 
     package init(
         processBundleIdentifier: String? = nil,
@@ -57,8 +60,8 @@ package struct XcodePermissionDialogWindowSnapshot: Equatable, Sendable {
         document: String? = nil,
         childCount: Int = 0,
         hasProxy: Bool = false,
-        defaultButton: XcodePermissionDialogButtonSnapshot? = nil,
-        cancelButton: XcodePermissionDialogButtonSnapshot? = nil
+        defaultButton: XcodePermissionDialog.ButtonSnapshot? = nil,
+        cancelButton: XcodePermissionDialog.ButtonSnapshot? = nil
     ) {
         self.processBundleIdentifier = processBundleIdentifier
         self.title = title
@@ -75,14 +78,15 @@ package struct XcodePermissionDialogWindowSnapshot: Equatable, Sendable {
         self.defaultButton = defaultButton
         self.cancelButton = cancelButton
     }
-}
+    }
 
-package struct XcodePermissionDialogMatchDecision: Equatable, Sendable {
+    package struct MatchDecision: Equatable, Sendable {
     package let fingerprint: String
     package let defaultButtonTitle: String
 
     package init(fingerprint: String, defaultButtonTitle: String) {
         self.fingerprint = fingerprint
         self.defaultButtonTitle = defaultButtonTitle
+    }
     }
 }

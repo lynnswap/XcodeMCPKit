@@ -237,14 +237,14 @@ struct HTTPHandlerTests {
 
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let snapshot = try decoder.decode(HTTPDebugSnapshot.self, from: data)
+            let snapshot = try decoder.decode(HTTPControlService.DebugSnapshot.self, from: data)
             #expect(snapshot.refreshCodeIssues == nil)
 
             let (sensitiveResponse, sensitiveData) = try await getHTTPData(
                 url: makeDebugSnapshotURL(from: server.url, includeSensitive: true)
             )
             #expect(sensitiveResponse.statusCode == 200)
-            let sensitiveSnapshot = try decoder.decode(HTTPDebugSnapshot.self, from: sensitiveData)
+            let sensitiveSnapshot = try decoder.decode(HTTPControlService.DebugSnapshot.self, from: sensitiveData)
             let refreshSnapshot = try #require(sensitiveSnapshot.refreshCodeIssues)
             #expect(refreshSnapshot.queue.activeRequestCount == 1)
             #expect(refreshSnapshot.activeRequests.count == 1)
@@ -266,7 +266,7 @@ struct HTTPHandlerTests {
                 url: makeDebugSnapshotURL(from: server.url, includeSensitive: true)
             )
             #expect(completedResponse.statusCode == 200)
-            let completedSnapshot = try decoder.decode(HTTPDebugSnapshot.self, from: completedData)
+            let completedSnapshot = try decoder.decode(HTTPControlService.DebugSnapshot.self, from: completedData)
             let completedRefreshSnapshot = try #require(completedSnapshot.refreshCodeIssues)
             #expect(completedRefreshSnapshot.queue.activeRequestCount == 0)
             #expect(completedRefreshSnapshot.recentCompletedRequests.first?.finalState == "completed")
@@ -347,7 +347,7 @@ struct HTTPHandlerTests {
             "id": 1,
             "method": "initialize",
             "params": [
-                "protocolVersion": MCPProtocolVersion.current,
+                "protocolVersion": MCP.ProtocolVersion.current,
                 "capabilities": [String: Any](),
             ],
         ]
@@ -431,7 +431,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "MCP-Session-Id", value: "missing-session")
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -512,7 +512,7 @@ struct HTTPHandlerTests {
 
         var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
         deleteHead.headers.add(name: "MCP-Session-Id", value: sessionID)
-        deleteHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        deleteHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         try channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -523,7 +523,7 @@ struct HTTPHandlerTests {
         var sseHead = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         sseHead.headers.add(name: "Accept", value: "text/event-stream")
         sseHead.headers.add(name: "MCP-Session-Id", value: sessionID)
-        sseHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        sseHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         try channel.writeInbound(HTTPServerRequestPart.head(sseHead))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -777,7 +777,7 @@ struct HTTPHandlerTests {
         let sessionID = try initializeHTTPChannel(channel)
         let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
         let clientID = sessionManager.session(id: sessionID).serverRequestTracker.record(
-            upstreamID: RPCID(any: NSNumber(value: 99))!,
+            upstreamID: JSONRPC.ID(any: NSNumber(value: 99))!,
             upstreamIndex: 0
         )
 
@@ -811,7 +811,7 @@ struct HTTPHandlerTests {
         let sessionID = try initializeHTTPChannel(channel)
         let session = sessionManager.session(id: sessionID)
         let clientID = session.serverRequestTracker.record(
-            upstreamID: RPCID(any: NSNumber(value: 99))!,
+            upstreamID: JSONRPC.ID(any: NSNumber(value: 99))!,
             upstreamIndex: 0
         )
         sessionManager.setServerRequestResponseSendResults([.backpressure, .accepted])
@@ -1046,7 +1046,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1107,7 +1107,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1214,7 +1214,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1265,7 +1265,7 @@ struct HTTPHandlerTests {
         malformedHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         malformedHead.headers.add(name: "Content-Type", value: "application/json")
         malformedHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        malformedHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        malformedHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var malformedBody = channel.allocator.buffer(capacity: 20)
         malformedBody.writeString("{\"jsonrpc\":\"2.0\",")
         try channel.writeInbound(HTTPServerRequestPart.head(malformedHead))
@@ -1331,7 +1331,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1369,7 +1369,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: "missing-session")
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -1397,7 +1397,7 @@ struct HTTPHandlerTests {
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Mcp-Session-Id", value: "session-1")
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -1454,7 +1454,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1530,7 +1530,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1680,7 +1680,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1706,7 +1706,7 @@ struct HTTPHandlerTests {
         toolsHead2.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead2.headers.add(name: "Content-Type", value: "application/json")
         toolsHead2.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        toolsHead2.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead2.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody2 = channel.allocator.buffer(capacity: toolsData2.count)
         toolsBody2.writeBytes(toolsData2)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead2))
@@ -1774,7 +1774,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -1844,7 +1844,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -2016,7 +2016,7 @@ struct HTTPHandlerTests {
         toolsHead.headers.add(name: "Accept", value: "application/json, text/event-stream")
         toolsHead.headers.add(name: "Content-Type", value: "application/json")
         toolsHead.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        toolsHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var toolsBody = channel.allocator.buffer(capacity: toolsData.count)
         toolsBody.writeBytes(toolsData)
         try channel.writeInbound(HTTPServerRequestPart.head(toolsHead))
@@ -2043,7 +2043,7 @@ struct HTTPHandlerTests {
                     requests.append(arguments["query"] as? String ?? "")
                 }
                 let originalIDValue = try #require(object["id"])
-                let originalID = try #require(RPCID(any: originalIDValue))
+                let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
                     id: originalID,
                     text: "{\"answer\":\"ok\"}"
@@ -2247,7 +2247,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: "session-1")
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2322,7 +2322,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2400,7 +2400,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2473,7 +2473,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2548,7 +2548,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
@@ -2627,7 +2627,7 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID!)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCPProtocolVersion.current)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))

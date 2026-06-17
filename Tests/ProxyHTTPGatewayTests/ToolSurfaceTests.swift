@@ -50,7 +50,7 @@ struct ToolSurfaceTests {
         let rewritten = surface.rewriteForwardedResponse(
             method: "tools/call",
             toolName: "DocumentationSearch",
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             upstreamData: upstreamData
         )
 
@@ -102,7 +102,7 @@ struct ToolSurfaceTests {
         let rewritten = surface.rewriteForwardedResponse(
             method: "tools/call",
             toolName: "DocumentationSearch",
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             upstreamData: upstreamData
         )
 
@@ -158,7 +158,7 @@ struct ToolSurfaceTests {
         let rewritten = surface.rewriteForwardedResponse(
             method: "tools/call",
             toolName: "GetBuildLog",
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             upstreamData: upstreamData
         )
 
@@ -185,7 +185,7 @@ struct ToolSurfaceTests {
                 "result": [
                     "tools": [
                         [
-                            "name": RefreshCodeIssuesRequest.toolName,
+                            "name": RefreshCodeIssues.Request.toolName,
                             "description": "old",
                         ],
                         [
@@ -215,7 +215,7 @@ struct ToolSurfaceTests {
         let result = try #require(payload["result"] as? [String: Any])
         let tools = try #require(result["tools"] as? [[String: Any]])
         #expect(tools.count == 1)
-        #expect(tools[0]["name"] as? String == RefreshCodeIssuesRequest.toolName)
+        #expect(tools[0]["name"] as? String == RefreshCodeIssues.Request.toolName)
         #expect((tools[0]["description"] as? String)?.contains("navigator issues") == true)
     }
 
@@ -410,7 +410,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
 
     func registerInitialize(
         sessionID: String,
-        originalID: RPCID,
+        originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ByteBuffer> {
@@ -437,8 +437,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     func chooseUpstreamIndex() -> Int? { nil }
 
     func enqueueOnUpstreamSlot<Output>(
-        leaseID: RequestLeaseID,
-        descriptor: SessionPipelineRequestDescriptor,
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
@@ -446,7 +446,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func assignUpstreamID(sessionID: String, originalID: RPCID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
         fatalError("unused in ToolSurfaceTests")
     }
 
@@ -459,35 +459,35 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func createRequestLease(descriptor: SessionPipelineRequestDescriptor) -> RequestLeaseID {
+    func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID {
         fatalError("unused in ToolSurfaceTests")
     }
 
     func activateRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
         timeout: TimeAmount?
     ) {}
 
-    func completeRequestLease(_ leaseID: RequestLeaseID) {}
-    func requeueRequestLease(_ leaseID: RequestLeaseID) {}
+    func completeRequestLease(_ leaseID: LeaseManager.ID) {}
+    func requeueRequestLease(_ leaseID: LeaseManager.ID) {}
 
     func failRequestLease(
-        _ leaseID: RequestLeaseID,
-        terminalState: RequestLeaseState,
-        reason: RequestLeaseReleaseReason
+        _ leaseID: LeaseManager.ID,
+        terminalState: LeaseManager.State,
+        reason: LeaseManager.ReleaseReason
     ) {}
 
     func handleRequestLeaseTimeout(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int
     ) {}
 
     func abandonRequestLease(
-        _ leaseID: RequestLeaseID,
+        _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
         upstreamIndex: Int?

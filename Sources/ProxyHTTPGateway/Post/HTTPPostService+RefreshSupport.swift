@@ -14,7 +14,7 @@ extension HTTPPostService {
     package func listXcodeWindows(
         sessionID: String,
         eventLoop: EventLoop,
-        cancellationHandle: HTTPPostCancellationHandle? = nil,
+        cancellationHandle: HTTPPostService.CancellationHandle? = nil,
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
     ) async throws -> [XcodeWindowInfo]? {
@@ -43,14 +43,14 @@ extension HTTPPostService {
     package func forwardOnce(
         bodyData: Data,
         sessionID: String,
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         shouldRequeueLeaseOnRetryableFailure: @Sendable () -> Bool,
         eventLoop: EventLoop,
-        leaseID: RequestLeaseID,
-        cancellationHandle: HTTPPostCancellationHandle?,
+        leaseID: LeaseManager.ID,
+        cancellationHandle: HTTPPostService.CancellationHandle?,
         requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshForwardAttemptResult {
+    ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
         let parsedRequestJSON: Any
         do {
             parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
@@ -155,7 +155,7 @@ extension HTTPPostService {
                 // function's job; the terminal lease transition belongs to
                 // the caller that owns the whole refresh request.
                 if allowsLeaseRetry,
-                    RefreshCodeIssuesWorkflow.isRetryableRefreshCodeIssuesFailure(responseData),
+                    RefreshCodeIssues.Workflow.isRetryableRefreshCodeIssuesFailure(responseData),
                     shouldRequeueLeaseOnRetryableFailure()
                 {
                     sessionManager.requeueRequestLease(leaseID)
@@ -186,8 +186,8 @@ extension HTTPPostService {
     /// The single terminal lease transition for a refresh request,
     /// regardless of whether the proxy answered locally or forwarded.
     package func finishRefreshLease(
-        _ leaseID: RequestLeaseID,
-        result: RefreshForwardAttemptResult
+        _ leaseID: LeaseManager.ID,
+        result: RefreshCodeIssues.Workflow.ForwardAttemptResult
     ) {
         switch result {
         case .success:
@@ -235,7 +235,7 @@ extension HTTPPostService {
 
     package static func isRetryScopedRefreshLeaseRequest(_ requestJSON: Any) -> Bool {
         if let object = requestJSON as? [String: Any] {
-            return RefreshCodeIssuesRequest(requestObject: object) != nil
+            return RefreshCodeIssues.Request(requestObject: object) != nil
         }
         guard let array = requestJSON as? [Any],
             array.count == 1,
@@ -243,7 +243,7 @@ extension HTTPPostService {
         else {
             return false
         }
-        return RefreshCodeIssuesRequest(requestObject: object) != nil
+        return RefreshCodeIssues.Request(requestObject: object) != nil
     }
 
 
@@ -251,9 +251,9 @@ extension HTTPPostService {
         sessionID: String,
         parsedRequestJSON: Any,
         requestIsBatch: Bool,
-        requestIDs: [RPCID]
-    ) -> SessionPipelineRequestDescriptor {
-        SessionPipelineRequestDescriptor(
+        requestIDs: [JSONRPC.ID]
+    ) -> SessionRequestPipeline.Descriptor {
+        SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: requestLabel(from: parsedRequestJSON),
             isBatch: requestIsBatch,
@@ -263,16 +263,16 @@ extension HTTPPostService {
     }
 
     package func forwardRefreshCodeIssuesRequest(
-        _ refreshRequest: RefreshCodeIssuesRequest,
+        _ refreshRequest: RefreshCodeIssues.Request,
         bodyData: Data,
         sessionID: String,
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         requestTimeoutOverride: TimeAmount? = nil,
         eventLoop: EventLoop,
-        leaseID: RequestLeaseID,
-        cancellationHandle: HTTPPostCancellationHandle?
-    ) async -> RefreshForwardAttemptResult {
+        leaseID: LeaseManager.ID,
+        cancellationHandle: HTTPPostService.CancellationHandle?
+    ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
         await refreshWorkflow.run(
             refreshRequest: refreshRequest,
             bodyData: bodyData,
@@ -328,13 +328,13 @@ extension HTTPPostService {
     /// are no-ops; this performs exactly the lease/cancellation choreography
     /// the re-entry used to produce.
     package func executeRefreshRoute(
-        _ route: RefreshRequestRoute,
+        _ route: HTTPPostService.RefreshRoute,
         sessionID: String,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
-        parentCancellationHandle: HTTPPostCancellationHandle?
-    ) async -> HTTPPostResolution {
+        parentCancellationHandle: HTTPPostService.CancellationHandle?
+    ) async -> HTTPPostService.Resolution {
         let parsedRoutePayload =
             (try? JSONSerialization.jsonObject(with: route.bodyData, options: []))
             ?? [String: Any]()
@@ -345,7 +345,7 @@ extension HTTPPostService {
             requestIDs: route.requestIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = HTTPPostCancellationHandle(
+        let cancellationHandle = HTTPPostService.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: route.requestIDs.map(\.key)
@@ -391,10 +391,10 @@ extension HTTPPostService {
     }
 
     package func makeResolution(
-        from result: RefreshForwardAttemptResult,
+        from result: RefreshCodeIssues.Workflow.ForwardAttemptResult,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostResolution {
+    ) -> HTTPPostService.Resolution {
         switch result {
         case .success(let responseData):
             return .responseData(
@@ -459,19 +459,19 @@ extension HTTPPostService {
     }
 
     package func makeImmediateLeaseResolution(
-        _ resolution: HTTPPostResolution,
-        leaseID: RequestLeaseID,
+        _ resolution: HTTPPostService.Resolution,
+        leaseID: LeaseManager.ID,
         eventLoop: EventLoop,
-        cancellationHandle: HTTPPostCancellationHandle?
-    ) -> EventLoopFuture<HTTPPostResolution> {
+        cancellationHandle: HTTPPostService.CancellationHandle?
+    ) -> EventLoopFuture<HTTPPostService.Resolution> {
         cancellationHandle?.markCompleted()
         sessionManager.completeRequestLease(leaseID)
         return eventLoop.makeSucceededFuture(resolution)
     }
 
     package func cancel(
-        _ handle: HTTPPostCancellationHandle,
-        source: HTTPPostCancellationSource = .channelInactive
+        _ handle: HTTPPostService.CancellationHandle,
+        source: HTTPPostService.CancellationSource = .channelInactive
     ) {
         logger.debug(
             "Cancelling top-level upstream request",

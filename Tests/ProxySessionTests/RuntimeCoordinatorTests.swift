@@ -106,12 +106,12 @@ struct RuntimeCoordinatorTests {
         let request1 = makeInitializeRequest(id: 1)
         let request2 = makeInitializeRequest(id: 2)
         let future1 = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: request1,
             on: eventLoop
         )
         let future2 = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: request2,
             on: eventLoop
         )
@@ -157,7 +157,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -183,7 +183,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-unsupported-protocol"
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -226,7 +226,7 @@ struct RuntimeCoordinatorTests {
         let sessionID = "session-failed-initialize"
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -257,7 +257,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -278,7 +278,7 @@ struct RuntimeCoordinatorTests {
         )
         manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
 
-        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
         #expect(route.upstreamIndex == 0)
         #expect(route.upstreamID.key == "server-request-1")
@@ -300,7 +300,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
         let initializeFuture = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -309,7 +309,7 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
         _ = try await initializeFuture.get()
 
-        let originalID = RPCID(any: NSNumber(value: 42))!
+        let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
         let responseFuture = session.router.registerRequest(
             idKey: originalID.key,
             on: eventLoop
@@ -331,7 +331,7 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
 
-        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
         #expect(route.upstreamIndex == 0)
         #expect(route.upstreamID.key == String(upstreamID))
@@ -355,7 +355,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
         let initializeFuture = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -364,7 +364,7 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
         _ = try await initializeFuture.get()
 
-        let originalID = RPCID(any: NSNumber(value: 42))!
+        let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
         let responseFuture = session.router.registerRequest(
             idKey: originalID.key,
             on: eventLoop
@@ -397,7 +397,7 @@ struct RuntimeCoordinatorTests {
         #expect((response["id"] as? NSNumber)?.intValue == 42)
         #expect((response["result"] as? [String: Any])?["ok"] as? Bool == true)
 
-        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         let route = try #require(session.serverRequestTracker.lookup(clientID: clientID))
         #expect(route.upstreamIndex == 0)
         #expect(route.upstreamID.key == "server-request-1")
@@ -439,7 +439,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
         let initializeFuture = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -448,7 +448,7 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
         _ = try await initializeFuture.get()
 
-        let originalID = RPCID(any: NSNumber(value: 42))!
+        let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
         let responseFuture = session.router.registerRequest(
             idKey: originalID.key,
             on: eventLoop
@@ -490,7 +490,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
         let initializeFuture = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -510,7 +510,7 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
 
-        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
 
         let clientResponse: [String: Any] = [
@@ -553,7 +553,7 @@ struct RuntimeCoordinatorTests {
         async throws
     {
         let tracker = ServerRequestTracker()
-        let upstreamID = RPCID(any: "duplicate")!
+        let upstreamID = JSONRPC.ID(any: "duplicate")!
 
         let firstClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 0)
         let secondClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 1)
@@ -569,7 +569,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func serverRequestTrackerExpiresUnansweredRoutes() async throws {
         let tracker = ServerRequestTracker(routeTimeout: .seconds(1))
-        let upstreamID = RPCID(any: "stale")!
+        let upstreamID = JSONRPC.ID(any: "stale")!
         let now = Date()
 
         let clientID = tracker.record(
@@ -589,17 +589,17 @@ struct RuntimeCoordinatorTests {
         let tracker = ServerRequestTracker(routeTimeout: .seconds(60), maxRoutes: 2)
         let now = Date()
         let first = tracker.record(
-            upstreamID: RPCID(any: "first")!,
+            upstreamID: JSONRPC.ID(any: "first")!,
             upstreamIndex: 0,
             now: now
         )
         let second = tracker.record(
-            upstreamID: RPCID(any: "second")!,
+            upstreamID: JSONRPC.ID(any: "second")!,
             upstreamIndex: 0,
             now: now
         )
         let third = tracker.record(
-            upstreamID: RPCID(any: "third")!,
+            upstreamID: JSONRPC.ID(any: "third")!,
             upstreamIndex: 0,
             now: now
         )
@@ -622,7 +622,7 @@ struct RuntimeCoordinatorTests {
         let firstSession = manager.session(id: firstSessionID)
         let firstFuture = manager.registerInitialize(
             sessionID: firstSessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -635,14 +635,14 @@ struct RuntimeCoordinatorTests {
         let secondSession = manager.session(id: secondSessionID)
         let secondFuture = manager.registerInitialize(
             sessionID: secondSessionID,
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
         _ = try await secondFuture.get()
 
         let ownerLeaseID = manager.createRequestLease(
-            descriptor: SessionPipelineRequestDescriptor(
+            descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: secondSessionID,
                 label: "tools/call:owner",
                 isBatch: false,
@@ -670,7 +670,7 @@ struct RuntimeCoordinatorTests {
         )
         manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
 
-        let clientID = RPCID(any: "xcode-mcp-proxy.server-request.1")!
+        let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         #expect(firstSession.serverRequestTracker.consume(clientID: clientID) == nil)
         let route = try #require(secondSession.serverRequestTracker.consume(clientID: clientID))
         #expect(route.upstreamIndex == 0)
@@ -689,7 +689,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -726,7 +726,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -771,7 +771,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -811,7 +811,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -849,7 +849,7 @@ struct RuntimeCoordinatorTests {
 
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -897,7 +897,7 @@ struct RuntimeCoordinatorTests {
 
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -936,7 +936,7 @@ struct RuntimeCoordinatorTests {
 
         let firstFuture = manager.registerInitialize(
             sessionID: "session-A",
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -951,7 +951,7 @@ struct RuntimeCoordinatorTests {
         _ = session.router.drainBufferedNotifications()
         let cachedFuture = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -993,7 +993,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1022,7 +1022,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1085,7 +1085,7 @@ struct RuntimeCoordinatorTests {
 
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1153,7 +1153,7 @@ struct RuntimeCoordinatorTests {
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: request,
             on: eventLoop
         )
@@ -1173,7 +1173,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.testStateSnapshot().initInFlight == false)
 
         _ = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -1195,7 +1195,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1223,7 +1223,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1257,7 +1257,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionID)
         let future = manager.registerInitialize(
             sessionID: sessionID,
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1304,7 +1304,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1361,7 +1361,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1424,7 +1424,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1494,7 +1494,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1541,7 +1541,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1611,7 +1611,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1677,7 +1677,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1733,7 +1733,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1787,7 +1787,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1842,7 +1842,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -1897,7 +1897,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -2046,7 +2046,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func initializeTimeoutRemainsBoundedWhenRequestTimeoutIsDisabled() throws {
-        let timeout = MCPMethodDispatcher.timeoutForInitialize(defaultSeconds: 0)
+        let timeout = MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: 0)
         #expect(timeout?.nanoseconds == TimeAmount.seconds(60).nanoseconds)
     }
 
@@ -2388,7 +2388,7 @@ struct RuntimeCoordinatorTests {
         }
 
         _ = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: [
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -2429,7 +2429,7 @@ struct RuntimeCoordinatorTests {
 
         let request = makeInitializeRequest(id: 1)
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: request,
             on: eventLoop
         )
@@ -2443,7 +2443,7 @@ struct RuntimeCoordinatorTests {
         _ = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
 
         let cached = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -2468,7 +2468,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -2481,7 +2481,7 @@ struct RuntimeCoordinatorTests {
         let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
         let init1ID = try extractUpstreamID(from: init1)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -2513,7 +2513,7 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/list",
             isBatch: false,
@@ -2562,7 +2562,7 @@ struct RuntimeCoordinatorTests {
 
         // First init establishes the cached init result.
         let init1 = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -2582,7 +2582,7 @@ struct RuntimeCoordinatorTests {
 
         // A new downstream initialize must trigger a new upstream initialize (no cached response).
         let init2 = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -2602,7 +2602,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -2630,7 +2630,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -2640,7 +2640,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -2672,7 +2672,7 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/list",
             isBatch: false,
@@ -2733,7 +2733,7 @@ struct RuntimeCoordinatorTests {
 
         // First init establishes the cached init result (primary only).
         let init1 = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -2777,7 +2777,7 @@ struct RuntimeCoordinatorTests {
 
         // A new downstream initialize must trigger a new upstream initialize (no cached response).
         let init2 = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 2))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
@@ -2935,8 +2935,8 @@ struct RuntimeCoordinatorTests {
         let sessionA = manager.session(id: sessionIDA)
         let sessionB = manager.session(id: sessionIDB)
 
-        let originalA = RPCID(any: NSNumber(value: 100))!
-        let originalB = RPCID(any: NSNumber(value: 101))!
+        let originalA = JSONRPC.ID(any: NSNumber(value: 100))!
+        let originalB = JSONRPC.ID(any: NSNumber(value: 101))!
 
         let upstreamIndexA = try #require(
             manager.chooseUpstreamIndex())
@@ -3128,7 +3128,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
         let upstreamIndex = try #require(
             manager.chooseUpstreamIndex())
-        let original = RPCID(any: NSNumber(value: 301))!
+        let original = JSONRPC.ID(any: NSNumber(value: 301))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(1))
         let upstreamID = manager.assignUpstreamID(
@@ -3149,7 +3149,7 @@ struct RuntimeCoordinatorTests {
             ))
         await upstream.yield(
             .stdoutProtocolViolation(
-                StdioFramerProtocolViolation(
+                StdioFramer.ProtocolViolation(
                     reason: .invalidJSON,
                     bufferedByteCount: 1024,
                     preview: "...broken"
@@ -3309,7 +3309,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -3332,7 +3332,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
 
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-quarantine-recovery",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -3378,7 +3378,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -3405,7 +3405,7 @@ struct RuntimeCoordinatorTests {
         let warmInitialize = try #require(await upstream1.sentValue(at: 0))
         let warmInitID = try extractUpstreamID(from: warmInitialize)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -3450,7 +3450,7 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/list",
             isBatch: false,
@@ -3526,7 +3526,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -3541,7 +3541,7 @@ struct RuntimeCoordinatorTests {
         await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -3566,7 +3566,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = activeFuture
 
-        let preferredDescriptor = SessionPipelineRequestDescriptor(
+        let preferredDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-preferred",
             label: "tools/call:XcodeListWindows",
             isBatch: false,
@@ -3589,7 +3589,7 @@ struct RuntimeCoordinatorTests {
             manager.debugSnapshot().queuedRequestCount == 1
         }
 
-        let genericDescriptor = SessionPipelineRequestDescriptor(
+        let genericDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-generic",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -3737,7 +3737,7 @@ struct RuntimeCoordinatorTests {
         let session = manager.session(id: sessionID)
 
         // Send a request to upstream1, then kill upstream1 before it can respond.
-        let originalA = RPCID(any: NSNumber(value: 200))!
+        let originalA = JSONRPC.ID(any: NSNumber(value: 200))!
         let futureA = session.router.registerRequest(idKey: originalA.key, on: eventLoop)
         let upstreamIDA = manager.assignUpstreamID(
             sessionID: sessionID, originalID: originalA, upstreamIndex: 1)
@@ -3751,7 +3751,7 @@ struct RuntimeCoordinatorTests {
         )
 
         // The proxy should continue serving on upstream0.
-        let originalB = RPCID(any: NSNumber(value: 201))!
+        let originalB = JSONRPC.ID(any: NSNumber(value: 201))!
         let futureB = session.router.registerRequest(idKey: originalB.key, on: eventLoop)
         let upstreamIndexB = try #require(
             manager.chooseUpstreamIndex())
@@ -3788,7 +3788,7 @@ struct RuntimeCoordinatorTests {
 
         let sessionID = "session-overloaded"
         let session = manager.session(id: sessionID)
-        let original = RPCID(any: NSNumber(value: 910))!
+        let original = JSONRPC.ID(any: NSNumber(value: 910))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(5))
         let upstreamID = manager.assignUpstreamID(
@@ -3827,7 +3827,7 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
-        let original = RPCID(any: NSNumber(value: 1001))!
+        let original = JSONRPC.ID(any: NSNumber(value: 1001))!
         let future = manager.registerInitialize(
             originalID: original,
             requestObject: makeInitializeRequest(id: 1001),
@@ -3880,7 +3880,7 @@ struct RuntimeCoordinatorTests {
 
         await upstream0.setOverloaded(true)
 
-        let original = RPCID(any: NSNumber(value: 920))!
+        let original = JSONRPC.ID(any: NSNumber(value: 920))!
         let future = session.router.registerRequest(
             idKey: original.key, on: eventLoop, timeout: .seconds(5))
         let upstreamID = manager.assignUpstreamID(
@@ -3903,7 +3903,7 @@ struct RuntimeCoordinatorTests {
             manager.chooseUpstreamIndex())
         #expect(repinned == 1)
 
-        let original2 = RPCID(any: NSNumber(value: 921))!
+        let original2 = JSONRPC.ID(any: NSNumber(value: 921))!
         let future2 = session.router.registerRequest(
             idKey: original2.key, on: eventLoop, timeout: .seconds(5))
         let upstreamID2 = manager.assignUpstreamID(
@@ -4070,7 +4070,7 @@ struct RuntimeCoordinatorTests {
         ]))
         manager.canonicalBrokerState.syncCanonicalInitialize(cachedHandshake, sourceUpstream: 0)
         let future = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 77))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 77))!,
             requestObject: makeInitializeRequest(id: 77),
             on: eventLoop
         )
@@ -4223,7 +4223,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-recovery-trigger",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4273,7 +4273,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4283,7 +4283,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4307,7 +4307,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = activeFuture
 
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -4351,7 +4351,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-disconnect"
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -4359,7 +4359,7 @@ struct RuntimeCoordinatorTests {
             isTopLevelClientRequest: true
         )
         let leaseID = manager.createRequestLease(descriptor: descriptor)
-        let originalID = try #require(RPCID(any: NSNumber(value: 1)))
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
         let upstreamID = manager.assignUpstreamID(
             sessionID: sessionID,
             originalID: originalID,
@@ -4413,7 +4413,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let leaseID = manager.createRequestLease(
-            descriptor: SessionPipelineRequestDescriptor(
+            descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: "session-terminal-lease",
                 label: "tools/call:DocumentationSearch",
                 isBatch: false,
@@ -4454,7 +4454,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-protocol-violation"
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4462,7 +4462,7 @@ struct RuntimeCoordinatorTests {
             isTopLevelClientRequest: true
         )
         let leaseID = manager.createRequestLease(descriptor: descriptor)
-        let originalID = try #require(RPCID(any: NSNumber(value: 41)))
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 41)))
         let upstreamID = manager.assignUpstreamID(
             sessionID: sessionID,
             originalID: originalID,
@@ -4476,7 +4476,7 @@ struct RuntimeCoordinatorTests {
             timeout: .seconds(5)
         )
         manager.handleUpstreamProtocolViolation(
-            StdioFramerProtocolViolation(
+            StdioFramer.ProtocolViolation(
                 reason: .invalidJSON,
                 bufferedByteCount: 128,
                 preview: "{broken"
@@ -4508,7 +4508,7 @@ struct RuntimeCoordinatorTests {
         #expect(lateLease.releaseReason == "stdoutProtocolViolation")
 
         let nextLeaseID = manager.createRequestLease(descriptor: descriptor)
-        let nextOriginalID = try #require(RPCID(any: NSNumber(value: 42)))
+        let nextOriginalID = try #require(JSONRPC.ID(any: NSNumber(value: 42)))
         let nextUpstreamID = manager.assignUpstreamID(
             sessionID: sessionID,
             originalID: nextOriginalID,
@@ -4541,7 +4541,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4552,7 +4552,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
         manager.handleUpstreamProtocolViolation(
-            StdioFramerProtocolViolation(
+            StdioFramer.ProtocolViolation(
                 reason: .invalidJSON,
                 bufferedByteCount: 128,
                 preview: "{broken"
@@ -4581,7 +4581,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4611,7 +4611,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4625,7 +4625,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.cachedToolsListResult() != nil)
 
         manager.handleUpstreamProtocolViolation(
-            StdioFramerProtocolViolation(
+            StdioFramer.ProtocolViolation(
                 reason: .invalidJSON,
                 bufferedByteCount: 64,
                 preview: "{broken"
@@ -4646,7 +4646,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4657,7 +4657,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
         manager.handleUpstreamProtocolViolation(
-            StdioFramerProtocolViolation(
+            StdioFramer.ProtocolViolation(
                 reason: .invalidJSON,
                 bufferedByteCount: 128,
                 preview: "{broken"
@@ -4688,7 +4688,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4698,7 +4698,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4722,7 +4722,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = activeFuture
 
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -4749,7 +4749,7 @@ struct RuntimeCoordinatorTests {
         }
 
         manager.handleUpstreamProtocolViolation(
-            StdioFramerProtocolViolation(
+            StdioFramer.ProtocolViolation(
                 reason: .invalidJSON,
                 bufferedByteCount: 128,
                 preview: "{broken"
@@ -4773,7 +4773,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4788,7 +4788,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 0, nowUptimeNs: 0)
         _ = manager.chooseUpstreamIndex()
 
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-probe-failure",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4835,7 +4835,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4845,7 +4845,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-timeout-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4869,7 +4869,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = activeFuture
 
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-timeout-queued",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -4930,7 +4930,7 @@ struct RuntimeCoordinatorTests {
         manager.setCachedToolsListResult(.object(["tools": .array([])]), sourceUpstream: 0)
 
         let leaseID = manager.createRequestLease(
-            descriptor: SessionPipelineRequestDescriptor(
+            descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: "session-debug-reset",
                 label: "tools/call:DocumentationSearch",
                 isBatch: false,
@@ -4964,7 +4964,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
-            originalID: RPCID(any: NSNumber(value: 1))!,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
@@ -4974,7 +4974,7 @@ struct RuntimeCoordinatorTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        let activeDescriptor = SessionPipelineRequestDescriptor(
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -4998,7 +4998,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = activeFuture
 
-        let queuedDescriptor = SessionPipelineRequestDescriptor(
+        let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -5029,7 +5029,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func requestLeaseRegistryKeepsOnlyBoundedReleasedHistory() async throws {
         let registry = LeaseManager(releasedHistoryLimit: 2)
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-bounded-history",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -5061,7 +5061,7 @@ struct RuntimeCoordinatorTests {
         async throws
     {
         let registry = LeaseManager()
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-requeue",
             label: "tools/call:XcodeRefreshCodeIssuesInFile",
             isBatch: false,
@@ -5093,7 +5093,7 @@ struct RuntimeCoordinatorTests {
         async throws
     {
         let registry = LeaseManager(releasedHistoryLimit: 1)
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-abandon-history",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -5135,10 +5135,10 @@ struct RuntimeCoordinatorTests {
     {
         let eventLoop = EmbeddedEventLoop()
         let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 1)
-        let startedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
-        let cancelledLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+        let startedLeaseIDs = NIOLockedValueBox<[LeaseManager.ID]>([])
+        let cancelledLeaseIDs = NIOLockedValueBox<[LeaseManager.ID]>([])
 
-        let firstDescriptor = SessionPipelineRequestDescriptor(
+        let firstDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-race-1",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -5163,7 +5163,7 @@ struct RuntimeCoordinatorTests {
 
         scheduler.cancelQueuedRequest(leaseID: firstLeaseID)
 
-        let secondDescriptor = SessionPipelineRequestDescriptor(
+        let secondDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-race-2",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -5198,10 +5198,10 @@ struct RuntimeCoordinatorTests {
     {
         let eventLoop = EmbeddedEventLoop()
         let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 1)
-        let startedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
-        let failedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+        let startedLeaseIDs = NIOLockedValueBox<[LeaseManager.ID]>([])
+        let failedLeaseIDs = NIOLockedValueBox<[LeaseManager.ID]>([])
 
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-fail-race",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -5237,10 +5237,10 @@ struct RuntimeCoordinatorTests {
     {
         let eventLoop = EmbeddedEventLoop()
         let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 1)
-        let startedLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
-        let cancelledLeaseIDs = NIOLockedValueBox<[RequestLeaseID]>([])
+        let startedLeaseIDs = NIOLockedValueBox<[LeaseManager.ID]>([])
+        let cancelledLeaseIDs = NIOLockedValueBox<[LeaseManager.ID]>([])
 
-        let descriptor = SessionPipelineRequestDescriptor(
+        let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-reset-race",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -5278,7 +5278,7 @@ struct RuntimeCoordinatorTests {
         let scheduler = makeTestUpstreamSlotScheduler(upstreamCount: 2)
         let started = NIOLockedValueBox<[String]>([])
 
-        let firstDescriptor = SessionPipelineRequestDescriptor(
+        let firstDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-a",
             label: "tools/call:DocumentationSearch",
             isBatch: false,
@@ -5302,7 +5302,7 @@ struct RuntimeCoordinatorTests {
         )
         eventLoop.run()
 
-        let secondDescriptor = SessionPipelineRequestDescriptor(
+        let secondDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-a",
             label: "tools/call:ExecuteSnippet",
             isBatch: false,
@@ -5325,7 +5325,7 @@ struct RuntimeCoordinatorTests {
             }
         )
 
-        let thirdDescriptor = SessionPipelineRequestDescriptor(
+        let thirdDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-b",
             label: "tools/call:XcodeListWindows",
             isBatch: false,

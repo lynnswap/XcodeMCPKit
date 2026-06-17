@@ -5,64 +5,64 @@ import XcodeMCPProxy
 
 extension ProxyServer: ProxyServerCommandServer {}
 
-package struct ProxyServerOptions {
-    package var forwardedArgs: [String]
-    package var showHelp: Bool
-    package var showVersion: Bool
-    package var hasListenFlag: Bool
-    package var hasHostFlag: Bool
-    package var hasPortFlag: Bool
-    package var hasConfigFlag: Bool
-    package var hasAutoApproveFlag: Bool
-    package var hasRefreshCodeIssuesModeFlag: Bool
-    package var forceRestart: Bool
-    package var dryRun: Bool
+package struct XcodeMCPProxyServerCommand {
+    package struct Options {
+        package var forwardedArgs: [String]
+        package var showHelp: Bool
+        package var showVersion: Bool
+        package var hasListenFlag: Bool
+        package var hasHostFlag: Bool
+        package var hasPortFlag: Bool
+        package var hasConfigFlag: Bool
+        package var hasAutoApproveFlag: Bool
+        package var hasRefreshCodeIssuesModeFlag: Bool
+        package var forceRestart: Bool
+        package var dryRun: Bool
 
-    package init(
-        forwardedArgs: [String],
-        showHelp: Bool,
-        showVersion: Bool,
-        hasListenFlag: Bool,
-        hasHostFlag: Bool,
-        hasPortFlag: Bool,
-        hasConfigFlag: Bool,
-        hasAutoApproveFlag: Bool,
-        hasRefreshCodeIssuesModeFlag: Bool,
-        forceRestart: Bool,
-        dryRun: Bool
-    ) {
-        self.forwardedArgs = forwardedArgs
-        self.showHelp = showHelp
-        self.showVersion = showVersion
-        self.hasListenFlag = hasListenFlag
-        self.hasHostFlag = hasHostFlag
-        self.hasPortFlag = hasPortFlag
-        self.hasConfigFlag = hasConfigFlag
-        self.hasAutoApproveFlag = hasAutoApproveFlag
-        self.hasRefreshCodeIssuesModeFlag = hasRefreshCodeIssuesModeFlag
-        self.forceRestart = forceRestart
-        self.dryRun = dryRun
-    }
-}
-
-package enum ProxyServerCommandError: Error, CustomStringConvertible {
-    case message(String)
-
-    package var description: String {
-        switch self {
-        case .message(let text):
-            return text
+        package init(
+            forwardedArgs: [String],
+            showHelp: Bool,
+            showVersion: Bool,
+            hasListenFlag: Bool,
+            hasHostFlag: Bool,
+            hasPortFlag: Bool,
+            hasConfigFlag: Bool,
+            hasAutoApproveFlag: Bool,
+            hasRefreshCodeIssuesModeFlag: Bool,
+            forceRestart: Bool,
+            dryRun: Bool
+        ) {
+            self.forwardedArgs = forwardedArgs
+            self.showHelp = showHelp
+            self.showVersion = showVersion
+            self.hasListenFlag = hasListenFlag
+            self.hasHostFlag = hasHostFlag
+            self.hasPortFlag = hasPortFlag
+            self.hasConfigFlag = hasConfigFlag
+            self.hasAutoApproveFlag = hasAutoApproveFlag
+            self.hasRefreshCodeIssuesModeFlag = hasRefreshCodeIssuesModeFlag
+            self.forceRestart = forceRestart
+            self.dryRun = dryRun
         }
     }
-}
 
-package struct XcodeMCPProxyServerCommand {
+    package enum Error: Swift.Error, CustomStringConvertible {
+        case message(String)
+
+        package var description: String {
+            switch self {
+            case .message(let text):
+                return text
+            }
+        }
+    }
+
     package struct Dependencies {
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
         package var stderr: (String) -> Void
         package var makeServer: (ProxyConfig) -> any ProxyServerCommandServer
-        package var isAddressAlreadyInUse: (Error) -> Bool
+        package var isAddressAlreadyInUse: (Swift.Error) -> Bool
         package var existingProxyServerClient: ExistingProxyServerClient
 
         package init(
@@ -70,7 +70,7 @@ package struct XcodeMCPProxyServerCommand {
             stdout: @escaping (String) -> Void,
             stderr: @escaping (String) -> Void,
             makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
-            isAddressAlreadyInUse: @escaping (Error) -> Bool,
+            isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
             existingProxyServerClient: ExistingProxyServerClient = .liveValue
         ) {
             self.bootstrapLogging = bootstrapLogging
@@ -87,7 +87,7 @@ package struct XcodeMCPProxyServerCommand {
             stderr: @escaping (String) -> Void,
             terminateExistingServer: @escaping @Sendable (String, Int) -> Bool,
             makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
-            isAddressAlreadyInUse: @escaping (Error) -> Bool,
+            isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
             detectExistingProxyServerPIDs: @escaping @Sendable (String, Int) -> [Int]
         ) {
             self.init(
@@ -125,7 +125,7 @@ package struct XcodeMCPProxyServerCommand {
 
     package func run(args: [String], environment: [String: String]) async -> Int32 {
         dependencies.bootstrapLogging(environment)
-        return await ProxyServerCommandRuntime(dependencies: dependencies).execute(
+        return await XcodeMCPProxyServerCommand.Runtime(dependencies: dependencies).execute(
             args: args,
             environment: environment
         )

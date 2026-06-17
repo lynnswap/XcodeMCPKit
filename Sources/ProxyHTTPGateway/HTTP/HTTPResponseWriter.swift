@@ -108,7 +108,7 @@ package struct HTTPResponseWriter: Sendable {
 
     package func sendMCPError(
         on channel: Channel,
-        id: RPCID?,
+        id: JSONRPC.ID?,
         code: Int,
         message: String,
         forceBatchArray: Bool = false,
@@ -144,7 +144,7 @@ package struct HTTPResponseWriter: Sendable {
 
     package func sendMCPError(
         on channel: Channel,
-        ids: [RPCID],
+        ids: [JSONRPC.ID],
         code: Int,
         message: String,
         forceBatchArray: Bool = false,

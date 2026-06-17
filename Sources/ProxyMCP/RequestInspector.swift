@@ -5,13 +5,13 @@ package struct RequestTransform {
     package let expectsResponse: Bool
     package let isBatch: Bool
     package let idKey: String?
-    package let responseIDs: [RPCID]
+    package let responseIDs: [JSONRPC.ID]
     package let responseMethodsByIDKey: [String: String]
     package let responseToolNamesByIDKey: [String: String]
-    package let responseOriginalIDsByKey: [String: RPCID]
+    package let responseOriginalIDsByKey: [String: JSONRPC.ID]
     package let method: String?
     package let toolName: String?
-    package let originalID: RPCID?
+    package let originalID: JSONRPC.ID?
     package let normalizationToolsListResponseIDKey: String?
     package let isCacheableToolsListRequest: Bool
     package let cacheableToolsListResponseIDKey: String?
@@ -22,12 +22,12 @@ package enum RequestInspector {
         _ data: Data,
         parsedJSON: Any? = nil,
         sessionID: String,
-        mapID: (_ sessionID: String, _ originalID: RPCID) -> Int64
+        mapID: (_ sessionID: String, _ originalID: JSONRPC.ID) -> Int64
     ) throws -> RequestTransform {
         let json = try parsedJSON ?? JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
-            let kind = JSONRPCMessageInspector.kind(of: object)
-            let method = JSONRPCMessageInspector.method(from: object)
+            let kind = JSONRPC.Message.Inspector.kind(of: object)
+            let method = JSONRPC.Message.Inspector.method(from: object)
             let toolName = toolName(from: object, method: method)
             // We intentionally treat tools/list as stable and cache it regardless of params.
             // Some clients attach pagination-like params even when they expect the full list.
@@ -77,15 +77,15 @@ package enum RequestInspector {
 
         if let array = json as? [Any] {
             var transformed: [Any] = []
-            var responseIDs: [RPCID] = []
+            var responseIDs: [JSONRPC.ID] = []
             var responseMethodsByIDKey: [String: String] = [:]
             var responseToolNamesByIDKey: [String: String] = [:]
-            var responseOriginalIDsByKey: [String: RPCID] = [:]
+            var responseOriginalIDsByKey: [String: JSONRPC.ID] = [:]
             responseIDs.reserveCapacity(array.count)
             for item in array {
                 if var object = item as? [String: Any] {
                     if case .request(let method, let rpcID) =
-                        JSONRPCMessageInspector.kind(of: object)
+                        JSONRPC.Message.Inspector.kind(of: object)
                     {
                         let upstreamID = mapID(sessionID, rpcID)
                         object["id"] = upstreamID
@@ -105,7 +105,7 @@ package enum RequestInspector {
                 for item in array {
                     guard let object = item as? [String: Any],
                         case .request("tools/list", let rpcID) =
-                            JSONRPCMessageInspector.kind(of: object)
+                            JSONRPC.Message.Inspector.kind(of: object)
                     else {
                         continue
                     }
@@ -120,7 +120,7 @@ package enum RequestInspector {
                 for item in array {
                     guard let object = item as? [String: Any],
                         case .request(let method, _) =
-                            JSONRPCMessageInspector.kind(of: object)
+                            JSONRPC.Message.Inspector.kind(of: object)
                     else {
                         continue
                     }

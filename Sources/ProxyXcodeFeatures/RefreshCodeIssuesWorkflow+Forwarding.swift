@@ -5,13 +5,13 @@ import ProxyCore
 import ProxyMCP
 import ProxyXcodeSupport
 
-extension RefreshCodeIssuesWorkflow {
+extension RefreshCodeIssues.Workflow {
     /// Every proxy-mode bail-out funnels through here: record the debug
     /// step, log the reason, and return nil so the caller falls back to a
     /// plain upstream refresh.
     private func fallBackToUpstream(
         reason: String,
-        state: RefreshCodeIssuesDebugRequestState? = nil,
+        state: RefreshCodeIssues.RequestState? = nil,
         extraMetadata: [String: String] = [:],
         debugRequestID: String,
         logMetadata: Logger.Metadata
@@ -37,9 +37,9 @@ extension RefreshCodeIssuesWorkflow {
     }
 
     package func runProxyRefresh(
-        refreshRequest: RefreshCodeIssuesRequest,
+        refreshRequest: RefreshCodeIssues.Request,
         sessionID: String,
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         eventLoop: EventLoop,
         baseMetadata: Logger.Metadata,
@@ -246,15 +246,15 @@ extension RefreshCodeIssuesWorkflow {
     package func runForwardAttempts(
         bodyData: Data,
         sessionID: String,
-        requestIDs: [RPCID],
+        requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         eventLoop: EventLoop,
         baseMetadata: Logger.Metadata,
         executionBudget: ExecutionBudget,
         debugRequestID: String,
         forwarder: Forwarder
-    ) async -> RefreshForwardAttemptResult {
-        var finalResult: RefreshForwardAttemptResult = .invalidRequest
+    ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
+        var finalResult: RefreshCodeIssues.Workflow.ForwardAttemptResult = .invalidRequest
 
         resultLoop: for attemptIndex in 0...Self.retryDelaysNanos.count {
             let attempt = attemptIndex + 1

@@ -14,7 +14,7 @@ struct CLICommandTests {
                 stdout: { output.append($0) },
                 makeLogSink: {
                     Issue.record("makeLogSink should not be called for --version")
-                    return CLICommandLogSink(
+                    return XcodeMCPProxyCLICommand.LogSink(
                         error: { _ in },
                         info: { _, _ in }
                     )
@@ -44,7 +44,7 @@ struct CLICommandTests {
                 stdout: { output.append($0) },
                 makeLogSink: {
                     Issue.record("makeLogSink should not be called for --version")
-                    return CLICommandLogSink(
+                    return XcodeMCPProxyCLICommand.LogSink(
                         error: { _ in },
                         info: { _, _ in }
                     )
@@ -74,7 +74,7 @@ struct CLICommandTests {
                 stdout: { output.append($0) },
                 makeLogSink: {
                     Issue.record("makeLogSink should not be called for --help")
-                    return CLICommandLogSink(
+                    return XcodeMCPProxyCLICommand.LogSink(
                         error: { _ in },
                         info: { _, _ in }
                     )
@@ -118,7 +118,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -152,7 +152,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -182,7 +182,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -212,7 +212,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -242,7 +242,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -269,7 +269,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -297,7 +297,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { _ in },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { _ in },
                         info: { _, _ in }
                     )
@@ -335,7 +335,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { output.append($0) },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { _ in },
                         info: { _, _ in }
                     )
@@ -366,7 +366,7 @@ struct CLICommandTests {
                 stdout: { _ in },
                 makeLogSink: {
                     order.withValue { $0.append("makeLogSink") }
-                    return CLICommandLogSink(
+                    return XcodeMCPProxyCLICommand.LogSink(
                         error: { output.append($0) },
                         info: { _, _ in }
                     )
@@ -396,7 +396,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { usage.append($0) },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -430,7 +430,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { usage.append($0) },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )
@@ -466,7 +466,7 @@ struct CLICommandTests {
                 bootstrapLogging: { _ in },
                 stdout: { usage.append($0) },
                 makeLogSink: {
-                    CLICommandLogSink(
+                    XcodeMCPProxyCLICommand.LogSink(
                         error: { errors.append($0) },
                         info: { _, _ in }
                     )

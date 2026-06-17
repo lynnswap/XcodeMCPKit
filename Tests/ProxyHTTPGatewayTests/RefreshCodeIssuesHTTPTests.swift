@@ -1159,15 +1159,15 @@ extension HTTPHandlerTests {
         )
 
         let config = makeConfig(requestTimeout: 1)
-        let coordinator = RefreshCodeIssuesCoordinator()
-        let debugState = RefreshCodeIssuesDebugState(
+        let coordinator = RefreshCodeIssues.Coordinator()
+        let debugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
-        let workflow = RefreshCodeIssuesWorkflow(
+        let workflow = RefreshCodeIssues.Workflow(
             mode: .proxy,
             requestTimeout: config.requestTimeout,
             coordinator: coordinator,
-            targetResolver: RefreshCodeIssuesTargetResolver(),
+            targetResolver: RefreshCodeIssues.TargetResolver(),
             debugState: debugState,
             windowLookupTimeout: 0.2,
             navigatorIssuesTimeout: 0.05,
@@ -1176,7 +1176,7 @@ extension HTTPHandlerTests {
         let observedTimeouts = NIOLockedValueBox<[Int64]>([])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
-        let requestID = RPCID(any: NSNumber(value: 33))!
+        let requestID = JSONRPC.ID(any: NSNumber(value: 33))!
         let requestPayload = toolsCallPayload(
             id: 33,
             name: "XcodeRefreshCodeIssuesInFile",
@@ -1192,7 +1192,7 @@ extension HTTPHandlerTests {
         )
 
         let result = await workflow.run(
-            refreshRequest: RefreshCodeIssuesRequest(
+            refreshRequest: RefreshCodeIssues.Request(
                 tabIdentifier: "windowtab-navigator-timeout",
                 filePath: "App/Sources/App.swift"
             ),
@@ -1259,15 +1259,15 @@ extension HTTPHandlerTests {
         )
 
         let config = makeConfig(requestTimeout: 0)
-        let coordinator = RefreshCodeIssuesCoordinator()
-        let debugState = RefreshCodeIssuesDebugState(
+        let coordinator = RefreshCodeIssues.Coordinator()
+        let debugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
-        let workflow = RefreshCodeIssuesWorkflow(
+        let workflow = RefreshCodeIssues.Workflow(
             mode: .proxy,
             requestTimeout: config.requestTimeout,
             coordinator: coordinator,
-            targetResolver: RefreshCodeIssuesTargetResolver(),
+            targetResolver: RefreshCodeIssues.TargetResolver(),
             debugState: debugState,
             windowLookupTimeout: 0.2,
             navigatorIssuesTimeout: 0.05,
@@ -1276,7 +1276,7 @@ extension HTTPHandlerTests {
         let observedTimeouts = NIOLockedValueBox<[Int64]>([])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
-        let requestID = RPCID(any: NSNumber(value: 133))!
+        let requestID = JSONRPC.ID(any: NSNumber(value: 133))!
         let requestPayload = toolsCallPayload(
             id: 133,
             name: "XcodeRefreshCodeIssuesInFile",
@@ -1288,7 +1288,7 @@ extension HTTPHandlerTests {
         let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
 
         let result = await workflow.run(
-            refreshRequest: RefreshCodeIssuesRequest(
+            refreshRequest: RefreshCodeIssues.Request(
                 tabIdentifier: "windowtab-unbounded-timeout",
                 filePath: "App/Sources/App.swift"
             ),
@@ -1378,15 +1378,15 @@ extension HTTPHandlerTests {
             withIntermediateDirectories: true
         )
 
-        let coordinator = RefreshCodeIssuesCoordinator()
-        let debugState = RefreshCodeIssuesDebugState(
+        let coordinator = RefreshCodeIssues.Coordinator()
+        let debugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: 2
         )
-        let workflow = RefreshCodeIssuesWorkflow(
+        let workflow = RefreshCodeIssues.Workflow(
             mode: .proxy,
             requestTimeout: 2,
             coordinator: coordinator,
-            targetResolver: RefreshCodeIssuesTargetResolver(),
+            targetResolver: RefreshCodeIssues.TargetResolver(),
             debugState: debugState,
             windowLookupTimeout: 0.2,
             navigatorIssuesTimeout: 0.05,
@@ -1394,7 +1394,7 @@ extension HTTPHandlerTests {
         )
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
-        let requestID = RPCID(any: NSNumber(value: 144))!
+        let requestID = JSONRPC.ID(any: NSNumber(value: 144))!
         let requestPayload = toolsCallPayload(
             id: 144,
             name: "XcodeRefreshCodeIssuesInFile",
@@ -1406,7 +1406,7 @@ extension HTTPHandlerTests {
         let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
 
         let result = await workflow.run(
-            refreshRequest: RefreshCodeIssuesRequest(
+            refreshRequest: RefreshCodeIssues.Request(
                 tabIdentifier: "windowtab-cancelled-navigator",
                 filePath: "App/Sources/App.swift"
             ),
@@ -1462,22 +1462,22 @@ extension HTTPHandlerTests {
         )
 
         let config = makeConfig(requestTimeout: 1)
-        let coordinator = RefreshCodeIssuesCoordinator()
-        let debugState = RefreshCodeIssuesDebugState(
+        let coordinator = RefreshCodeIssues.Coordinator()
+        let debugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
-        let workflow = RefreshCodeIssuesWorkflow(
+        let workflow = RefreshCodeIssues.Workflow(
             mode: .proxy,
             requestTimeout: config.requestTimeout,
             coordinator: coordinator,
-            targetResolver: RefreshCodeIssuesTargetResolver(),
+            targetResolver: RefreshCodeIssues.TargetResolver(),
             debugState: debugState,
             logger: ProxyLogging.make("test.refresh")
         )
         let observedGlob = NIOLockedValueBox<String?>(nil)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
-        let requestID = RPCID(any: NSNumber(value: 233))!
+        let requestID = JSONRPC.ID(any: NSNumber(value: 233))!
         let requestPayload = toolsCallPayload(
             id: 233,
             name: "XcodeRefreshCodeIssuesInFile",
@@ -1489,7 +1489,7 @@ extension HTTPHandlerTests {
         let requestData = try JSONSerialization.data(withJSONObject: requestPayload, options: [])
 
         let result = await workflow.run(
-            refreshRequest: RefreshCodeIssuesRequest(
+            refreshRequest: RefreshCodeIssues.Request(
                 tabIdentifier: "windowtab-backslash",
                 filePath: "Group\\Folder/App.swift"
             ),
@@ -2119,13 +2119,13 @@ extension HTTPHandlerTests {
         async throws
     {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssuesCoordinator(waitClock: clock)
-        let debugState = RefreshCodeIssuesDebugState(defaultRequestTimeoutSeconds: 2)
-        let workflow = RefreshCodeIssuesWorkflow(
+        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let debugState = RefreshCodeIssues.DebugState(defaultRequestTimeoutSeconds: 2)
+        let workflow = RefreshCodeIssues.Workflow(
             mode: .upstream,
             requestTimeout: 2,
             coordinator: coordinator,
-            targetResolver: RefreshCodeIssuesTargetResolver(),
+            targetResolver: RefreshCodeIssues.TargetResolver(),
             debugState: debugState,
             logger: ProxyLogging.make("test.refresh")
         )
@@ -2145,7 +2145,7 @@ extension HTTPHandlerTests {
         }
         try await activeStarted.wait(description: "waiting for active queued-timeout execution")
 
-        let requestID = RPCID(any: NSNumber(value: 25))!
+        let requestID = JSONRPC.ID(any: NSNumber(value: 25))!
         let requestPayload = toolsCallPayload(
             id: 25,
             name: "XcodeRefreshCodeIssuesInFile",
@@ -2158,7 +2158,7 @@ extension HTTPHandlerTests {
 
         let requestTask = Task {
             await workflow.run(
-                refreshRequest: RefreshCodeIssuesRequest(
+                refreshRequest: RefreshCodeIssues.Request(
                     tabIdentifier: "windowtab-timeout",
                     filePath: "B.swift"
                 ),

@@ -154,7 +154,7 @@ struct ServerCommandTests {
     }
 
     @Test func serverCommandAppliesEnvironmentDefaultsWithoutXcodePID() throws {
-        var options = ProxyServerOptions(
+        var options = XcodeMCPProxyServerCommand.Options(
             forwardedArgs: [],
             showHelp: false,
             showVersion: false,
@@ -184,7 +184,7 @@ struct ServerCommandTests {
     }
 
     @Test func serverCommandExplicitConfigOverridesEnvironment() throws {
-        var options = ProxyServerOptions(
+        var options = XcodeMCPProxyServerCommand.Options(
             forwardedArgs: ["--config", "/tmp/explicit.toml"],
             showHelp: false,
             showVersion: false,
@@ -212,7 +212,7 @@ struct ServerCommandTests {
     }
 
     @Test func serverCommandIgnoresRemovedXcodePIDEnvironment() throws {
-        var options = ProxyServerOptions(
+        var options = XcodeMCPProxyServerCommand.Options(
             forwardedArgs: [],
             showHelp: false,
             showVersion: false,
