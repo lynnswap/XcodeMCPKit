@@ -9,16 +9,16 @@ package final class HTTPControlService: Sendable {
         package let proxyInitialized: Bool
         package let cachedToolsListAvailable: Bool
         package let warmupInFlight: Bool
-        package let controlPlane: ProxyControlPlaneDebugSnapshot?
-        package let upstreams: [ProxyUpstreamDebugSnapshot]
-        package let recentTraffic: [ProxyDebugTrafficEvent]
+        package let controlPlane: ControlPlane.DebugSnapshot?
+        package let upstreams: [ProxyDebug.UpstreamSnapshot]
+        package let recentTraffic: [ProxyDebug.TrafficEvent]
         package let sessions: [SessionRequestPipeline.DebugSnapshot]
         package let leases: [LeaseManager.DebugSnapshot]
         package let queuedRequestCount: Int
         package let refreshCodeIssues: RefreshCodeIssues.DebugSnapshot?
 
         package init(
-            base: ProxyDebugSnapshot,
+            base: ProxyDebug.Snapshot,
             refreshCodeIssues: RefreshCodeIssues.DebugSnapshot?
         ) {
             self.generatedAt = base.generatedAt

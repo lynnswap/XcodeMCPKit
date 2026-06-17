@@ -140,7 +140,7 @@ extension HTTPHandlerTests {
             documentationSearchResponder: { requestData in
                 _ = requestData
                 localDocumentationRequests.withLockedValue { $0 += 1 }
-                throw UpstreamSlotAcquisitionError.unavailable
+                throw UpstreamSlotScheduler.AcquisitionError.unavailable
             }
         )
         sessionManager.setInitialized(true)
@@ -165,7 +165,7 @@ extension HTTPHandlerTests {
             #expect(response.statusCode == 200)
             let error = try #require(body["error"] as? [String: Any])
             #expect((error["code"] as? NSNumber)?.intValue == -32001)
-            #expect(error["message"] as? String == DocumentationProviderUnavailableReason.userFacingMessage)
+            #expect(error["message"] as? String == DocumentationProvider.UnavailableReason.userFacingMessage)
             #expect(sessionManager.sentToolNames() == [])
             #expect(localDocumentationRequests.withLockedValue { $0 } == 1)
         } catch {
@@ -596,7 +596,7 @@ extension HTTPHandlerTests {
             documentationSearchResponder: { requestData in
                 _ = requestData
                 localDocumentationRequests.withLockedValue { $0 += 1 }
-                throw UpstreamSlotAcquisitionError.unavailable
+                throw UpstreamSlotScheduler.AcquisitionError.unavailable
             }
         )
         sessionManager.setInitialized(true)
@@ -674,7 +674,7 @@ extension HTTPHandlerTests {
             documentationSearchResponder: { requestData in
                 _ = requestData
                 localDocumentationRequests.withLockedValue { $0 += 1 }
-                throw UpstreamSlotAcquisitionError.unavailable
+                throw UpstreamSlotScheduler.AcquisitionError.unavailable
             }
         )
         sessionManager.setAvailableUpstreamIndices([0, 1])

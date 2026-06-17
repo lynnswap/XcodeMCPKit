@@ -83,7 +83,7 @@ package final class UpstreamHealthManager: Sendable {
         package var initPhase: InitPhase = .idle
         package var initTimeout: RuntimeScheduledTimeout?
         package var didSendInitialized = false
-        package var healthState: UpstreamHealthState = .healthy
+        package var healthState: Upstream.HealthState = .healthy
         package var consecutiveRequestTimeouts = 0
         package var healthProbeInFlight = false
         package var healthProbeGeneration: UInt64 = 0
@@ -498,7 +498,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func debugHealthStateString(_ state: UpstreamHealthState) -> String {
+    package func debugHealthStateString(_ state: Upstream.HealthState) -> String {
         switch state {
         case .healthy:
             return "healthy"
@@ -571,7 +571,7 @@ package final class UpstreamHealthManager: Sendable {
         nowUptimeNs: UInt64,
         state: inout State,
         effects: inout [UpstreamHealthManager.Effect]
-    ) -> UpstreamHealthState {
+    ) -> Upstream.HealthState {
         guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
             return .quarantined(untilUptimeNs: nowUptimeNs)
         }

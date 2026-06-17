@@ -29,7 +29,7 @@ extension ControlPlaneCoordinator {
     }
 
     func replaceWindowLoad(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         current: WindowLoadState,
         requestTimeout: TimeAmount?
     ) -> UUID {
@@ -96,7 +96,7 @@ extension ControlPlaneCoordinator {
     }
 
     func attachWindowWaiters(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         loadID: UUID,
         waiters: [(WaiterID, WindowWaiterRecord)]
     ) {
@@ -129,14 +129,14 @@ extension ControlPlaneCoordinator {
         return .idle
     }
 
-    func currentWaiterCounts() -> ControlPlaneWaiterCounts {
+    func currentWaiterCounts() -> ControlPlane.WaiterCounts {
         let toolsCount =
             (toolsCatalogLoad?.foregroundWaiterCount ?? 0)
             + (prewarmToolsCatalogLoad?.foregroundWaiterCount ?? 0)
         let windowsCount = windowLoads.values.reduce(into: 0) { partial, load in
             partial += load.waiters.count
         }
-        return ControlPlaneWaiterCounts(
+        return ControlPlane.WaiterCounts(
             initialize: 0,
             toolsCatalog: toolsCount,
             windows: windowsCount
@@ -159,7 +159,7 @@ extension ControlPlaneCoordinator {
 
     func syncDebug() {
         let brokerSnapshot = brokerState.snapshot()
-        let snapshot = ProxyControlPlaneDebugSnapshot(
+        let snapshot = ControlPlane.DebugSnapshot(
             phase: currentPhase().rawValue,
             canonicalInitializeSourceUpstream: brokerSnapshot.initializeSourceUpstream,
             canonicalToolsSourceUpstream: brokerSnapshot.toolsSourceUpstream,

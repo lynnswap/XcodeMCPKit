@@ -14,7 +14,7 @@ extension RuntimeCoordinatorTests {
         var config = makeConfig(requestTimeout: 5)
         #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) != nil)
 
-        config.disabledToolNames = [DocumentationToolCatalog.toolName]
+        config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
         #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
 
         config.disabledToolNames = []
@@ -98,7 +98,7 @@ extension RuntimeCoordinatorTests {
         )
 
         #expect(toolNames(in: result) == ["XcodeRead"])
-        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
         #expect(manager.cachedToolsListResult() != nil)
     }
 
@@ -244,10 +244,10 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected handled outcome, got \(outcome)")
             return
         }
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
+        #expect(DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
         #expect(responseData == providerResponse)
         let cachedResult = try #require(manager.cachedToolsListResult())
-        #expect(DocumentationToolCatalog.descriptor(in: cachedResult) != nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: cachedResult) != nil)
         #expect(await documentationProvider.callCount() == 1)
     }
 
@@ -293,7 +293,7 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
-        #expect(reason.message == DocumentationProviderUnavailableReason.userFacingMessage)
+        #expect(reason.message == DocumentationProvider.UnavailableReason.userFacingMessage)
         #expect(manager.cachedToolsListResult() != nil)
         #expect(await documentationProvider.callCount() == 1)
     }
@@ -371,7 +371,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let update = await manager.toolListUpdate(requestTimeout: nil)
-        let result = DocumentationToolCatalog.applying(
+        let result = DocumentationProvider.ToolCatalog.applying(
             update,
             to: try jsonValue([
                 "tools": [
@@ -380,7 +380,7 @@ extension RuntimeCoordinatorTests {
             ])
         )
 
-        #expect(DocumentationToolCatalog.descriptor(in: result) == nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
@@ -405,7 +405,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [target.processID])
@@ -448,7 +448,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         let observedParams = try #require(await factory.initializeParams(for: target.processID).first)
@@ -499,7 +499,7 @@ extension RuntimeCoordinatorTests {
         let results = await [firstUpdate, secondUpdate]
 
         for update in results {
-            let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+            let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
             #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         }
         #expect(await factory.startAttempts() == [target.processID])
@@ -540,7 +540,7 @@ extension RuntimeCoordinatorTests {
         }
 
         let finalUpdate = await longUpdate
-        let result = DocumentationToolCatalog.applying(finalUpdate, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(finalUpdate, to: try jsonValue(["tools": []]))
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [target.processID])
     }
@@ -576,7 +576,7 @@ extension RuntimeCoordinatorTests {
             Issue.record("short tools/list should time out without cancelling provider selection")
         }
 
-        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [target.processID])
     }
@@ -619,7 +619,7 @@ extension RuntimeCoordinatorTests {
         #expect(Date().timeIntervalSince(cancelStart) < 0.25)
 
         let longUpdate = await manager.toolListUpdate(requestTimeout: .seconds(2))
-        let result = DocumentationToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(longUpdate, to: try jsonValue(["tools": []]))
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [target.processID])
     }
@@ -653,7 +653,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
@@ -719,7 +719,7 @@ extension RuntimeCoordinatorTests {
         let update = try await waitWithTimeout("waiting for documentation provider selection") {
             await updateTask.value
         }
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [hung.processID, working.processID])
@@ -755,7 +755,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
         #expect(await factory.startedPIDs() == [pinned.processID])
@@ -790,7 +790,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
@@ -838,7 +838,7 @@ extension RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        let initialTools = DocumentationToolCatalog.applying(
+        let initialTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: nil),
             to: try jsonValue(["tools": []])
         )
@@ -853,7 +853,7 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected handled outcome, got \(outcome)")
             return
         }
-        #expect(DocumentationToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
+        #expect(DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(responseData) == false)
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"retry\"}")
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
@@ -904,7 +904,7 @@ extension RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        let initialTools = DocumentationToolCatalog.applying(
+        let initialTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: nil),
             to: try jsonValue(["tools": []])
         )
@@ -919,11 +919,11 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
-        let followUpTools = DocumentationToolCatalog.applying(
+        let followUpTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
             to: try jsonValue(["tools": []])
         )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: followUpTools) == nil)
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
@@ -968,7 +968,7 @@ extension RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        let initialTools = DocumentationToolCatalog.applying(
+        let initialTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: nil),
             to: try jsonValue(["tools": []])
         )
@@ -983,11 +983,11 @@ extension RuntimeCoordinatorTests {
             return
         }
 
-        let followUpTools = DocumentationToolCatalog.applying(
+        let followUpTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
             to: try jsonValue(["tools": []])
         )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: followUpTools) == nil)
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
@@ -1039,7 +1039,7 @@ extension RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        let initialTools = DocumentationToolCatalog.applying(
+        let initialTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: nil),
             to: try jsonValue(["tools": []])
         )
@@ -1054,11 +1054,11 @@ extension RuntimeCoordinatorTests {
             return
         }
 
-        let followUpTools = DocumentationToolCatalog.applying(
+        let followUpTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
             to: try jsonValue(["tools": []])
         )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: followUpTools) == nil)
         #expect(await factory.startedPIDs() == [
             xcode26.processID,
             xcode27.processID,
@@ -1094,7 +1094,7 @@ extension RuntimeCoordinatorTests {
             sessionFactory: factory
         )
 
-        let initialTools = DocumentationToolCatalog.applying(
+        let initialTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: nil),
             to: try jsonValue(["tools": []])
         )
@@ -1109,11 +1109,11 @@ extension RuntimeCoordinatorTests {
             return
         }
 
-        let followUpTools = DocumentationToolCatalog.applying(
+        let followUpTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
             to: try jsonValue(["tools": []])
         )
-        #expect(DocumentationToolCatalog.descriptor(in: followUpTools) == nil)
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: followUpTools) == nil)
     }
 
     @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
@@ -1192,7 +1192,7 @@ extension RuntimeCoordinatorTests {
         }
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
-        let result = DocumentationToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await factory.startedPIDs() == [xcode.processID])
     }

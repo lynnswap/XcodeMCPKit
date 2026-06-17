@@ -426,7 +426,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
 
 
     func liveXcodeListWindowsResult(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
         fatalError("unused in ToolSurfaceTests")
@@ -454,8 +454,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {}
-    func debugSnapshot() -> ProxyDebugSnapshot { fatalError("unused in ToolSurfaceTests") }
-    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
+    func debugSnapshot() -> ProxyDebug.Snapshot { fatalError("unused in ToolSurfaceTests") }
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         fatalError("unused in ToolSurfaceTests")
     }
 

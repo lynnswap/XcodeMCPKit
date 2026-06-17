@@ -22,7 +22,7 @@ extension HTTPPostService {
         _ = eventLoop
         _ = cancellationHandle
         let windowQueryService = XcodeWindowQueryService()
-        let route: ControlPlaneRoute = if let upstreamIndexOverride {
+        let route: ControlPlane.Route = if let upstreamIndexOverride {
             .pinnedUpstream(upstreamIndexOverride)
         } else {
             .anyHealthy

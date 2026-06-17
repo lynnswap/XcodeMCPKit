@@ -1,8 +1,8 @@
 import Foundation
 import Logging
 import NIO
-import NIOFoundationCompat
 import NIOConcurrencyHelpers
+import NIOFoundationCompat
 import ProxyCore
 import ProxyMCP
 
@@ -41,7 +41,7 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 /// DocumentationSearch is unavailable.
 package enum DocumentationSearchOutcome: Sendable {
     case handled(Data)
-    case unavailable(DocumentationProviderUnavailableReason)
+    case unavailable(DocumentationProvider.UnavailableReason)
 }
 
 package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
@@ -74,7 +74,7 @@ package protocol RuntimeCoordinating: Sendable {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue
     func liveXcodeListWindowsResult(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue
     func callDocumentationSearch(
@@ -101,8 +101,8 @@ package protocol RuntimeCoordinating: Sendable {
         responseID: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult>
-    func debugSnapshot() -> ProxyDebugSnapshot
-    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot
+    func debugSnapshot() -> ProxyDebug.Snapshot
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot
     func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID
     func activateRequestLease(
         _ leaseID: LeaseManager.ID,
@@ -172,7 +172,7 @@ extension RuntimeCoordinating {
         )
     }
 
-    func debugSnapshot() -> ProxyDebugSnapshot {
+    func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
 
@@ -191,7 +191,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         struct Upstream: Sendable {
             let isInitialized: Bool
             let initInFlight: Bool
-            let healthState: UpstreamHealthState
+            let healthState: ProxySession.Upstream.HealthState
         }
 
         struct Session: Sendable {
@@ -221,7 +221,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let upstreams: [any UpstreamSlotControlling]
     package let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     package let canonicalBrokerState: CanonicalBrokerState
-    package let controlPlaneDebugMirror = ControlPlaneDebugMirror()
+    package let controlPlaneDebugMirror = ControlPlane.DebugMirror()
 
     package let upstreamHealthManager: UpstreamHealthManager
     package let upstreamSlotScheduler: UpstreamSlotScheduler
@@ -229,8 +229,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let upstreamReadinessCoordinator: UpstreamReadinessCoordinator
     package let clock: ClockClient
     package let nowUptimeNanoseconds: @Sendable () -> UInt64
-    package let scheduleRuntimeTimeout: @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
-        RuntimeScheduledTimeout
+    package let scheduleRuntimeTimeout:
+        @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
+            RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
     package let prewarmDocumentationProviderOnStartup: Bool
@@ -269,7 +270,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyConfig,
         discovery: any XcodeTargetDiscovering
     ) -> (any DocumentationProviderManaging)? {
-        guard config.disabledToolNames.contains(DocumentationToolCatalog.toolName) == false else {
+        guard config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
+        else {
             return nil
         }
         guard XcrunArguments.isDefaultMCPBridgeInvocation(config: config) else {
@@ -294,8 +296,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         clock: ClockClient = .liveValue,
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
         nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
-        scheduleRuntimeTimeout: (@Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
-            RuntimeScheduledTimeout)? = nil,
+        scheduleRuntimeTimeout: (
+            @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
+                RuntimeScheduledTimeout
+        )? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         startImmediately: Bool = true
@@ -309,7 +313,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             sleep: clock.sleep,
             sleepForTimeInterval: clock.sleepForTimeInterval
         )
-        let timeoutScheduler = scheduleRuntimeTimeout
+        let timeoutScheduler =
+            scheduleRuntimeTimeout
             ?? { delay, operation in
                 RuntimeScheduledTimeout.schedule(
                     on: eventLoop,
@@ -333,7 +338,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
-        let resolvedReadinessGate = upstreamReadinessGate
+        let resolvedReadinessGate =
+            upstreamReadinessGate
             ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
         self.upstreamReadinessGate = resolvedReadinessGate
         self.upstreamReadinessCoordinator = UpstreamReadinessCoordinator(
@@ -341,7 +347,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             logger: ProxyLogging.make("upstream.readiness")
         )
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
-            canUseUpstream: { [weak upstreamHealthManager = self.upstreamHealthManager] upstreamIndex in
+            canUseUpstream: {
+                [weak upstreamHealthManager = self.upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
                 guard let upstreamHealthManager else {
                     return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
@@ -388,17 +395,18 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             upstreamHandshakeStates: { [weak upstreamHealthManager = self.upstreamHealthManager] in
                 guard let upstreamHealthManager else { return [:] }
                 let states = upstreamHealthManager.statesSnapshot()
-                return Dictionary(uniqueKeysWithValues: states.enumerated().map { index, state in
-                    let summary: String
-                    if state.initInFlight {
-                        summary = "initializing"
-                    } else if state.isInitialized {
-                        summary = "initialized"
-                    } else {
-                        summary = "idle"
-                    }
-                    return ("\(index)", summary)
-                })
+                return Dictionary(
+                    uniqueKeysWithValues: states.enumerated().map { index, state in
+                        let summary: String
+                        if state.initInFlight {
+                            summary = "initializing"
+                        } else if state.isInitialized {
+                            summary = "initialized"
+                        } else {
+                            summary = "idle"
+                        }
+                        return ("\(index)", summary)
+                    })
             },
             logger: ProxyLogging.make("control-plane"),
             controlPlaneDefaultTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
@@ -597,7 +605,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func prewarmDocumentationProvider() {
         guard let documentationProviderManager else { return }
-        let timeoutSeconds = config.requestTimeout > 0
+        let timeoutSeconds =
+            config.requestTimeout > 0
             ? min(config.requestTimeout, 30)
             : 30
         let timeout = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
@@ -606,7 +615,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             logger.debug(
                 "Prewarming documentation provider",
                 metadata: [
-                    "timeout_seconds": .string("\(timeoutSeconds)"),
+                    "timeout_seconds": .string("\(timeoutSeconds)")
                 ]
             )
             let update = await documentationProviderManager.prewarm(requestTimeout: timeout)
@@ -684,7 +693,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         guard hasHealthyUpstream || recoveryInFlight else {
             _ = chooseUpstreamIndex()
-            return eventLoop.makeFailedFuture(UpstreamSlotAcquisitionError.unavailable)
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
         let promise = eventLoop.makePromise(of: Output.self)
         upstreamSlotScheduler.enqueueRequest(
@@ -696,7 +705,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 starter(upstreamIndex).cascade(to: promise)
             },
             failUnavailable: {
-                promise.fail(UpstreamSlotAcquisitionError.unavailable)
+                promise.fail(UpstreamSlotScheduler.AcquisitionError.unavailable)
             },
             failCancelled: {
                 promise.fail(CancellationError())
@@ -849,11 +858,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 "update": .string(update.debugLabel),
             ]
         )
-        return DocumentationToolCatalog.applying(update, to: baseResult)
+        return DocumentationProvider.ToolCatalog.applying(update, to: baseResult)
     }
 
     package func liveXcodeListWindowsResult(
-        route: ControlPlaneRoute,
+        route: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
         let timeout =
@@ -908,7 +917,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         documentationProviderManager != nil
     }
 
-    private func recordDocumentationToolListUpdate(_ update: DocumentationToolListUpdate) {
+    private func recordDocumentationToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {
         logger.debug(
             "Documentation provider tools/list update observed",
             metadata: ["update": .string(update.debugLabel)]
@@ -932,7 +941,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     private func documentationToolListUpdate(
         manager: any DocumentationProviderManaging,
         requestTimeout: TimeAmount?
-    ) async -> DocumentationToolListUpdate {
+    ) async -> DocumentationProvider.ToolListUpdate {
         guard requestTimeout?.nanoseconds != 0 else {
             return .unavailable
         }
@@ -940,7 +949,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return await manager.toolListUpdate(requestTimeout: requestTimeout)
         }
         do {
-            return try await withThrowingTaskGroup(of: DocumentationToolListUpdate.self) { group in
+            return try await withThrowingTaskGroup(of: DocumentationProvider.ToolListUpdate.self) {
+                group in
                 group.addTask {
                     await manager.toolListUpdate(requestTimeout: requestTimeout)
                 }
@@ -988,7 +998,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         id: JSONRPC.ID,
         error: Error
     ) throws -> ByteBuffer {
-        let mapped = ControlPlaneErrorMapper.jsonRPCError(for: error)
+        let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,

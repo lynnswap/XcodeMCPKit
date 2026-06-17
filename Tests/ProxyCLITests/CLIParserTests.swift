@@ -204,7 +204,7 @@ struct CLIParserTests {
         do {
             try config.validateModernProtocolConfiguration()
             Issue.record("expected legacy protocolVersion to be rejected")
-        } catch let error as CLIError {
+        } catch let error as ProxyConfig.ValidationError {
             #expect(error.description.contains("2025-06-18"))
             #expect(error.description.contains("2025-03-26"))
         }

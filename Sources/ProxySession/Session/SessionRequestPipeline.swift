@@ -42,7 +42,3 @@ package enum SessionRequestPipeline {
         package var pendingRequestCount: Int { 0 }
     }
 }
-
-package enum UpstreamSlotAcquisitionError: Error {
-    case unavailable
-}

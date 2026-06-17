@@ -4,198 +4,218 @@ import NIO
 import ProxyCore
 import ProxyMCP
 
-package enum DocumentationToolListUpdate: Sendable {
-    case unchanged
-    case unavailable
-    case available(JSONValue)
+package enum DocumentationProvider {}
 
-    package var debugLabel: String {
-        switch self {
-        case .unchanged:
-            "unchanged"
-        case .unavailable:
-            "unavailable"
-        case .available:
-            "available"
+extension DocumentationProvider {
+    package enum ToolListUpdate: Sendable {
+        case unchanged
+        case unavailable
+        case available(JSONValue)
+
+        package var debugLabel: String {
+            switch self {
+            case .unchanged:
+                "unchanged"
+            case .unavailable:
+                "unavailable"
+            case .available:
+                "available"
+            }
         }
     }
 }
 
-package enum DocumentationProviderUnavailableReason: Sendable, Error, CustomStringConvertible {
-    case noAvailableProvider
+extension DocumentationProvider {
+    package enum UnavailableReason: Sendable, Error, CustomStringConvertible {
+        case noAvailableProvider
 
-    package static let userFacingMessage =
-        "DocumentationSearch is unavailable from the running Xcode documentation provider. Try restarting Xcode if the problem persists."
+        package static let userFacingMessage =
+            "DocumentationSearch is unavailable from the running Xcode documentation provider. Try restarting Xcode if the problem persists."
 
-    package var message: String {
-        switch self {
-        case .noAvailableProvider:
-            Self.userFacingMessage
+        package var message: String {
+            switch self {
+            case .noAvailableProvider:
+                Self.userFacingMessage
+            }
         }
-    }
 
-    package var description: String {
-        message
+        package var description: String {
+            message
+        }
     }
 }
 
 /// The manager's classification of one DocumentationSearch attempt.
 /// When the manager is enabled, DocumentationSearch is owned by the
 /// documentation provider and does not fall back to the regular upstream.
-package enum DocumentationProviderCallOutcome: Sendable {
-    case handled(Data, invalidatedProvider: Bool)
-    case unavailable(DocumentationProviderUnavailableReason)
-    case failed(any Error, invalidatedProvider: Bool)
+extension DocumentationProvider {
+    package enum CallOutcome: Sendable {
+        case handled(Data, invalidatedProvider: Bool)
+        case unavailable(DocumentationProvider.UnavailableReason)
+        case failed(any Error, invalidatedProvider: Bool)
+    }
 }
 
 package protocol DocumentationProviderManaging: Sendable {
-    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
-    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate
+    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
+    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
     func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallOutcome
+    ) async throws -> DocumentationProvider.CallOutcome
     func invalidate(reason: String) async
     func shutdown() async
 }
 
-package enum DocumentationToolCatalog {
-    package static let toolName = "DocumentationSearch"
+extension DocumentationProvider {
+    package enum ToolCatalog {
+        package static let toolName = "DocumentationSearch"
 
-    package static func applying(
-        _ update: DocumentationToolListUpdate,
-        to result: JSONValue
-    ) -> JSONValue {
-        switch update {
-        case .unchanged:
-            return result
-        case .unavailable:
-            return removingDocumentationSearch(from: result)
-        case .available(let descriptor):
-            return replacingDocumentationSearch(in: result, with: descriptor)
-        }
-    }
-
-    package static func descriptor(in result: JSONValue) -> JSONValue? {
-        guard case .object(let object) = result,
-              case .array(let tools)? = object["tools"] else {
-            return nil
-        }
-        return tools.first { value in
-            guard case .object(let toolObject) = value,
-                  case .string(let name)? = toolObject["name"] else {
-                return false
+        package static func applying(
+            _ update: DocumentationProvider.ToolListUpdate,
+            to result: JSONValue
+        ) -> JSONValue {
+            switch update {
+            case .unchanged:
+                return result
+            case .unavailable:
+                return removingDocumentationSearch(from: result)
+            case .available(let descriptor):
+                return replacingDocumentationSearch(in: result, with: descriptor)
             }
-            return name == toolName
         }
-    }
 
-    package static func responseIsDocumentationNotEnabled(_ data: Data) -> Bool {
-        responseErrorTexts(in: data).contains { text in
-            let normalized = text.lowercased()
-            return normalized.contains("documentationsearch")
-                && normalized.contains("not enabled")
+        package static func descriptor(in result: JSONValue) -> JSONValue? {
+            guard case .object(let object) = result,
+                case .array(let tools)? = object["tools"]
+            else {
+                return nil
+            }
+            return tools.first { value in
+                guard case .object(let toolObject) = value,
+                    case .string(let name)? = toolObject["name"]
+                else {
+                    return false
+                }
+                return name == toolName
+            }
         }
-    }
 
-    package static func responseIsToolError(_ data: Data) -> Bool {
-        responseErrorObjects(in: data).isEmpty == false || responseResultObjects(in: data).contains { object in
-            object["isError"] as? Bool == true
+        package static func responseIsDocumentationNotEnabled(_ data: Data) -> Bool {
+            responseErrorTexts(in: data).contains { text in
+                let normalized = text.lowercased()
+                return normalized.contains("documentationsearch")
+                    && normalized.contains("not enabled")
+            }
         }
-    }
 
-    private static func replacingDocumentationSearch(
-        in result: JSONValue,
-        with descriptor: JSONValue
-    ) -> JSONValue {
-        guard case .object(var object) = result,
-              case .array(let tools)? = object["tools"] else {
-            return result
+        package static func responseIsToolError(_ data: Data) -> Bool {
+            responseErrorObjects(in: data).isEmpty == false
+                || responseResultObjects(in: data).contains { object in
+                    object["isError"] as? Bool == true
+                }
         }
-        var replaced = false
-        var rewritten: [JSONValue] = []
-        rewritten.reserveCapacity(tools.count + 1)
-        for tool in tools {
-            guard case .object(let toolObject) = tool,
-                  case .string(let name)? = toolObject["name"],
-                  name == toolName else {
-                rewritten.append(tool)
-                continue
+
+        private static func replacingDocumentationSearch(
+            in result: JSONValue,
+            with descriptor: JSONValue
+        ) -> JSONValue {
+            guard case .object(var object) = result,
+                case .array(let tools)? = object["tools"]
+            else {
+                return result
+            }
+            var replaced = false
+            var rewritten: [JSONValue] = []
+            rewritten.reserveCapacity(tools.count + 1)
+            for tool in tools {
+                guard case .object(let toolObject) = tool,
+                    case .string(let name)? = toolObject["name"],
+                    name == toolName
+                else {
+                    rewritten.append(tool)
+                    continue
+                }
+                if !replaced {
+                    rewritten.append(descriptor)
+                    replaced = true
+                }
             }
             if !replaced {
                 rewritten.append(descriptor)
-                replaced = true
             }
+            object["tools"] = .array(rewritten)
+            return .object(object)
         }
-        if !replaced {
-            rewritten.append(descriptor)
-        }
-        object["tools"] = .array(rewritten)
-        return .object(object)
-    }
 
-    private static func removingDocumentationSearch(from result: JSONValue) -> JSONValue {
-        guard case .object(var object) = result,
-              case .array(let tools)? = object["tools"] else {
-            return result
-        }
-        object["tools"] = .array(tools.filter { tool in
-            guard case .object(let toolObject) = tool,
-                  case .string(let name)? = toolObject["name"] else {
-                return true
+        private static func removingDocumentationSearch(from result: JSONValue) -> JSONValue {
+            guard case .object(var object) = result,
+                case .array(let tools)? = object["tools"]
+            else {
+                return result
             }
-            return name != toolName
-        })
-        return .object(object)
-    }
-
-    private static func responseErrorTexts(in data: Data) -> [String] {
-        var texts = responseErrorObjects(in: data).compactMap { object in
-            object["message"] as? String
+            object["tools"] = .array(
+                tools.filter { tool in
+                    guard case .object(let toolObject) = tool,
+                        case .string(let name)? = toolObject["name"]
+                    else {
+                        return true
+                    }
+                    return name != toolName
+                })
+            return .object(object)
         }
-        texts += responseResultObjects(in: data).flatMap { object -> [String] in
-            guard object["isError"] as? Bool == true else {
+
+        private static func responseErrorTexts(in data: Data) -> [String] {
+            var texts = responseErrorObjects(in: data).compactMap { object in
+                object["message"] as? String
+            }
+            texts += responseResultObjects(in: data).flatMap { object -> [String] in
+                guard object["isError"] as? Bool == true else {
+                    return []
+                }
+                guard let content = object["content"] as? [[String: Any]] else {
+                    return []
+                }
+                return content.compactMap { $0["text"] as? String }
+            }
+            return texts
+        }
+
+        private static func responseErrorObjects(in data: Data) -> [[String: Any]] {
+            guard let payload = try? JSONSerialization.jsonObject(with: data, options: []) else {
                 return []
             }
-            guard let content = object["content"] as? [[String: Any]] else {
+            if let object = payload as? [String: Any],
+                let error = object["error"] as? [String: Any]
+            {
+                return [error]
+            }
+            guard let array = payload as? [Any] else {
                 return []
             }
-            return content.compactMap { $0["text"] as? String }
+            return array.compactMap { item in
+                guard let object = item as? [String: Any] else { return nil }
+                return object["error"] as? [String: Any]
+            }
         }
-        return texts
-    }
 
-    private static func responseErrorObjects(in data: Data) -> [[String: Any]] {
-        guard let payload = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return []
-        }
-        if let object = payload as? [String: Any],
-           let error = object["error"] as? [String: Any] {
-            return [error]
-        }
-        guard let array = payload as? [Any] else {
-            return []
-        }
-        return array.compactMap { item in
-            guard let object = item as? [String: Any] else { return nil }
-            return object["error"] as? [String: Any]
-        }
-    }
-
-    private static func responseResultObjects(in data: Data) -> [[String: Any]] {
-        guard let payload = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return []
-        }
-        if let object = payload as? [String: Any],
-           let result = object["result"] as? [String: Any] {
-            return [result]
-        }
-        guard let array = payload as? [Any] else {
-            return []
-        }
-        return array.compactMap { item in
-            guard let object = item as? [String: Any] else { return nil }
-            return object["result"] as? [String: Any]
+        private static func responseResultObjects(in data: Data) -> [[String: Any]] {
+            guard let payload = try? JSONSerialization.jsonObject(with: data, options: []) else {
+                return []
+            }
+            if let object = payload as? [String: Any],
+                let result = object["result"] as? [String: Any]
+            {
+                return [result]
+            }
+            guard let array = payload as? [Any] else {
+                return []
+            }
+            return array.compactMap { item in
+                guard let object = item as? [String: Any] else { return nil }
+                return object["result"] as? [String: Any]
+            }
         }
     }
 }
@@ -211,7 +231,9 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
         self.baseEnvironment = baseEnvironment
     }
 
-    package func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
+    package func startSession(for target: DocumentationProviderTarget) async throws
+        -> any UpstreamSession
+    {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
         environment["MCP_XCODE_PID"] = String(target.processID)
@@ -256,7 +278,7 @@ package actor DocumentationProviderConnection {
             for await event in session.events {
                 await self?.handle(event)
             }
-            await self?.failAll(UpstreamSlotAcquisitionError.unavailable)
+            await self?.failAll(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
     }
 
@@ -269,20 +291,22 @@ package actor DocumentationProviderConnection {
 
     package func sendNotification(_ object: [String: Any]) async throws {
         guard JSONSerialization.isValidJSONObject(object) else {
-            throw ControlPlaneError.invalidResponse("invalid notification")
+            throw ControlPlane.Error.invalidResponse("invalid notification")
         }
         let data = try JSONSerialization.data(withJSONObject: object, options: [])
         let result = await session.send(data)
         guard result == .accepted else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
     }
 
     package func call(_ requestData: Data, timeout: TimeAmount?) async throws -> Data {
-        guard var object = try JSONSerialization.jsonObject(with: requestData, options: [])
-            as? [String: Any],
-            let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
-            throw ControlPlaneError.invalidResponse("missing DocumentationSearch request id")
+        guard
+            var object = try JSONSerialization.jsonObject(with: requestData, options: [])
+                as? [String: Any],
+            let originalID = JSONRPC.Message.Inspector.requestID(from: object)
+        else {
+            throw ControlPlane.Error.invalidResponse("missing DocumentationSearch request id")
         }
 
         let upstreamID = nextID
@@ -290,7 +314,7 @@ package actor DocumentationProviderConnection {
         nextID += 1
         object["id"] = upstreamID
         guard JSONSerialization.isValidJSONObject(object) else {
-            throw ControlPlaneError.invalidResponse("invalid DocumentationSearch request")
+            throw ControlPlane.Error.invalidResponse("invalid DocumentationSearch request")
         }
         let upstreamData = try JSONSerialization.data(withJSONObject: object, options: [])
 
@@ -306,7 +330,9 @@ package actor DocumentationProviderConnection {
                 Task { [weak self, session] in
                     let sendResult = await session.send(upstreamData)
                     guard sendResult == .accepted else {
-                        await self?.failPending(id: upstreamIDKey, error: UpstreamSlotAcquisitionError.unavailable)
+                        await self?.failPending(
+                            id: upstreamIDKey,
+                            error: UpstreamSlotScheduler.AcquisitionError.unavailable)
                         return
                     }
                 }
@@ -340,24 +366,30 @@ package actor DocumentationProviderConnection {
         case .message(let data):
             handleMessage(data)
         case .exit, .stdoutProtocolViolation:
-            failAll(UpstreamSlotAcquisitionError.unavailable)
+            failAll(UpstreamSlotScheduler.AcquisitionError.unavailable)
         case .stderr, .stdoutBufferSize:
             break
         }
     }
 
     private func handleMessage(_ data: Data) {
-        guard var object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-              let responseID = JSONRPC.Message.Inspector.responseID(from: object),
-              let pending = pendingResponses.removeValue(forKey: responseID.key) else {
+        guard
+            var object = try? JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
+            let responseID = JSONRPC.Message.Inspector.responseID(from: object),
+            let pending = pendingResponses.removeValue(forKey: responseID.key)
+        else {
             return
         }
 
         pending.timeoutTask?.cancel()
         object["id"] = pending.originalID.value.foundationObject
         guard JSONSerialization.isValidJSONObject(object),
-              let rewrittenData = try? JSONSerialization.data(withJSONObject: object, options: []) else {
-            pending.continuation.resume(throwing: ControlPlaneError.invalidResponse("invalid DocumentationSearch response"))
+            let rewrittenData = try? JSONSerialization.data(withJSONObject: object, options: [])
+        else {
+            pending.continuation.resume(
+                throwing: ControlPlane.Error.invalidResponse("invalid DocumentationSearch response")
+            )
             return
         }
         pending.continuation.resume(returning: rewrittenData)
@@ -410,7 +442,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         private var continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>?
         private var resolvedResult: ProviderSelectionWaitResult?
 
-        func setContinuation(_ continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>) {
+        func setContinuation(
+            _ continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>
+        ) {
             lock.lock()
             if let resolvedResult {
                 lock.unlock()
@@ -448,7 +482,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     package init(
         discovery: any XcodeTargetDiscovering,
-        sessionFactory: any DocumentationProviderSessionMaking = LiveDocumentationProviderSessionFactory(),
+        sessionFactory: any DocumentationProviderSessionMaking =
+            LiveDocumentationProviderSessionFactory(),
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
@@ -464,12 +499,15 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.logger = logger
     }
 
-    package func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+    package func prewarm(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
+    {
         guard !isShutdown else { return .unavailable }
         return await toolListUpdate(requestTimeout: requestTimeout)
     }
 
-    package func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+    package func toolListUpdate(requestTimeout: TimeAmount?) async
+        -> DocumentationProvider.ToolListUpdate
+    {
         guard !isShutdown else {
             return .unavailable
         }
@@ -488,7 +526,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     package func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallOutcome {
+    ) async throws -> DocumentationProvider.CallOutcome {
         guard !isShutdown else {
             return .unavailable(.noAvailableProvider)
         }
@@ -500,10 +538,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             if let deadline, deadline.hasExpired {
                 return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
-            guard let provider = await providerIfAvailable(
-                requestTimeout: deadline?.remaining(),
-                excluding: rejectedProcessIDs
-            ) else {
+            guard
+                let provider = await providerIfAvailable(
+                    requestTimeout: deadline?.remaining(),
+                    excluding: rejectedProcessIDs
+                )
+            else {
                 try Task.checkCancellation()
                 if let deadline, deadline.hasExpired {
                     return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
@@ -518,7 +558,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     requestData,
                     timeout: deadline?.remaining()
                 )
-                guard DocumentationToolCatalog.responseIsDocumentationNotEnabled(response) else {
+                guard DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
+                else {
                     return .handled(response, invalidatedProvider: invalidatedProvider)
                 }
                 await invalidate(provider, reason: "documentation_search_not_enabled")
@@ -547,7 +588,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let provider = activeProvider
         activeProvider = nil
         if let selected = await selection?.task.value,
-           selected.id != provider?.profile.id {
+            selected.id != provider?.profile.id
+        {
             await selected.connection.stop()
         }
         await provider?.profile.connection.stop()
@@ -696,7 +738,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let targets: [DocumentationProviderTarget]
         if let pinnedProcessID {
             targets = discoveredTargets.filter {
-                $0.processID == pinnedProcessID && excludedProcessIDs.contains($0.processID) == false
+                $0.processID == pinnedProcessID
+                    && excludedProcessIDs.contains($0.processID) == false
             }
         } else {
             targets = discoveredTargets.filter {
@@ -710,7 +753,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "discovered_candidate_count": .string("\(discoveredTargets.count)"),
                 "excluded_candidate_count": .string("\(excludedProcessIDs.count)"),
                 "pinned_pid": .string(pinnedProcessID.map(String.init) ?? ""),
-                "candidates": .string(targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
+                "candidates": .string(
+                    targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
             ]
         )
         var profiles: [CandidateProfile] = []
@@ -726,7 +770,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 break
             }
             do {
-                let profile = try await boundedProbe(target: target, requestTimeout: candidateTimeout)
+                let profile = try await boundedProbe(
+                    target: target, requestTimeout: candidateTimeout)
                 guard !Task.isCancelled, !isShutdown else {
                     await profile.connection.stop()
                     break
@@ -754,12 +799,15 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return nil
         }
 
-        guard let selected = profiles.max(by: { lhs, rhs in
-            if lhs.toolCount != rhs.toolCount {
-                return lhs.toolCount < rhs.toolCount
-            }
-            return Self.compareVersion(lhs.serverVersion, rhs.serverVersion) == .orderedAscending
-        }) else {
+        guard
+            let selected = profiles.max(by: { lhs, rhs in
+                if lhs.toolCount != rhs.toolCount {
+                    return lhs.toolCount < rhs.toolCount
+                }
+                return Self.compareVersion(lhs.serverVersion, rhs.serverVersion)
+                    == .orderedAscending
+            })
+        else {
             return nil
         }
 
@@ -797,7 +845,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             do {
                 guard let result = try await group.next() else {
-                    throw UpstreamSlotAcquisitionError.unavailable
+                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
                 group.cancelAll()
                 return result
@@ -842,8 +890,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 timeout: toolsListTimeout
             )
             let toolsResult = try Self.resultValue(from: toolsList)
-            guard let descriptor = DocumentationToolCatalog.descriptor(in: toolsResult) else {
-                throw UpstreamSlotAcquisitionError.unavailable
+            guard let descriptor = DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
+            else {
+                throw UpstreamSlotScheduler.AcquisitionError.unavailable
             }
             let documentationProbeTimeout = remainingTimeout(until: probeDeadline)
             guard documentationProbeTimeout?.nanoseconds != 0 else {
@@ -853,9 +902,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 try Self.makeDocumentationProbeRequestData(),
                 timeout: documentationProbeTimeout
             )
-            guard !DocumentationToolCatalog.responseIsDocumentationNotEnabled(probeResponse),
-                  !DocumentationToolCatalog.responseIsToolError(probeResponse) else {
-                throw UpstreamSlotAcquisitionError.unavailable
+            guard
+                !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(probeResponse),
+                !DocumentationProvider.ToolCatalog.responseIsToolError(probeResponse)
+            else {
+                throw UpstreamSlotScheduler.AcquisitionError.unavailable
             }
             return CandidateProfile(
                 id: UUID(),
@@ -901,9 +952,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "id": "documentation-probe",
                 "method": "tools/call",
                 "params": [
-                    "name": DocumentationToolCatalog.toolName,
+                    "name": DocumentationProvider.ToolCatalog.toolName,
                     "arguments": [
-                        "query": "UIView animate withDuration animations completion",
+                        "query": "UIView animate withDuration animations completion"
                     ],
                 ],
             ],
@@ -912,28 +963,33 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private static func resultValue(from responseData: Data) throws -> JSONValue {
-        guard let object = try JSONSerialization.jsonObject(with: responseData, options: [])
-            as? [String: Any],
+        guard
+            let object = try JSONSerialization.jsonObject(with: responseData, options: [])
+                as? [String: Any],
             let result = object["result"],
-            let value = JSONValue(any: result) else {
-            throw ControlPlaneError.invalidResponse("invalid documentation provider response")
+            let value = JSONValue(any: result)
+        else {
+            throw ControlPlane.Error.invalidResponse("invalid documentation provider response")
         }
         return value
     }
 
     private static func toolCount(in result: JSONValue) -> Int {
         guard case .object(let object) = result,
-              case .array(let tools)? = object["tools"] else {
+            case .array(let tools)? = object["tools"]
+        else {
             return 0
         }
         return tools.count
     }
 
     private static func serverVersion(fromInitializeResponse data: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
-            as? [String: Any],
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
             let result = object["result"] as? [String: Any],
-            let serverInfo = result["serverInfo"] as? [String: Any] else {
+            let serverInfo = result["serverInfo"] as? [String: Any]
+        else {
             return nil
         }
         return serverInfo["version"] as? String

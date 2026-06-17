@@ -498,11 +498,11 @@ extension RuntimeCoordinator {
         return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
     }
 
-    package func debugSnapshot() -> ProxyDebugSnapshot {
+    package func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
 
-    package func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
+    package func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         let initSnapshot = initializeManager.snapshot()
         let brokerSnapshot = canonicalBrokerState.snapshot()
         let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()

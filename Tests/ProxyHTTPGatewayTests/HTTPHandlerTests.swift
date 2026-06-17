@@ -48,7 +48,7 @@ struct HTTPHandlerTests {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let snapshot = try decoder.decode(ProxyDebugSnapshot.self, from: Data(response.body.utf8))
+        let snapshot = try decoder.decode(ProxyDebug.Snapshot.self, from: Data(response.body.utf8))
         #expect(snapshot.proxyInitialized == false)
         #expect(snapshot.upstreams.count == 1)
         #expect(snapshot.upstreams[0].upstreamIndex == 0)
@@ -77,7 +77,7 @@ struct HTTPHandlerTests {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let snapshot = try decoder.decode(ProxyDebugSnapshot.self, from: Data(response.body.utf8))
+        let snapshot = try decoder.decode(ProxyDebug.Snapshot.self, from: Data(response.body.utf8))
         #expect(snapshot.upstreams[0].lastProtocolViolationPreview == "raw-preview")
         #expect(snapshot.upstreams[0].lastProtocolViolationPreviewHex == "61 62")
         #expect(snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == "61")

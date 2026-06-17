@@ -303,7 +303,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
 
     func liveXcodeListWindowsResult(
-        route _: ControlPlaneRoute,
+        route _: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
         _ = requestTimeoutOverride
@@ -334,7 +334,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
         do {
             return .handled(try await documentationSearchResponder(requestData))
-        } catch is UpstreamSlotAcquisitionError {
+        } catch is UpstreamSlotScheduler.AcquisitionError {
             return .unavailable(.noAvailableProvider)
         }
     }
@@ -621,7 +621,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     ) async throws -> Data {
         _ = session(id: sessionID)
         guard let upstreamIndex = chooseUpstreamIndex() else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         state.withLockedValue { state in
             state.upstreamSendCount += 1
@@ -644,16 +644,16 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             try await Task.sleep(nanoseconds: delayNanos)
         }
         guard plan.deliverManually == false else {
-            throw ControlPlaneError.invalidResponse("timeout")
+            throw ControlPlane.Error.invalidResponse("timeout")
         }
         guard let object = try? JSONSerialization.jsonObject(
             with: plan.data,
             options: []
         ) as? [String: Any] else {
-            throw ControlPlaneError.invalidResponse("invalid response")
+            throw ControlPlane.Error.invalidResponse("invalid response")
         }
         if let errorObject = object["error"] as? [String: Any] {
-            throw ControlPlaneError.upstreamRPC(
+            throw ControlPlane.Error.upstreamRPC(
                 code: (errorObject["code"] as? NSNumber)?.intValue ?? -32000,
                 message: errorObject["message"] as? String ?? "upstream error"
             )
@@ -664,7 +664,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         return plan.data
     }
 
-    func debugSnapshot() -> ProxyDebugSnapshot {
+    func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
 
@@ -757,15 +757,15 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         )
     }
 
-    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebugSnapshot {
-        ProxyDebugSnapshot(
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
+        ProxyDebug.Snapshot(
             generatedAt: Date(timeIntervalSince1970: 0),
             proxyInitialized: isInitialized(),
             cachedToolsListAvailable: cachedToolsListResult() != nil,
             warmupInFlight: false,
             controlPlane: nil,
             upstreams: [
-                ProxyUpstreamDebugSnapshot(
+                ProxyDebug.UpstreamSnapshot(
                     upstreamIndex: 0,
                     isInitialized: isInitialized(),
                     initInFlight: false,

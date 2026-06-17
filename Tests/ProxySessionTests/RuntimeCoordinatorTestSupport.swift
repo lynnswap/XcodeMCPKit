@@ -40,7 +40,7 @@ func jsonValue(_ object: [String: Any]) throws -> JSONValue {
 
 func documentationDescriptor(version: String) -> JSONValue {
     JSONValue(any: [
-        "name": DocumentationToolCatalog.toolName,
+        "name": DocumentationProvider.ToolCatalog.toolName,
         "description": "docs-\(version)",
         "inputSchema": [
             "type": "object",
@@ -69,7 +69,7 @@ func toolNames(in result: JSONValue) -> [String] {
 }
 
 func documentationDescriptorDescription(in result: JSONValue) -> String? {
-    guard let descriptor = DocumentationToolCatalog.descriptor(in: result),
+    guard let descriptor = DocumentationProvider.ToolCatalog.descriptor(in: result),
           case .object(let object) = descriptor,
           case .string(let description)? = object["description"] else {
         return nil
@@ -84,7 +84,7 @@ func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
             "id": id,
             "method": "tools/call",
             "params": [
-                "name": DocumentationToolCatalog.toolName,
+                "name": DocumentationProvider.ToolCatalog.toolName,
                 "arguments": [
                     "query": query,
                 ],
@@ -196,7 +196,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         }
         guard var plans = plansByPID[target.processID],
               plans.isEmpty == false else {
-            throw UpstreamSlotAcquisitionError.unavailable
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         let plan = plans.removeFirst()
         plansByPID[target.processID] = plans
@@ -430,8 +430,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
 }
 
 actor StubDocumentationProviderManager: DocumentationProviderManaging {
-    private var update: DocumentationToolListUpdate
-    private var callOutcomes: [DocumentationProviderCallOutcome]
+    private var update: DocumentationProvider.ToolListUpdate
+    private var callOutcomes: [DocumentationProvider.CallOutcome]
     private var callCountValue = 0
     private var invalidateReasons: [String] = []
     private var prewarmTimeouts: [TimeAmount?] = []
@@ -443,8 +443,8 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private let prewarmBlocker: AsyncGate?
 
     init(
-        toolListUpdate: DocumentationToolListUpdate,
-        callOutcomes: [DocumentationProviderCallOutcome] = [],
+        toolListUpdate: DocumentationProvider.ToolListUpdate,
+        callOutcomes: [DocumentationProvider.CallOutcome] = [],
         prewarmDelayNanoseconds: UInt64? = nil,
         toolListDelayNanoseconds: UInt64? = nil,
         prewarmStarted: TestSignal? = nil,
@@ -458,7 +458,7 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
         self.prewarmBlocker = prewarmBlocker
     }
 
-    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate {
         prewarmStarted?.signal()
         if let prewarmDelayNanoseconds {
             try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
@@ -476,7 +476,7 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
         return await toolListUpdate(requestTimeout: requestTimeout)
     }
 
-    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationToolListUpdate {
+    func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate {
         toolListTimeouts.append(requestTimeout)
         if let toolListDelayNanoseconds {
             try? await Task.sleep(nanoseconds: toolListDelayNanoseconds)
@@ -488,7 +488,7 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     func callDocumentationSearch(
         requestData _: Data,
         requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProviderCallOutcome {
+    ) async throws -> DocumentationProvider.CallOutcome {
         callCountValue += 1
         callTimeouts.append(requestTimeoutOverride)
         guard callOutcomes.isEmpty == false else {
