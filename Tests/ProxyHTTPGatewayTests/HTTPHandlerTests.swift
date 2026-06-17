@@ -557,24 +557,7 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "capabilities": [String: Any](),
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Origin", value: "https://example.invalid")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try writeInitializePost(to: channel, origin: "https://example.invalid")
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -589,24 +572,7 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "capabilities": [String: Any](),
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Origin", value: "http://127.attacker.example:8765")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try writeInitializePost(to: channel, origin: "http://127.attacker.example:8765")
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -622,25 +588,11 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "capabilities": [String: Any](),
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Host", value: "localhost:8765")
-        head.headers.add(name: "Origin", value: "http://localhost")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try writeInitializePost(
+            to: channel,
+            host: "localhost:8765",
+            origin: "http://localhost"
+        )
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -648,7 +600,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.isInitialized() == false)
     }
 
-    @Test func httpAllowsOriginMatchingHostHeaderWhenBoundToWildcard() async throws {
+    @Test func httpRejectsNonLoopbackOriginMatchingHostHeaderWhenBoundToWildcard() async throws {
         var config = makeConfig()
         config.listenHost = "0.0.0.0"
         config.listenPort = 8765
@@ -657,25 +609,73 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "capabilities": [String: Any](),
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Host", value: "192.0.2.10:8765")
-        head.headers.add(name: "Origin", value: "http://192.0.2.10:8765")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try writeInitializePost(
+            to: channel,
+            host: "192.0.2.10:8765",
+            origin: "http://192.0.2.10:8765"
+        )
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.isInitialized() == false)
+    }
+
+    @Test func httpRejectsDNSOriginMatchingHostHeaderWhenBoundToWildcard() async throws {
+        var config = makeConfig()
+        config.listenHost = "0.0.0.0"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        try writeInitializePost(
+            to: channel,
+            host: "attacker.example:8765",
+            origin: "http://attacker.example:8765"
+        )
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.isInitialized() == false)
+    }
+
+    @Test func httpAllowsLoopbackOriginWhenBoundToWildcard() async throws {
+        var config = makeConfig()
+        config.listenHost = "0.0.0.0"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        try writeInitializePost(
+            to: channel,
+            host: "localhost:8765",
+            origin: "http://localhost:8765"
+        )
+
+        let response = try collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+        #expect(response.head.headers.first(name: "Mcp-Session-Id") != nil)
+    }
+
+    @Test func httpAllowsOriginMatchingExplicitListenHost() async throws {
+        var config = makeConfig()
+        config.listenHost = "192.0.2.10"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        try writeInitializePost(
+            to: channel,
+            host: "192.0.2.10:8765",
+            origin: "http://192.0.2.10:8765"
+        )
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -691,25 +691,11 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "capabilities": [String: Any](),
-            ],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Host", value: "192.0.2.10:8765")
-        head.headers.add(name: "Origin", value: "http://example.invalid:8765")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try writeInitializePost(
+            to: channel,
+            host: "192.0.2.10:8765",
+            origin: "http://example.invalid:8765"
+        )
 
         let response = try collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -2658,6 +2644,34 @@ struct HTTPHandlerTests {
         let result = object?["result"] as? [String: Any]
         #expect((result?["isError"] as? Bool) == true)
         #expect(result?["resources"] == nil)
+    }
+
+    private func writeInitializePost(
+        to channel: EmbeddedChannel,
+        host: String? = nil,
+        origin: String
+    ) throws {
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        if let host {
+            head.headers.add(name: "Host", value: host)
+        }
+        head.headers.add(name: "Origin", value: origin)
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 
 }
