@@ -188,7 +188,7 @@ extension RuntimeCoordinator {
         }
 
         if mapping.isInitialize {
-            handleInitializeResponse(object, upstreamIndex: upstreamIndex)
+            handleInitializeResponse(object, upstreamIndex: upstreamIndex, upstreamID: upstreamID)
             return .handled
         }
 

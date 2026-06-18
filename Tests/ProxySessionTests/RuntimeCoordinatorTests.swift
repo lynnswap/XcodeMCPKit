@@ -2781,8 +2781,10 @@ struct RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
-        try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
-        let upstreamID2 = try extractUpstreamID(from: (await upstream0.sent())[2])
+        try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
+        let secondInitialize = (await upstream0.sent())[3]
+        #expect(methodName(from: secondInitialize) == "initialize")
+        let upstreamID2 = try extractUpstreamID(from: secondInitialize)
         await upstream0.yield(.message(try makeInitializeResponse(id: upstreamID2)))
         _ = try await init2.get()
     }
@@ -4160,6 +4162,73 @@ struct RuntimeCoordinatorTests {
                 manager.testStateSnapshot().upstreams[1].isInitialized == false
             }
         )
+    }
+
+    @Test func sessionManagerIgnoresStaleSecondaryInitializedNotificationAfterReset()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = BlockingInitializedNotificationUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1]
+        )
+        defer { manager.shutdownAndWait() }
+
+        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let init0ID = try extractUpstreamID(from: init0)
+        await upstream1.blockNextInitializedNotification()
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
+
+        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let init1ID = try extractUpstreamID(from: init1)
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
+        try await upstream1.waitForBlockedInitializedNotification()
+
+        #expect(manager.testStateSnapshot().upstreams[1].initInFlight)
+        manager.clearUpstreamState(upstreamIndex: 1)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+
+        await upstream1.releaseBlockedInitializedNotification(.accepted)
+
+        #expect(
+            await staysTrue(for: .milliseconds(200)) {
+                let snapshot = manager.testStateSnapshot().upstreams[1]
+                if snapshot.isInitialized {
+                    return false
+                }
+                guard case .quarantined = snapshot.healthState else {
+                    return false
+                }
+                return true
+            }
+        )
+    }
+
+    @Test func upstreamHealthManagerIgnoresStaleInitializeCompletionAfterStateReset() {
+        let manager = UpstreamHealthManager(upstreamCount: 1)
+        manager.markInitInFlight(upstreamIndex: 0, upstreamID: 10)
+        guard let _ = manager.clearUpstreamState(upstreamIndex: 0) else {
+            Issue.record("expected initial reset to clear the active initialize attempt")
+            return
+        }
+
+        if let _ = manager.markInitialized(upstreamIndex: 0, expectedUpstreamID: 10) {
+            Issue.record("expected stale initialize completion to be ignored")
+        }
+        if let _ = manager.clearUpstreamState(upstreamIndex: 0, expectedUpstreamID: 10) {
+            Issue.record("expected stale initialized notification rejection to be ignored")
+        }
+        let snapshot = manager.statesSnapshot()[0]
+        #expect(snapshot.isInitialized == false)
+        #expect(snapshot.initInFlight == false)
     }
 
     @Test func sessionManagerPrimaryWarmReinitOverloadFallsBackToEagerInitAfterWarmRetryFailure()

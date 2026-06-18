@@ -63,7 +63,14 @@ extension RuntimeCoordinator {
         }
     }
 
-    func handleInitializeResponse(_ object: [String: Any], upstreamIndex: Int) {
+    func handleInitializeResponse(_ object: [String: Any], upstreamIndex: Int, upstreamID: Int64) {
+        guard upstreamHealthManager.initializeAttemptMatches(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: upstreamID
+        ) else {
+            return
+        }
+
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {
             if upstreamIndex == 0 {
                 if let errorObject = object["error"] as? [String: Any], !errorObject.isEmpty {
@@ -72,7 +79,7 @@ extension RuntimeCoordinator {
                     failInitPending(error: TimeoutError())
                 }
             } else {
-                clearUpstreamState(upstreamIndex: upstreamIndex)
+                clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
                 failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             }
             return
@@ -97,11 +104,23 @@ extension RuntimeCoordinator {
                 failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
                 return
             }
-            sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
-                self?.markUpstreamInitialized(upstreamIndex: upstreamIndex)
-                self?.upstreamSlotScheduler.wake()
+            sendInitializedNotificationIfNeeded(
+                upstreamIndex: upstreamIndex,
+                expectedUpstreamID: upstreamID
+            ) { [weak self] in
+                guard let self else { return }
+                guard self.markUpstreamInitialized(
+                    upstreamIndex: upstreamIndex,
+                    expectedUpstreamID: upstreamID
+                ) else {
+                    return
+                }
+                self.upstreamSlotScheduler.wake()
             } onRejected: { [weak self] in
-                self?.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+                self?.handleInitializedNotificationSendOverload(
+                    upstreamIndex: upstreamIndex,
+                    expectedUpstreamID: upstreamID
+                )
             }
             return
         }
@@ -110,14 +129,22 @@ extension RuntimeCoordinator {
         guard let update else { return }
         update.timeout?.cancel()
 
-        sendInitializedNotificationIfNeeded(upstreamIndex: upstreamIndex) { [weak self] in
+        sendInitializedNotificationIfNeeded(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: upstreamID
+        ) { [weak self] in
             guard let self else { return }
+            guard self.markUpstreamInitialized(
+                upstreamIndex: upstreamIndex,
+                expectedUpstreamID: upstreamID
+            ) else {
+                return
+            }
             self.canonicalBrokerState.syncCanonicalInitialize(
                 result,
                 sourceUpstream: upstreamIndex
             )
             guard let pending = self.initializeManager.finishPrimaryInitializeSuccess() else { return }
-            self.markUpstreamInitialized(upstreamIndex: upstreamIndex)
             self.upstreamSlotScheduler.wake()
             if update.shouldWarmSecondary {
                 self.initializeManager.markSecondaryWarmupStarted()
@@ -131,6 +158,12 @@ extension RuntimeCoordinator {
             )
         } onRejected: { [weak self] in
             guard let self else { return }
+            guard self.upstreamHealthManager.initializeAttemptMatches(
+                upstreamIndex: upstreamIndex,
+                expectedUpstreamID: upstreamID
+            ) else {
+                return
+            }
             if upstreamIndex == 0,
                 self.hasUsableInitializedSecondaryUpstreams(),
                 let completion = self.initializeManager.finishPrimaryInitializeUsingCachedResult()
@@ -143,12 +176,18 @@ extension RuntimeCoordinator {
                     )
                 )
                 self.eventLoop.execute { [weak self] in
-                    self?.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+                    self?.handleInitializedNotificationSendOverload(
+                        upstreamIndex: upstreamIndex,
+                        expectedUpstreamID: upstreamID
+                    )
                 }
                 return
             }
             self.initializeManager.reopenPrimaryInitializeForRetry()
-            self.handleInitializedNotificationSendOverload(upstreamIndex: upstreamIndex)
+            self.handleInitializedNotificationSendOverload(
+                upstreamIndex: upstreamIndex,
+                expectedUpstreamID: upstreamID
+            )
         }
     }
 
@@ -289,6 +328,7 @@ extension RuntimeCoordinator {
 
     func sendInitializedNotificationIfNeeded(
         upstreamIndex: Int,
+        expectedUpstreamID: Int64,
         onAccepted: @escaping @Sendable () -> Void = {},
         onRejected: @escaping @Sendable () -> Void = {}
     ) {
@@ -296,6 +336,12 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex
         )
         guard shouldSend else {
+            guard upstreamHealthManager.initializeAttemptMatches(
+                upstreamIndex: upstreamIndex,
+                expectedUpstreamID: expectedUpstreamID
+            ) else {
+                return
+            }
             onAccepted()
             return
         }
@@ -305,6 +351,12 @@ extension RuntimeCoordinator {
             "method": "notifications/initialized",
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: notification, options: []) else {
+            guard upstreamHealthManager.initializeAttemptMatches(
+                upstreamIndex: upstreamIndex,
+                expectedUpstreamID: expectedUpstreamID
+            ) else {
+                return
+            }
             onAccepted()
             return
         }
@@ -313,7 +365,12 @@ extension RuntimeCoordinator {
             guard let self else { return }
             let result = await self.upstreams[upstreamIndex].send(data)
             if result == .accepted {
-                self.upstreamHealthManager.markInitializedNotificationSent(upstreamIndex: upstreamIndex)
+                guard self.upstreamHealthManager.markInitializedNotificationSent(
+                    upstreamIndex: upstreamIndex,
+                    expectedUpstreamID: expectedUpstreamID
+                ) else {
+                    return
+                }
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
                     direction: "outbound",
@@ -326,8 +383,13 @@ extension RuntimeCoordinator {
         }
     }
 
-    func handleInitializedNotificationSendOverload(upstreamIndex: Int) {
-        clearUpstreamState(upstreamIndex: upstreamIndex)
+    func handleInitializedNotificationSendOverload(upstreamIndex: Int, expectedUpstreamID: Int64) {
+        guard clearUpstreamState(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: expectedUpstreamID
+        ) else {
+            return
+        }
         let hasHealthySecondary = upstreamIndex == 0 && hasUsableInitializedSecondaryUpstreams()
         if canonicalBrokerState.toolsSourceUpstream() == upstreamIndex && !hasHealthySecondary {
             invalidateControlPlane(
@@ -408,9 +470,13 @@ extension RuntimeCoordinator {
         upstreamHealthManager.clearInitInFlight(upstreamIndex: upstreamIndex)
     }
 
-    func clearUpstreamState(upstreamIndex: Int) {
-        guard let cleared = upstreamHealthManager.clearUpstreamState(upstreamIndex: upstreamIndex) else {
-            return
+    @discardableResult
+    func clearUpstreamState(upstreamIndex: Int, expectedUpstreamID: Int64? = nil) -> Bool {
+        guard let cleared = upstreamHealthManager.clearUpstreamState(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: expectedUpstreamID
+        ) else {
+            return false
         }
         cleared.timeout?.cancel()
         if let initUpstreamID = cleared.initUpstreamID {
@@ -420,11 +486,27 @@ extension RuntimeCoordinator {
             )
         }
         debugRecorder.resetUpstream(upstreamIndex)
+        return true
+    }
+
+    @discardableResult
+    func markUpstreamInitialized(upstreamIndex: Int, expectedUpstreamID: Int64) -> Bool {
+        guard let result = upstreamHealthManager.markInitialized(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: expectedUpstreamID
+        ) else {
+            return false
+        }
+        result.timeout?.cancel()
+        noteUpstreamInitializationSucceeded()
+        return true
     }
 
     func markUpstreamInitialized(upstreamIndex: Int) {
-        let timeout = upstreamHealthManager.markInitialized(upstreamIndex: upstreamIndex)
-        timeout?.cancel()
+        guard let result = upstreamHealthManager.markInitialized(upstreamIndex: upstreamIndex) else {
+            return
+        }
+        result.timeout?.cancel()
         noteUpstreamInitializationSucceeded()
     }
 

@@ -46,6 +46,10 @@ package final class UpstreamHealthManager: Sendable {
         package let initUpstreamID: Int64?
     }
 
+    package struct MarkInitializedTransition: Sendable {
+        package let timeout: RuntimeScheduledTimeout?
+    }
+
     package enum InitPhase: Sendable, Equatable {
         case idle
         case initializing(upstreamID: Int64?)
@@ -383,10 +387,31 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func markInitializedNotificationSent(upstreamIndex: Int) {
+    package func markInitializedNotificationSent(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64
+    ) -> Bool {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
+                return false
+            }
+            guard state.upstreamStates[upstreamIndex].initUpstreamID == expectedUpstreamID else {
+                return false
+            }
             state.upstreamStates[upstreamIndex].didSendInitialized = true
+            return true
+        }
+    }
+
+    package func initializeAttemptMatches(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
+                return false
+            }
+            return state.upstreamStates[upstreamIndex].initUpstreamID == expectedUpstreamID
         }
     }
 
@@ -463,8 +488,23 @@ package final class UpstreamHealthManager: Sendable {
         timeout: RuntimeScheduledTimeout?,
         initUpstreamID: Int64?
     )? {
+        clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: nil)
+    }
+
+    package func clearUpstreamState(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64?
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?
+    )? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            if let expectedUpstreamID,
+               state.upstreamStates[upstreamIndex].initUpstreamID != expectedUpstreamID
+            {
+                return nil
+            }
             let timeout = state.upstreamStates[upstreamIndex].initTimeout
             let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
             state.upstreamStates[upstreamIndex].initTimeout = nil
@@ -483,9 +523,21 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func markInitialized(upstreamIndex: Int) -> RuntimeScheduledTimeout? {
+    package func markInitialized(upstreamIndex: Int) -> UpstreamHealthManager.MarkInitializedTransition? {
+        markInitialized(upstreamIndex: upstreamIndex, expectedUpstreamID: nil)
+    }
+
+    package func markInitialized(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64?
+    ) -> UpstreamHealthManager.MarkInitializedTransition? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
+            if let expectedUpstreamID,
+               state.upstreamStates[upstreamIndex].initUpstreamID != expectedUpstreamID
+            {
+                return nil
+            }
             state.upstreamStates[upstreamIndex].isInitialized = true
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].initUpstreamID = nil
@@ -494,7 +546,7 @@ package final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             let timeout = state.upstreamStates[upstreamIndex].initTimeout
             state.upstreamStates[upstreamIndex].initTimeout = nil
-            return timeout
+            return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
         }
     }
 
