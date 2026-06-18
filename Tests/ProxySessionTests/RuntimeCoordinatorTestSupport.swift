@@ -1150,6 +1150,19 @@ func sentValue(
     }
 }
 
+func sentValue(
+    from upstream: BlockingInitializedNotificationUpstreamClient,
+    at index: Int,
+    timeout: Duration = .seconds(5)
+) async throws -> Data {
+    try await nextValue(
+        "waiting for sent message \(index + 1)",
+        timeout: timeout
+    ) {
+        await upstream.sentValue(at: index)
+    }
+}
+
 func sentMessage(
     from upstream: TestUpstreamClient,
     matching predicate: @escaping @Sendable (Data) -> Bool,
