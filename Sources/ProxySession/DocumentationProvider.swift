@@ -536,6 +536,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     fetchDescriptor: true
                 )
                 if let descriptor = profile.descriptor {
+                    let didPromote = await promoteToActive(profile)
+                    if didPromote {
+                        logger.info(
+                            "Prewarmed documentation provider",
+                            metadata: [
+                                "pid": .string("\(target.processID)"),
+                                "app_path": .string(target.appPath),
+                                "xcode_version": .string(target.xcodeVersion),
+                                "server_version": .string(profile.serverVersion),
+                            ]
+                        )
+                    }
                     return .available(descriptor)
                 }
                 return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
@@ -611,7 +623,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
             if let activeProvider,
-                rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false
+                rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false,
+                activeProviderIsCurrentBest(
+                    activeProvider,
+                    excluding: rejectedProcessIDs.union(unusableProcessIDs)
+                )
             {
                 let fallbackTargets = orderedTargets(
                     excluding: rejectedProcessIDs
@@ -683,17 +699,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         deadline: candidateDeadline
                     ) {
                     case .success(let data):
-                        activeProvider = provider
-                        preparedProviders.removeValue(forKey: target.processID)
-                        logger.info(
-                            "Selected documentation provider",
-                            metadata: [
-                                "pid": .string("\(target.processID)"),
-                                "app_path": .string(target.appPath),
-                                "xcode_version": .string(target.xcodeVersion),
-                                "server_version": .string(profile.serverVersion),
-                            ]
-                        )
+                        let didPromote = await promoteToActive(profile)
+                        if didPromote {
+                            logger.info(
+                                "Selected documentation provider",
+                                metadata: [
+                                    "pid": .string("\(target.processID)"),
+                                    "app_path": .string(target.appPath),
+                                    "xcode_version": .string(target.xcodeVersion),
+                                    "server_version": .string(profile.serverVersion),
+                                ]
+                            )
+                        }
                         return .handled(data, invalidatedProvider: invalidatedProvider)
                     case .rejected(let processID, let permanentlyUnusable):
                         rejectedProcessIDs.insert(processID)
@@ -733,6 +750,30 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
         }
         throw CancellationError()
+    }
+
+    private func activeProviderIsCurrentBest(
+        _ activeProvider: ActiveProvider,
+        excluding excludedProcessIDs: Set<pid_t>
+    ) -> Bool {
+        guard let first = orderedTargets(excluding: excludedProcessIDs).first else {
+            return false
+        }
+        return first.processID == activeProvider.profile.target.processID
+    }
+
+    private func promoteToActive(_ profile: CandidateProfile) async -> Bool {
+        let previous = activeProvider
+        activeProvider = ActiveProvider(profile: profile)
+        preparedProviders.removeValue(forKey: profile.target.processID)
+        guard let previous else {
+            return true
+        }
+        guard previous.profile.id != profile.id else {
+            return false
+        }
+        await previous.profile.connection.stop()
+        return true
     }
 
     private enum DocumentationAttemptResult: Sendable {
