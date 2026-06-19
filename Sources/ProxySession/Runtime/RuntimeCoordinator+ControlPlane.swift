@@ -218,6 +218,12 @@ extension RuntimeCoordinator {
                 }
                 let upstreamRequestTimeout = self.timeAmount(until: requestDeadlineUptimeNs)
                 if upstreamRequestTimeout?.nanoseconds == 0 {
+                    self.activateRequestLease(
+                        leaseID,
+                        requestIDKey: nil,
+                        upstreamIndex: selectedUpstreamIndex,
+                        timeout: .nanoseconds(0)
+                    )
                     self.failRequestLease(
                         leaseID,
                         terminalState: .timedOut,
