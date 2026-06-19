@@ -81,7 +81,7 @@ package protocol RuntimeCoordinating: Sendable {
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationSearchOutcome
-    func hasDocumentationProvider() -> Bool
+    func hasDocumentationSearchService() -> Bool
     func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
@@ -140,7 +140,7 @@ extension RuntimeCoordinating {
 
     package func markNotificationClientConnected(sessionID _: String) {}
 
-    package func hasDocumentationProvider() -> Bool {
+    package func hasDocumentationSearchService() -> Bool {
         false
     }
 
@@ -618,7 +618,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     "timeout_seconds": .string("\(timeoutSeconds)")
                 ]
             )
-            let update = await documentationProviderManager.prewarm(requestTimeout: timeout)
+            let update = await documentationProviderManager.startBackgroundDiscovery(
+                requestTimeout: timeout
+            )
             self?.recordDocumentationToolListUpdate(update)
             guard !Task.isCancelled else { return }
             logger.debug("Documentation provider prewarm completed")
@@ -913,7 +915,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func hasDocumentationProvider() -> Bool {
+    package func hasDocumentationSearchService() -> Bool {
         documentationProviderManager != nil
     }
 

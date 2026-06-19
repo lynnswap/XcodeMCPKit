@@ -114,12 +114,42 @@ func toolContentText(in responseData: Data) throws -> String? {
     return content.first?["text"] as? String
 }
 
+func toolResultIsError(in responseData: Data) throws -> Bool {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+    )
+    let result = try #require(object["result"] as? [String: Any])
+    return result["isError"] as? Bool == true
+}
+
+func responseID(in responseData: Data) throws -> Int64 {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+    )
+    let id = try #require(object["id"] as? NSNumber)
+    return id.int64Value
+}
+
 func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
     DocumentationProviderTarget(
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
-        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge"
+        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge",
+        xcodeVersion: "\(processID).0"
+    )
+}
+
+func documentationProviderTarget(
+    processID: pid_t,
+    xcodeVersion: String
+) -> DocumentationProviderTarget {
+    DocumentationProviderTarget(
+        processID: processID,
+        appPath: "/Applications/Xcode-\(processID).app",
+        developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
+        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge",
+        xcodeVersion: xcodeVersion
     )
 }
 
@@ -131,9 +161,32 @@ struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
     }
 }
 
+final class SequencedXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
+    private let lock = NSLock()
+    private var remainingSequences: [[DocumentationProviderTarget]]
+    private var lastSequence: [DocumentationProviderTarget]
+
+    init(_ sequences: [[DocumentationProviderTarget]]) {
+        self.remainingSequences = sequences
+        self.lastSequence = sequences.last ?? []
+    }
+
+    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remainingSequences.isEmpty == false else {
+            return lastSequence
+        }
+        let targets = remainingSequences.removeFirst()
+        lastSequence = targets
+        return targets
+    }
+}
+
 enum ScriptedDocumentationResponse: Sendable {
     case success
     case successText(String)
+    case toolErrorText(String)
     case hang
     case notEnabled
     case exit
@@ -143,7 +196,8 @@ struct ScriptedDocumentationSessionPlan: Sendable {
     let serverVersion: String
     let toolCount: Int
     let includesDocumentationSearch: Bool
-    let probeResponse: ScriptedDocumentationResponse
+    let hangsToolsList: Bool
+    let firstDocumentationResponse: ScriptedDocumentationResponse
     let userCallResponses: [ScriptedDocumentationResponse]
     let requiresNumericRequestIDs: Bool
 
@@ -151,14 +205,16 @@ struct ScriptedDocumentationSessionPlan: Sendable {
         serverVersion: String,
         toolCount: Int,
         includesDocumentationSearch: Bool,
-        probeResponse: ScriptedDocumentationResponse,
+        hangsToolsList: Bool = false,
+        firstDocumentationResponse: ScriptedDocumentationResponse,
         userCallResponses: [ScriptedDocumentationResponse] = [],
         requiresNumericRequestIDs: Bool = false
     ) {
         self.serverVersion = serverVersion
         self.toolCount = toolCount
         self.includesDocumentationSearch = includesDocumentationSearch
-        self.probeResponse = probeResponse
+        self.hangsToolsList = hangsToolsList
+        self.firstDocumentationResponse = firstDocumentationResponse
         self.userCallResponses = userCallResponses
         self.requiresNumericRequestIDs = requiresNumericRequestIDs
     }
@@ -178,6 +234,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private var startedProcessIDs: [pid_t] = []
     private var initializeParamsByPID: [pid_t: [JSONValue]] = [:]
     private var requestCountsByPID: [pid_t: [String: Int]] = [:]
+    private var documentationQueriesByPID: [pid_t: [String]] = [:]
     private var requestCountWaiters: [RequestCountWaiter] = []
     private let startDelayNanoseconds: UInt64?
 
@@ -231,6 +288,14 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
 
     func requestCount(processID: pid_t, method: String) -> Int {
         requestCountsByPID[processID]?[method] ?? 0
+    }
+
+    func recordDocumentationQuery(_ query: String, for processID: pid_t) {
+        documentationQueriesByPID[processID, default: []].append(query)
+    }
+
+    func documentationQueries(for processID: pid_t) -> [String] {
+        documentationQueriesByPID[processID] ?? []
     }
 
     func waitForRequestCount(_ count: Int, processID: pid_t, method: String) async throws {
@@ -337,6 +402,9 @@ actor ScriptedDocumentationSession: UpstreamSession {
                 ]
             )
         case "tools/list":
+            guard plan.hangsToolsList == false else {
+                return .accepted
+            }
             yieldResponse(
                 id: requestID,
                 result: [
@@ -344,10 +412,15 @@ actor ScriptedDocumentationSession: UpstreamSession {
                 ]
             )
         case "tools/call":
+            if let params = object["params"] as? [String: Any],
+               let arguments = params["arguments"] as? [String: Any],
+               let query = arguments["query"] as? String {
+                await recorder.recordDocumentationQuery(query, for: processID)
+            }
             documentationCallCount += 1
             let response: ScriptedDocumentationResponse
             if documentationCallCount == 1 {
-                response = plan.probeResponse
+                response = plan.firstDocumentationResponse
             } else if remainingUserCallResponses.isEmpty == false {
                 response = remainingUserCallResponses.removeFirst()
             } else {
@@ -387,6 +460,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
             yieldToolResponse(id: id, text: "{\"ok\":true}", isError: false)
         case .successText(let text):
             yieldToolResponse(id: id, text: text, isError: false)
+        case .toolErrorText(let text):
+            yieldToolResponse(id: id, text: text, isError: true)
         case .hang:
             break
         case .notEnabled:
@@ -458,7 +533,9 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
         self.prewarmBlocker = prewarmBlocker
     }
 
-    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate {
+    func startBackgroundDiscovery(requestTimeout: TimeAmount?) async
+        -> DocumentationProvider.ToolListUpdate
+    {
         prewarmStarted?.signal()
         if let prewarmDelayNanoseconds {
             try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)

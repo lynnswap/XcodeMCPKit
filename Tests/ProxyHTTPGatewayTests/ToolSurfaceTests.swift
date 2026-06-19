@@ -432,7 +432,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func hasDocumentationProvider() -> Bool { false }
+    func hasDocumentationSearchService() -> Bool { false }
 
     func chooseUpstreamIndex() -> Int? { nil }
 

@@ -339,7 +339,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func hasDocumentationProvider() -> Bool {
+    func hasDocumentationSearchService() -> Bool {
         documentationSearchResponder != nil
     }
 
