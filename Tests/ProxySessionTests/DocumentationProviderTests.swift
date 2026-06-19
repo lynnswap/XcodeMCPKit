@@ -415,7 +415,7 @@ extension RuntimeCoordinatorTests {
         #expect(documentationDescriptorDescription(in: cachedResult) == "docs-27.0")
     }
 
-    @Test func documentationProviderBackgroundDiscoveryRemovesStaleToolWhenDescriptorsAreAbsent()
+    @Test func documentationProviderBackgroundDiscoveryKeepsBaseCatalogWhenDescriptorIsAbsent()
         async throws
     {
         let target = documentationProviderTarget(processID: 115, xcodeVersion: "27.0")
@@ -446,7 +446,7 @@ extension RuntimeCoordinatorTests {
             ])
         )
 
-        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(documentationDescriptorDescription(in: result) == "docs-stale")
         #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 1)
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
@@ -814,7 +814,7 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
     }
 
-    @Test func documentationProviderManagerSkipsDescriptorMissingTargetsForSearch() async throws {
+    @Test func documentationProviderManagerSearchesDescriptorMissingPreparedTarget() async throws {
         let xcode26 = documentationProviderTarget(processID: 610, xcodeVersion: "26.6")
         let xcode27 = documentationProviderTarget(processID: 611, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
@@ -832,7 +832,7 @@ extension RuntimeCoordinatorTests {
                         serverVersion: "27.0",
                         toolCount: 46,
                         includesDocumentationSearch: false,
-                        firstDocumentationResponse: .toolErrorText("missing descriptor target")
+                        firstDocumentationResponse: .successText("{\"answer\":\"actual\"}")
                     ),
                 ],
             ]
@@ -844,7 +844,7 @@ extension RuntimeCoordinatorTests {
 
         let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
         let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 84, query: "SwiftUI"),
@@ -855,10 +855,11 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected handled outcome, got \(outcome)")
             return
         }
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"advertised\"}")
-        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
-        #expect(await factory.documentationQueries(for: xcode27.processID).isEmpty)
-        #expect(await factory.documentationQueries(for: xcode26.processID) == ["SwiftUI"])
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"actual\"}")
+        #expect(await factory.startedPIDs() == [xcode27.processID])
+        #expect(await factory.requestCount(processID: xcode27.processID, method: "tools/list") == 1)
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["SwiftUI"])
+        #expect(await factory.documentationQueries(for: xcode26.processID).isEmpty)
     }
 
     @Test func documentationProviderManagerRetriesActualRequestWhenNewestIsNotEnabled() async throws {

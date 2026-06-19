@@ -423,21 +423,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let task: Task<CandidateProfile, Error>
     }
 
-    private struct DescriptorUnavailable: Error {}
-
     private struct PreparationWaitTimedOut: Error {}
-
-    private struct TargetIdentity: Hashable, Sendable {
-        let processID: pid_t
-        let appPath: String
-        let xcodeVersion: String
-
-        init(_ target: DocumentationProviderTarget) {
-            self.processID = target.processID
-            self.appPath = target.appPath
-            self.xcodeVersion = target.xcodeVersion
-        }
-    }
 
     private final class PreparationWaiter: @unchecked Sendable {
         private let lock = NSLock()
@@ -503,7 +489,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private var preparedProviders: [pid_t: CandidateProfile] = [:]
     private var providerPreparations: [pid_t: ProviderPreparation] = [:]
     private var unusableProcessIDs: Set<pid_t> = []
-    private var descriptorMissingTargets: Set<TargetIdentity> = []
     private var isShutdown = false
 
     package init(
@@ -553,6 +538,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 if let descriptor = profile.descriptor {
                     return .available(descriptor)
                 }
+                return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
             } catch is CancellationError {
                 return .unavailable
             } catch {
@@ -606,10 +592,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if targetIDs.isSubset(of: unusableProcessIDs) {
             return .unavailable
         }
-        let targetIdentities = Set(targets.map(TargetIdentity.init))
-        if targetIdentities.isSubset(of: descriptorMissingTargets) {
-            return .unavailable
-        }
         return .unchanged
     }
 
@@ -634,8 +616,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 let fallbackTargets = orderedTargets(
                     excluding: rejectedProcessIDs
                         .union(unusableProcessIDs)
-                        .union([activeProvider.profile.target.processID]),
-                    includeDescriptorMissing: false
+                        .union([activeProvider.profile.target.processID])
                 )
                 let activeDeadline = makeDeadline(
                     fromTimeout: timeoutForCandidate(
@@ -668,8 +649,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
 
             let targets = orderedTargets(
-                excluding: rejectedProcessIDs.union(unusableProcessIDs),
-                includeDescriptorMissing: false
+                excluding: rejectedProcessIDs.union(unusableProcessIDs)
             )
             guard targets.isEmpty == false else {
                 try Task.checkCancellation()
@@ -814,7 +794,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     ) async throws -> CandidateProfile {
         if let activeProvider, activeProvider.profile.target.processID == target.processID {
             if fetchDescriptor, activeProvider.profile.descriptor == nil {
-                let updated = try await profileWithRequiredDescriptor(
+                let updated = await profileByRefreshingDescriptor(
                     activeProvider.profile,
                     requestTimeout: requestTimeout
                 )
@@ -834,7 +814,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         if var prepared = preparedProviders[target.processID] {
             if fetchDescriptor, prepared.descriptor == nil {
-                let updated = try await profileWithRequiredDescriptor(
+                let updated = await profileByRefreshingDescriptor(
                     prepared,
                     requestTimeout: requestTimeout
                 )
@@ -906,7 +886,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     ) async throws -> CandidateProfile {
         if let activeProvider, activeProvider.profile.id == profile.id {
             if fetchDescriptor, activeProvider.profile.descriptor == nil {
-                let updated = try await profileWithRequiredDescriptor(
+                let updated = await profileByRefreshingDescriptor(
                     activeProvider.profile,
                     requestTimeout: requestTimeout
                 )
@@ -919,7 +899,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             prepared.id == profile.id
         {
             if fetchDescriptor, prepared.descriptor == nil {
-                let updated = try await profileWithRequiredDescriptor(
+                let updated = await profileByRefreshingDescriptor(
                     prepared,
                     requestTimeout: requestTimeout
                 )
@@ -932,7 +912,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         var prepared = profile
         preparedProviders[profile.target.processID] = prepared
         if fetchDescriptor, prepared.descriptor == nil {
-            prepared = try await profileWithRequiredDescriptor(
+            prepared = await profileByRefreshingDescriptor(
                 prepared,
                 requestTimeout: requestTimeout
             )
@@ -1025,8 +1005,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func orderedTargets(
-        excluding excludedProcessIDs: Set<pid_t>,
-        includeDescriptorMissing: Bool = true
+        excluding excludedProcessIDs: Set<pid_t>
     ) -> [DocumentationProviderTarget] {
         let discoveredTargets = discovery.runningXcodeTargets()
         let filtered: [DocumentationProviderTarget]
@@ -1034,12 +1013,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             filtered = discoveredTargets.filter {
                 $0.processID == pinnedProcessID
                     && excludedProcessIDs.contains($0.processID) == false
-                    && (includeDescriptorMissing || descriptorMissingTargets.contains(TargetIdentity($0)) == false)
             }
         } else {
             filtered = discoveredTargets.filter {
                 excludedProcessIDs.contains($0.processID) == false
-                    && (includeDescriptorMissing || descriptorMissingTargets.contains(TargetIdentity($0)) == false)
             }
         }
         return filtered.sorted { lhs, rhs in
@@ -1122,34 +1099,32 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return updated
     }
 
-    private func profileWithRequiredDescriptor(
+    private func profileByRefreshingDescriptor(
         _ profile: CandidateProfile,
         requestTimeout: TimeAmount?
-    ) async throws -> CandidateProfile {
-        let updated = try await profileWithDescriptor(profile, requestTimeout: requestTimeout)
-        guard updated.descriptor != nil else {
-            await markDescriptorMissingAndStopIfUnused(updated)
-            throw DescriptorUnavailable()
+    ) async -> CandidateProfile {
+        do {
+            let updated = try await profileWithDescriptor(profile, requestTimeout: requestTimeout)
+            if updated.descriptor == nil {
+                logger.debug(
+                    "Documentation provider descriptor missing from tools/list",
+                    metadata: [
+                        "pid": .string("\(profile.target.processID)"),
+                        "app_path": .string(profile.target.appPath),
+                        "xcode_version": .string(profile.target.xcodeVersion),
+                    ]
+                )
+            }
+            return updated
+        } catch is CancellationError {
+            return profile
+        } catch {
+            logger.debug(
+                "Documentation provider descriptor refresh failed",
+                metadata: candidateLogMetadata(target: profile.target, error: error)
+            )
+            return profile
         }
-        descriptorMissingTargets.remove(TargetIdentity(updated.target))
-        return updated
-    }
-
-    private func markDescriptorMissingAndStopIfUnused(_ profile: CandidateProfile) async {
-        let identity = TargetIdentity(profile.target)
-        descriptorMissingTargets.insert(identity)
-        if activeProvider?.profile.id == profile.id {
-            preparedProviders.removeValue(forKey: profile.target.processID)
-            return
-        }
-        if let prepared = preparedProviders[profile.target.processID],
-            prepared.id == profile.id
-        {
-            preparedProviders.removeValue(forKey: profile.target.processID)
-            await prepared.connection.stop()
-            return
-        }
-        await profile.connection.stop()
     }
 
     private func makeInitializeRequestData() throws -> Data {
