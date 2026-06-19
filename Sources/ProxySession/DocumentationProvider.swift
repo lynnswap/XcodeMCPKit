@@ -631,10 +631,22 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             if let activeProvider,
                 rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false
             {
+                let fallbackTargets = orderedTargets(
+                    excluding: rejectedProcessIDs
+                        .union(unusableProcessIDs)
+                        .union([activeProvider.profile.target.processID]),
+                    includeDescriptorMissing: false
+                )
+                let activeDeadline = makeDeadline(
+                    fromTimeout: timeoutForCandidate(
+                        until: deadline,
+                        remainingCandidateCount: fallbackTargets.count + 1
+                    )
+                )
                 switch try await attemptDocumentationSearch(
                     requestData: requestData,
                     provider: activeProvider,
-                    deadline: deadline
+                    deadline: activeDeadline
                 ) {
                 case .success(let data):
                     return .handled(data, invalidatedProvider: invalidatedProvider)
@@ -668,21 +680,27 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
 
             var progressed = false
-            for target in targets {
+            for (index, target) in targets.enumerated() {
                 if let deadline, deadline.hasExpired {
                     return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
                 }
+                let candidateDeadline = makeDeadline(
+                    fromTimeout: timeoutForCandidate(
+                        until: deadline,
+                        remainingCandidateCount: targets.count - index
+                    )
+                )
                 do {
                     let profile = try await preparedProvider(
                         for: target,
-                        requestTimeout: remainingTimeout(until: deadline),
+                        requestTimeout: remainingTimeout(until: candidateDeadline),
                         fetchDescriptor: false
                     )
                     let provider = ActiveProvider(profile: profile)
                     switch try await attemptDocumentationSearch(
                         requestData: requestData,
                         provider: provider,
-                        deadline: deadline
+                        deadline: candidateDeadline
                     ) {
                     case .success(let data):
                         activeProvider = provider
@@ -1211,6 +1229,32 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return nil
         }
         return deadline.remaining()
+    }
+
+    private func timeoutForCandidate(
+        until deadline: Deadline?,
+        remainingCandidateCount: Int
+    ) -> TimeAmount? {
+        guard let remaining = remainingTimeout(until: deadline) else {
+            return nil
+        }
+        guard remaining.nanoseconds > 0 else {
+            return .nanoseconds(0)
+        }
+        guard remainingCandidateCount > 1 else {
+            return remaining
+        }
+        return .nanoseconds(max(1, remaining.nanoseconds / Int64(remainingCandidateCount)))
+    }
+
+    private func makeDeadline(fromTimeout timeout: TimeAmount?) -> Deadline? {
+        guard let timeout else {
+            return nil
+        }
+        guard timeout.nanoseconds > 0 else {
+            return Deadline(uptimeNanoseconds: clock.uptimeNanoseconds(), clock: clock)
+        }
+        return Deadline.fromNow(timeout, clock: clock)
     }
 
     private func candidateLogMetadata(

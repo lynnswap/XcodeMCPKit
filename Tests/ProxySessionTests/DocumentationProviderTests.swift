@@ -905,6 +905,50 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
     }
 
+    @Test func documentationProviderManagerPreservesTimeForFallbackWhenNewestHangs() async throws {
+        let xcode26 = documentationProviderTarget(processID: 425, xcodeVersion: "26.6")
+        let xcode27 = documentationProviderTarget(processID: 426, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"fallback\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .hang
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 88, query: "UIView"),
+            requestTimeoutOverride: .milliseconds(200)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
+        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
+    }
+
     @Test func documentationProviderManagerRetriesActiveNotEnabledOnNextCandidate() async throws {
         let xcode26 = documentationProviderTarget(processID: 430, xcodeVersion: "26.6")
         let xcode27 = documentationProviderTarget(processID: 431, xcodeVersion: "27.0")
