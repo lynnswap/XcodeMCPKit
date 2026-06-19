@@ -67,6 +67,49 @@ package protocol DocumentationProviderManaging: Sendable {
     func shutdown() async
 }
 
+package struct DocumentationProviderRoute: Sendable, Equatable {
+    package let id: String
+    package let target: DocumentationProviderTarget
+    package let upstreamIndex: Int?
+    package let serverVersion: String
+
+    package init(
+        id: String,
+        target: DocumentationProviderTarget,
+        upstreamIndex: Int?,
+        serverVersion: String = ""
+    ) {
+        self.id = id
+        self.target = target
+        self.upstreamIndex = upstreamIndex
+        self.serverVersion = serverVersion
+    }
+}
+
+package protocol DocumentationProviderRouting: Sendable {
+    func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?,
+        initializeParams: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute
+    func toolsList(
+        route: DocumentationProviderRoute,
+        timeout: TimeAmount?
+    ) async throws -> JSONValue
+    func callDocumentationSearch(
+        route: DocumentationProviderRoute,
+        requestData: Data,
+        timeout: TimeAmount?
+    ) async throws -> Data
+    func close(route: DocumentationProviderRoute) async
+    func shutdown() async
+}
+
+extension DocumentationProviderRouting {
+    package func close(route _: DocumentationProviderRoute) async {}
+    package func shutdown() async {}
+}
+
 extension DocumentationProvider {
     package enum ToolCatalog {
         package static let toolName = "DocumentationSearch"
@@ -406,11 +449,124 @@ package actor DocumentationProviderConnection {
     }
 }
 
+package actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting {
+    private let sessionFactory: any DocumentationProviderSessionMaking
+    private let clock: ClockClient
+    private var connections: [String: DocumentationProviderConnection] = [:]
+
+    package init(
+        sessionFactory: any DocumentationProviderSessionMaking,
+        clock: ClockClient = .liveValue
+    ) {
+        self.sessionFactory = sessionFactory
+        self.clock = clock
+    }
+
+    package func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?,
+        initializeParams: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        let session = try await sessionFactory.startSession(for: target)
+        let connection = DocumentationProviderConnection(session: session, clock: clock)
+        let routeID = UUID().uuidString
+        do {
+            await connection.start()
+            let initialize = try await connection.call(
+                try Self.makeInitializeRequestData(initializeParams: initializeParams),
+                timeout: requestTimeout
+            )
+            let serverVersion = DocumentationProviderManager.serverVersion(
+                fromInitializeResponse: initialize
+            ) ?? ""
+            try await connection.sendNotification([
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            ])
+            connections[routeID] = connection
+            return DocumentationProviderRoute(
+                id: routeID,
+                target: target,
+                upstreamIndex: nil,
+                serverVersion: serverVersion
+            )
+        } catch {
+            await connection.stop()
+            throw error
+        }
+    }
+
+    package func toolsList(
+        route: DocumentationProviderRoute,
+        timeout: TimeAmount?
+    ) async throws -> JSONValue {
+        guard let connection = connections[route.id] else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let toolsList = try await connection.call(
+            try Self.makeToolsListRequestData(),
+            timeout: timeout
+        )
+        return try DocumentationProviderManager.resultValue(from: toolsList)
+    }
+
+    package func callDocumentationSearch(
+        route: DocumentationProviderRoute,
+        requestData: Data,
+        timeout: TimeAmount?
+    ) async throws -> Data {
+        guard let connection = connections[route.id] else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        return try await connection.call(requestData, timeout: timeout)
+    }
+
+    package func close(route: DocumentationProviderRoute) async {
+        guard let connection = connections.removeValue(forKey: route.id) else {
+            return
+        }
+        await connection.stop()
+    }
+
+    package func shutdown() async {
+        let connections = self.connections
+        self.connections.removeAll()
+        for connection in connections.values {
+            await connection.stop()
+        }
+    }
+
+    private static func makeInitializeRequestData(
+        initializeParams: [String: JSONValue]
+    ) throws -> Data {
+        try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": initializeParams.mapValues(\.foundationObject),
+            ],
+            options: []
+        )
+    }
+
+    private static func makeToolsListRequestData() throws -> Data {
+        try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": "tools-list",
+                "method": "tools/list",
+            ],
+            options: []
+        )
+    }
+}
+
 package actor DocumentationProviderManager: DocumentationProviderManaging {
     private struct CandidateProfile: Sendable {
         let id: UUID
         let target: DocumentationProviderTarget
-        let connection: DocumentationProviderConnection
+        let route: DocumentationProviderRoute
         var descriptor: JSONValue?
         let serverVersion: String
     }
@@ -479,7 +635,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private let discovery: any XcodeTargetDiscovering
-    private let sessionFactory: any DocumentationProviderSessionMaking
+    private let transport: any DocumentationProviderRouting
     private let providerSelectionTimeout: TimeAmount?
     private let pinnedProcessID: pid_t?
     private let initializeParams: [String: JSONValue]
@@ -493,8 +649,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     package init(
         discovery: any XcodeTargetDiscovering,
-        sessionFactory: any DocumentationProviderSessionMaking =
-            LiveDocumentationProviderSessionFactory(),
+        transport: any DocumentationProviderRouting,
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
@@ -502,12 +657,35 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
-        self.sessionFactory = sessionFactory
+        self.transport = transport
         self.providerSelectionTimeout = providerSelectionTimeout
         self.pinnedProcessID = pinnedProcessID
         self.initializeParams = initializeParams
         self.clock = clock
         self.logger = logger
+    }
+
+    package init(
+        discovery: any XcodeTargetDiscovering,
+        sessionFactory: any DocumentationProviderSessionMaking,
+        providerSelectionTimeout: TimeAmount? = .seconds(30),
+        pinnedProcessID: pid_t? = nil,
+        initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
+        clock: ClockClient = .liveValue,
+        logger: Logger = ProxyLogging.make("documentation.provider")
+    ) {
+        self.init(
+            discovery: discovery,
+            transport: SessionBackedDocumentationProviderTransport(
+                sessionFactory: sessionFactory,
+                clock: clock
+            ),
+            providerSelectionTimeout: providerSelectionTimeout,
+            pinnedProcessID: pinnedProcessID,
+            initializeParams: initializeParams,
+            clock: clock,
+            logger: logger
+        )
     }
 
     package func startBackgroundDiscovery(requestTimeout: TimeAmount?) async
@@ -772,7 +950,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard previous.profile.id != profile.id else {
             return false
         }
-        await previous.profile.connection.stop()
+        await transport.close(route: previous.profile.route)
         return true
     }
 
@@ -789,8 +967,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     ) async throws -> DocumentationAttemptResult {
         let processID = provider.profile.target.processID
         do {
-            let response = try await provider.profile.connection.call(
-                requestData,
+            let response = try await transport.callDocumentationSearch(
+                route: provider.profile.route,
+                requestData: requestData,
                 timeout: remainingTimeout(until: deadline)
             )
             guard !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
@@ -818,14 +997,17 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let provider = activeProvider
         activeProvider = nil
         for profile in prepared.values where profile.id != provider?.profile.id {
-            await profile.connection.stop()
+            await transport.close(route: profile.route)
         }
-        await provider?.profile.connection.stop()
+        if let provider {
+            await transport.close(route: provider.profile.route)
+        }
     }
 
     package func shutdown() async {
         isShutdown = true
         await invalidate(reason: "shutdown")
+        await transport.shutdown()
     }
 
     private func preparedProvider(
@@ -889,7 +1071,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             let timeout = providerSelectionTimeout
             preparation = ProviderPreparation(
                 task: Task {
-                    try await self.openProviderConnection(
+                    try await self.openProviderRoute(
                         target: target,
                         requestTimeout: timeout
                     )
@@ -910,7 +1092,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         providerPreparations.removeValue(forKey: target.processID)
         if isShutdown {
-            await profile.connection.stop()
+            await transport.close(route: profile.route)
             throw CancellationError()
         }
         return try await cachePreparedProvider(
@@ -1042,7 +1224,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if let activeProvider, activeProvider.profile.id == provider.profile.id {
             self.activeProvider = nil
         }
-        await provider.profile.connection.stop()
+        await transport.close(route: provider.profile.route)
     }
 
     private func orderedTargets(
@@ -1072,7 +1254,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func openProviderConnection(
+    private func openProviderRoute(
         target: DocumentationProviderTarget,
         requestTimeout: TimeAmount?
     ) async throws -> CandidateProfile {
@@ -1089,37 +1271,34 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         )
         let startupDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
         try Task.checkCancellation()
-        let session = try await sessionFactory.startSession(for: target)
-        let connection = DocumentationProviderConnection(session: session, clock: clock)
+        let startupTimeout = remainingTimeout(until: startupDeadline)
+        guard startupTimeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+        let route = try await transport.openRoute(
+            for: target,
+            requestTimeout: startupTimeout,
+            initializeParams: initializeParams
+        )
         do {
             try Task.checkCancellation()
-            await connection.start()
-            let initializeTimeout = remainingTimeout(until: startupDeadline)
-            guard initializeTimeout?.nanoseconds != 0 else {
+            guard !isShutdown else {
+                throw CancellationError()
+            }
+            guard remainingTimeout(until: startupDeadline)?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
-            let initialize = try await connection.call(
-                try makeInitializeRequestData(),
-                timeout: initializeTimeout
-            )
-            let serverVersion = Self.serverVersion(fromInitializeResponse: initialize) ?? ""
-            try Task.checkCancellation()
-            try await connection.sendNotification([
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-            ])
-            let profile = CandidateProfile(
-                id: UUID(),
-                target: target,
-                connection: connection,
-                descriptor: nil,
-                serverVersion: serverVersion
-            )
-            return profile
         } catch {
-            await connection.stop()
+            await transport.close(route: route)
             throw error
         }
+        return CandidateProfile(
+            id: UUID(),
+            target: target,
+            route: route,
+            descriptor: nil,
+            serverVersion: route.serverVersion
+        )
     }
 
     private func profileWithDescriptor(
@@ -1131,11 +1310,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard toolsListTimeout?.nanoseconds != 0 else {
             throw TimeoutError()
         }
-        let toolsList = try await profile.connection.call(
-            try Self.makeToolsListRequestData(),
+        let toolsResult = try await transport.toolsList(
+            route: profile.route,
             timeout: toolsListTimeout
         )
-        let toolsResult = try Self.resultValue(from: toolsList)
         updated.descriptor = DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
         return updated
     }
@@ -1168,30 +1346,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func makeInitializeRequestData() throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: [
-                "jsonrpc": "2.0",
-                "id": "initialize",
-                "method": "initialize",
-                "params": initializeParams.mapValues(\.foundationObject),
-            ],
-            options: []
-        )
-    }
-
-    private static func makeToolsListRequestData() throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: [
-                "jsonrpc": "2.0",
-                "id": "tools-list",
-                "method": "tools/list",
-            ],
-            options: []
-        )
-    }
-
-    private static func resultValue(from responseData: Data) throws -> JSONValue {
+    package static func resultValue(from responseData: Data) throws -> JSONValue {
         guard
             let object = try JSONSerialization.jsonObject(with: responseData, options: [])
                 as? [String: Any],
@@ -1203,7 +1358,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return value
     }
 
-    private static func serverVersion(fromInitializeResponse data: Data) -> String? {
+    package static func serverVersion(fromInitializeResponse data: Data) -> String? {
         guard
             let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],

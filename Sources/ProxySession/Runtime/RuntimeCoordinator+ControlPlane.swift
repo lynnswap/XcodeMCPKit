@@ -150,8 +150,11 @@ extension RuntimeCoordinator {
         label: String,
         requestObject: [String: Any],
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlane.RPCHandle? = nil
+        rpcHandle: ControlPlane.RPCHandle? = nil,
+        responseIDOverride: JSONRPC.ID? = nil,
+        throwsOnRPCError: Bool = true
     ) async throws -> ControlPlane.RPCResponse {
+        let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: requestTimeout)
         let internalSessionID = controlPlaneSessionID(for: purpose, route: route)
         let session = session(id: internalSessionID)
         let router = session.router
@@ -213,10 +216,19 @@ extension RuntimeCoordinator {
                 if rpcHandle?.isCancelled() == true {
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
+                let upstreamRequestTimeout = self.timeAmount(until: requestDeadlineUptimeNs)
+                if upstreamRequestTimeout?.nanoseconds == 0 {
+                    self.failRequestLease(
+                        leaseID,
+                        terminalState: .timedOut,
+                        reason: .timedOut
+                    )
+                    return self.eventLoop.makeFailedFuture(TimeoutError())
+                }
                 let registration = session.router.registerRequestPending(
                     idKey: originalID.key,
                     on: self.eventLoop,
-                    timeout: requestTimeout,
+                    timeout: upstreamRequestTimeout,
                     onTimeout: {
                         self.handleRequestLeaseTimeout(
                             leaseID,
@@ -243,7 +255,7 @@ extension RuntimeCoordinator {
                     leaseID,
                     requestIDKey: originalID.key,
                     upstreamIndex: selectedUpstreamIndex,
-                    timeout: requestTimeout
+                    timeout: upstreamRequestTimeout
                 )
                 let upstreamID = self.assignUpstreamID(
                     sessionID: internalSessionID,
@@ -331,12 +343,19 @@ extension RuntimeCoordinator {
                 }
             }
             let response = try await withTaskCancellationHandler {
-                try await future.get()
+                try await waitForEventLoopFuture(
+                    future,
+                    deadlineUptimeNs: requestDeadlineUptimeNs,
+                    onTimeout: {
+                        rpcHandle?.cancel()
+                    }
+                )
             } onCancel: {
                 rpcHandle?.cancel()
             }
             let responseObject = try extractJSONRPCResponseObject(from: response.responseData)
-            if responseObject["error"] != nil {
+            let isProxyUpstreamFailure = responseIsProxyUpstreamFailure(responseObject)
+            if responseObject["error"] != nil, throwsOnRPCError {
                 failRequestLease(
                     leaseID,
                     terminalState: .failed,
@@ -352,10 +371,24 @@ extension RuntimeCoordinator {
                     )
                 )
             }
+            let responseData: Data
+            if let responseIDOverride {
+                responseData = try responseDataByReplacingJSONRPCID(
+                    in: responseObject,
+                    with: responseIDOverride
+                )
+            } else {
+                responseData = response.responseData
+            }
             rpcHandle?.markFinished()
-            markRequestSucceeded(upstreamIndex: response.upstreamIndex)
+            if !isProxyUpstreamFailure {
+                markRequestSucceeded(upstreamIndex: response.upstreamIndex)
+            }
             completeRequestLease(leaseID)
-            return response
+            return ControlPlane.RPCResponse(
+                responseData: responseData,
+                upstreamIndex: response.upstreamIndex
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch is TimeoutError {
@@ -419,12 +452,35 @@ extension RuntimeCoordinator {
         return responseObject
     }
 
+    func responseDataByReplacingJSONRPCID(
+        in responseObject: [String: Any],
+        with responseID: JSONRPC.ID
+    ) throws -> Data {
+        var rewritten = responseObject
+        rewritten["id"] = responseID.value.foundationObject
+        guard JSONSerialization.isValidJSONObject(rewritten) else {
+            throw ControlPlane.Error.invalidResponse("invalid rewritten response")
+        }
+        return try JSONSerialization.data(withJSONObject: rewritten, options: [])
+    }
+
     func extractJSONRPCErrorMessage(from responseObject: [String: Any]) -> String? {
         (responseObject["error"] as? [String: Any])?["message"] as? String
     }
 
     func extractJSONRPCErrorCode(from responseObject: [String: Any]) -> Int? {
         ((responseObject["error"] as? [String: Any])?["code"] as? NSNumber)?.intValue
+    }
+
+    func responseIsProxyUpstreamFailure(_ responseObject: [String: Any]) -> Bool {
+        guard
+            let code = extractJSONRPCErrorCode(from: responseObject),
+            let message = extractJSONRPCErrorMessage(from: responseObject)
+        else {
+            return false
+        }
+        return (code == -32001 && message == "upstream unavailable")
+            || (code == -32002 && message == "upstream overloaded")
     }
 
     func controlPlaneFailureReason(for error: any Error) -> String {
@@ -458,9 +514,19 @@ extension RuntimeCoordinator {
         return .nanoseconds(Int64(min(remaining, maxNanos)))
     }
 
+    func deadlineUptimeNanoseconds(for requestTimeout: TimeAmount?) -> UInt64? {
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return nil
+        }
+        let now = nowUptimeNanoseconds()
+        let clamped = min(UInt64(requestTimeout.nanoseconds), UInt64.max &- now)
+        return now &+ clamped
+    }
+
     func waitForEventLoopFuture<Output: Sendable>(
         _ future: EventLoopFuture<Output>,
-        deadlineUptimeNs: UInt64?
+        deadlineUptimeNs: UInt64?,
+        onTimeout: @escaping @Sendable () -> Void = {}
     ) async throws -> Output {
         if let deadlineUptimeNs, let timeout = timeAmount(until: deadlineUptimeNs) {
             return try await withThrowingTaskGroup(of: Output.self) { group in
@@ -471,6 +537,7 @@ extension RuntimeCoordinator {
                     try await Task.sleep(
                         nanoseconds: UInt64(max(0, timeout.nanoseconds))
                     )
+                    onTimeout()
                     throw TimeoutError()
                 }
                 let result = try await group.next()!

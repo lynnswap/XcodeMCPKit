@@ -234,6 +234,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
+    package let documentationProviderRoutes: [DocumentationProviderRoute]
     package let prewarmDocumentationProviderOnStartup: Bool
     private let lifecycleStartedBox = NIOLockedValueBox(false)
 
@@ -248,45 +249,80 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let count = max(1, min(config.upstreamProcessCount, 10))
-        let upstreams = Self.makeDefaultUpstreams(
-            config: config, sharedSessionID: config.upstreamSessionID, count: count)
+        let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
+            config: config
+        )
+        let documentationTargets =
+            documentationServiceEnabled
+            ? xcodeTargetDiscovery?.runningXcodeTargets() ?? []
+            : []
+        let upstreamPlan = Self.makeDefaultUpstreamPlan(
+            config: config,
+            sharedSessionID: config.upstreamSessionID,
+            count: count,
+            documentationTargets: documentationTargets
+        )
         let clock = ClockClient.liveValue
-        let documentationProviderManager = xcodeTargetDiscovery.flatMap { discovery in
-            Self.makeDefaultDocumentationProviderManager(config: config, discovery: discovery)
-        }
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let documentationTransport = RuntimeDocumentationProviderTransport(
+            runtimeBox: runtimeBox,
+            fallback: SessionBackedDocumentationProviderTransport(
+                sessionFactory: LiveDocumentationProviderSessionFactory(
+                    baseEnvironment: ProcessInfo.processInfo.environment
+                ),
+                clock: clock
+            ),
+            clock: clock
+        )
+        let documentationProviderManager =
+            documentationServiceEnabled
+            ? xcodeTargetDiscovery.flatMap { discovery in
+                Self.makeDefaultDocumentationProviderManager(
+                    config: config,
+                    discovery: discovery,
+                    transport: documentationTransport
+                )
+            }
+            : nil
         self.init(
             config: config,
             eventLoop: eventLoop,
-            upstreams: upstreams,
+            upstreams: upstreamPlan.upstreams,
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
+            documentationProviderRoutes: upstreamPlan.documentationRoutes,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
-            startImmediately: startImmediately
+            startImmediately: startImmediately,
+            runtimeBox: runtimeBox
         )
     }
 
     package static func makeDefaultDocumentationProviderManager(
         config: ProxyConfig,
-        discovery: any XcodeTargetDiscovering
+        discovery: any XcodeTargetDiscovering,
+        transport: any DocumentationProviderRouting
     ) -> (any DocumentationProviderManaging)? {
-        guard config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
-        else {
-            return nil
-        }
-        guard XcrunArguments.isDefaultMCPBridgeInvocation(config: config) else {
+        guard documentationProviderServiceIsConfigured(config: config) else {
             return nil
         }
         let environment = ProcessInfo.processInfo.environment
         let pinnedProcessID = environment["MCP_XCODE_PID"].flatMap(pid_t.init)
         return DocumentationProviderManager(
             discovery: discovery,
-            sessionFactory: LiveDocumentationProviderSessionFactory(baseEnvironment: environment),
+            transport: transport,
             pinnedProcessID: pinnedProcessID,
             initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
             )
         )
+    }
+
+    package static func documentationProviderServiceIsConfigured(
+        config: ProxyConfig
+    ) -> Bool {
+        config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
+            && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
     }
 
     package init(
@@ -300,12 +336,14 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
                 RuntimeScheduledTimeout
         )? = nil,
+        documentationProviderRoutes: [DocumentationProviderRoute] = [],
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
-        startImmediately: Bool = true
+        startImmediately: Bool = true,
+        runtimeBox providedRuntimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
         precondition(!upstreams.isEmpty, "upstreams must not be empty")
-        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let runtimeBox = providedRuntimeBox ?? WeakRuntimeCoordinatorBox()
         let uptimeProvider = nowUptimeNanoseconds ?? clock.uptimeNanoseconds
         let runtimeClock = ClockClient(
             now: clock.now,
@@ -337,6 +375,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
+        self.documentationProviderRoutes = documentationProviderRoutes
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         let resolvedReadinessGate =
             upstreamReadinessGate

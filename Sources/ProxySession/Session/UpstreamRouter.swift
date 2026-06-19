@@ -4,11 +4,91 @@ import ProxyCore
 import ProxyMCP
 
 extension RuntimeCoordinator {
+    package struct DefaultUpstreamPlan: Sendable {
+        package let upstreams: [ManagedUpstreamSlot]
+        package let documentationRoutes: [DocumentationProviderRoute]
+
+        package init(
+            upstreams: [ManagedUpstreamSlot],
+            documentationRoutes: [DocumentationProviderRoute]
+        ) {
+            self.upstreams = upstreams
+            self.documentationRoutes = documentationRoutes
+        }
+    }
+
     static func makeDefaultUpstreams(
         config: ProxyConfig,
         sharedSessionID: String?,
         count: Int
     ) -> [ManagedUpstreamSlot] {
+        makeDefaultUpstreamPlan(
+            config: config,
+            sharedSessionID: sharedSessionID,
+            count: count,
+            documentationTargets: []
+        ).upstreams
+    }
+
+    package static func makeDefaultUpstreamPlan(
+        config: ProxyConfig,
+        sharedSessionID: String?,
+        count: Int,
+        documentationTargets: [DocumentationProviderTarget]
+    ) -> DefaultUpstreamPlan {
+        let orderedDocumentationTargets = orderedDocumentationTargets(
+            documentationTargets,
+            pinnedProcessID: ProcessInfo.processInfo.environment["MCP_XCODE_PID"]
+                .flatMap(pid_t.init)
+        )
+        let canReuseDefaultUpstreamForDocumentation =
+            orderedDocumentationTargets.isEmpty == false
+            && config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
+            && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
+        let reusableDocumentationTarget: DocumentationProviderTarget?
+        if canReuseDefaultUpstreamForDocumentation,
+            ProcessInfo.processInfo.environment["MCP_XCODE_PID"].flatMap(pid_t.init) != nil
+                || orderedDocumentationTargets.count == 1
+        {
+            reusableDocumentationTarget = orderedDocumentationTargets.first
+        } else {
+            reusableDocumentationTarget = nil
+        }
+        var upstreams: [ManagedUpstreamSlot] = []
+        var documentationRoutes: [DocumentationProviderRoute] = []
+        let upstreamCount = max(1, count)
+        upstreams.reserveCapacity(upstreamCount)
+        documentationRoutes.reserveCapacity(reusableDocumentationTarget == nil ? 0 : 1)
+        for _ in 0..<upstreamCount {
+            let upstreamConfig = makeDefaultUpstreamConfig(
+                config: config,
+                sharedSessionID: sharedSessionID,
+                documentationTarget: nil
+            )
+            upstreams.append(
+                ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
+            )
+        }
+        if let reusableDocumentationTarget {
+            documentationRoutes.append(
+                DocumentationProviderRoute(
+                    id: "upstream-0-pid-\(reusableDocumentationTarget.processID)",
+                    target: reusableDocumentationTarget,
+                    upstreamIndex: 0
+                )
+            )
+        }
+        return DefaultUpstreamPlan(
+            upstreams: upstreams,
+            documentationRoutes: documentationRoutes
+        )
+    }
+
+    private static func makeDefaultUpstreamConfig(
+        config: ProxyConfig,
+        sharedSessionID: String?,
+        documentationTarget: DocumentationProviderTarget?
+    ) -> UpstreamProcess.Config {
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "XCODE_PID")
         if let sharedSessionID, !sharedSessionID.isEmpty {
@@ -16,31 +96,86 @@ extension RuntimeCoordinator {
         } else {
             environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
         }
-        let upstreamConfig = UpstreamProcess.Config(
-            command: config.upstreamCommand,
-            args: config.upstreamArgs,
+        let command: String
+        let args: [String]
+        if let documentationTarget {
+            environment["MCP_XCODE_PID"] = String(documentationTarget.processID)
+            environment["DEVELOPER_DIR"] = documentationTarget.developerDir
+            command = documentationTarget.mcpbridgePath
+            args = []
+        } else {
+            command = config.upstreamCommand
+            args = config.upstreamArgs
+        }
+        return UpstreamProcess.Config(
+            command: command,
+            args: args,
             environment: environment,
-            maxQueuedWriteBytes: {
-                let minimum = 1_048_576
-                guard config.maxBodyBytes > 0 else { return minimum }
-                let multiplied = config.maxBodyBytes.multipliedReportingOverflow(by: 4)
-                if multiplied.overflow {
-                    return Int.max
-                }
-                return max(minimum, multiplied.partialValue)
-            }()
+            maxQueuedWriteBytes: maxQueuedWriteBytes(for: config)
         )
-        if count <= 1 {
-            return [ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))]
+    }
+
+    private static func maxQueuedWriteBytes(for config: ProxyConfig) -> Int {
+        let minimum = 1_048_576
+        guard config.maxBodyBytes > 0 else { return minimum }
+        let multiplied = config.maxBodyBytes.multipliedReportingOverflow(by: 4)
+        if multiplied.overflow {
+            return Int.max
         }
-        var upstreams: [ManagedUpstreamSlot] = []
-        upstreams.reserveCapacity(count)
-        for _ in 0..<count {
-            upstreams.append(
-                ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
+        return max(minimum, multiplied.partialValue)
+    }
+
+    private static func orderedDocumentationTargets(
+        _ targets: [DocumentationProviderTarget],
+        pinnedProcessID: pid_t?
+    ) -> [DocumentationProviderTarget] {
+        let filtered: [DocumentationProviderTarget]
+        if let pinnedProcessID {
+            filtered = targets.filter { $0.processID == pinnedProcessID }
+        } else {
+            filtered = targets
+        }
+        return filtered.sorted { lhs, rhs in
+            let versionComparison = compareDocumentationVersion(
+                lhs.xcodeVersion,
+                rhs.xcodeVersion
             )
+            if versionComparison != .orderedSame {
+                return versionComparison == .orderedDescending
+            }
+            if lhs.appPath != rhs.appPath {
+                return lhs.appPath < rhs.appPath
+            }
+            return lhs.processID < rhs.processID
         }
-        return upstreams
+    }
+
+    private static func compareDocumentationVersion(
+        _ lhs: String,
+        _ rhs: String
+    ) -> ComparisonResult {
+        let lhsParts = numericDocumentationVersionParts(lhs)
+        let rhsParts = numericDocumentationVersionParts(rhs)
+        let count = max(lhsParts.count, rhsParts.count)
+        for index in 0..<count {
+            let lhsValue = index < lhsParts.count ? lhsParts[index] : 0
+            let rhsValue = index < rhsParts.count ? rhsParts[index] : 0
+            if lhsValue < rhsValue {
+                return .orderedAscending
+            }
+            if lhsValue > rhsValue {
+                return .orderedDescending
+            }
+        }
+        return lhs.localizedStandardCompare(rhs)
+    }
+
+    private static func numericDocumentationVersionParts(_ version: String) -> [Int] {
+        version
+            .split { character in
+                !character.isNumber
+            }
+            .compactMap { Int($0) }
     }
 }
 

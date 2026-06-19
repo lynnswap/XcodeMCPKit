@@ -130,6 +130,14 @@ func responseID(in responseData: Data) throws -> Int64 {
     return id.int64Value
 }
 
+func jsonRPCErrorMessage(in responseData: Data) throws -> String? {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+    )
+    let error = try #require(object["error"] as? [String: Any])
+    return error["message"] as? String
+}
+
 func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
     DocumentationProviderTarget(
         processID: processID,
@@ -161,6 +169,138 @@ struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
     }
 }
 
+final class CountingXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
+    private let lock = NSLock()
+    private let targets: [DocumentationProviderTarget]
+    private var callCountValue = 0
+
+    init(targets: [DocumentationProviderTarget]) {
+        self.targets = targets
+    }
+
+    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+        lock.lock()
+        callCountValue += 1
+        lock.unlock()
+        return targets
+    }
+
+    func callCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return callCountValue
+    }
+}
+
+actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouting {
+    private let openStarted: TestSignal
+    private let openGate: AsyncGate
+    private let ignoresOpenCancellation: Bool
+    private var openCountValue = 0
+    private var closedRouteIDs: [String] = []
+
+    init(
+        openStarted: TestSignal,
+        openGate: AsyncGate,
+        ignoresOpenCancellation: Bool = false
+    ) {
+        self.openStarted = openStarted
+        self.openGate = openGate
+        self.ignoresOpenCancellation = ignoresOpenCancellation
+    }
+
+    func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        openCountValue += 1
+        let routeID = "blocking-fallback-\(target.processID)-\(openCountValue)"
+        openStarted.signal()
+        if ignoresOpenCancellation {
+            await openGate.waitIgnoringCancellation()
+        } else {
+            try await openGate.wait()
+        }
+        return DocumentationProviderRoute(
+            id: routeID,
+            target: target,
+            upstreamIndex: nil,
+            serverVersion: "fallback"
+        )
+    }
+
+    func toolsList(
+        route _: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        try jsonValue([
+            "tools": [
+                documentationDescriptor(version: "fallback").foundationObject,
+            ],
+        ])
+    }
+
+    func callDocumentationSearch(
+        route _: DocumentationProviderRoute,
+        requestData: Data,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        let object = try JSONSerialization.jsonObject(with: requestData, options: [])
+            as? [String: Any]
+        let id = object?["id"] ?? 0
+        return try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"answer\":\"fallback\"}",
+                        ],
+                    ],
+                    "isError": false,
+                ],
+            ],
+            options: []
+        )
+    }
+
+    func close(route: DocumentationProviderRoute) async {
+        closedRouteIDs.append(route.id)
+    }
+
+    func closeCount() -> Int {
+        closedRouteIDs.count
+    }
+}
+
+struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
+    func openRoute(
+        for _: DocumentationProviderTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    func toolsList(
+        route _: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    func callDocumentationSearch(
+        route _: DocumentationProviderRoute,
+        requestData _: Data,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+}
+
 final class SequencedXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
     private var remainingSequences: [[DocumentationProviderTarget]]
@@ -187,6 +327,7 @@ enum ScriptedDocumentationResponse: Sendable {
     case success
     case successText(String)
     case toolErrorText(String)
+    case jsonRPCError(code: Int, message: String)
     case hang
     case notEnabled
     case exit
@@ -462,6 +603,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
             yieldToolResponse(id: id, text: text, isError: false)
         case .toolErrorText(let text):
             yieldToolResponse(id: id, text: text, isError: true)
+        case .jsonRPCError(let code, let message):
+            yieldJSONRPCError(id: id, code: code, message: message)
         case .hang:
             break
         case .notEnabled:
@@ -473,6 +616,22 @@ actor ScriptedDocumentationSession: UpstreamSession {
         case .exit:
             continuation.yield(.exit(1))
         }
+    }
+
+    private func yieldJSONRPCError(id: Any, code: Int, message: String) {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": [
+                "code": code,
+                "message": message,
+            ],
+        ]
+        guard JSONSerialization.isValidJSONObject(response),
+              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            return
+        }
+        continuation.yield(.message(data))
     }
 
     private func yieldToolResponse(id: Any, text: String, isError: Bool) {
@@ -629,6 +788,31 @@ func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: Str
 }
 
 func upstreamEnvironment(from upstream: ManagedUpstreamSlot) throws -> [String: String] {
+    let configMirror = try upstreamConfigMirror(from: upstream)
+    return try #require(
+        configMirror.children.first(where: { $0.label == "environment" })?.value
+            as? [String: String],
+        "UpstreamProcess.Config should include environment for tests"
+    )
+}
+
+func upstreamCommand(from upstream: ManagedUpstreamSlot) throws -> String {
+    let configMirror = try upstreamConfigMirror(from: upstream)
+    return try #require(
+        configMirror.children.first(where: { $0.label == "command" })?.value as? String,
+        "UpstreamProcess.Config should include command for tests"
+    )
+}
+
+func upstreamArgs(from upstream: ManagedUpstreamSlot) throws -> [String] {
+    let configMirror = try upstreamConfigMirror(from: upstream)
+    return try #require(
+        configMirror.children.first(where: { $0.label == "args" })?.value as? [String],
+        "UpstreamProcess.Config should include args for tests"
+    )
+}
+
+private func upstreamConfigMirror(from upstream: ManagedUpstreamSlot) throws -> Mirror {
     let upstreamMirror = Mirror(reflecting: upstream)
     let factory = try #require(
         upstreamMirror.children.first(where: { $0.label == "factory" })?.value,
@@ -639,12 +823,7 @@ func upstreamEnvironment(from upstream: ManagedUpstreamSlot) throws -> [String: 
         factoryMirror.children.first(where: { $0.label == "config" })?.value,
         "UpstreamProcess factory should expose a stored config for tests"
     )
-    let configMirror = Mirror(reflecting: config)
-    return try #require(
-        configMirror.children.first(where: { $0.label == "environment" })?.value
-            as? [String: String],
-        "UpstreamProcess.Config should include environment for tests"
-    )
+    return Mirror(reflecting: config)
 }
 
 func withEnvironmentVariables<T>(
@@ -1195,6 +1374,49 @@ func makeToolListResponse(id: Int64) throws -> Data {
         ],
         options: []
     )
+}
+
+func makeDocumentationToolsListResponse(id: Int64, version: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "tools": [
+                    documentationDescriptor(version: version).foundationObject,
+                ],
+            ],
+        ],
+        options: []
+    )
+}
+
+func makeDocumentationSearchResponse(id: Int64, text: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": text,
+                    ],
+                ],
+                "isError": false,
+            ],
+        ],
+        options: []
+    )
+}
+
+func documentationSearchQuery(in data: Data) throws -> String? {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+    )
+    let params = try #require(object["params"] as? [String: Any])
+    let arguments = try #require(params["arguments"] as? [String: Any])
+    return arguments["query"] as? String
 }
 
 func yieldMessage(_ data: Data, to upstream: TestUpstreamClient) async {

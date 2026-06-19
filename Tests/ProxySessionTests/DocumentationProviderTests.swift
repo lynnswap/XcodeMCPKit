@@ -12,18 +12,633 @@ import XcodeMCPTestSupport
 extension RuntimeCoordinatorTests {
     @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
         var config = makeConfig(requestTimeout: 5)
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) != nil)
+        let transport = UnavailableDocumentationProviderTransport()
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
+            config: config,
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            transport: transport
+        ) != nil)
 
         config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
+            config: config,
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            transport: transport
+        ) == nil)
 
         config.disabledToolNames = []
         config.upstreamArgs = ["--sdk", "macosx", "swift"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
+            config: config,
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            transport: transport
+        ) == nil)
 
         config.upstreamCommand = "/bin/echo"
         config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(config: config, discovery: StubXcodeTargetDiscovery(targets: [])) == nil)
+        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
+            config: config,
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            transport: transport
+        ) == nil)
+    }
+
+    @Test func defaultUpstreamPlanReusesSingleXcodeProcessWithoutAddingProviderSlot() throws {
+        let target = documentationProviderTarget(processID: 710, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.upstreamSessionID = "shared-docs-session"
+
+        let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
+            RuntimeCoordinator.makeDefaultUpstreamPlan(
+                config: config,
+                sharedSessionID: config.upstreamSessionID,
+                count: 2,
+                documentationTargets: [target]
+            )
+        }
+
+        #expect(plan.upstreams.count == 2)
+        #expect(plan.documentationRoutes.map(\.target.processID) == [target.processID])
+        #expect(plan.documentationRoutes.first?.upstreamIndex == 0)
+        for upstream in plan.upstreams {
+            let environment = try upstreamEnvironment(from: upstream)
+            #expect(try upstreamCommand(from: upstream) == config.upstreamCommand)
+            #expect(try upstreamArgs(from: upstream) == config.upstreamArgs)
+            #expect(environment["MCP_XCODE_PID"]?.isEmpty ?? true)
+            #expect(environment["DEVELOPER_DIR"] == nil)
+            #expect(environment["MCP_XCODE_SESSION_ID"] == "shared-docs-session")
+        }
+    }
+
+    @Test func defaultUpstreamPlanDoesNotLimitDocumentationCandidatesToUpstreamCount()
+        throws
+    {
+        let older = documentationProviderTarget(processID: 720, xcodeVersion: "26.6")
+        let newer = documentationProviderTarget(processID: 721, xcodeVersion: "27.0")
+        let config = makeConfig(requestTimeout: 5)
+
+        let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
+            RuntimeCoordinator.makeDefaultUpstreamPlan(
+                config: config,
+                sharedSessionID: config.upstreamSessionID,
+                count: 1,
+                documentationTargets: [older, newer]
+            )
+        }
+
+        #expect(plan.upstreams.count == 1)
+        #expect(plan.documentationRoutes.isEmpty)
+        let upstream = try #require(plan.upstreams.first)
+        #expect(try upstreamCommand(from: upstream) == config.upstreamCommand)
+        #expect(try upstreamArgs(from: upstream) == config.upstreamArgs)
+    }
+
+    @Test func defaultUpstreamPlanHonorsPinnedDocumentationProcess() throws {
+        let pinned = documentationProviderTarget(processID: 730, xcodeVersion: "26.6")
+        let newer = documentationProviderTarget(processID: 731, xcodeVersion: "27.0")
+        let config = makeConfig(requestTimeout: 5)
+
+        let plan = try withEnvironmentVariables(["MCP_XCODE_PID": "\(pinned.processID)"]) {
+            RuntimeCoordinator.makeDefaultUpstreamPlan(
+                config: config,
+                sharedSessionID: config.upstreamSessionID,
+                count: 2,
+                documentationTargets: [newer, pinned]
+            )
+        }
+
+        #expect(plan.upstreams.count == 2)
+        #expect(plan.documentationRoutes.map(\.target.processID) == [pinned.processID])
+        #expect(plan.documentationRoutes.first?.upstreamIndex == 0)
+        for upstream in plan.upstreams {
+            let environment = try upstreamEnvironment(from: upstream)
+            #expect(environment["MCP_XCODE_PID"] == "\(pinned.processID)")
+            #expect(try upstreamCommand(from: upstream) == config.upstreamCommand)
+            #expect(try upstreamArgs(from: upstream) == config.upstreamArgs)
+        }
+    }
+
+    @Test func runtimeCoordinatorSkipsXcodeDiscoveryWhenDocumentationServiceIsDisabled()
+        throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = documentationProviderTarget(processID: 735, xcodeVersion: "27.0")
+
+        do {
+            var config = makeConfig(requestTimeout: 5)
+            config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
+            let discovery = CountingXcodeTargetDiscovery(targets: [target])
+            let manager = RuntimeCoordinator(
+                config: config,
+                eventLoop: eventLoop,
+                xcodeTargetDiscovery: discovery,
+                startImmediately: false
+            )
+            defer { manager.shutdownAndWait() }
+
+            #expect(discovery.callCount() == 0)
+            #expect(manager.hasDocumentationSearchService() == false)
+        }
+
+        do {
+            var config = makeConfig(requestTimeout: 5)
+            config.upstreamArgs = ["--sdk", "macosx", "swift"]
+            let discovery = CountingXcodeTargetDiscovery(targets: [target])
+            let manager = RuntimeCoordinator(
+                config: config,
+                eventLoop: eventLoop,
+                xcodeTargetDiscovery: discovery,
+                startImmediately: false
+            )
+            defer { manager.shutdownAndWait() }
+
+            #expect(discovery.callCount() == 0)
+            #expect(manager.hasDocumentationSearchService() == false)
+        }
+    }
+
+    @Test func runtimeDocumentationTransportReusesPrewarmedUpstreamRouteForSearch()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = documentationProviderTarget(processID: 740, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [
+                DocumentationProviderRoute(
+                    id: "upstream-0-pid-\(target.processID)",
+                    target: target,
+                    upstreamIndex: 0
+                )
+            ],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        async let prewarmUpdate = providerManager.startBackgroundDiscovery(
+            requestTimeout: .seconds(1)
+        )
+        let toolsRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: toolsRequest) == "tools/list")
+        let toolsRequestID = try extractUpstreamID(from: toolsRequest)
+        await yieldMessage(
+            try makeDocumentationToolsListResponse(id: toolsRequestID, version: "27.0"),
+            to: upstream
+        )
+        let update = await prewarmUpdate
+        let result = DocumentationProvider.ToolCatalog.applying(
+            update,
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+
+        async let searchOutcome = providerManager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        let searchRequest = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        #expect(methodName(from: searchRequest) == "tools/call")
+        #expect(try documentationSearchQuery(in: searchRequest) == "UIView")
+        let searchRequestID = try extractUpstreamID(from: searchRequest)
+        await yieldMessage(
+            try makeDocumentationSearchResponse(
+                id: searchRequestID,
+                text: "{\"answer\":\"route\"}"
+            ),
+            to: upstream
+        )
+
+        let outcome = try await searchOutcome
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try responseID(in: responseData) == 91)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"route\"}")
+        #expect(await upstream.sentCount() == 2)
+    }
+
+    @Test func runtimeDocumentationTransportFallsBackWhenReusedUpstreamRouteFails()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        await upstream.overloadNextSend()
+        let target = documentationProviderTarget(processID: 742, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"fallback\"}"),
+                        userCallResponses: [.successText("{\"answer\":\"reused-fallback\"}")]
+                    ),
+                ],
+            ]
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                fallback: SessionBackedDocumentationProviderTransport(sessionFactory: factory)
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let route = DocumentationProviderRoute(
+            id: "upstream-0-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: 0
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [route],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let firstOutcome = try await providerManager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 94, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        let firstRuntimeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: firstRuntimeRequest) == "tools/call")
+        guard case .handled(let firstData, _) = firstOutcome else {
+            Issue.record("expected handled fallback outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"fallback\"}")
+        #expect(await factory.startedPIDs() == [target.processID])
+        #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
+        guard case .degraded = manager.testStateSnapshot().upstreams[0].healthState else {
+            Issue.record("proxy-generated upstream failure should not be marked successful")
+            return
+        }
+
+        let secondOutcome = try await providerManager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 95, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let secondData, _) = secondOutcome else {
+            Issue.record("expected handled fallback reuse outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"reused-fallback\"}")
+        #expect(await upstream.sentCount() == 1)
+        #expect(await factory.startedPIDs() == [target.processID])
+        #expect(await factory.documentationQueries(for: target.processID) == ["UIView", "SwiftUI"])
+    }
+
+    @Test func runtimeDocumentationTransportTimesOutQueuedPinnedRouteBeforeDispatch()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = documentationProviderTarget(processID: 746, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let route = DocumentationProviderRoute(
+            id: "upstream-0-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: 0
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [route],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-active",
+            label: "tools/call:LongRunning",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
+        let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: activeLeaseID,
+            descriptor: activeDescriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: 0
+        ) { selectedUpstreamIndex in
+            manager.activateRequestLease(
+                activeLeaseID,
+                requestIDKey: nil,
+                upstreamIndex: selectedUpstreamIndex,
+                timeout: nil
+            )
+            return activePromise.futureResult
+        }
+        _ = activeFuture
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.debugSnapshot().leases.contains { lease in
+                lease.leaseID == activeLeaseID.uuidString && lease.state == .active
+            }
+        }
+
+        let started = Date()
+        let outcome = try await providerManager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 96, query: "UIView"),
+            requestTimeoutOverride: .milliseconds(10)
+        )
+
+        #expect(Date().timeIntervalSince(started) < 0.5)
+        guard case .failed(let error, _) = outcome else {
+            Issue.record("expected timed-out outcome, got \(outcome)")
+            activePromise.fail(CancellationError())
+            return
+        }
+        #expect(error is TimeoutError)
+        #expect(await upstream.sentCount() == 0)
+        try await waitForCondition(timeoutSeconds: 2) {
+            manager.debugSnapshot().queuedRequestCount == 0
+        }
+
+        activePromise.fail(CancellationError())
+    }
+
+    @Test func runtimeDocumentationTransportClosesFallbackOpenedAfterRouteInvalidation()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        await upstream.overloadNextSend()
+        let target = documentationProviderTarget(processID: 743, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let openStarted = TestSignal()
+        let openGate = AsyncGate()
+        let fallback = BlockingFallbackDocumentationProviderTransport(
+            openStarted: openStarted,
+            openGate: openGate
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                fallback: fallback
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let route = DocumentationProviderRoute(
+            id: "upstream-0-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: 0
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [route],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let searchTask = Task {
+            try await providerManager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 96, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+        }
+        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        try await openStarted.wait(description: "waiting for fallback open")
+
+        await providerManager.invalidate(reason: "test_invalidation")
+        await openGate.signal()
+
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for invalidated documentation search",
+                timeout: .seconds(2)
+            ) {
+                try await searchTask.value
+            }
+            Issue.record("expected invalidated documentation search to be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for invalidated search, got \(error)")
+        }
+        #expect(await fallback.closeCount() == 1)
+    }
+
+    @Test func documentationProviderManagerClosesRouteOpenedAfterPreparationCancellation()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 744, xcodeVersion: "27.0")
+        let openStarted = TestSignal()
+        let openGate = AsyncGate()
+        let transport = BlockingFallbackDocumentationProviderTransport(
+            openStarted: openStarted,
+            openGate: openGate,
+            ignoresOpenCancellation: true
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: transport,
+            providerSelectionTimeout: .seconds(5)
+        )
+
+        let searchTask = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 97, query: "UIView"),
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        try await openStarted.wait(description: "waiting for provider open")
+
+        await manager.invalidate(reason: "test_invalidation")
+        await openGate.signal()
+
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for cancelled provider preparation",
+                timeout: .seconds(2)
+            ) {
+                try await searchTask.value
+            }
+            Issue.record("expected provider preparation to be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for provider preparation, got \(error)")
+        }
+        #expect(await transport.closeCount() == 1)
+    }
+
+    @Test func runtimeDocumentationTransportCancellationReleasesControlPlaneLease()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = documentationProviderTarget(processID: 745, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let route = DocumentationProviderRoute(
+            id: "upstream-0-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: 0
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 30),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [route],
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let toolsListTask = Task {
+            try await manager.documentationProviderToolsList(
+                route: route,
+                requestTimeout: .seconds(30)
+            )
+        }
+        let toolsRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: toolsRequest) == "tools/list")
+
+        toolsListTask.cancel()
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for cancelled documentation tools/list",
+                timeout: .seconds(2)
+            ) {
+                try await toolsListTask.value
+            }
+            Issue.record("expected documentation tools/list to be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for documentation tools/list, got \(error)")
+        }
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            let snapshot = manager.debugSnapshot()
+            return snapshot.queuedRequestCount == 0
+                && snapshot.upstreams[0].activeCorrelatedRequestCount == 0
+        })
+
+        let searchTask = Task {
+            try await manager.documentationProviderCall(
+                route: route,
+                requestData: makeDocumentationSearchRequest(id: 93, query: "UIView"),
+                requestTimeout: .seconds(30)
+            )
+        }
+        let searchRequest = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        #expect(methodName(from: searchRequest) == "tools/call")
+        #expect(try documentationSearchQuery(in: searchRequest) == "UIView")
+
+        searchTask.cancel()
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for cancelled documentation search",
+                timeout: .seconds(2)
+            ) {
+                try await searchTask.value
+            }
+            Issue.record("expected documentation search to be cancelled")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError for documentation search, got \(error)")
+        }
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            let snapshot = manager.debugSnapshot()
+            return snapshot.queuedRequestCount == 0
+                && snapshot.upstreams[0].activeCorrelatedRequestCount == 0
+        })
+    }
+
+    @Test func runtimeDocumentationTransportFallsBackToDirectCandidateWhenNoUpstreamRouteExists()
+        async throws
+    {
+        let newer = documentationProviderTarget(processID: 750, xcodeVersion: "27.0")
+        let older = documentationProviderTarget(processID: 751, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                newer.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"newer\"}")
+                    ),
+                ],
+                older.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [older, newer]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: WeakRuntimeCoordinatorBox(),
+                fallback: SessionBackedDocumentationProviderTransport(sessionFactory: factory)
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 92, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"newer\"}")
+        #expect(await factory.startedPIDs() == [newer.processID])
+        #expect(await factory.documentationQueries(for: newer.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: older.processID).isEmpty)
     }
 
     @Test func sharedToolsListMergesDocumentationProviderDescriptor() async throws {
@@ -749,6 +1364,53 @@ extension RuntimeCoordinatorTests {
         #expect(try toolResultIsError(in: errorData))
         #expect(try toolContentText(in: errorData) == "query-specific failure")
         #expect(try toolContentText(in: followUpData) == "{\"answer\":\"after-error\"}")
+        #expect(await factory.startedPIDs() == [target.processID])
+        #expect(await factory.documentationQueries(for: target.processID) == ["bad query", "SwiftUI"])
+    }
+
+    @Test func documentationProviderManagerPreservesRequestScopedJSONRPCErrors()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 603, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .jsonRPCError(
+                            code: -32602,
+                            message: "Invalid params"
+                        ),
+                        userCallResponses: [.successText("{\"answer\":\"after-jsonrpc-error\"}")]
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let errorOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 84, query: "bad query"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        let followUpOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 85, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let errorData, let invalidatedProvider) = errorOutcome,
+              case .handled(let followUpData, _) = followUpOutcome else {
+            Issue.record("expected handled outcomes, got \(errorOutcome) and \(followUpOutcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try responseID(in: errorData) == 84)
+        #expect(try jsonRPCErrorMessage(in: errorData) == "Invalid params")
+        #expect(try toolContentText(in: followUpData) == "{\"answer\":\"after-jsonrpc-error\"}")
         #expect(await factory.startedPIDs() == [target.processID])
         #expect(await factory.documentationQueries(for: target.processID) == ["bad query", "SwiftUI"])
     }
