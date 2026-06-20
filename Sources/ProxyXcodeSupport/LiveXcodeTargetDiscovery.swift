@@ -49,12 +49,23 @@ package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering {
         guard FileManager.default.isExecutableFile(atPath: mcpbridgePath) else {
             return nil
         }
+        let xcodeVersion = Self.xcodeVersion(appPath: appPath)
         return DocumentationProviderTarget(
             processID: processID,
             appPath: appPath,
             developerDir: developerDir,
-            mcpbridgePath: mcpbridgePath
+            mcpbridgePath: mcpbridgePath,
+            xcodeVersion: xcodeVersion
         )
+    }
+
+    private static func xcodeVersion(appPath: String) -> String {
+        guard let bundle = Bundle(url: URL(fileURLWithPath: appPath)) else {
+            return ""
+        }
+        return bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? ""
     }
 
     private static func appPath(fromExecutablePath path: String) -> String? {

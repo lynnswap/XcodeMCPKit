@@ -57,7 +57,7 @@ extension DocumentationProvider {
 }
 
 package protocol DocumentationProviderManaging: Sendable {
-    func prewarm(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
+    func startBackgroundDiscovery(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
     func callDocumentationSearch(
         requestData: Data,
@@ -65,6 +65,49 @@ package protocol DocumentationProviderManaging: Sendable {
     ) async throws -> DocumentationProvider.CallOutcome
     func invalidate(reason: String) async
     func shutdown() async
+}
+
+package struct DocumentationProviderRoute: Sendable, Equatable {
+    package let id: String
+    package let target: DocumentationProviderTarget
+    package let upstreamIndex: Int?
+    package let serverVersion: String
+
+    package init(
+        id: String,
+        target: DocumentationProviderTarget,
+        upstreamIndex: Int?,
+        serverVersion: String = ""
+    ) {
+        self.id = id
+        self.target = target
+        self.upstreamIndex = upstreamIndex
+        self.serverVersion = serverVersion
+    }
+}
+
+package protocol DocumentationProviderRouting: Sendable {
+    func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?,
+        initializeParams: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute
+    func toolsList(
+        route: DocumentationProviderRoute,
+        timeout: TimeAmount?
+    ) async throws -> JSONValue
+    func callDocumentationSearch(
+        route: DocumentationProviderRoute,
+        requestData: Data,
+        timeout: TimeAmount?
+    ) async throws -> Data
+    func close(route: DocumentationProviderRoute) async
+    func shutdown() async
+}
+
+extension DocumentationProviderRouting {
+    package func close(route _: DocumentationProviderRoute) async {}
+    package func shutdown() async {}
 }
 
 extension DocumentationProvider {
@@ -107,13 +150,6 @@ extension DocumentationProvider {
                 return normalized.contains("documentationsearch")
                     && normalized.contains("not enabled")
             }
-        }
-
-        package static func responseIsToolError(_ data: Data) -> Bool {
-            responseErrorObjects(in: data).isEmpty == false
-                || responseResultObjects(in: data).contains { object in
-                    object["isError"] as? Bool == true
-                }
         }
 
         private static func replacingDocumentationSearch(
@@ -413,507 +449,45 @@ package actor DocumentationProviderConnection {
     }
 }
 
-package actor DocumentationProviderManager: DocumentationProviderManaging {
-    private struct CandidateProfile: Sendable {
-        let id: UUID
-        let target: DocumentationProviderTarget
-        let connection: DocumentationProviderConnection
-        let descriptor: JSONValue
-        let toolCount: Int
-        let serverVersion: String
-    }
-
-    private struct ActiveProvider: Sendable {
-        let profile: CandidateProfile
-    }
-
-    private struct ProviderSelection: Sendable {
-        let id: UUID
-        let task: Task<CandidateProfile?, Never>
-    }
-
-    private enum ProviderSelectionWaitResult: Sendable {
-        case completed(CandidateProfile?)
-        case timedOut
-    }
-
-    private final class ProviderSelectionWaitState: @unchecked Sendable {
-        private let lock = NSLock()
-        private var continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>?
-        private var resolvedResult: ProviderSelectionWaitResult?
-
-        func setContinuation(
-            _ continuation: CheckedContinuation<ProviderSelectionWaitResult, Never>
-        ) {
-            lock.lock()
-            if let resolvedResult {
-                lock.unlock()
-                continuation.resume(returning: resolvedResult)
-                return
-            }
-            self.continuation = continuation
-            lock.unlock()
-        }
-
-        func resume(_ result: ProviderSelectionWaitResult) {
-            lock.lock()
-            guard resolvedResult == nil else {
-                lock.unlock()
-                return
-            }
-            resolvedResult = result
-            let continuation = continuation
-            self.continuation = nil
-            lock.unlock()
-            continuation?.resume(returning: result)
-        }
-    }
-
-    private let discovery: any XcodeTargetDiscovering
+package actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting {
     private let sessionFactory: any DocumentationProviderSessionMaking
-    private let providerSelectionTimeout: TimeAmount?
-    private let pinnedProcessID: pid_t?
-    private let initializeParams: [String: JSONValue]
     private let clock: ClockClient
-    private let logger: Logger
-    private var activeProvider: ActiveProvider?
-    private var providerSelection: ProviderSelection?
-    private var isShutdown = false
+    private var connections: [String: DocumentationProviderConnection] = [:]
 
     package init(
-        discovery: any XcodeTargetDiscovering,
-        sessionFactory: any DocumentationProviderSessionMaking =
-            LiveDocumentationProviderSessionFactory(),
-        providerSelectionTimeout: TimeAmount? = .seconds(30),
-        pinnedProcessID: pid_t? = nil,
-        initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
-        clock: ClockClient = .liveValue,
-        logger: Logger = ProxyLogging.make("documentation.provider")
+        sessionFactory: any DocumentationProviderSessionMaking,
+        clock: ClockClient = .liveValue
     ) {
-        self.discovery = discovery
         self.sessionFactory = sessionFactory
-        self.providerSelectionTimeout = providerSelectionTimeout
-        self.pinnedProcessID = pinnedProcessID
-        self.initializeParams = initializeParams
         self.clock = clock
-        self.logger = logger
     }
 
-    package func prewarm(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
-    {
-        guard !isShutdown else { return .unavailable }
-        return await toolListUpdate(requestTimeout: requestTimeout)
-    }
-
-    package func toolListUpdate(requestTimeout: TimeAmount?) async
-        -> DocumentationProvider.ToolListUpdate
-    {
-        guard !isShutdown else {
-            return .unavailable
-        }
-        guard requestTimeout?.nanoseconds != 0 else {
-            return .unavailable
-        }
-        guard !Task.isCancelled else {
-            return .unavailable
-        }
-        guard let provider = await providerIfAvailable(requestTimeout: requestTimeout) else {
-            return .unavailable
-        }
-        return .available(provider.profile.descriptor)
-    }
-
-    package func callDocumentationSearch(
-        requestData: Data,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationProvider.CallOutcome {
-        guard !isShutdown else {
-            return .unavailable(.noAvailableProvider)
-        }
-        let deadline = Deadline.fromNow(requestTimeoutOverride, clock: clock)
-        var rejectedProcessIDs: Set<pid_t> = []
-        var invalidatedProvider = false
-
-        while !Task.isCancelled {
-            if let deadline, deadline.hasExpired {
-                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
-            }
-            guard
-                let provider = await providerIfAvailable(
-                    requestTimeout: deadline?.remaining(),
-                    excluding: rejectedProcessIDs
-                )
-            else {
-                try Task.checkCancellation()
-                if let deadline, deadline.hasExpired {
-                    return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
-                }
-                return .unavailable(.noAvailableProvider)
-            }
-            if let deadline, deadline.hasExpired {
-                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
-            }
-            do {
-                let response = try await provider.profile.connection.call(
-                    requestData,
-                    timeout: deadline?.remaining()
-                )
-                guard DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
-                else {
-                    return .handled(response, invalidatedProvider: invalidatedProvider)
-                }
-                await invalidate(provider, reason: "documentation_search_not_enabled")
-                rejectedProcessIDs.insert(provider.profile.target.processID)
-                invalidatedProvider = true
-                try Task.checkCancellation()
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                try Task.checkCancellation()
-                await invalidate(provider, reason: "documentation_provider_call_failed")
-                rejectedProcessIDs.insert(provider.profile.target.processID)
-                invalidatedProvider = true
-                if let deadline, deadline.hasExpired {
-                    return .failed(error, invalidatedProvider: invalidatedProvider)
-                }
-            }
-        }
-        throw CancellationError()
-    }
-
-    package func invalidate(reason _: String) async {
-        let selection = providerSelection
-        providerSelection = nil
-        selection?.task.cancel()
-        let provider = activeProvider
-        activeProvider = nil
-        if let selected = await selection?.task.value,
-            selected.id != provider?.profile.id
-        {
-            await selected.connection.stop()
-        }
-        await provider?.profile.connection.stop()
-    }
-
-    package func shutdown() async {
-        isShutdown = true
-        await invalidate(reason: "shutdown")
-    }
-
-    private func providerIfAvailable(
+    package func openRoute(
+        for target: DocumentationProviderTarget,
         requestTimeout: TimeAmount?,
-        excluding excludedProcessIDs: Set<pid_t> = []
-    ) async -> ActiveProvider? {
-        guard !isShutdown else {
-            return nil
-        }
-        if let activeProvider {
-            if excludedProcessIDs.contains(activeProvider.profile.target.processID) {
-                self.activeProvider = nil
-                await activeProvider.profile.connection.stop()
-            } else {
-                return activeProvider
-            }
-        }
-        let selection: ProviderSelection
-        let selectionIsShared: Bool
-        if let providerSelection, excludedProcessIDs.isEmpty {
-            selection = providerSelection
-            selectionIsShared = true
-        } else {
-            let selectionTimeout = providerSelectionTimeout
-            selection = ProviderSelection(
-                id: UUID(),
-                task: Task {
-                    await self.selectProvider(
-                        requestTimeout: selectionTimeout,
-                        excluding: excludedProcessIDs
-                    )
-                }
-            )
-            selectionIsShared = excludedProcessIDs.isEmpty
-            if selectionIsShared {
-                providerSelection = selection
-            }
-        }
-
-        let waitResult = await waitForSelection(selection, requestTimeout: requestTimeout)
-        let selected: CandidateProfile?
-        switch waitResult {
-        case .completed(let profile):
-            selected = profile
-        case .timedOut:
-            return nil
-        }
-        let selectionIsCurrent = selectionIsShared ? providerSelection?.id == selection.id : true
-        if selectionIsShared, selectionIsCurrent {
-            providerSelection = nil
-        }
-
-        if isShutdown {
-            if let selected {
-                await selected.connection.stop()
-            }
-            return nil
-        }
-
-        if let activeProvider {
-            if let selected, selected.id != activeProvider.profile.id {
-                await selected.connection.stop()
-            }
-            return activeProvider
-        }
-
-        guard selectionIsCurrent else {
-            if let selected {
-                await selected.connection.stop()
-            }
-            return nil
-        }
-        guard let selected else {
-            return nil
-        }
-        let provider = ActiveProvider(profile: selected)
-        activeProvider = provider
-        return provider
-    }
-
-    private func waitForSelection(
-        _ selection: ProviderSelection,
-        requestTimeout: TimeAmount?
-    ) async -> ProviderSelectionWaitResult {
-        guard !Task.isCancelled else {
-            return .timedOut
-        }
-
-        let state = ProviderSelectionWaitState()
-        let selectionWaitTask = Task {
-            let profile = await selection.task.value
-            state.resume(.completed(profile))
-        }
-        let clock = clock
-        let timeoutTask: Task<Void, Never>?
-        if let requestTimeout, requestTimeout.nanoseconds > 0 {
-            timeoutTask = Task {
-                await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
-                guard Task.isCancelled == false else {
-                    return
-                }
-                state.resume(.timedOut)
-            }
-        } else {
-            timeoutTask = nil
-        }
-
-        let result = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                state.setContinuation(continuation)
-            }
-        } onCancel: {
-            state.resume(.timedOut)
-        }
-        selectionWaitTask.cancel()
-        timeoutTask?.cancel()
-        return result
-    }
-
-    private func invalidate(_ provider: ActiveProvider, reason _: String) async {
-        guard let activeProvider, activeProvider.profile.id == provider.profile.id else {
-            await provider.profile.connection.stop()
-            return
-        }
-        self.activeProvider = nil
-        await provider.profile.connection.stop()
-    }
-
-    private func selectProvider(
-        requestTimeout: TimeAmount?,
-        excluding excludedProcessIDs: Set<pid_t> = []
-    ) async -> CandidateProfile? {
-        guard !isShutdown else {
-            return nil
-        }
-        let selectionDeadline = Deadline.fromNow(requestTimeout, clock: clock)
-        let discoveredTargets = discovery.runningXcodeTargets()
-        let targets: [DocumentationProviderTarget]
-        if let pinnedProcessID {
-            targets = discoveredTargets.filter {
-                $0.processID == pinnedProcessID
-                    && excludedProcessIDs.contains($0.processID) == false
-            }
-        } else {
-            targets = discoveredTargets.filter {
-                excludedProcessIDs.contains($0.processID) == false
-            }
-        }
-        logger.debug(
-            "Selecting documentation provider from running Xcode processes",
-            metadata: [
-                "candidate_count": .string("\(targets.count)"),
-                "discovered_candidate_count": .string("\(discoveredTargets.count)"),
-                "excluded_candidate_count": .string("\(excludedProcessIDs.count)"),
-                "pinned_pid": .string(pinnedProcessID.map(String.init) ?? ""),
-                "candidates": .string(
-                    targets.map { "\($0.processID):\($0.appPath)" }.joined(separator: ",")),
-            ]
-        )
-        var profiles: [CandidateProfile] = []
-        for (index, target) in targets.enumerated() {
-            guard !Task.isCancelled, !isShutdown else {
-                break
-            }
-            let candidateTimeout = candidateProbeTimeout(
-                until: selectionDeadline,
-                remainingCandidateCount: targets.count - index
-            )
-            if candidateTimeout?.nanoseconds == 0 {
-                break
-            }
-            do {
-                let profile = try await boundedProbe(
-                    target: target, requestTimeout: candidateTimeout)
-                guard !Task.isCancelled, !isShutdown else {
-                    await profile.connection.stop()
-                    break
-                }
-                profiles.append(profile)
-            } catch is CancellationError {
-                break
-            } catch {
-                logger.debug(
-                    "Documentation provider candidate rejected",
-                    metadata: [
-                        "pid": .string("\(target.processID)"),
-                        "app_path": .string(target.appPath),
-                        "error": .string(String(describing: error)),
-                    ]
-                )
-                continue
-            }
-        }
-
-        if Task.isCancelled || isShutdown {
-            for profile in profiles {
-                await profile.connection.stop()
-            }
-            return nil
-        }
-
-        guard
-            let selected = profiles.max(by: { lhs, rhs in
-                if lhs.toolCount != rhs.toolCount {
-                    return lhs.toolCount < rhs.toolCount
-                }
-                return Self.compareVersion(lhs.serverVersion, rhs.serverVersion)
-                    == .orderedAscending
-            })
-        else {
-            return nil
-        }
-
-        for profile in profiles where profile.target != selected.target {
-            await profile.connection.stop()
-        }
-        logger.info(
-            "Selected documentation provider",
-            metadata: [
-                "pid": .string("\(selected.target.processID)"),
-                "app_path": .string(selected.target.appPath),
-                "server_version": .string(selected.serverVersion),
-                "tool_count": .string("\(selected.toolCount)"),
-            ]
-        )
-        return selected
-    }
-
-    private func boundedProbe(
-        target: DocumentationProviderTarget,
-        requestTimeout: TimeAmount?
-    ) async throws -> CandidateProfile {
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return try await probe(target: target, requestTimeout: requestTimeout)
-        }
-        return try await withThrowingTaskGroup(of: CandidateProfile.self) { group in
-            group.addTask {
-                try await self.probe(target: target, requestTimeout: requestTimeout)
-            }
-            let clock = clock
-            group.addTask {
-                await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
-                try Task.checkCancellation()
-                throw TimeoutError()
-            }
-            do {
-                guard let result = try await group.next() else {
-                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
-                }
-                group.cancelAll()
-                return result
-            } catch {
-                group.cancelAll()
-                throw error
-            }
-        }
-    }
-
-    private func probe(
-        target: DocumentationProviderTarget,
-        requestTimeout: TimeAmount?
-    ) async throws -> CandidateProfile {
-        let probeDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
-        try Task.checkCancellation()
+        initializeParams: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
         let session = try await sessionFactory.startSession(for: target)
         let connection = DocumentationProviderConnection(session: session, clock: clock)
+        let routeID = UUID().uuidString
         do {
-            try Task.checkCancellation()
             await connection.start()
-            let initializeTimeout = remainingTimeout(until: probeDeadline)
-            guard initializeTimeout?.nanoseconds != 0 else {
-                throw TimeoutError()
-            }
             let initialize = try await connection.call(
-                try makeInitializeRequestData(),
-                timeout: initializeTimeout
+                try Self.makeInitializeRequestData(initializeParams: initializeParams),
+                timeout: requestTimeout
             )
-            let serverVersion = Self.serverVersion(fromInitializeResponse: initialize) ?? ""
-            try Task.checkCancellation()
+            let serverVersion = DocumentationProviderManager.serverVersion(
+                fromInitializeResponse: initialize
+            ) ?? ""
             try await connection.sendNotification([
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized",
             ])
-            let toolsListTimeout = remainingTimeout(until: probeDeadline)
-            guard toolsListTimeout?.nanoseconds != 0 else {
-                throw TimeoutError()
-            }
-            let toolsList = try await connection.call(
-                try Self.makeToolsListRequestData(),
-                timeout: toolsListTimeout
-            )
-            let toolsResult = try Self.resultValue(from: toolsList)
-            guard let descriptor = DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
-            else {
-                throw UpstreamSlotScheduler.AcquisitionError.unavailable
-            }
-            let documentationProbeTimeout = remainingTimeout(until: probeDeadline)
-            guard documentationProbeTimeout?.nanoseconds != 0 else {
-                throw TimeoutError()
-            }
-            let probeResponse = try await connection.call(
-                try Self.makeDocumentationProbeRequestData(),
-                timeout: documentationProbeTimeout
-            )
-            guard
-                !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(probeResponse),
-                !DocumentationProvider.ToolCatalog.responseIsToolError(probeResponse)
-            else {
-                throw UpstreamSlotScheduler.AcquisitionError.unavailable
-            }
-            return CandidateProfile(
-                id: UUID(),
+            connections[routeID] = connection
+            return DocumentationProviderRoute(
+                id: routeID,
                 target: target,
-                connection: connection,
-                descriptor: descriptor,
-                toolCount: Self.toolCount(in: toolsResult),
+                upstreamIndex: nil,
                 serverVersion: serverVersion
             )
         } catch {
@@ -922,7 +496,49 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func makeInitializeRequestData() throws -> Data {
+    package func toolsList(
+        route: DocumentationProviderRoute,
+        timeout: TimeAmount?
+    ) async throws -> JSONValue {
+        guard let connection = connections[route.id] else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let toolsList = try await connection.call(
+            try Self.makeToolsListRequestData(),
+            timeout: timeout
+        )
+        return try DocumentationProviderManager.resultValue(from: toolsList)
+    }
+
+    package func callDocumentationSearch(
+        route: DocumentationProviderRoute,
+        requestData: Data,
+        timeout: TimeAmount?
+    ) async throws -> Data {
+        guard let connection = connections[route.id] else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        return try await connection.call(requestData, timeout: timeout)
+    }
+
+    package func close(route: DocumentationProviderRoute) async {
+        guard let connection = connections.removeValue(forKey: route.id) else {
+            return
+        }
+        await connection.stop()
+    }
+
+    package func shutdown() async {
+        let connections = self.connections
+        self.connections.removeAll()
+        for connection in connections.values {
+            await connection.stop()
+        }
+    }
+
+    private static func makeInitializeRequestData(
+        initializeParams: [String: JSONValue]
+    ) throws -> Data {
         try JSONSerialization.data(
             withJSONObject: [
                 "jsonrpc": "2.0",
@@ -944,25 +560,793 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             options: []
         )
     }
+}
 
-    private static func makeDocumentationProbeRequestData() throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: [
-                "jsonrpc": "2.0",
-                "id": "documentation-probe",
-                "method": "tools/call",
-                "params": [
-                    "name": DocumentationProvider.ToolCatalog.toolName,
-                    "arguments": [
-                        "query": "UIView animate withDuration animations completion"
-                    ],
-                ],
-            ],
-            options: []
+package actor DocumentationProviderManager: DocumentationProviderManaging {
+    private struct CandidateProfile: Sendable {
+        let id: UUID
+        let target: DocumentationProviderTarget
+        let route: DocumentationProviderRoute
+        var descriptor: JSONValue?
+        let serverVersion: String
+    }
+
+    private struct ActiveProvider: Sendable {
+        let profile: CandidateProfile
+    }
+
+    private struct ProviderPreparation: Sendable {
+        let task: Task<CandidateProfile, Error>
+    }
+
+    private struct PreparationWaitTimedOut: Error {}
+
+    private final class PreparationWaiter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<CandidateProfile, Error>?
+        private var tasks: [Task<Void, Never>] = []
+        private var resolved = false
+
+        func setContinuation(_ continuation: CheckedContinuation<CandidateProfile, Error>) {
+            lock.lock()
+            if resolved {
+                lock.unlock()
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        func addTask(_ task: Task<Void, Never>) {
+            lock.lock()
+            if resolved {
+                lock.unlock()
+                task.cancel()
+                return
+            }
+            tasks.append(task)
+            lock.unlock()
+        }
+
+        func resume(_ result: Result<CandidateProfile, Error>) {
+            lock.lock()
+            guard resolved == false else {
+                lock.unlock()
+                return
+            }
+            resolved = true
+            let continuation = continuation
+            self.continuation = nil
+            let tasks = tasks
+            self.tasks.removeAll()
+            lock.unlock()
+
+            for task in tasks {
+                task.cancel()
+            }
+            switch result {
+            case .success(let profile):
+                continuation?.resume(returning: profile)
+            case .failure(let error):
+                continuation?.resume(throwing: error)
+            }
+        }
+    }
+
+    private let discovery: any XcodeTargetDiscovering
+    private let transport: any DocumentationProviderRouting
+    private let providerSelectionTimeout: TimeAmount?
+    private let pinnedProcessID: pid_t?
+    private let initializeParams: [String: JSONValue]
+    private let clock: ClockClient
+    private let logger: Logger
+    private var activeProvider: ActiveProvider?
+    private var preparedProviders: [pid_t: CandidateProfile] = [:]
+    private var providerPreparations: [pid_t: ProviderPreparation] = [:]
+    private var unusableProcessIDs: Set<pid_t> = []
+    private var isShutdown = false
+
+    package init(
+        discovery: any XcodeTargetDiscovering,
+        transport: any DocumentationProviderRouting,
+        providerSelectionTimeout: TimeAmount? = .seconds(30),
+        pinnedProcessID: pid_t? = nil,
+        initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
+        clock: ClockClient = .liveValue,
+        logger: Logger = ProxyLogging.make("documentation.provider")
+    ) {
+        self.discovery = discovery
+        self.transport = transport
+        self.providerSelectionTimeout = providerSelectionTimeout
+        self.pinnedProcessID = pinnedProcessID
+        self.initializeParams = initializeParams
+        self.clock = clock
+        self.logger = logger
+    }
+
+    package init(
+        discovery: any XcodeTargetDiscovering,
+        sessionFactory: any DocumentationProviderSessionMaking,
+        providerSelectionTimeout: TimeAmount? = .seconds(30),
+        pinnedProcessID: pid_t? = nil,
+        initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
+        clock: ClockClient = .liveValue,
+        logger: Logger = ProxyLogging.make("documentation.provider")
+    ) {
+        self.init(
+            discovery: discovery,
+            transport: SessionBackedDocumentationProviderTransport(
+                sessionFactory: sessionFactory,
+                clock: clock
+            ),
+            providerSelectionTimeout: providerSelectionTimeout,
+            pinnedProcessID: pinnedProcessID,
+            initializeParams: initializeParams,
+            clock: clock,
+            logger: logger
         )
     }
 
-    private static func resultValue(from responseData: Data) throws -> JSONValue {
+    package func startBackgroundDiscovery(requestTimeout: TimeAmount?) async
+        -> DocumentationProvider.ToolListUpdate
+    {
+        guard !isShutdown else { return .unavailable }
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        let deadline = Deadline.fromNow(requestTimeout, clock: clock)
+        let targets = orderedTargets(excluding: [])
+        guard targets.isEmpty == false else {
+            return .unavailable
+        }
+        for target in targets {
+            guard !Task.isCancelled, !isShutdown else {
+                return .unavailable
+            }
+            guard unusableProcessIDs.contains(target.processID) == false else {
+                continue
+            }
+            do {
+                let profile = try await preparedProvider(
+                    for: target,
+                    requestTimeout: remainingTimeout(until: deadline),
+                    fetchDescriptor: true
+                )
+                if let descriptor = profile.descriptor {
+                    let didPromote = await promoteToActive(profile)
+                    if didPromote {
+                        logger.info(
+                            "Prewarmed documentation provider",
+                            metadata: [
+                                "pid": .string("\(target.processID)"),
+                                "app_path": .string(target.appPath),
+                                "xcode_version": .string(target.xcodeVersion),
+                                "server_version": .string(profile.serverVersion),
+                            ]
+                        )
+                    }
+                    return .available(descriptor)
+                }
+                return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+            } catch is CancellationError {
+                return .unavailable
+            } catch {
+                logger.debug(
+                    "Documentation provider background discovery candidate rejected",
+                    metadata: candidateLogMetadata(target: target, error: error)
+                )
+                continue
+            }
+        }
+        return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+    }
+
+    package func toolListUpdate(requestTimeout: TimeAmount?) async
+        -> DocumentationProvider.ToolListUpdate
+    {
+        guard !isShutdown else {
+            return .unavailable
+        }
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        guard !Task.isCancelled else {
+            return .unavailable
+        }
+        return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+    }
+
+    private func toolListUpdateFromCachedState(requestTimeout: TimeAmount?)
+        -> DocumentationProvider.ToolListUpdate
+    {
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        if let activeProvider {
+            guard let descriptor = activeProvider.profile.descriptor else {
+                return .unchanged
+            }
+            return .available(descriptor)
+        }
+        let targets = orderedTargets(excluding: [])
+        guard targets.isEmpty == false else {
+            return .unavailable
+        }
+        for target in targets {
+            if let descriptor = preparedProviders[target.processID]?.descriptor {
+                return .available(descriptor)
+            }
+        }
+        let targetIDs = Set(targets.map(\.processID))
+        if targetIDs.isSubset(of: unusableProcessIDs) {
+            return .unavailable
+        }
+        return .unchanged
+    }
+
+    package func callDocumentationSearch(
+        requestData: Data,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> DocumentationProvider.CallOutcome {
+        guard !isShutdown else {
+            return .unavailable(.noAvailableProvider)
+        }
+        let deadline = Deadline.fromNow(requestTimeoutOverride, clock: clock)
+        var rejectedProcessIDs: Set<pid_t> = []
+        var invalidatedProvider = false
+
+        while !Task.isCancelled {
+            if let deadline, deadline.hasExpired {
+                return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+            }
+            if let activeProvider,
+                rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false,
+                activeProviderIsCurrentBest(
+                    activeProvider,
+                    excluding: rejectedProcessIDs.union(unusableProcessIDs)
+                )
+            {
+                let fallbackTargets = orderedTargets(
+                    excluding: rejectedProcessIDs
+                        .union(unusableProcessIDs)
+                        .union([activeProvider.profile.target.processID])
+                )
+                let activeDeadline = makeDeadline(
+                    fromTimeout: timeoutForCandidate(
+                        until: deadline,
+                        remainingCandidateCount: fallbackTargets.count + 1
+                    )
+                )
+                switch try await attemptDocumentationSearch(
+                    requestData: requestData,
+                    provider: activeProvider,
+                    deadline: activeDeadline
+                ) {
+                case .success(let data):
+                    return .handled(data, invalidatedProvider: invalidatedProvider)
+                case .rejected(let processID, let permanentlyUnusable):
+                    rejectedProcessIDs.insert(processID)
+                    invalidatedProvider = true
+                    if permanentlyUnusable {
+                        unusableProcessIDs.insert(processID)
+                    }
+                    continue
+                case .failed(let error):
+                    if let deadline, deadline.hasExpired {
+                        return .failed(error, invalidatedProvider: invalidatedProvider)
+                    }
+                    rejectedProcessIDs.insert(activeProvider.profile.target.processID)
+                    invalidatedProvider = true
+                    continue
+                }
+            }
+
+            let targets = orderedTargets(
+                excluding: rejectedProcessIDs.union(unusableProcessIDs)
+            )
+            guard targets.isEmpty == false else {
+                try Task.checkCancellation()
+                if let deadline, deadline.hasExpired {
+                    return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                return .unavailable(.noAvailableProvider)
+            }
+
+            var progressed = false
+            for (index, target) in targets.enumerated() {
+                if let deadline, deadline.hasExpired {
+                    return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                let candidateDeadline = makeDeadline(
+                    fromTimeout: timeoutForCandidate(
+                        until: deadline,
+                        remainingCandidateCount: targets.count - index
+                    )
+                )
+                do {
+                    let profile = try await preparedProvider(
+                        for: target,
+                        requestTimeout: remainingTimeout(until: candidateDeadline),
+                        fetchDescriptor: false
+                    )
+                    let provider = ActiveProvider(profile: profile)
+                    switch try await attemptDocumentationSearch(
+                        requestData: requestData,
+                        provider: provider,
+                        deadline: candidateDeadline
+                    ) {
+                    case .success(let data):
+                        let didPromote = await promoteToActive(profile)
+                        if didPromote {
+                            logger.info(
+                                "Selected documentation provider",
+                                metadata: [
+                                    "pid": .string("\(target.processID)"),
+                                    "app_path": .string(target.appPath),
+                                    "xcode_version": .string(target.xcodeVersion),
+                                    "server_version": .string(profile.serverVersion),
+                                ]
+                            )
+                        }
+                        return .handled(data, invalidatedProvider: invalidatedProvider)
+                    case .rejected(let processID, let permanentlyUnusable):
+                        rejectedProcessIDs.insert(processID)
+                        invalidatedProvider = true
+                        progressed = true
+                        if permanentlyUnusable {
+                            unusableProcessIDs.insert(processID)
+                        }
+                        continue
+                    case .failed(let error):
+                        rejectedProcessIDs.insert(target.processID)
+                        invalidatedProvider = true
+                        progressed = true
+                        if let deadline, deadline.hasExpired {
+                            return .failed(error, invalidatedProvider: invalidatedProvider)
+                        }
+                        continue
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    try Task.checkCancellation()
+                    rejectedProcessIDs.insert(target.processID)
+                    invalidatedProvider = true
+                    progressed = true
+                    if let deadline, deadline.hasExpired {
+                        return .failed(error, invalidatedProvider: invalidatedProvider)
+                    }
+                    logger.debug(
+                        "Documentation provider candidate rejected before user request",
+                        metadata: candidateLogMetadata(target: target, error: error)
+                    )
+                }
+            }
+            if !progressed {
+                return .unavailable(.noAvailableProvider)
+            }
+        }
+        throw CancellationError()
+    }
+
+    private func activeProviderIsCurrentBest(
+        _ activeProvider: ActiveProvider,
+        excluding excludedProcessIDs: Set<pid_t>
+    ) -> Bool {
+        guard let first = orderedTargets(excluding: excludedProcessIDs).first else {
+            return false
+        }
+        return first.processID == activeProvider.profile.target.processID
+    }
+
+    private func promoteToActive(_ profile: CandidateProfile) async -> Bool {
+        let previous = activeProvider
+        activeProvider = ActiveProvider(profile: profile)
+        preparedProviders.removeValue(forKey: profile.target.processID)
+        guard let previous else {
+            return true
+        }
+        guard previous.profile.id != profile.id else {
+            return false
+        }
+        await transport.close(route: previous.profile.route)
+        return true
+    }
+
+    private enum DocumentationAttemptResult: Sendable {
+        case success(Data)
+        case rejected(processID: pid_t, permanentlyUnusable: Bool)
+        case failed(any Error)
+    }
+
+    private func attemptDocumentationSearch(
+        requestData: Data,
+        provider: ActiveProvider,
+        deadline: Deadline?
+    ) async throws -> DocumentationAttemptResult {
+        let processID = provider.profile.target.processID
+        do {
+            let response = try await transport.callDocumentationSearch(
+                route: provider.profile.route,
+                requestData: requestData,
+                timeout: remainingTimeout(until: deadline)
+            )
+            guard !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
+            else {
+                await invalidate(provider, reason: "documentation_search_tool_error")
+                return .rejected(processID: processID, permanentlyUnusable: true)
+            }
+            return .success(response)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            await invalidate(provider, reason: "documentation_provider_call_failed")
+            return .failed(error)
+        }
+    }
+
+    package func invalidate(reason _: String) async {
+        let preparations = providerPreparations
+        providerPreparations.removeAll()
+        for preparation in preparations.values {
+            preparation.task.cancel()
+        }
+        let prepared = preparedProviders
+        preparedProviders.removeAll()
+        let provider = activeProvider
+        activeProvider = nil
+        for profile in prepared.values where profile.id != provider?.profile.id {
+            await transport.close(route: profile.route)
+        }
+        if let provider {
+            await transport.close(route: provider.profile.route)
+        }
+    }
+
+    package func shutdown() async {
+        isShutdown = true
+        await invalidate(reason: "shutdown")
+        await transport.shutdown()
+    }
+
+    private func preparedProvider(
+        for target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?,
+        fetchDescriptor: Bool
+    ) async throws -> CandidateProfile {
+        if let activeProvider, activeProvider.profile.target.processID == target.processID {
+            if fetchDescriptor, activeProvider.profile.descriptor == nil {
+                let updated = await profileByRefreshingDescriptor(
+                    activeProvider.profile,
+                    requestTimeout: requestTimeout
+                )
+                if let current = self.activeProvider,
+                    current.profile.id == updated.id
+                {
+                    let merged = profileByPreferringDescriptor(
+                        primary: current.profile,
+                        fallback: updated
+                    )
+                    self.activeProvider = ActiveProvider(profile: merged)
+                    return merged
+                }
+                return updated
+            }
+            return activeProvider.profile
+        }
+        if var prepared = preparedProviders[target.processID] {
+            if fetchDescriptor, prepared.descriptor == nil {
+                let updated = await profileByRefreshingDescriptor(
+                    prepared,
+                    requestTimeout: requestTimeout
+                )
+                if let activeProvider, activeProvider.profile.id == updated.id {
+                    let merged = profileByPreferringDescriptor(
+                        primary: activeProvider.profile,
+                        fallback: updated
+                    )
+                    self.activeProvider = ActiveProvider(profile: merged)
+                    return merged
+                }
+                if let cached = preparedProviders[target.processID],
+                    cached.id == updated.id
+                {
+                    let merged = profileByPreferringDescriptor(
+                        primary: cached,
+                        fallback: updated
+                    )
+                    preparedProviders[target.processID] = merged
+                    return merged
+                }
+                prepared = updated
+                preparedProviders[target.processID] = prepared
+            }
+            return prepared
+        }
+        let preparation: ProviderPreparation
+        if let existing = providerPreparations[target.processID] {
+            preparation = existing
+        } else {
+            let timeout = providerSelectionTimeout
+            preparation = ProviderPreparation(
+                task: Task {
+                    try await self.openProviderRoute(
+                        target: target,
+                        requestTimeout: timeout
+                    )
+                }
+            )
+            providerPreparations[target.processID] = preparation
+        }
+        let profile: CandidateProfile
+        do {
+            profile = try await waitForPreparation(preparation, requestTimeout: requestTimeout)
+        } catch is PreparationWaitTimedOut {
+            throw TimeoutError()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            providerPreparations.removeValue(forKey: target.processID)
+            throw error
+        }
+        providerPreparations.removeValue(forKey: target.processID)
+        if isShutdown {
+            await transport.close(route: profile.route)
+            throw CancellationError()
+        }
+        return try await cachePreparedProvider(
+            profile,
+            requestTimeout: requestTimeout,
+            fetchDescriptor: fetchDescriptor
+        )
+    }
+
+    private func cachePreparedProvider(
+        _ profile: CandidateProfile,
+        requestTimeout: TimeAmount?,
+        fetchDescriptor: Bool
+    ) async throws -> CandidateProfile {
+        if let activeProvider, activeProvider.profile.id == profile.id {
+            if fetchDescriptor, activeProvider.profile.descriptor == nil {
+                let updated = await profileByRefreshingDescriptor(
+                    activeProvider.profile,
+                    requestTimeout: requestTimeout
+                )
+                self.activeProvider = ActiveProvider(profile: updated)
+                return updated
+            }
+            return activeProvider.profile
+        }
+        if let prepared = preparedProviders[profile.target.processID],
+            prepared.id == profile.id
+        {
+            if fetchDescriptor, prepared.descriptor == nil {
+                let updated = await profileByRefreshingDescriptor(
+                    prepared,
+                    requestTimeout: requestTimeout
+                )
+                preparedProviders[profile.target.processID] = updated
+                return updated
+            }
+            return prepared
+        }
+
+        var prepared = profile
+        preparedProviders[profile.target.processID] = prepared
+        if fetchDescriptor, prepared.descriptor == nil {
+            prepared = await profileByRefreshingDescriptor(
+                prepared,
+                requestTimeout: requestTimeout
+            )
+            if let activeProvider, activeProvider.profile.id == profile.id {
+                let merged = profileByPreferringDescriptor(
+                    primary: activeProvider.profile,
+                    fallback: prepared
+                )
+                self.activeProvider = ActiveProvider(profile: merged)
+                return merged
+            }
+            if let cached = preparedProviders[profile.target.processID],
+                cached.id == profile.id
+            {
+                let merged = profileByPreferringDescriptor(primary: cached, fallback: prepared)
+                preparedProviders[profile.target.processID] = merged
+                return merged
+            }
+        }
+
+        if let cached = preparedProviders[profile.target.processID],
+            cached.id == profile.id
+        {
+            let merged = profileByPreferringDescriptor(primary: cached, fallback: prepared)
+            preparedProviders[profile.target.processID] = merged
+            return merged
+        }
+        preparedProviders[profile.target.processID] = prepared
+        return prepared
+    }
+
+    private func profileByPreferringDescriptor(
+        primary: CandidateProfile,
+        fallback: CandidateProfile
+    ) -> CandidateProfile {
+        guard primary.descriptor == nil, fallback.descriptor != nil else {
+            return primary
+        }
+        var merged = primary
+        merged.descriptor = fallback.descriptor
+        return merged
+    }
+
+    private func waitForPreparation(
+        _ preparation: ProviderPreparation,
+        requestTimeout: TimeAmount?
+    ) async throws -> CandidateProfile {
+        guard let requestTimeout else {
+            return try await preparation.task.value
+        }
+        guard requestTimeout.nanoseconds > 0 else {
+            throw PreparationWaitTimedOut()
+        }
+        let waiter = PreparationWaiter()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiter.setContinuation(continuation)
+                waiter.addTask(Task {
+                    do {
+                        let profile = try await preparation.task.value
+                        waiter.resume(.success(profile))
+                    } catch {
+                        waiter.resume(.failure(error))
+                    }
+                })
+                let clock = clock
+                waiter.addTask(Task {
+                    await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    waiter.resume(.failure(PreparationWaitTimedOut()))
+                })
+            }
+        } onCancel: {
+            waiter.resume(.failure(CancellationError()))
+        }
+    }
+
+    private func invalidate(_ provider: ActiveProvider, reason _: String) async {
+        if let prepared = preparedProviders[provider.profile.target.processID],
+            prepared.id == provider.profile.id
+        {
+            preparedProviders.removeValue(forKey: provider.profile.target.processID)
+        }
+        if let activeProvider, activeProvider.profile.id == provider.profile.id {
+            self.activeProvider = nil
+        }
+        await transport.close(route: provider.profile.route)
+    }
+
+    private func orderedTargets(
+        excluding excludedProcessIDs: Set<pid_t>
+    ) -> [DocumentationProviderTarget] {
+        let discoveredTargets = discovery.runningXcodeTargets()
+        let filtered: [DocumentationProviderTarget]
+        if let pinnedProcessID {
+            filtered = discoveredTargets.filter {
+                $0.processID == pinnedProcessID
+                    && excludedProcessIDs.contains($0.processID) == false
+            }
+        } else {
+            filtered = discoveredTargets.filter {
+                excludedProcessIDs.contains($0.processID) == false
+            }
+        }
+        return filtered.sorted { lhs, rhs in
+            let versionComparison = Self.compareVersion(lhs.xcodeVersion, rhs.xcodeVersion)
+            if versionComparison != .orderedSame {
+                return versionComparison == .orderedDescending
+            }
+            if lhs.appPath != rhs.appPath {
+                return lhs.appPath < rhs.appPath
+            }
+            return lhs.processID < rhs.processID
+        }
+    }
+
+    private func openProviderRoute(
+        target: DocumentationProviderTarget,
+        requestTimeout: TimeAmount?
+    ) async throws -> CandidateProfile {
+        guard !isShutdown else {
+            throw CancellationError()
+        }
+        logger.debug(
+            "Preparing documentation provider candidate",
+            metadata: [
+                "pid": .string("\(target.processID)"),
+                "app_path": .string(target.appPath),
+                "xcode_version": .string(target.xcodeVersion),
+            ]
+        )
+        let startupDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
+        try Task.checkCancellation()
+        let startupTimeout = remainingTimeout(until: startupDeadline)
+        guard startupTimeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+        let route = try await transport.openRoute(
+            for: target,
+            requestTimeout: startupTimeout,
+            initializeParams: initializeParams
+        )
+        do {
+            try Task.checkCancellation()
+            guard !isShutdown else {
+                throw CancellationError()
+            }
+            guard remainingTimeout(until: startupDeadline)?.nanoseconds != 0 else {
+                throw TimeoutError()
+            }
+        } catch {
+            await transport.close(route: route)
+            throw error
+        }
+        return CandidateProfile(
+            id: UUID(),
+            target: target,
+            route: route,
+            descriptor: nil,
+            serverVersion: route.serverVersion
+        )
+    }
+
+    private func profileWithDescriptor(
+        _ profile: CandidateProfile,
+        requestTimeout: TimeAmount?
+    ) async throws -> CandidateProfile {
+        var updated = profile
+        let toolsListTimeout = requestTimeout
+        guard toolsListTimeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+        let toolsResult = try await transport.toolsList(
+            route: profile.route,
+            timeout: toolsListTimeout
+        )
+        updated.descriptor = DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
+        return updated
+    }
+
+    private func profileByRefreshingDescriptor(
+        _ profile: CandidateProfile,
+        requestTimeout: TimeAmount?
+    ) async -> CandidateProfile {
+        do {
+            let updated = try await profileWithDescriptor(profile, requestTimeout: requestTimeout)
+            if updated.descriptor == nil {
+                logger.debug(
+                    "Documentation provider descriptor missing from tools/list",
+                    metadata: [
+                        "pid": .string("\(profile.target.processID)"),
+                        "app_path": .string(profile.target.appPath),
+                        "xcode_version": .string(profile.target.xcodeVersion),
+                    ]
+                )
+            }
+            return updated
+        } catch is CancellationError {
+            return profile
+        } catch {
+            logger.debug(
+                "Documentation provider descriptor refresh failed",
+                metadata: candidateLogMetadata(target: profile.target, error: error)
+            )
+            return profile
+        }
+    }
+
+    package static func resultValue(from responseData: Data) throws -> JSONValue {
         guard
             let object = try JSONSerialization.jsonObject(with: responseData, options: [])
                 as? [String: Any],
@@ -974,16 +1358,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return value
     }
 
-    private static func toolCount(in result: JSONValue) -> Int {
-        guard case .object(let object) = result,
-            case .array(let tools)? = object["tools"]
-        else {
-            return 0
-        }
-        return tools.count
-    }
-
-    private static func serverVersion(fromInitializeResponse data: Data) -> String? {
+    package static func serverVersion(fromInitializeResponse data: Data) -> String? {
         guard
             let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],
@@ -1027,7 +1402,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return deadline.remaining()
     }
 
-    private func candidateProbeTimeout(
+    private func timeoutForCandidate(
         until deadline: Deadline?,
         remainingCandidateCount: Int
     ) -> TimeAmount? {
@@ -1037,7 +1412,31 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard remaining.nanoseconds > 0 else {
             return .nanoseconds(0)
         }
-        let divisor = max(Int64(remainingCandidateCount), 1)
-        return .nanoseconds(max(remaining.nanoseconds / divisor, 1))
+        guard remainingCandidateCount > 1 else {
+            return remaining
+        }
+        return .nanoseconds(max(1, remaining.nanoseconds / Int64(remainingCandidateCount)))
+    }
+
+    private func makeDeadline(fromTimeout timeout: TimeAmount?) -> Deadline? {
+        guard let timeout else {
+            return nil
+        }
+        guard timeout.nanoseconds > 0 else {
+            return Deadline(uptimeNanoseconds: clock.uptimeNanoseconds(), clock: clock)
+        }
+        return Deadline.fromNow(timeout, clock: clock)
+    }
+
+    private func candidateLogMetadata(
+        target: DocumentationProviderTarget,
+        error: any Error
+    ) -> Logger.Metadata {
+        [
+            "pid": .string("\(target.processID)"),
+            "app_path": .string(target.appPath),
+            "xcode_version": .string(target.xcodeVersion),
+            "error": .string(String(describing: error)),
+        ]
     }
 }

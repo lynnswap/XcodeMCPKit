@@ -508,7 +508,7 @@ extension HTTPPostService {
     }
 
     private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
-        guard sessionManager.hasDocumentationProvider() else {
+        guard sessionManager.hasDocumentationSearchService() else {
             return false
         }
         guard case .request("tools/call", _) = JSONRPC.Message.Inspector.kind(of: object),
