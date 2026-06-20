@@ -54,7 +54,6 @@ bin_out="$out_dir/bin"
 products=(
   "xcode-mcp-proxy"
   "xcode-mcp-proxy-server"
-  "xcode-mcp-proxy-install"
 )
 
 pushd "$repo_root" >/dev/null

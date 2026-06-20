@@ -69,7 +69,6 @@ rm -f "$output_base/SHA256SUMS.txt"
 products=(
   "xcode-mcp-proxy"
   "xcode-mcp-proxy-server"
-  "xcode-mcp-proxy-install"
 )
 
 for product in "${products[@]}"; do
@@ -80,8 +79,9 @@ for product in "${products[@]}"; do
   fi
 done
 
-cp -R "$arm_bin" "$tmp_dir/bin"
+mkdir -p "$tmp_dir/bin"
 for product in "${products[@]}"; do
+  cp "$arm_bin/$product" "$tmp_dir/bin/$product"
   chmod +x "$tmp_dir/bin/$product"
   if command -v lipo >/dev/null 2>&1; then
     archs="$(lipo -archs "$tmp_dir/bin/$product")"
