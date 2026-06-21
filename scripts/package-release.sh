@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/package-release.sh [--dist-root <dir>] [--output-dir <dir>]
+Usage: scripts/package-release.sh --version <tag> [--repo <owner/repo>] [--dist-root <dir>] [--output-dir <dir>]
 
 Requires staged arm64 binaries from:
   <dist-root>/arm64/bin/
@@ -11,14 +11,25 @@ Requires staged arm64 binaries from:
 Outputs:
   <output-dir>/xcode-mcp-proxy-darwin-arm64.tar.gz
   <output-dir>/SHA256SUMS.txt
+  <output-dir>/install.sh
 EOF
 }
 
+version=""
+release_repo="lynnswap/XcodeMCPKit"
 dist_root="dist"
 output_dir="release"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --version)
+      version="${2:-}"
+      shift 2
+      ;;
+    --repo)
+      release_repo="${2:-}"
+      shift 2
+      ;;
     --dist-root)
       dist_root="${2:-}"
       shift 2
@@ -38,6 +49,22 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -z "$version" ]]; then
+  echo "--version is required." >&2
+  usage
+  exit 1
+fi
+
+if [[ ! "$version" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+  echo "Release tag must look like v1.2.3." >&2
+  exit 1
+fi
+
+if [[ ! "$release_repo" =~ ^[0-9A-Za-z_.-]+/[0-9A-Za-z_.-]+$ ]]; then
+  echo "Release repo must look like owner/repo." >&2
+  exit 1
+fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$dist_root" = /* ]]; then
@@ -63,13 +90,13 @@ trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$output_base"
 
 archive="$output_base/xcode-mcp-proxy-darwin-arm64.tar.gz"
+install_script="$output_base/install.sh"
 find "$output_base" -maxdepth 1 -type f -name 'xcode-mcp-proxy*.tar.gz' -delete
-rm -f "$output_base/SHA256SUMS.txt"
+rm -f "$output_base/SHA256SUMS.txt" "$install_script"
 
 products=(
   "xcode-mcp-proxy"
   "xcode-mcp-proxy-server"
-  "xcode-mcp-proxy-install"
 )
 
 for product in "${products[@]}"; do
@@ -80,8 +107,9 @@ for product in "${products[@]}"; do
   fi
 done
 
-cp -R "$arm_bin" "$tmp_dir/bin"
+mkdir -p "$tmp_dir/bin"
 for product in "${products[@]}"; do
+  cp "$arm_bin/$product" "$tmp_dir/bin/$product"
   chmod +x "$tmp_dir/bin/$product"
   if command -v lipo >/dev/null 2>&1; then
     archs="$(lipo -archs "$tmp_dir/bin/$product")"
@@ -94,10 +122,16 @@ done
 
 tar -C "$tmp_dir" -czf "$archive" bin
 
+"$repo_root/scripts/render-install-script.sh" \
+  --version "$version" \
+  --repo "$release_repo" \
+  --output "$install_script"
+
 (
   cd "$output_base"
-  shasum -a 256 xcode-mcp-proxy-darwin-arm64.tar.gz > SHA256SUMS.txt
+  shasum -a 256 xcode-mcp-proxy-darwin-arm64.tar.gz install.sh > SHA256SUMS.txt
 )
 
 echo "Created release package: $archive"
 echo "Created checksum file: $output_base/SHA256SUMS.txt"
+echo "Created install script: $install_script"

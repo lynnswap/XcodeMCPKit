@@ -1,0 +1,116 @@
+#!/usr/bin/env sh
+set -eu
+
+VERSION="__VERSION__"
+REPO="__REPO__"
+DEFAULT_BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+BASE_URL="${XCODE_MCPKIT_BASE_URL:-$DEFAULT_BASE_URL}"
+PREFIX="${PREFIX:-${HOME}/.local}"
+BINDIR="${BINDIR:-}"
+ARCHIVE="xcode-mcp-proxy-darwin-arm64.tar.gz"
+
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--prefix <dir>] [--bindir <dir>]
+EOF
+}
+
+need_value() {
+  if [ -z "${2:-}" ]; then
+    echo "$1 requires a value." >&2
+    usage >&2
+    exit 1
+  fi
+}
+
+need() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --prefix)
+      need_value "$1" "${2:-}"
+      PREFIX="$2"
+      shift 2
+      ;;
+    --bindir)
+      need_value "$1" "${2:-}"
+      BINDIR="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+need curl
+need grep
+need install
+need mktemp
+need shasum
+need tar
+need uname
+
+if [ -z "$BINDIR" ]; then
+  BINDIR="${PREFIX}/bin"
+fi
+
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+if [ "$OS" != "Darwin" ]; then
+  echo "GitHub release archives are macOS arm64 only. Build from source on ${OS}/${ARCH}." >&2
+  exit 1
+fi
+
+ARM64_CAPABLE=0
+if [ "$ARCH" = "arm64" ]; then
+  ARM64_CAPABLE=1
+elif [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
+  ARM64_CAPABLE=1
+fi
+
+if [ "$ARM64_CAPABLE" != "1" ]; then
+  echo "GitHub release archives are macOS arm64 only. Build from source on ${OS}/${ARCH}." >&2
+  exit 1
+fi
+
+tmp_root="${TMPDIR:-/tmp}"
+tmp_dir="$(mktemp -d "${tmp_root%/}/xcode-mcpkit.XXXXXX")"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+curl -fsSL -o "$tmp_dir/$ARCHIVE" "$BASE_URL/$ARCHIVE"
+curl -fsSL -o "$tmp_dir/SHA256SUMS.txt" "$BASE_URL/SHA256SUMS.txt"
+
+(
+  cd "$tmp_dir"
+  grep "  ${ARCHIVE}\$" SHA256SUMS.txt > SHA256SUMS.selected
+  shasum -a 256 -c SHA256SUMS.selected
+  tar -xzf "$ARCHIVE"
+)
+
+mkdir -p "$BINDIR"
+install -m 755 "$tmp_dir/bin/xcode-mcp-proxy" "$BINDIR/xcode-mcp-proxy"
+install -m 755 "$tmp_dir/bin/xcode-mcp-proxy-server" "$BINDIR/xcode-mcp-proxy-server"
+
+echo "Installed XcodeMCPKit ${VERSION} to ${BINDIR}"
+case ":${PATH}:" in
+  *":${BINDIR}:"*) ;;
+  *)
+    echo "Add this directory to PATH:"
+    echo "  export PATH=\"${BINDIR}:\$PATH\""
+    ;;
+esac
