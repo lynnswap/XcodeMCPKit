@@ -78,6 +78,7 @@ These are used by the default CI workflow and release workflow, and intentionall
   - Verifies checksums, archive contents, and regenerated installer contents.
   - Creates the release tag for the default-branch commit.
   - Creates a draft GitHub Release with generated notes.
+  - Rerunning the workflow repairs an existing draft for the same tag when it points to the same default-branch commit.
   - Maintainers edit the draft release notes and publish manually.
 - Distribution:
   - GitHub Releases publish `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and `SHA256SUMS.txt`.

@@ -56,13 +56,23 @@ jobs:
             echo "Workflow SHA: ${GITHUB_SHA}" >&2
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
-            echo "Release tag already exists: ${RELEASE_VERSION}" >&2
+          remote_tag_target() {
+            git ls-remote --tags origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }'
+          }
+          tag_target="$(remote_tag_target)"
+          if [[ -n "${tag_target}" && "${tag_target}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag already exists for a different commit: ${RELEASE_VERSION}" >&2
+            echo "Tag target: ${tag_target}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
             exit 1
           fi
-          if gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "GitHub Release already exists: ${RELEASE_VERSION}" >&2
-            exit 1
+          if release_is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "GitHub Release already exists and is not a draft: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+            echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
           fi
 
       - name: Setup Swift 6.2
@@ -193,13 +203,23 @@ jobs:
             echo "Workflow SHA: ${GITHUB_SHA}" >&2
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
-            echo "Release tag already exists: ${RELEASE_VERSION}" >&2
+          remote_tag_target() {
+            git ls-remote --tags origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }'
+          }
+          tag_target="$(remote_tag_target)"
+          if [[ -n "${tag_target}" && "${tag_target}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag already exists for a different commit: ${RELEASE_VERSION}" >&2
+            echo "Tag target: ${tag_target}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
             exit 1
           fi
-          if gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "GitHub Release already exists: ${RELEASE_VERSION}" >&2
-            exit 1
+          if release_is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "GitHub Release already exists and is not a draft: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+            echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
           fi
 
       - name: Create draft release
@@ -208,15 +228,65 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          gh release create "${RELEASE_VERSION}" \
-            release/xcode-mcp-proxy-darwin-arm64.tar.gz \
-            release/SHA256SUMS.txt \
-            release/install.sh \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft \
-            --generate-notes \
-            --target "${GITHUB_SHA}" \
-            --title "${RELEASE_VERSION}"
+          remote_tag_target() {
+            git ls-remote --tags origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }'
+          }
+          is_expected_asset() {
+            case "$1" in
+              xcode-mcp-proxy-darwin-arm64.tar.gz|SHA256SUMS.txt|install.sh)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
 
-          echo "Created draft release ${RELEASE_VERSION}."
+          tag_target="$(remote_tag_target)"
+          if [[ -n "${tag_target}" && "${tag_target}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag already exists for a different commit: ${RELEASE_VERSION}" >&2
+            echo "Tag target: ${tag_target}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+
+          if release_is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "GitHub Release already exists and is not a draft: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+            if [[ -z "${tag_target}" ]]; then
+              echo "Draft release exists but the release tag is missing: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+
+            while IFS= read -r asset_name; do
+              [[ -n "${asset_name}" ]] || continue
+              if ! is_expected_asset "${asset_name}"; then
+                gh release delete-asset "${RELEASE_VERSION}" "${asset_name}" --repo "${GITHUB_REPOSITORY}" --yes
+              fi
+            done < <(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
+
+            gh release upload "${RELEASE_VERSION}" \
+              release/xcode-mcp-proxy-darwin-arm64.tar.gz \
+              release/SHA256SUMS.txt \
+              release/install.sh \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+
+            echo "Repaired draft release ${RELEASE_VERSION}."
+          else
+            gh release create "${RELEASE_VERSION}" \
+              release/xcode-mcp-proxy-darwin-arm64.tar.gz \
+              release/SHA256SUMS.txt \
+              release/install.sh \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --generate-notes \
+              --target "${GITHUB_SHA}" \
+              --title "${RELEASE_VERSION}"
+
+            echo "Created draft release ${RELEASE_VERSION}."
+          fi
           echo "Edit the release notes, then publish the draft manually."
