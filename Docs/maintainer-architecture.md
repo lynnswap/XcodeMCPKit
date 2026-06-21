@@ -72,10 +72,11 @@ These are used by the default CI workflow and release verification, and intentio
   - `scripts/publish-local-release.sh v1.2.3`
 - Behavior:
   - Builds the arm64 archive, `SHA256SUMS.txt`, and `install.sh` locally.
+  - `SHA256SUMS.txt` covers both the archive and `install.sh`.
   - Pushes the release tag from `main`.
   - Creates a draft GitHub Release.
   - Dispatches `.github/workflows/release.yml` for the tag ref.
-  - The workflow publishes the draft only after `scripts/check.sh` and release asset verification pass.
+  - The workflow publishes the draft only after `scripts/check.sh`, checksum verification, and regenerated installer comparison pass.
 - Distribution:
   - GitHub Releases publish `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and `SHA256SUMS.txt`.
   - x86_64 and universal archives are not produced.

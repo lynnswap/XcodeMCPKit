@@ -15,13 +15,19 @@ endpoint and automates the `mcpbridge` approval flow.
 ### From GitHub Releases
 
 ```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
 ```
 
 Custom install directory:
 
 ```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | BINDIR="$HOME/bin" sh
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh -s -- --bindir "$HOME/bin"
+```
+
+Install a specific version:
+
+```bash
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
 ```
 
 ### From Source

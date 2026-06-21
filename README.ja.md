@@ -14,13 +14,19 @@ XcodeMCPKitは、Xcode MCPのためのローカルプロキシです。MCPクラ
 ### GitHub Releasesからインストール
 
 ```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
 ```
 
 インストール先を変える場合:
 
 ```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | BINDIR="$HOME/bin" sh
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh -s -- --bindir "$HOME/bin"
+```
+
+バージョンを指定する場合:
+
+```bash
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
 ```
 
 ### ソースからインストール
