@@ -54,7 +54,9 @@ source ~/.zshrc
 xcode-mcp-proxy-server --auto-approve
 ```
 
-Without Accessibility permission:
+`--auto-approve` clicks the Xcode **Allow** button automatically. It requires macOS Accessibility permission.
+
+Without Accessibility permission, omit `--auto-approve` and click **Allow** yourself:
 
 ```bash
 xcode-mcp-proxy-server

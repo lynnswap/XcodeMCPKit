@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-XcodeMCPKit は、Xcode MCP のためのローカルプロキシです。MCP クライアントに安定した endpoint を提供し、`mcpbridge` の承認フローを自動化します。
+XcodeMCPKitは、Xcode MCPのためのローカルプロキシです。MCPクライアントに安定したendpointを提供し、`mcpbridge`の承認フローを自動化します。
 
 ## 要件
 
@@ -11,7 +11,7 @@ XcodeMCPKit は、Xcode MCP のためのローカルプロキシです。MCP ク
 
 ## インストール
 
-### GitHub Releases からインストール
+### GitHub Releasesからインストール
 
 ```bash
 curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
@@ -25,7 +25,7 @@ curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/ins
 
 ### ソースからインストール
 
-proxy server と STDIO adapter をまとめてインストールします:
+proxy serverとSTDIO adapterをまとめてインストールします:
 
 ```bash
 swift run -c release xcode-mcp-proxy-install
@@ -38,14 +38,14 @@ swift run -c release xcode-mcp-proxy-install --prefix "$HOME/.local"
 swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
 ```
 
-`PATH` に追加:
+`PATH`に追加:
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-## MCP クライアント設定
+## MCPクライアント設定
 
 ### 1. プロキシサーバーを起動
 
@@ -53,7 +53,9 @@ source ~/.zshrc
 xcode-mcp-proxy-server --auto-approve
 ```
 
-Accessibility 権限を付けられない場合:
+`--auto-approve`はXcodeの**Allow**ボタンを自動でクリックします。macOSのAccessibility権限が必要です。
+
+Accessibility権限を付けられない場合は、`--auto-approve`を外して、手動で**Allow**ボタンを押してください:
 
 ```bash
 xcode-mcp-proxy-server
@@ -61,7 +63,7 @@ xcode-mcp-proxy-server
 
 ### 2. クライアントに登録
 
-`xcrun mcpbridge` を proxy endpoint に置き換えます。
+`xcrun mcpbridge`をproxy endpointに置き換えます。
 
 #### Codex
 
@@ -100,29 +102,29 @@ xcode-mcp-proxy --help
 
 | Option | 説明 |
 |--------|------|
-| `--listen host:port` | listen address。既定値は `localhost:8765`。 |
-| `--host host` / `--port port` | `--listen` を使わない場合の listen host / port。 |
-| `--upstream-processes n` | upstream `mcpbridge` process 数。既定値は `1`、最大 `10`。 |
-| `--request-timeout seconds` | request timeout。`0` で `initialize` 以外の timeout を無効化します。`initialize` には固定の handshake timeout があります。 |
+| `--listen host:port` | listen address。既定値は`localhost:8765`。 |
+| `--host host` / `--port port` | `--listen`を使わない場合のlisten host / port。 |
+| `--upstream-processes n` | upstream `mcpbridge` process数。既定値は`1`、最大`10`。 |
+| `--request-timeout seconds` | request timeout。`0`で`initialize`以外のtimeoutを無効化します。`initialize`には固定のhandshake timeoutがあります。 |
 | `--config path` | TOML config path。 |
-| `--auto-approve` | Xcode の許可ダイアログを自動承認します。Accessibility 権限が必要です。 |
-| `--refresh-code-issues-mode proxy|upstream` | `XcodeRefreshCodeIssuesInFile` を proxy diagnostics で提供するか（`proxy`、既定値）、Xcode live diagnostics に pass-through するか（`upstream`）。 |
-| `--force-restart` | listen port 上の既存 `xcode-mcp-proxy-server` を終了して新しく起動します。 |
+| `--auto-approve` | Xcodeの**Allow**ボタンを自動でクリックします。Accessibility権限が必要です。 |
+| `--refresh-code-issues-mode proxy|upstream` | `XcodeRefreshCodeIssuesInFile`をproxy diagnosticsで提供するか（`proxy`、既定値）、Xcode live diagnosticsにpass-throughするか（`upstream`）。 |
+| `--force-restart` | listen port上の既存`xcode-mcp-proxy-server`を終了して新しく起動します。 |
 
 ### Environment Variables
 
 | Variable | 説明 |
 |------|------|
-| `LISTEN` | listen address。例: `127.0.0.1:8765`。 |
-| `HOST` / `PORT` | `LISTEN` 未指定時の listen host / port。 |
-| `MCP_XCODE_PID` | upstream `mcpbridge` へそのまま渡します。proxy 自身は解釈しません。 |
-| `MCP_XCODE_SESSION_ID` | 明示的に指定する upstream Xcode MCP session ID。 |
-| `MCP_XCODE_CONFIG` | TOML config path。`--config` が優先されます。 |
-| `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` または `upstream`。 |
+| `LISTEN` | listen address。例:`127.0.0.1:8765`。 |
+| `HOST` / `PORT` | `LISTEN`未指定時のlisten host / port。 |
+| `MCP_XCODE_PID` | upstream `mcpbridge`へそのまま渡します。proxy自身は解釈しません。 |
+| `MCP_XCODE_SESSION_ID` | 明示的に指定するupstream Xcode MCP session ID。 |
+| `MCP_XCODE_CONFIG` | TOML config path。`--config`が優先されます。 |
+| `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy`または`upstream`。 |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical`。 |
-| `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter の upstream URL。`--url` が優先されます。 |
-| `XCODE_MCP_PROXY_DISCOVERY_FILE` | 隔離された local/live test run 向けの discovery file override。 |
-| `XCODE_MCP_PROXY_CACHE_ROOT` | `XCODE_MCP_PROXY_DISCOVERY_FILE` 未指定時に discovery path を導出する cache root。 |
+| `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapterのupstream URL。`--url`が優先されます。 |
+| `XCODE_MCP_PROXY_DISCOVERY_FILE` | 隔離されたlocal/live test run向けのdiscovery file override。 |
+| `XCODE_MCP_PROXY_CACHE_ROOT` | `XCODE_MCP_PROXY_DISCOVERY_FILE`未指定時にdiscovery pathを導出するcache root。 |
 
 ### TOML Config
 
@@ -141,24 +143,24 @@ disabled = ["RunAllTests", "RunSomeTests"]
 | `upstream_handshake.capabilities` | table | `{}` |
 | `tools.disabled` | array of strings | `[]` |
 
-- `clientVersion` 省略時: Xcode の `IDEChat*Version` defaults entry から解決します。
-- disabled tool は `tools/list` から削除し、直接の `tools/call` は拒否します。
-- config 変更後は `xcode-mcp-proxy-server` を再起動してください。
+- `clientVersion`省略時: Xcodeの`IDEChat*Version` defaults entryから解決します。
+- disabled toolは`tools/list`から削除し、直接の`tools/call`は拒否します。
+- config変更後は`xcode-mcp-proxy-server`を再起動してください。
 
 ## 移行
 
 ### v0.11.0
 
-Codex / Claude Code から利用している場合は、移行作業はありません。
+Codex/Claude Codeから利用している場合は、移行作業はありません。
 以下のどちらかに当てはまる場合だけ対応してください。
 
-- Streamable HTTP endpoint を直接呼んでいる場合:
-  `initialize` 後は server が発行した `MCP-Session-Id` と
-  `MCP-Protocol-Version: 2025-06-18` を送り、`POST /mcp` には
-  `Accept: application/json, text/event-stream` を付けてください。
-  JSON-RPC batch request は送らないでください。
-- SwiftPM library product に依存している場合:
-  `v0.10.2` に固定するか、executable product に移行してください。
+- Streamable HTTP endpointを直接呼んでいる場合:
+  `initialize`後はserverが発行した`MCP-Session-Id`と
+  `MCP-Protocol-Version: 2025-06-18`を送り、`POST /mcp`には
+  `Accept: application/json, text/event-stream`を付けてください。
+  JSON-RPC batch requestは送らないでください。
+- SwiftPM library productに依存している場合:
+  `v0.10.2`に固定するか、executable productに移行してください。
 
 ## Troubleshooting
 
