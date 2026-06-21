@@ -25,7 +25,7 @@ curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/ins
 
 ### ソースからインストール
 
-proxy server と STDIO adapter の両方をインストールします:
+proxy server と STDIO adapter をまとめてインストールします:
 
 ```bash
 swift run -c release xcode-mcp-proxy-install
@@ -89,34 +89,34 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 
 ## 設定
 
-CLI 全体:
+CLI help:
 
 ```bash
 xcode-mcp-proxy-server --help
 xcode-mcp-proxy --help
 ```
 
-### よく使う server option
+### Server options
 
 | Option | 説明 |
 |--------|------|
 | `--listen host:port` | listen address。既定値は `localhost:8765`。 |
 | `--host host` / `--port port` | `--listen` を使わない場合の listen host / port。 |
 | `--upstream-processes n` | upstream `mcpbridge` process 数。既定値は `1`、最大 `10`。 |
-| `--request-timeout seconds` | request timeout。`0` で initialize 以外の timeout を無効化します。initialize には固定の handshake timeout があります。 |
+| `--request-timeout seconds` | request timeout。`0` で `initialize` 以外の timeout を無効化します。`initialize` には固定の handshake timeout があります。 |
 | `--config path` | TOML config path。 |
 | `--auto-approve` | Xcode の許可ダイアログを自動承認します。Accessibility 権限が必要です。 |
 | `--refresh-code-issues-mode proxy|upstream` | `XcodeRefreshCodeIssuesInFile` を proxy diagnostics で提供するか（`proxy`、既定値）、Xcode live diagnostics に pass-through するか（`upstream`）。 |
 | `--force-restart` | listen port 上の既存 `xcode-mcp-proxy-server` を終了して新しく起動します。 |
 
-### 環境変数
+### Environment Variables
 
-| 変数 | 説明 |
+| Variable | 説明 |
 |------|------|
 | `LISTEN` | listen address。例: `127.0.0.1:8765`。 |
 | `HOST` / `PORT` | `LISTEN` 未指定時の listen host / port。 |
 | `MCP_XCODE_PID` | upstream `mcpbridge` へそのまま渡します。proxy 自身は解釈しません。 |
-| `MCP_XCODE_SESSION_ID` | 任意の明示的な upstream Xcode MCP session ID。 |
+| `MCP_XCODE_SESSION_ID` | 明示的に指定する upstream Xcode MCP session ID。 |
 | `MCP_XCODE_CONFIG` | TOML config path。`--config` が優先されます。 |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` または `upstream`。 |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical`。 |
@@ -134,7 +134,7 @@ clientName = "XcodeMCPKit"
 disabled = ["RunAllTests", "RunSomeTests"]
 ```
 
-| Key | 型 | 既定値 |
+| Key | Type | Default |
 |-----|----|--------|
 | `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
 | `upstream_handshake.clientVersion` | string | `"dev"` |
@@ -142,7 +142,7 @@ disabled = ["RunAllTests", "RunSomeTests"]
 | `tools.disabled` | array of strings | `[]` |
 
 - `clientVersion` 省略時: Xcode の `IDEChat*Version` defaults entry から解決します。
-- disabled tool: `tools/list` から削除し、直接の `tools/call` は拒否します。
+- disabled tool は `tools/list` から削除し、直接の `tools/call` は拒否します。
 - config 変更後は `xcode-mcp-proxy-server` を再起動してください。
 
 ## 移行
@@ -160,7 +160,7 @@ Codex / Claude Code から利用している場合は、移行作業はありま
 - SwiftPM library product に依存している場合:
   `v0.10.2` に固定するか、executable product に移行してください。
 
-## トラブルシューティング
+## Troubleshooting
 
 - [Troubleshooting](Docs/troubleshooting.md)
 
@@ -183,13 +183,13 @@ scripts/publish-local-release.sh v0.11.0
 - module boundary、release flow、live test、benchmark:
   [Maintainer Architecture](Docs/maintainer-architecture.md)
 
-## 関連ドキュメント
+## Documentation
 
 - [Architecture](Docs/architecture.md)
 - [Troubleshooting](Docs/troubleshooting.md)
 - [MCP / Xcode MCP Benchmark Notes](Docs/mcp-benchmark.md)
 - [MCP Connection Permission Dialog Investigation](Docs/mcp-permission-dialog-investigation.md)
 
-## ライセンス
+## License
 
 [LICENSE](LICENSE)

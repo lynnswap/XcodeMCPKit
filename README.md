@@ -18,7 +18,7 @@ endpoint and automates the `mcpbridge` approval flow.
 curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
 ```
 
-Custom destination:
+Custom install directory:
 
 ```bash
 curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | BINDIR="$HOME/bin" sh
@@ -32,7 +32,7 @@ Installs both the proxy server and the STDIO adapter:
 swift run -c release xcode-mcp-proxy-install
 ```
 
-Custom destination:
+Custom install directory:
 
 ```bash
 swift run -c release xcode-mcp-proxy-install --prefix "$HOME/.local"
@@ -53,10 +53,6 @@ source ~/.zshrc
 ```bash
 xcode-mcp-proxy-server --auto-approve
 ```
-
-- Recommended default.
-- Keep it running while MCP clients use Xcode.
-- Requires macOS Accessibility permission.
 
 Without Accessibility permission:
 
@@ -94,14 +90,14 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 
 ## Configuration
 
-Full CLI surface:
+CLI help:
 
 ```bash
 xcode-mcp-proxy-server --help
 xcode-mcp-proxy --help
 ```
 
-### Common Server Options
+### Server Options
 
 | Option | Description |
 |--------|-------------|
@@ -129,7 +125,7 @@ xcode-mcp-proxy --help
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root used to derive the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
 
-### TOML Config
+### TOML Configuration
 
 ```toml
 [upstream_handshake]
@@ -189,7 +185,7 @@ scripts/publish-local-release.sh v0.11.0
 - Module boundaries, release flow, live tests, benchmarks:
   [Maintainer Architecture](Docs/maintainer-architecture.md)
 
-## More Documentation
+## Documentation
 
 - [Architecture](Docs/architecture.md)
 - [Troubleshooting](Docs/troubleshooting.md)
