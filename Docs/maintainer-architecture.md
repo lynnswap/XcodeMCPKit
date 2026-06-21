@@ -64,19 +64,21 @@ the default suite includes `ProxyArchitectureTests`.
 - Full local maintainer check:
   - `scripts/check.sh`
 
-These are used by the default CI workflow and release verification, and intentionally avoid requiring real `mcpbridge`.
+These are used by the default CI workflow and release workflow, and intentionally avoid requiring real `mcpbridge`.
 
 ## Release Flow
 
 - Entry point:
-  - `scripts/publish-local-release.sh v1.2.3`
+  - `gh workflow run release.yml --ref main -f version=v1.2.3`
 - Behavior:
-  - Builds the arm64 archive, `SHA256SUMS.txt`, and `install.sh` locally.
+  - Runs only from the default branch.
+  - Runs `scripts/check.sh`.
+  - Builds the arm64 archive, `SHA256SUMS.txt`, and `install.sh` on GitHub Actions.
   - `SHA256SUMS.txt` covers both the archive and `install.sh`.
-  - Pushes the release tag from `main`.
-  - Creates a draft GitHub Release.
-  - Dispatches `.github/workflows/release.yml` for the tag ref.
-  - The workflow publishes the draft only after `scripts/check.sh`, checksum verification, and regenerated installer comparison pass.
+  - Verifies checksums, archive contents, and regenerated installer contents.
+  - Creates the release tag for the default-branch commit.
+  - Creates a draft GitHub Release with generated notes.
+  - Maintainers edit the draft release notes and publish manually.
 - Distribution:
   - GitHub Releases publish `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and `SHA256SUMS.txt`.
   - x86_64 and universal archives are not produced.

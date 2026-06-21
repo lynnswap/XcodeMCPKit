@@ -192,8 +192,10 @@ scripts/check.sh
 Release:
 
 ```bash
-scripts/publish-local-release.sh v0.11.0
+gh workflow run release.yml --ref main -f version=v0.11.0
 ```
+
+Edit the draft release notes, then publish the release manually.
 
 - Module boundaries, release flow, live tests, benchmarks:
   [Maintainer Architecture](Docs/maintainer-architecture.md)
