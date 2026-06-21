@@ -1,13 +1,10 @@
-name: Release Verification
+name: Release
 
-# Release assets are built and uploaded by scripts/publish-local-release.sh.
-# The local script pushes the tag, creates the draft release, and explicitly
-# dispatches this workflow for that tag ref. Tag pushes alone do not publish.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release tag to verify
+        description: Release tag to create
         required: true
         type: string
 
@@ -15,12 +12,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-verification-${{ inputs.version }}
+  group: release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  package-tests:
-    name: Package Tests
+  build-release:
+    name: Build Release
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
@@ -28,21 +25,54 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
 
-      - name: Verify release ref
+      - name: Verify release input
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
             echo "Release tag must look like v1.2.3." >&2
             exit 1
           fi
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
-            echo "Release verification must be dispatched against the release tag ref." >&2
-            echo "Expected tag: ${RELEASE_VERSION}" >&2
+          if [[ "${GITHUB_REF_TYPE}" != "branch" || "${GITHUB_REF_NAME}" != "${RELEASE_BRANCH}" ]]; then
+            echo "Release workflow must be dispatched from ${RELEASE_BRANCH}." >&2
+            echo "Expected branch: ${RELEASE_BRANCH}" >&2
             echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
             exit 1
+          fi
+          remote_head="$(git ls-remote origin "refs/heads/${RELEASE_BRANCH}" | awk '{ print $1 }')"
+          if [[ -z "${remote_head}" ]]; then
+            echo "Could not resolve remote branch: ${RELEASE_BRANCH}" >&2
+            exit 1
+          fi
+          if [[ "${remote_head}" != "${GITHUB_SHA}" ]]; then
+            echo "Release workflow must run against the current ${RELEASE_BRANCH} head." >&2
+            echo "Remote head: ${remote_head}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          remote_tag_target() {
+            git ls-remote --tags origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }'
+          }
+          tag_target="$(remote_tag_target)"
+          if [[ -n "${tag_target}" && "${tag_target}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag already exists for a different commit: ${RELEASE_VERSION}" >&2
+            echo "Tag target: ${tag_target}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if release_is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "GitHub Release already exists and is not a draft: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+            echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
           fi
 
       - name: Setup Swift 6.2
@@ -53,47 +83,26 @@ jobs:
       - name: Run package checks
         run: scripts/check.sh
 
-  publish-release:
-    name: Publish Verified Release
-    needs: package-tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build release binaries
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: scripts/build-release.sh --version "${RELEASE_VERSION}" --dist-root dist
 
-      - name: Verify release ref
+      - name: Package release assets
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          scripts/package-release.sh \
+            --version "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dist-root dist \
+            --output-dir release
+
+      - name: Verify release assets
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must look like v1.2.3." >&2
-            exit 1
-          fi
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
-            echo "Release publishing must be dispatched against the release tag ref." >&2
-            echo "Expected tag: ${RELEASE_VERSION}" >&2
-            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
-            exit 1
-          fi
-
-      - name: Publish verified draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          tag_name="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName')"
-          if [[ "${tag_name}" != "${RELEASE_VERSION}" ]]; then
-            echo "Release tag mismatch." >&2
-            echo "Expected tag: ${RELEASE_VERSION}" >&2
-            echo "Actual tag:   ${tag_name}" >&2
-            exit 1
-          fi
 
           expected_assets=(
             "xcode-mcp-proxy-darwin-arm64.tar.gz"
@@ -101,100 +110,183 @@ jobs:
             "install.sh"
           )
 
-          mapfile -t asset_names < <(
-            gh release view "${RELEASE_VERSION}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --json assets \
-              --jq '.assets[].name'
-          )
-
-          is_expected_asset() {
-            local candidate="$1"
-            local expected
-            for expected in "${expected_assets[@]}"; do
-              if [[ "${candidate}" == "${expected}" ]]; then
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          for expected in "${expected_assets[@]}"; do
-            if ! printf '%s\n' "${asset_names[@]}" | grep -Fxq "${expected}"; then
-              echo "Expected uploaded release asset was not found: ${expected}" >&2
-              exit 1
-            fi
-          done
-
-          for asset in "${asset_names[@]}"; do
-            if ! is_expected_asset "${asset}"; then
-              echo "Unexpected release asset found: ${asset}" >&2
-              exit 1
-            fi
-          done
-
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "${tmp_dir}"' EXIT
-
-          gh release download "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "xcode-mcp-proxy-darwin-arm64.tar.gz" \
-            --dir "${tmp_dir}"
-          gh release download "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "SHA256SUMS.txt" \
-            --dir "${tmp_dir}"
-          gh release download "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "install.sh" \
-            --dir "${tmp_dir}"
-
-          expected_checksum_files=(
-            "xcode-mcp-proxy-darwin-arm64.tar.gz"
-            "install.sh"
-          )
-
-          mapfile -t checksum_lines < <(grep -v '^[[:space:]]*$' "${tmp_dir}/SHA256SUMS.txt")
-          if [[ "${#checksum_lines[@]}" -ne "${#expected_checksum_files[@]}" ]]; then
-            echo "SHA256SUMS.txt must contain exactly ${#expected_checksum_files[@]} checksum entries." >&2
-            exit 1
-          fi
-
-          for expected in "${expected_checksum_files[@]}"; do
-            if ! awk -v name="${expected}" '$1 ~ /^[0-9a-f]{64}$/ && $2 == name { found = 1 } END { exit found ? 0 : 1 }' "${tmp_dir}/SHA256SUMS.txt"; then
-              echo "SHA256SUMS.txt is missing the expected checksum entry for ${expected}." >&2
+          for asset in "${expected_assets[@]}"; do
+            if [[ ! -f "release/${asset}" ]]; then
+              echo "Expected release asset was not created: ${asset}" >&2
               exit 1
             fi
           done
 
           (
-            cd "${tmp_dir}"
+            cd release
             shasum -a 256 -c SHA256SUMS.txt
           )
 
-          sh -n "${tmp_dir}/install.sh"
+          sh -n release/install.sh
           scripts/render-install-script.sh \
             --version "${RELEASE_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --output "${tmp_dir}/install.expected.sh"
-          if ! cmp -s "${tmp_dir}/install.expected.sh" "${tmp_dir}/install.sh"; then
+            --output release/install.expected.sh
+          if ! cmp -s release/install.expected.sh release/install.sh; then
             echo "install.sh does not match the generated installer for ${RELEASE_VERSION}." >&2
-            diff -u "${tmp_dir}/install.expected.sh" "${tmp_dir}/install.sh" || true
+            diff -u release/install.expected.sh release/install.sh || true
+            exit 1
+          fi
+          rm release/install.expected.sh
+
+          expected_entries="$(printf '%s\n' \
+            "bin/" \
+            "bin/xcode-mcp-proxy" \
+            "bin/xcode-mcp-proxy-server")"
+          actual_entries="$(tar -tzf release/xcode-mcp-proxy-darwin-arm64.tar.gz | sort)"
+          if [[ "${actual_entries}" != "${expected_entries}" ]]; then
+            echo "Release archive contents are not expected." >&2
+            printf 'Expected:\n%s\n' "${expected_entries}" >&2
+            printf 'Actual:\n%s\n' "${actual_entries}" >&2
             exit 1
           fi
 
-          is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
-          is_prerelease="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isPrerelease --jq '.isPrerelease')"
-          if [[ "${is_draft}" != "true" ]]; then
-            if [[ "${is_prerelease}" == "false" ]]; then
-              echo "Release ${RELEASE_VERSION} is already published."
-              exit 0
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: |
+            release/xcode-mcp-proxy-darwin-arm64.tar.gz
+            release/SHA256SUMS.txt
+            release/install.sh
+          if-no-files-found: error
+
+  create-draft-release:
+    name: Create Draft Release
+    needs: build-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: release
+
+      - name: Verify release target
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.2.3." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" != "branch" || "${GITHUB_REF_NAME}" != "${RELEASE_BRANCH}" ]]; then
+            echo "Release workflow must be dispatched from ${RELEASE_BRANCH}." >&2
+            echo "Expected branch: ${RELEASE_BRANCH}" >&2
+            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          remote_head="$(git ls-remote origin "refs/heads/${RELEASE_BRANCH}" | awk '{ print $1 }')"
+          if [[ -z "${remote_head}" ]]; then
+            echo "Could not resolve remote branch: ${RELEASE_BRANCH}" >&2
+            exit 1
+          fi
+          if [[ "${remote_head}" != "${GITHUB_SHA}" ]]; then
+            echo "Release workflow must run against the current ${RELEASE_BRANCH} head." >&2
+            echo "Remote head: ${remote_head}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          remote_tag_target() {
+            git ls-remote --tags origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }'
+          }
+          tag_target="$(remote_tag_target)"
+          if [[ -n "${tag_target}" && "${tag_target}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag already exists for a different commit: ${RELEASE_VERSION}" >&2
+            echo "Tag target: ${tag_target}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if release_is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "GitHub Release already exists and is not a draft: ${RELEASE_VERSION}" >&2
+              exit 1
             fi
-            echo "Release ${RELEASE_VERSION} is already public but marked as a prerelease." >&2
+            echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          remote_tag_target() {
+            git ls-remote --tags origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }'
+          }
+          is_expected_asset() {
+            case "$1" in
+              xcode-mcp-proxy-darwin-arm64.tar.gz|SHA256SUMS.txt|install.sh)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          tag_target="$(remote_tag_target)"
+          if [[ -n "${tag_target}" && "${tag_target}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag already exists for a different commit: ${RELEASE_VERSION}" >&2
+            echo "Tag target: ${tag_target}" >&2
+            echo "Workflow SHA: ${GITHUB_SHA}" >&2
             exit 1
           fi
 
-          gh release edit "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft=false \
-            --prerelease=false
+          if release_is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              echo "GitHub Release already exists and is not a draft: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+            if [[ -z "${tag_target}" ]]; then
+              echo "Draft release exists but the release tag is missing: ${RELEASE_VERSION}" >&2
+              exit 1
+            fi
+
+            while IFS= read -r asset_name; do
+              [[ -n "${asset_name}" ]] || continue
+              if ! is_expected_asset "${asset_name}"; then
+                gh release delete-asset "${RELEASE_VERSION}" "${asset_name}" --repo "${GITHUB_REPOSITORY}" --yes
+              fi
+            done < <(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
+
+            gh release upload "${RELEASE_VERSION}" \
+              release/xcode-mcp-proxy-darwin-arm64.tar.gz \
+              release/SHA256SUMS.txt \
+              release/install.sh \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+
+            echo "Repaired draft release ${RELEASE_VERSION}."
+          else
+            gh release create "${RELEASE_VERSION}" \
+              release/xcode-mcp-proxy-darwin-arm64.tar.gz \
+              release/SHA256SUMS.txt \
+              release/install.sh \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --generate-notes \
+              --target "${GITHUB_SHA}" \
+              --title "${RELEASE_VERSION}"
+
+            echo "Created draft release ${RELEASE_VERSION}."
+          fi
+          echo "Edit the release notes, then publish the draft manually."

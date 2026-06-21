@@ -190,8 +190,10 @@ scripts/check.sh
 Release:
 
 ```bash
-scripts/publish-local-release.sh v0.11.0
+gh workflow run release.yml --ref main -f version=v0.11.0
 ```
+
+draft Releaseの本文を編集してから、手動で公開します。
 
 - module boundary、release flow、live test、benchmark:
   [Maintainer Architecture](Docs/maintainer-architecture.md)
