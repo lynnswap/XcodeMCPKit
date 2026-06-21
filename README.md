@@ -155,15 +155,16 @@ disabled = ["RunAllTests", "RunSomeTests"]
 
 ### v0.11.0
 
-Most Codex and Claude Code setups do not need a manual migration. Check these
-only if they apply:
+If you use XcodeMCPKit through Codex or Claude Code, no migration is required.
+Only the following cases need changes:
 
-- If you call the Streamable HTTP endpoint directly, use the server-issued
-  `MCP-Session-Id`, send `MCP-Protocol-Version: 2025-06-18` after `initialize`,
-  include `Accept: application/json, text/event-stream` on `POST /mcp`, and stop
-  sending JSON-RPC batch requests.
-- If you depended on the old SwiftPM library product, pin to `v0.10.2` or
-  migrate to the executable products.
+- Direct Streamable HTTP clients:
+  after `initialize`, send the server-issued `MCP-Session-Id` and
+  `MCP-Protocol-Version: 2025-06-18`. Include
+  `Accept: application/json, text/event-stream` on `POST /mcp`, and do not send
+  JSON-RPC batch requests.
+- SwiftPM library users:
+  pin to `v0.10.2` or migrate to the executable products.
 
 ## Troubleshooting
 

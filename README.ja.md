@@ -149,15 +149,16 @@ disabled = ["RunAllTests", "RunSomeTests"]
 
 ### v0.11.0
 
-通常の Codex / Claude Code 設定では、手動の移行作業は不要です。該当する場合だけ
-確認してください:
+Codex / Claude Code から利用している場合は、移行作業はありません。
+以下のどちらかに当てはまる場合だけ対応してください。
 
-- Streamable HTTP endpoint を直接呼んでいる場合は、`initialize` 後に server-issued
-  `MCP-Session-Id` と `MCP-Protocol-Version: 2025-06-18` を送り、`POST /mcp` には
-  `Accept: application/json, text/event-stream` を付け、JSON-RPC batch request を
-  送らないようにしてください。
-- SwiftPM library product に依存していた場合は、`v0.10.2` に pin するか、
-  executable product に移行してください。
+- Streamable HTTP endpoint を直接呼んでいる場合:
+  `initialize` 後は server が発行した `MCP-Session-Id` と
+  `MCP-Protocol-Version: 2025-06-18` を送り、`POST /mcp` には
+  `Accept: application/json, text/event-stream` を付けてください。
+  JSON-RPC batch request は送らないでください。
+- SwiftPM library product に依存している場合:
+  `v0.10.2` に固定するか、executable product に移行してください。
 
 ## トラブルシューティング
 
