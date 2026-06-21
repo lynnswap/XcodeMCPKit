@@ -131,7 +131,7 @@ cat > "$install_script" <<'INSTALL_SH'
 #!/usr/bin/env sh
 set -eu
 
-VERSION="${VERSION:-__VERSION__}"
+VERSION="${XCODE_MCPKIT_VERSION:-__VERSION__}"
 REPO="${XCODE_MCPKIT_REPO:-__REPO__}"
 ARCHIVE="xcode-mcp-proxy-darwin-arm64.tar.gz"
 DEFAULT_BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"

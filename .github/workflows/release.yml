@@ -162,7 +162,7 @@ jobs:
           )
 
           sh -n "${tmp_dir}/install.sh"
-          if ! grep -Fq "VERSION=\"\${VERSION:-${RELEASE_VERSION}}\"" "${tmp_dir}/install.sh"; then
+          if ! grep -Fq "VERSION=\"\${XCODE_MCPKIT_VERSION:-${RELEASE_VERSION}}\"" "${tmp_dir}/install.sh"; then
             echo "install.sh does not default to ${RELEASE_VERSION}." >&2
             exit 1
           fi
