@@ -95,6 +95,7 @@ jobs:
           expected_assets=(
             "xcode-mcp-proxy-darwin-arm64.tar.gz"
             "SHA256SUMS.txt"
+            "install.sh"
           )
 
           mapfile -t asset_names < <(
@@ -140,6 +141,10 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "SHA256SUMS.txt" \
             --dir "${tmp_dir}"
+          gh release download "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "install.sh" \
+            --dir "${tmp_dir}"
 
           mapfile -t checksum_lines < <(grep -v '^[[:space:]]*$' "${tmp_dir}/SHA256SUMS.txt")
           if [[ "${#checksum_lines[@]}" -ne 1 ]]; then
@@ -155,6 +160,16 @@ jobs:
             cd "${tmp_dir}"
             shasum -a 256 -c SHA256SUMS.txt
           )
+
+          sh -n "${tmp_dir}/install.sh"
+          if ! grep -Fq "VERSION=\"\${VERSION:-${RELEASE_VERSION}}\"" "${tmp_dir}/install.sh"; then
+            echo "install.sh does not default to ${RELEASE_VERSION}." >&2
+            exit 1
+          fi
+          if ! grep -Fq "REPO=\"\${XCODE_MCPKIT_REPO:-${GITHUB_REPOSITORY}}\"" "${tmp_dir}/install.sh"; then
+            echo "install.sh does not default to ${GITHUB_REPOSITORY}." >&2
+            exit 1
+          fi
 
           is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
           is_prerelease="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isPrerelease --jq '.isPrerelease')"

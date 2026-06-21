@@ -14,22 +14,14 @@ endpoint and automates the `mcpbridge` approval flow.
 
 ### From GitHub Releases
 
-- `xcode-mcp-proxy-darwin-arm64.tar.gz`
-- `SHA256SUMS.txt`
+```bash
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
+```
+
+Custom destination:
 
 ```bash
-VERSION=v0.11.0
-BASE_URL="https://github.com/lynnswap/XcodeMCPKit/releases/download/${VERSION}"
-
-ARCHIVE="xcode-mcp-proxy-darwin-arm64.tar.gz"
-curl -fL -O "${BASE_URL}/${ARCHIVE}"
-curl -fL -O "${BASE_URL}/SHA256SUMS.txt"
-grep "  ${ARCHIVE}\$" SHA256SUMS.txt | shasum -a 256 -c
-
-tar -xzf "${ARCHIVE}"
-mkdir -p "${HOME}/.local/bin"
-install -m 755 bin/xcode-mcp-proxy "${HOME}/.local/bin/"
-install -m 755 bin/xcode-mcp-proxy-server "${HOME}/.local/bin/"
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | BINDIR="$HOME/bin" sh
 ```
 
 ### From Source

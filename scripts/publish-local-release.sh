@@ -89,7 +89,7 @@ refresh_tag_state() {
 
 is_release_asset() {
   case "$1" in
-    xcode-mcp-proxy-darwin-arm64.tar.gz|SHA256SUMS.txt)
+    xcode-mcp-proxy-darwin-arm64.tar.gz|SHA256SUMS.txt|install.sh)
       return 0
       ;;
     *)
@@ -228,7 +228,11 @@ if [[ "$skip_tests" -eq 0 ]]; then
 fi
 
 scripts/build-release.sh --version "$tag" --dist-root "$dist_root"
-scripts/package-release.sh --dist-root "$dist_root" --output-dir "$output_dir"
+package_args=(--version "$tag" --dist-root "$dist_root" --output-dir "$output_dir")
+if [[ -n "$github_repo" ]]; then
+  package_args+=(--repo "$github_repo")
+fi
+scripts/package-release.sh "${package_args[@]}"
 
 if [[ "$output_dir" = /* ]]; then
   output_base="$output_dir"
@@ -237,6 +241,7 @@ else
 fi
 archive_path="$output_base/xcode-mcp-proxy-darwin-arm64.tar.gz"
 checksum_path="$output_base/SHA256SUMS.txt"
+install_script_path="$output_base/install.sh"
 
 if [[ ! -f "$archive_path" ]]; then
   echo "Expected release archive was not created: $archive_path" >&2
@@ -244,6 +249,10 @@ if [[ ! -f "$archive_path" ]]; then
 fi
 if [[ ! -f "$checksum_path" ]]; then
   echo "Expected checksum file was not created: $checksum_path" >&2
+  exit 1
+fi
+if [[ ! -f "$install_script_path" ]]; then
+  echo "Expected install script was not created: $install_script_path" >&2
   exit 1
 fi
 
@@ -255,6 +264,7 @@ fi
 if [[ "$allow_dirty" -eq 1 ]]; then
   echo "Created local-only release archive: $archive_path"
   echo "Created local-only checksum file: $checksum_path"
+  echo "Created local-only install script: $install_script_path"
   echo "Skipped tag push, GitHub Release upload, and release workflow dispatch because --allow-dirty was supplied."
   exit 0
 fi
@@ -285,9 +295,9 @@ if gh release view "$tag" --repo "$github_repo" >/dev/null 2>&1; then
     fi
   done < <(gh release view "$tag" --repo "$github_repo" --json assets --jq '.assets[].name')
 
-  gh release upload "$tag" "$archive_path" "$checksum_path" --repo "$github_repo" --clobber
+  gh release upload "$tag" "$archive_path" "$checksum_path" "$install_script_path" --repo "$github_repo" --clobber
 else
-  gh release create "$tag" "$archive_path" "$checksum_path" --repo "$github_repo" --draft --generate-notes --title "$tag" --verify-tag
+  gh release create "$tag" "$archive_path" "$checksum_path" "$install_script_path" --repo "$github_repo" --draft --generate-notes --title "$tag" --verify-tag
 fi
 
 gh workflow run release.yml --repo "$github_repo" --ref "$tag" -f version="$tag"
@@ -295,5 +305,6 @@ gh workflow run release.yml --repo "$github_repo" --ref "$tag" -f version="$tag"
 echo "Created local release draft for $tag with assets:"
 echo "  $archive_path"
 echo "  $checksum_path"
+echo "  $install_script_path"
 echo "Dispatched Release Verification workflow for $tag"
 echo "The workflow will publish the draft release after verification succeeds."
