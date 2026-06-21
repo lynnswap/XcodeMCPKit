@@ -18,6 +18,9 @@ endpoint and automates the `mcpbridge` approval flow.
 curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
 ```
 
+<details>
+<summary>Other install options</summary>
+
 Custom install directory:
 
 ```bash
@@ -51,6 +54,8 @@ Add to `PATH`:
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
+
+</details>
 
 ## Set Up Your MCP Client
 

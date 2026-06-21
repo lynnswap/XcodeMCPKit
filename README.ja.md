@@ -17,6 +17,9 @@ XcodeMCPKitは、Xcode MCPのためのローカルプロキシです。MCPクラ
 curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
 ```
 
+<details>
+<summary>その他のインストール方法</summary>
+
 インストール先を変える場合:
 
 ```bash
@@ -50,6 +53,8 @@ swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
+
+</details>
 
 ## MCPクライアント設定
 
