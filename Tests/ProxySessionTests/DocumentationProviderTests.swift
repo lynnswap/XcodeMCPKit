@@ -1553,6 +1553,62 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: target.processID) == ["First", "Second"])
     }
 
+    @Test func backgroundDiscoveryKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"closed\"}")
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"reopened\"}")
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        _ = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 125, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"reopened\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+    }
+
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeReturnsNotEnabled()
         async throws
     {
@@ -2412,6 +2468,54 @@ extension RuntimeCoordinatorTests {
         #expect(invalidatedProvider)
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
         #expect(await localProvider.requestedCallPIDs() == [xcode27.processID])
+        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
+    }
+
+    @Test func documentationProviderManagerRetriesProviderFailureOnNextCandidate()
+        async throws
+    {
+        let xcode26 = documentationProviderTarget(processID: 424, xcodeVersion: "26.6")
+        let xcode27 = documentationProviderTarget(processID: 427, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"fallback\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .toolErrorText(
+                            "The file “config.json” couldn’t be opened because there is no such file."
+                        )
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
         #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
         #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
         #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])

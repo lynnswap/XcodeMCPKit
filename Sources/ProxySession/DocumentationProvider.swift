@@ -1989,19 +1989,22 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 await invalidate(provider, reason: "documentation_search_tool_error")
                 return .rejected(processID: processID, permanentlyUnusable: true)
             }
-            if DocumentationProvider.ToolCatalog.responseIsDocumentationProviderFailure(response),
-               let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
-                   requestData: requestData,
-                   target: provider.profile.target,
-                   deadline: deadline
-               ) {
-                return .success(
-                    data: fallback.responseData,
-                    replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
-                        provider.profile,
-                        fallback: fallback
+            if DocumentationProvider.ToolCatalog.responseIsDocumentationProviderFailure(response) {
+                if let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
+                    requestData: requestData,
+                    target: provider.profile.target,
+                    deadline: deadline
+                ) {
+                    return .success(
+                        data: fallback.responseData,
+                        replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
+                            provider.profile,
+                            fallback: fallback
+                        )
                     )
-                )
+                }
+                await invalidate(provider, reason: "documentation_search_provider_failure")
+                return .rejected(processID: processID, permanentlyUnusable: false)
             }
             return .success(data: response, replacementProfile: nil)
         } catch is CancellationError {
@@ -2254,11 +2257,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         primary: CandidateProfile,
         fallback: CandidateProfile
     ) -> CandidateProfile {
-        guard primary.descriptor == nil, fallback.descriptor != nil else {
-            return primary
-        }
         guard primary.id == fallback.id else {
             return fallback
+        }
+        guard primary.descriptor == nil, fallback.descriptor != nil else {
+            return primary
         }
         var merged = primary
         merged.descriptor = fallback.descriptor
