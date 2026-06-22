@@ -1,13 +1,48 @@
+import ProxyCore
 import Testing
 
 @testable import XcodeMCPProxy
 
 @Suite
 struct ProxyServerBuildInfoTests {
-    @Test func proxyServerListeningLogLineIncludesURLAndVersion() throws {
-        let line = ProxyServer.listeningLogLine(displayHost: "localhost", port: 8765)
+    @Test func proxyServerStartupSummaryUsesReadableSections() throws {
+        let config = ProxyConfig(
+            listenHost: "localhost",
+            listenPort: 8765,
+            upstreamCommand: "xcrun",
+            upstreamArgs: ["mcpbridge"],
+            upstreamProcessCount: 2,
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            autoApproveXcodeDialog: true
+        )
+        let target = DocumentationProviderTarget(
+            processID: 9004,
+            appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
+            xcodeVersion: "26.0"
+        )
 
-        #expect(line.contains("http://localhost:8765"))
-        #expect(line.contains("version \(ProxyBuildInfo.version)"))
+        let summary = ProxyServer.startupSummary(
+            displayHost: "localhost",
+            port: 8765,
+            config: config,
+            xcodeTargets: [target]
+        )
+
+        #expect(summary == """
+        XcodeMCPKit \(ProxyBuildInfo.version)
+
+        Server
+          URL: http://localhost:8765/mcp
+          Upstream processes: 2
+          Auto approve: enabled
+
+        Xcode
+          App: /Applications/Xcode.app
+          PID: 9004
+          DocumentationSearch: pending
+        """)
     }
 }

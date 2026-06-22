@@ -67,6 +67,75 @@ package protocol DocumentationProviderManaging: Sendable {
     func shutdown() async
 }
 
+package struct DocumentationSearchServiceRepairReport: Sendable, Equatable {
+    package let configURL: String
+    package let xcodeVersion: String
+    package let osVersion: String
+    package let documentationRelease: Int?
+    package let changedDefault: Bool
+
+    package init(
+        configURL: String,
+        xcodeVersion: String,
+        osVersion: String,
+        documentationRelease: Int?,
+        changedDefault: Bool
+    ) {
+        self.configURL = configURL
+        self.xcodeVersion = xcodeVersion
+        self.osVersion = osVersion
+        self.documentationRelease = documentationRelease
+        self.changedDefault = changedDefault
+    }
+}
+
+package enum DocumentationSearchServiceRepairResult: Sendable, Equatable {
+    case repaired(DocumentationSearchServiceRepairReport)
+    case skipped(String)
+    case failed(String)
+}
+
+package protocol DocumentationSearchServiceRepairing: Sendable {
+    func repairDocumentationSearch(
+        for target: DocumentationProviderTarget
+    ) async -> DocumentationSearchServiceRepairResult
+}
+
+package protocol DocumentationSearchProviding: Sendable {
+    func descriptor(for target: DocumentationProviderTarget) async -> JSONValue?
+    func callDocumentationSearch(
+        requestData: Data,
+        for target: DocumentationProviderTarget,
+        timeout: TimeAmount?
+    ) async throws -> Data
+}
+
+package struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+    package init() {}
+
+    package func repairDocumentationSearch(
+        for _: DocumentationProviderTarget
+    ) async -> DocumentationSearchServiceRepairResult {
+        .skipped("disabled")
+    }
+}
+
+package struct UnavailableDocumentationSearchProvider: DocumentationSearchProviding {
+    package init() {}
+
+    package func descriptor(for _: DocumentationProviderTarget) async -> JSONValue? {
+        nil
+    }
+
+    package func callDocumentationSearch(
+        requestData _: Data,
+        for _: DocumentationProviderTarget,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+}
+
 package struct DocumentationProviderRoute: Sendable, Equatable {
     package let id: String
     package let target: DocumentationProviderTarget
@@ -149,6 +218,19 @@ extension DocumentationProvider {
                 let normalized = text.lowercased()
                 return normalized.contains("documentationsearch")
                     && normalized.contains("not enabled")
+            }
+        }
+
+        package static func responseIsDocumentationProviderFailure(_ data: Data) -> Bool {
+            responseErrorTexts(in: data).contains { text in
+                let normalized = text.lowercased()
+                return normalized.contains("config.json")
+                    || normalized.contains("documentation database")
+                    || normalized.contains("asset is not installed")
+                    || normalized.contains("unable to obtain asset location")
+                    || normalized.contains("no matching asset")
+                    || normalized.contains("cannot complete asset query")
+                    || normalized.contains("cannot resolve asset query")
             }
         }
 
@@ -281,6 +363,678 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
             maxQueuedWriteBytes: 4 * 1_048_576
         )
         return try await UpstreamProcess(config: config).startSession()
+    }
+}
+
+package struct DocumentationSearchInstalledAsset: Sendable, Equatable {
+    package let assetURL: URL
+    package let configURL: URL
+    package let indexURL: URL
+    package let xcodeVersion: String
+    package let osVersion: String
+    package let documentationRelease: Int?
+
+    package init(
+        assetURL: URL,
+        configURL: URL,
+        indexURL: URL,
+        xcodeVersion: String,
+        osVersion: String,
+        documentationRelease: Int?
+    ) {
+        self.assetURL = assetURL
+        self.configURL = configURL
+        self.indexURL = indexURL
+        self.xcodeVersion = xcodeVersion
+        self.osVersion = osVersion
+        self.documentationRelease = documentationRelease
+    }
+}
+
+package struct DocumentationSearchAssetScan: Sendable, Equatable {
+    package let root: String
+    package let candidateCount: Int
+    package let assets: [DocumentationSearchInstalledAsset]
+    package let rejectionCounts: [String: Int]
+
+    package init(
+        root: String,
+        candidateCount: Int,
+        assets: [DocumentationSearchInstalledAsset],
+        rejectionCounts: [String: Int]
+    ) {
+        self.root = root
+        self.candidateCount = candidateCount
+        self.assets = assets
+        self.rejectionCounts = rejectionCounts
+    }
+
+    package var noAssetReason: String {
+        var parts = [
+            "no_installed_documentation_asset",
+            "root=\(root)",
+            "candidates=\(candidateCount)",
+            "accepted=\(assets.count)",
+        ]
+        let rejected = rejectionCounts
+            .sorted { lhs, rhs in
+                if lhs.value != rhs.value {
+                    return lhs.value > rhs.value
+                }
+                return lhs.key < rhs.key
+            }
+            .map { "\($0.key):\($0.value)" }
+            .joined(separator: ",")
+        if rejected.isEmpty == false {
+            parts.append("rejected=\(rejected)")
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
+package enum DocumentationSearchAssetLocator {
+    private enum AssetCandidate {
+        case asset(DocumentationSearchInstalledAsset)
+        case rejected(String)
+    }
+
+    package static let defaultAssetRoot = URL(
+        fileURLWithPath: "/System/Library/AssetsV2/com_apple_MobileAsset_AppleDeveloperDocumentation",
+        isDirectory: true
+    )
+
+    package static func scanInstalledAssets(in root: URL) throws -> DocumentationSearchAssetScan {
+        let assetURLs = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        var candidateCount = 0
+        var assets: [DocumentationSearchInstalledAsset] = []
+        var rejectionCounts: [String: Int] = [:]
+        for assetURL in assetURLs where assetURL.pathExtension == "asset" {
+            candidateCount += 1
+            switch installedAsset(at: assetURL) {
+            case .asset(let asset):
+                assets.append(asset)
+            case .rejected(let reason):
+                rejectionCounts[reason, default: 0] += 1
+            }
+        }
+        return DocumentationSearchAssetScan(
+            root: root.path,
+            candidateCount: candidateCount,
+            assets: assets,
+            rejectionCounts: rejectionCounts
+        )
+    }
+
+    private static func installedAsset(at assetURL: URL) -> AssetCandidate {
+        let configURL = assetURL
+            .appendingPathComponent("AssetData", isDirectory: true)
+            .appendingPathComponent("config.json", isDirectory: false)
+        let indexURL = assetURL
+            .appendingPathComponent("AssetData", isDirectory: true)
+            .appendingPathComponent("documentation-db", isDirectory: true)
+            .appendingPathComponent("index.sql", isDirectory: false)
+        guard FileManager.default.isReadableFile(atPath: configURL.path) else {
+            return .rejected("config_not_readable")
+        }
+        guard FileManager.default.isReadableFile(atPath: indexURL.path) else {
+            return .rejected("index_not_readable")
+        }
+
+        let infoURL = assetURL.appendingPathComponent("Info.plist", isDirectory: false)
+        let data: Data
+        do {
+            data = try Data(contentsOf: infoURL)
+        } catch {
+            return .rejected("info_plist_not_readable")
+        }
+        let plist: AssetInfoPlist
+        do {
+            plist = try PropertyListDecoder().decode(AssetInfoPlist.self, from: data)
+        } catch {
+            return .rejected("info_plist_decode_failed")
+        }
+        let properties = plist.mobileAssetProperties
+
+        return .asset(DocumentationSearchInstalledAsset(
+            assetURL: assetURL,
+            configURL: configURL,
+            indexURL: indexURL,
+            xcodeVersion: properties.xcodeVersion,
+            osVersion: properties.osVersion,
+            documentationRelease: properties.documentationRelease
+        ))
+    }
+
+    package static func bestAsset(
+        for targetXcodeVersion: String,
+        currentOSVersion: String,
+        from assets: [DocumentationSearchInstalledAsset]
+    ) -> DocumentationSearchInstalledAsset? {
+        assets.max { lhs, rhs in
+            isBetter(rhs, than: lhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
+        }
+    }
+
+    private static func isBetter(
+        _ lhs: DocumentationSearchInstalledAsset,
+        than rhs: DocumentationSearchInstalledAsset,
+        targetXcodeVersion: String,
+        currentOSVersion: String
+    ) -> Bool {
+        let lhsRank = rank(lhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
+        let rhsRank = rank(rhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
+        if lhsRank.exactXcodeVersion != rhsRank.exactXcodeVersion {
+            return lhsRank.exactXcodeVersion
+        }
+        if lhsRank.sameXcodeMajor != rhsRank.sameXcodeMajor {
+            return lhsRank.sameXcodeMajor
+        }
+        if lhsRank.notNewerThanTargetXcode != rhsRank.notNewerThanTargetXcode {
+            return lhsRank.notNewerThanTargetXcode
+        }
+        if lhsRank.xcodeVersionDistance != rhsRank.xcodeVersionDistance {
+            return lhsRank.xcodeVersionDistance < rhsRank.xcodeVersionDistance
+        }
+        if lhsRank.notNewerThanCurrentOS != rhsRank.notNewerThanCurrentOS {
+            return lhsRank.notNewerThanCurrentOS
+        }
+        if lhsRank.osVersionDistance != rhsRank.osVersionDistance {
+            return lhsRank.osVersionDistance < rhsRank.osVersionDistance
+        }
+        if lhsRank.documentationRelease != rhsRank.documentationRelease {
+            return lhsRank.documentationRelease > rhsRank.documentationRelease
+        }
+        return lhs.assetURL.path < rhs.assetURL.path
+    }
+
+    private struct AssetRank {
+        let exactXcodeVersion: Bool
+        let sameXcodeMajor: Bool
+        let notNewerThanTargetXcode: Bool
+        let xcodeVersionDistance: Int
+        let notNewerThanCurrentOS: Bool
+        let osVersionDistance: Int
+        let documentationRelease: Int
+    }
+
+    private static func rank(
+        _ asset: DocumentationSearchInstalledAsset,
+        targetXcodeVersion: String,
+        currentOSVersion: String
+    ) -> AssetRank {
+        let assetXcodeParts = numericVersionParts(asset.xcodeVersion)
+        let targetXcodeParts = numericVersionParts(targetXcodeVersion)
+        let assetOSParts = numericVersionParts(asset.osVersion)
+        let currentOSParts = numericVersionParts(currentOSVersion)
+        return AssetRank(
+            exactXcodeVersion: compareVersion(asset.xcodeVersion, targetXcodeVersion) == .orderedSame,
+            sameXcodeMajor: assetXcodeParts.first != nil && assetXcodeParts.first == targetXcodeParts.first,
+            notNewerThanTargetXcode: compareVersion(asset.xcodeVersion, targetXcodeVersion) != .orderedDescending,
+            xcodeVersionDistance: versionDistance(assetXcodeParts, targetXcodeParts),
+            notNewerThanCurrentOS: compareVersion(asset.osVersion, currentOSVersion) != .orderedDescending,
+            osVersionDistance: versionDistance(assetOSParts, currentOSParts),
+            documentationRelease: asset.documentationRelease ?? 0
+        )
+    }
+
+    package static func currentOperatingSystemVersionString() -> String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+    }
+
+    private static func compareVersion(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let lhsParts = numericVersionParts(lhs)
+        let rhsParts = numericVersionParts(rhs)
+        let count = max(lhsParts.count, rhsParts.count)
+        for index in 0..<count {
+            let lhsValue = index < lhsParts.count ? lhsParts[index] : 0
+            let rhsValue = index < rhsParts.count ? rhsParts[index] : 0
+            if lhsValue < rhsValue {
+                return .orderedAscending
+            }
+            if lhsValue > rhsValue {
+                return .orderedDescending
+            }
+        }
+        return lhs.localizedStandardCompare(rhs)
+    }
+
+    private static func numericVersionParts(_ version: String) -> [Int] {
+        version
+            .split { character in
+                !character.isNumber
+            }
+            .compactMap { Int($0) }
+    }
+
+    private static func versionDistance(_ lhs: [Int], _ rhs: [Int]) -> Int {
+        guard lhs.isEmpty == false, rhs.isEmpty == false else {
+            return Int.max
+        }
+        let count = max(lhs.count, rhs.count)
+        var multiplier = 1
+        var distance = 0
+        for index in stride(from: count - 1, through: 0, by: -1) {
+            let lhsValue = index < lhs.count ? lhs[index] : 0
+            let rhsValue = index < rhs.count ? rhs[index] : 0
+            distance += abs(lhsValue - rhsValue) * multiplier
+            multiplier *= 1_000
+        }
+        return distance
+    }
+
+    private struct AssetInfoPlist: Decodable {
+        let mobileAssetProperties: MobileAssetProperties
+
+        private enum CodingKeys: String, CodingKey {
+            case mobileAssetProperties = "MobileAssetProperties"
+        }
+    }
+
+    private struct MobileAssetProperties: Decodable {
+        let documentationRelease: Int?
+        let xcodeVersion: String
+        let osVersion: String
+
+        private enum CodingKeys: String, CodingKey {
+            case documentationRelease = "DocumentationRelease"
+            case xcodeVersion = "XcodeVersion"
+            case osVersion = "OSVersion"
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            xcodeVersion = try container.decode(String.self, forKey: .xcodeVersion)
+            osVersion = try container.decode(String.self, forKey: .osVersion)
+            documentationRelease = Self.decodeDocumentationRelease(from: container)
+        }
+
+        private static func decodeDocumentationRelease(
+            from container: KeyedDecodingContainer<CodingKeys>
+        ) -> Int? {
+            if let value = try? container.decode(Int.self, forKey: .documentationRelease) {
+                return value
+            }
+            if let value = try? container.decode(String.self, forKey: .documentationRelease) {
+                return Int(value)
+            }
+            return nil
+        }
+    }
+}
+
+package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+    private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
+    private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
+
+    private let assetRoot: URL
+    private let currentOSVersion: @Sendable () -> String
+    private let readConfigURLOverride: @Sendable () -> String?
+    private let writeConfigURLOverride: @Sendable (String) -> Bool
+
+    package init(
+        assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
+        currentOSVersion: @escaping @Sendable () -> String =
+            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
+        readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
+        writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
+    ) {
+        self.assetRoot = assetRoot
+        self.currentOSVersion = currentOSVersion
+        self.readConfigURLOverride = readConfigURLOverride
+        self.writeConfigURLOverride = writeConfigURLOverride
+    }
+
+    package func repairDocumentationSearch(
+        for target: DocumentationProviderTarget
+    ) async -> DocumentationSearchServiceRepairResult {
+        let scan: DocumentationSearchAssetScan
+        do {
+            scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        } catch {
+            return .failed("asset_scan_failed: \(error)")
+        }
+        guard let asset = DocumentationSearchAssetLocator.bestAsset(
+            for: target.xcodeVersion,
+            currentOSVersion: currentOSVersion(),
+            from: scan.assets
+        ) else {
+            return .skipped(scan.noAssetReason)
+        }
+
+        let configURLString = asset.configURL.path
+        let currentConfigURLString = readConfigURLOverride()
+        guard currentConfigURLString != configURLString else {
+            return .repaired(
+                Self.report(for: asset, configURLString: configURLString, changedDefault: false)
+            )
+        }
+
+        guard writeConfigURLOverride(configURLString) else {
+            return .failed("defaults_write_failed")
+        }
+        return .repaired(
+            Self.report(for: asset, configURLString: configURLString, changedDefault: true)
+        )
+    }
+
+    private static func report(
+        for asset: DocumentationSearchInstalledAsset,
+        configURLString: String,
+        changedDefault: Bool
+    ) -> DocumentationSearchServiceRepairReport {
+        DocumentationSearchServiceRepairReport(
+            configURL: configURLString,
+            xcodeVersion: asset.xcodeVersion,
+            osVersion: asset.osVersion,
+            documentationRelease: asset.documentationRelease,
+            changedDefault: changedDefault
+        )
+    }
+
+    private static func currentConfigURLOverride() -> String? {
+        guard let value = CFPreferencesCopyAppValue(
+            configURLDefaultsKey as CFString,
+            xcodeDefaultsDomain as CFString
+        ) else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let url = value as? URL {
+            return url.absoluteString
+        }
+        return nil
+    }
+
+    private static func writeConfigURLOverride(_ value: String) -> Bool {
+        CFPreferencesSetAppValue(
+            configURLDefaultsKey as CFString,
+            value as CFString,
+            xcodeDefaultsDomain as CFString
+        )
+        return CFPreferencesAppSynchronize(xcodeDefaultsDomain as CFString)
+    }
+}
+
+package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
+    private struct SearchArguments {
+        let requestID: JSONRPC.ID
+        let query: String
+        let frameworks: [String]
+        let limit: Int
+    }
+
+    private struct SearchRow: Decodable {
+        let assetID: String?
+        let type: String?
+        let framework: String?
+        let title: String?
+        let content: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case assetID = "asset_id"
+            case type
+            case framework
+            case title
+            case content
+        }
+    }
+
+    private let assetRoot: URL
+    private let currentOSVersion: @Sendable () -> String
+    private let processRunner: any ProcessRunning
+
+    package init(
+        assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
+        currentOSVersion: @escaping @Sendable () -> String =
+            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
+        processRunner: any ProcessRunning = ProcessRunner()
+    ) {
+        self.assetRoot = assetRoot
+        self.currentOSVersion = currentOSVersion
+        self.processRunner = processRunner
+    }
+
+    package func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
+        guard installedAsset(for: target) != nil else {
+            return nil
+        }
+        return Self.descriptor
+    }
+
+    package func callDocumentationSearch(
+        requestData: Data,
+        for target: DocumentationProviderTarget,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        let arguments = try Self.searchArguments(from: requestData)
+        guard let asset = installedAsset(for: target) else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let rows = try await searchRows(arguments: arguments, asset: asset)
+        return try Self.makeResponse(
+            requestID: arguments.requestID,
+            query: arguments.query,
+            asset: asset,
+            rows: rows
+        )
+    }
+
+    private func installedAsset(
+        for target: DocumentationProviderTarget
+    ) -> DocumentationSearchInstalledAsset? {
+        guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        else {
+            return nil
+        }
+        return DocumentationSearchAssetLocator.bestAsset(
+            for: target.xcodeVersion,
+            currentOSVersion: currentOSVersion(),
+            from: scan.assets
+        )
+    }
+
+    private func searchRows(
+        arguments: SearchArguments,
+        asset: DocumentationSearchInstalledAsset
+    ) async throws -> [SearchRow] {
+        let sql = Self.searchSQL(arguments: arguments)
+        let output = try await processRunner.run(ProcessRequest(
+            label: "documentation-search-local",
+            executablePath: "/usr/bin/sqlite3",
+            arguments: [
+                "-json",
+                asset.indexURL.path,
+                sql,
+            ],
+            input: nil
+        ))
+        guard output.terminationStatus == 0 else {
+            throw ControlPlane.Error.invalidResponse(
+                "local DocumentationSearch sqlite failed: \(output.stderr)"
+            )
+        }
+        guard let data = output.stdout.data(using: .utf8) else {
+            return []
+        }
+        return try JSONDecoder().decode([SearchRow].self, from: data)
+    }
+
+    private static var descriptor: JSONValue {
+        .object([
+            "name": .string(DocumentationProvider.ToolCatalog.toolName),
+            "description": .string(
+                "Searches installed Apple Developer Documentation."
+            ),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "query": .object([
+                        "type": .string("string"),
+                        "description": .string("Search query."),
+                    ]),
+                    "frameworks": .object([
+                        "type": .string("array"),
+                        "items": .object([
+                            "type": .string("string"),
+                        ]),
+                        "description": .string("Optional framework filter."),
+                    ]),
+                ]),
+                "required": .array([
+                    .string("query"),
+                ]),
+            ]),
+        ])
+    }
+
+    private static func searchArguments(from data: Data) throws -> SearchArguments {
+        guard
+            let object = try JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
+            let requestID = JSONRPC.Message.Inspector.requestID(from: object)
+        else {
+            throw ControlPlane.Error.invalidResponse("missing DocumentationSearch request id")
+        }
+        guard
+            let params = object["params"] as? [String: Any],
+            let arguments = params["arguments"] as? [String: Any],
+            let query = arguments["query"] as? String,
+            query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            throw ControlPlane.Error.invalidResponse("missing DocumentationSearch query")
+        }
+        let frameworks = Self.frameworks(from: arguments["frameworks"])
+        let limit = min(max((arguments["limit"] as? NSNumber)?.intValue ?? 8, 1), 20)
+        return SearchArguments(
+            requestID: requestID,
+            query: query.trimmingCharacters(in: .whitespacesAndNewlines),
+            frameworks: frameworks,
+            limit: limit
+        )
+    }
+
+    private static func frameworks(from value: Any?) -> [String] {
+        if let string = value as? String {
+            return [string].filter { $0.isEmpty == false }
+        }
+        guard let array = value as? [Any] else {
+            return []
+        }
+        return array.compactMap { $0 as? String }.filter { $0.isEmpty == false }
+    }
+
+    private static func searchSQL(arguments: SearchArguments) -> String {
+        let loweredQuery = arguments.query.lowercased()
+        let terms = loweredQuery
+            .split { character in
+                character.isWhitespace || character.isNewline
+            }
+            .prefix(6)
+            .map(String.init)
+        let termClauses = terms.isEmpty
+            ? [likeClause(for: loweredQuery)]
+            : terms.map(likeClause(for:))
+        var filters = termClauses
+        if arguments.frameworks.isEmpty == false {
+            let frameworks = arguments.frameworks
+                .map { sqliteStringLiteral($0) }
+                .joined(separator: ",")
+            filters.append("framework IN (\(frameworks))")
+        }
+        let whereClause = filters.joined(separator: " AND ")
+        let queryLiteral = sqliteStringLiteral(loweredQuery)
+        let prefixLiteral = sqliteStringLiteral("\(loweredQuery)%")
+        let containsLiteral = sqliteStringLiteral("%\(loweredQuery)%")
+        return """
+            SELECT asset_id,
+                   type,
+                   framework,
+                   title,
+                   substr(content, 1, 4000) AS content
+            FROM attributes
+            WHERE title IS NOT NULL
+              AND content IS NOT NULL
+              AND \(whereClause)
+            ORDER BY CASE
+                WHEN lower(title) = \(queryLiteral) THEN 0
+                WHEN lower(title) LIKE \(prefixLiteral) THEN 1
+                WHEN lower(title) LIKE \(containsLiteral) THEN 2
+                WHEN lower(content) LIKE \(prefixLiteral) THEN 3
+                ELSE 4
+              END,
+              CASE type WHEN 'symbol' THEN 0 WHEN 'article' THEN 1 ELSE 2 END,
+              length(content)
+            LIMIT \(arguments.limit)
+            """
+    }
+
+    private static func likeClause(for term: String) -> String {
+        let pattern = sqliteStringLiteral("%\(term)%")
+        return "(lower(title) LIKE \(pattern) OR lower(content) LIKE \(pattern))"
+    }
+
+    private static func sqliteStringLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
+    private static func makeResponse(
+        requestID: JSONRPC.ID,
+        query: String,
+        asset: DocumentationSearchInstalledAsset,
+        rows: [SearchRow]
+    ) throws -> Data {
+        let documents = rows.map { row -> [String: Any] in
+            var document: [String: Any] = [
+                "title": row.title ?? "",
+                "type": row.type ?? "",
+                "content": row.content ?? "",
+            ]
+            if let assetID = row.assetID {
+                document["identifier"] = assetID
+                document["url"] = "https://developer.apple.com\(assetID)"
+            }
+            if let framework = row.framework, framework.isEmpty == false {
+                document["framework"] = framework
+            }
+            return document
+        }
+        var assetPayload: [String: Any] = [
+            "path": asset.assetURL.path,
+            "xcodeVersion": asset.xcodeVersion,
+            "osVersion": asset.osVersion,
+        ]
+        if let documentationRelease = asset.documentationRelease {
+            assetPayload["documentationRelease"] = documentationRelease
+        }
+        let payload: [String: Any] = [
+            "query": query,
+            "source": "installed-documentation-asset",
+            "asset": assetPayload,
+            "documents": documents,
+        ]
+        let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let payloadText = String(decoding: payloadData, as: UTF8.self)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestID.value.foundationObject,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": payloadText,
+                    ],
+                ],
+                "isError": false,
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: response, options: [])
     }
 }
 
@@ -563,11 +1317,17 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
 }
 
 package actor DocumentationProviderManager: DocumentationProviderManaging {
+    private enum DescriptorSource: Sendable, Equatable {
+        case xcode
+        case installedDocumentationAsset
+    }
+
     private struct CandidateProfile: Sendable {
         let id: UUID
         let target: DocumentationProviderTarget
         let route: DocumentationProviderRoute
         var descriptor: JSONValue?
+        var descriptorSource: DescriptorSource?
         let serverVersion: String
     }
 
@@ -639,12 +1399,16 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let providerSelectionTimeout: TimeAmount?
     private let pinnedProcessID: pid_t?
     private let initializeParams: [String: JSONValue]
+    private let serviceRepairer: any DocumentationSearchServiceRepairing
+    private let localSearchProvider: any DocumentationSearchProviding
     private let clock: ClockClient
     private let logger: Logger
+    private let descriptorRefreshRetryDelayNanoseconds: Int64 = 250_000_000
     private var activeProvider: ActiveProvider?
     private var preparedProviders: [pid_t: CandidateProfile] = [:]
     private var providerPreparations: [pid_t: ProviderPreparation] = [:]
     private var unusableProcessIDs: Set<pid_t> = []
+    private var serviceRepairAttemptedProcessIDs: Set<pid_t> = []
     private var isShutdown = false
 
     package init(
@@ -653,6 +1417,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
+        serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
+        localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
         clock: ClockClient = .liveValue,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
@@ -661,6 +1427,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.providerSelectionTimeout = providerSelectionTimeout
         self.pinnedProcessID = pinnedProcessID
         self.initializeParams = initializeParams
+        self.serviceRepairer = serviceRepairer
+        self.localSearchProvider = localSearchProvider
         self.clock = clock
         self.logger = logger
     }
@@ -671,6 +1439,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         providerSelectionTimeout: TimeAmount? = .seconds(30),
         pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
+        serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
+        localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
         clock: ClockClient = .liveValue,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
@@ -683,6 +1453,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             providerSelectionTimeout: providerSelectionTimeout,
             pinnedProcessID: pinnedProcessID,
             initializeParams: initializeParams,
+            serviceRepairer: serviceRepairer,
+            localSearchProvider: localSearchProvider,
             clock: clock,
             logger: logger
         )
@@ -728,7 +1500,15 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     }
                     return .available(descriptor)
                 }
-                return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+                logger.info(
+                    "Documentation provider candidate did not advertise DocumentationSearch; trying next candidate",
+                    metadata: [
+                        "pid": .string("\(target.processID)"),
+                        "app_path": .string(target.appPath),
+                        "xcode_version": .string(target.xcodeVersion),
+                    ]
+                )
+                continue
             } catch is CancellationError {
                 return .unavailable
             } catch {
@@ -966,6 +1746,20 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         deadline: Deadline?
     ) async throws -> DocumentationAttemptResult {
         let processID = provider.profile.target.processID
+        if provider.profile.descriptorSource == .installedDocumentationAsset {
+            do {
+                let response = try await localSearchProvider.callDocumentationSearch(
+                    requestData: requestData,
+                    for: provider.profile.target,
+                    timeout: remainingTimeout(until: deadline)
+                )
+                return .success(response)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return .failed(error)
+            }
+        }
         do {
             let response = try await transport.callDocumentationSearch(
                 route: provider.profile.route,
@@ -974,13 +1768,38 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
             guard !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
             else {
+                if let localResponse = try await callInstalledDocumentationAssetFallback(
+                    requestData: requestData,
+                    target: provider.profile.target,
+                    deadline: deadline
+                ) {
+                    await invalidate(provider, reason: "documentation_search_tool_error")
+                    return .success(localResponse)
+                }
                 await invalidate(provider, reason: "documentation_search_tool_error")
                 return .rejected(processID: processID, permanentlyUnusable: true)
+            }
+            if DocumentationProvider.ToolCatalog.responseIsDocumentationProviderFailure(response),
+               let localResponse = try await callInstalledDocumentationAssetFallback(
+                   requestData: requestData,
+                   target: provider.profile.target,
+                   deadline: deadline
+               ) {
+                await invalidate(provider, reason: "documentation_search_provider_failure")
+                return .success(localResponse)
             }
             return .success(response)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if let localResponse = try await callInstalledDocumentationAssetFallback(
+                requestData: requestData,
+                target: provider.profile.target,
+                deadline: deadline
+            ) {
+                await invalidate(provider, reason: "documentation_provider_call_failed")
+                return .success(localResponse)
+            }
             await invalidate(provider, reason: "documentation_provider_call_failed")
             return .failed(error)
         }
@@ -1017,7 +1836,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     ) async throws -> CandidateProfile {
         if let activeProvider, activeProvider.profile.target.processID == target.processID {
             if fetchDescriptor, activeProvider.profile.descriptor == nil {
-                let updated = await profileByRefreshingDescriptor(
+                let updated = await profileByRefreshingDescriptorWithRepair(
                     activeProvider.profile,
                     requestTimeout: requestTimeout
                 )
@@ -1037,7 +1856,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         if var prepared = preparedProviders[target.processID] {
             if fetchDescriptor, prepared.descriptor == nil {
-                let updated = await profileByRefreshingDescriptor(
+                let updated = await profileByRefreshingDescriptorWithRepair(
                     prepared,
                     requestTimeout: requestTimeout
                 )
@@ -1109,7 +1928,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     ) async throws -> CandidateProfile {
         if let activeProvider, activeProvider.profile.id == profile.id {
             if fetchDescriptor, activeProvider.profile.descriptor == nil {
-                let updated = await profileByRefreshingDescriptor(
+                let updated = await profileByRefreshingDescriptorWithRepair(
                     activeProvider.profile,
                     requestTimeout: requestTimeout
                 )
@@ -1122,7 +1941,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             prepared.id == profile.id
         {
             if fetchDescriptor, prepared.descriptor == nil {
-                let updated = await profileByRefreshingDescriptor(
+                let updated = await profileByRefreshingDescriptorWithRepair(
                     prepared,
                     requestTimeout: requestTimeout
                 )
@@ -1135,7 +1954,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         var prepared = profile
         preparedProviders[profile.target.processID] = prepared
         if fetchDescriptor, prepared.descriptor == nil {
-            prepared = await profileByRefreshingDescriptor(
+            prepared = await profileByRefreshingDescriptorWithRepair(
                 prepared,
                 requestTimeout: requestTimeout
             )
@@ -1176,6 +1995,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         var merged = primary
         merged.descriptor = fallback.descriptor
+        merged.descriptorSource = fallback.descriptorSource
         return merged
     }
 
@@ -1297,6 +2117,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             target: target,
             route: route,
             descriptor: nil,
+            descriptorSource: nil,
             serverVersion: route.serverVersion
         )
     }
@@ -1315,18 +2136,110 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             timeout: toolsListTimeout
         )
         updated.descriptor = DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
+        updated.descriptorSource = updated.descriptor == nil ? nil : .xcode
         return updated
     }
 
-    private func profileByRefreshingDescriptor(
+    private func profileByRefreshingDescriptorWithRepair(
         _ profile: CandidateProfile,
         requestTimeout: TimeAmount?
     ) async -> CandidateProfile {
+        let refreshed = await profileByRefreshingDescriptor(
+            profile,
+            requestTimeout: requestTimeout
+        )
+        guard refreshed.descriptor == nil else {
+            return refreshed
+        }
+        let repaired = await profileByRepairingDocumentationSearchService(
+            refreshed,
+            requestTimeout: requestTimeout
+        )
+        guard repaired.descriptor == nil else {
+            return repaired
+        }
+        return await profileByAddingInstalledDocumentationAssetFallback(repaired)
+    }
+
+    private func profileByRepairingDocumentationSearchService(
+        _ profile: CandidateProfile,
+        requestTimeout: TimeAmount?
+    ) async -> CandidateProfile {
+        guard reserveServiceRepairAttempt(for: profile.target.processID) else {
+            return profile
+        }
+        guard requestTimeout?.nanoseconds != 0, !Task.isCancelled, !isShutdown else {
+            return profile
+        }
+
+        logger.warning(
+            "DocumentationSearch descriptor missing; attempting Xcode documentation service repair",
+            metadata: [
+                "pid": .string("\(profile.target.processID)"),
+                "app_path": .string(profile.target.appPath),
+                "xcode_version": .string(profile.target.xcodeVersion),
+            ]
+        )
+
+        let deadline = Deadline.fromNow(requestTimeout, clock: clock)
+        let repairResult = await serviceRepairer.repairDocumentationSearch(for: profile.target)
+        switch repairResult {
+        case .repaired(let report):
+            logger.info(
+                "Repaired Xcode documentation service configuration",
+                metadata: [
+                    "pid": .string("\(profile.target.processID)"),
+                    "config_url": .string(report.configURL),
+                    "asset_xcode_version": .string(report.xcodeVersion),
+                    "asset_os_version": .string(report.osVersion),
+                    "documentation_release": .string(
+                        report.documentationRelease.map(String.init) ?? "unknown"
+                    ),
+                    "changed_default": .string("\(report.changedDefault)"),
+                ]
+            )
+        case .skipped(let reason):
+            logger.info(
+                "Skipped Xcode documentation service repair",
+                metadata: [
+                    "pid": .string("\(profile.target.processID)"),
+                    "reason": .string(reason),
+                ]
+            )
+            return profile
+        case .failed(let reason):
+            logger.warning(
+                "Xcode documentation service repair failed",
+                metadata: [
+                    "pid": .string("\(profile.target.processID)"),
+                    "reason": .string(reason),
+                ]
+            )
+            return profile
+        }
+
         do {
-            let updated = try await profileWithDescriptor(profile, requestTimeout: requestTimeout)
+            let replacement = try await openProviderRoute(
+                target: profile.target,
+                requestTimeout: remainingTimeout(until: deadline)
+            )
+            await transport.close(route: profile.route)
+            let updated = await profileByRefreshingDescriptor(
+                replacement,
+                requestTimeout: remainingTimeout(until: deadline)
+            )
             if updated.descriptor == nil {
-                logger.debug(
-                    "Documentation provider descriptor missing from tools/list",
+                logger.warning(
+                    "Xcode documentation service repair did not restore DocumentationSearch",
+                    metadata: [
+                        "pid": .string("\(profile.target.processID)"),
+                        "app_path": .string(profile.target.appPath),
+                        "xcode_version": .string(profile.target.xcodeVersion),
+                    ]
+                )
+            } else {
+                logger.info(
+                    "Xcode documentation service repair restored DocumentationSearch",
                     metadata: [
                         "pid": .string("\(profile.target.processID)"),
                         "app_path": .string(profile.target.appPath),
@@ -1338,12 +2251,132 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         } catch is CancellationError {
             return profile
         } catch {
-            logger.debug(
-                "Documentation provider descriptor refresh failed",
+            logger.warning(
+                "Xcode documentation service repair could not reopen provider route",
                 metadata: candidateLogMetadata(target: profile.target, error: error)
             )
             return profile
         }
+    }
+
+    private func profileByAddingInstalledDocumentationAssetFallback(
+        _ profile: CandidateProfile
+    ) async -> CandidateProfile {
+        guard let descriptor = await localSearchProvider.descriptor(for: profile.target) else {
+            return profile
+        }
+        logger.warning(
+            "Using installed documentation asset fallback for DocumentationSearch",
+            metadata: [
+                "pid": .string("\(profile.target.processID)"),
+                "app_path": .string(profile.target.appPath),
+                "xcode_version": .string(profile.target.xcodeVersion),
+            ]
+        )
+        var updated = profile
+        updated.descriptor = descriptor
+        updated.descriptorSource = .installedDocumentationAsset
+        return updated
+    }
+
+    private func callInstalledDocumentationAssetFallback(
+        requestData: Data,
+        target: DocumentationProviderTarget,
+        deadline: Deadline?
+    ) async throws -> Data? {
+        guard await localSearchProvider.descriptor(for: target) != nil else {
+            return nil
+        }
+        logger.warning(
+            "Falling back to installed documentation asset for DocumentationSearch",
+            metadata: [
+                "pid": .string("\(target.processID)"),
+                "app_path": .string(target.appPath),
+                "xcode_version": .string(target.xcodeVersion),
+            ]
+        )
+        return try await localSearchProvider.callDocumentationSearch(
+            requestData: requestData,
+            for: target,
+            timeout: remainingTimeout(until: deadline)
+        )
+    }
+
+    private func reserveServiceRepairAttempt(for processID: pid_t) -> Bool {
+        guard serviceRepairAttemptedProcessIDs.contains(processID) == false else {
+            return false
+        }
+        serviceRepairAttemptedProcessIDs.insert(processID)
+        return true
+    }
+
+    private func profileByRefreshingDescriptor(
+        _ profile: CandidateProfile,
+        requestTimeout: TimeAmount?
+    ) async -> CandidateProfile {
+        let deadline = Deadline.fromNow(requestTimeout, clock: clock)
+        let maxAttempts = maxDescriptorRefreshAttempts(for: requestTimeout)
+        var attempt = 0
+        while !Task.isCancelled {
+            do {
+                let updated = try await profileWithDescriptor(
+                    profile,
+                    requestTimeout: remainingTimeout(until: deadline)
+                )
+                if updated.descriptor == nil {
+                    logger.info(
+                        "DocumentationSearch descriptor missing from Xcode tools/list",
+                        metadata: [
+                            "pid": .string("\(profile.target.processID)"),
+                            "app_path": .string(profile.target.appPath),
+                            "xcode_version": .string(profile.target.xcodeVersion),
+                        ]
+                    )
+                }
+                return updated
+            } catch is CancellationError {
+                return profile
+            } catch {
+                logger.debug(
+                    "Documentation provider descriptor refresh failed",
+                    metadata: candidateLogMetadata(target: profile.target, error: error)
+                )
+                guard descriptorRefreshErrorIsRetryable(error),
+                      attempt < maxAttempts,
+                      remainingTimeout(until: deadline)?.nanoseconds != 0 else {
+                    return profile
+                }
+                attempt += 1
+                await sleepBeforeRetryingDescriptorRefresh(until: deadline)
+            }
+        }
+        return profile
+    }
+
+    private func descriptorRefreshErrorIsRetryable(_ error: any Error) -> Bool {
+        if error is UpstreamSlotScheduler.AcquisitionError {
+            return true
+        }
+        return false
+    }
+
+    private func maxDescriptorRefreshAttempts(for requestTimeout: TimeAmount?) -> Int {
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return 120
+        }
+        let attempts = (requestTimeout.nanoseconds + descriptorRefreshRetryDelayNanoseconds - 1)
+            / descriptorRefreshRetryDelayNanoseconds
+        return max(1, min(120, Int(attempts)))
+    }
+
+    private func sleepBeforeRetryingDescriptorRefresh(until deadline: Deadline?) async {
+        guard let remaining = remainingTimeout(until: deadline),
+              remaining.nanoseconds > 0 else {
+            return
+        }
+        await clock.sleep(
+            .nanoseconds(min(remaining.nanoseconds, descriptorRefreshRetryDelayNanoseconds))
+        )
     }
 
     package static func resultValue(from responseData: Data) throws -> JSONValue {

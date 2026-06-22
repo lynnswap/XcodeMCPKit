@@ -13,6 +13,7 @@ public final class ProxyServer {
         package var discoveryClient: DiscoveryClient
         package var executableLookupClient: ExecutableLookupClient
         package var processID: @Sendable () -> Int
+        package var runningXcodeTargets: @Sendable () -> [DocumentationProviderTarget]
         package var makeAutoApprover: @Sendable () -> any ProxyServerPermissionDialogAutoApprover
         package var makeRuntimeCoordinator:
             @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
@@ -23,12 +24,16 @@ public final class ProxyServer {
             processID: @escaping @Sendable () -> Int = {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
+            runningXcodeTargets: @escaping @Sendable () -> [DocumentationProviderTarget] = {
+                []
+            },
             makeAutoApprover: @escaping @Sendable () -> any ProxyServerPermissionDialogAutoApprover,
             makeRuntimeCoordinator: @escaping @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
         ) {
             self.discoveryClient = discoveryClient
             self.executableLookupClient = executableLookupClient
             self.processID = processID
+            self.runningXcodeTargets = runningXcodeTargets
             self.makeAutoApprover = makeAutoApprover
             self.makeRuntimeCoordinator = makeRuntimeCoordinator
         }
@@ -37,6 +42,9 @@ public final class ProxyServer {
             let executableLookupClient = ExecutableLookupClient.liveValue
             return Self(
                 executableLookupClient: executableLookupClient,
+                runningXcodeTargets: {
+                    LiveXcodeTargetDiscovery().runningXcodeTargets()
+                },
                 makeAutoApprover: {
                     let additionalCandidates = ProxyServer.additionalPermissionDialogExecutableCandidates(
                         config: config,
@@ -102,7 +110,13 @@ public final class ProxyServer {
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
         writeDiscovery(resolvedHost: host, port: port)
-        logger.info("\(Self.listeningLogLine(displayHost: displayHost, port: port))")
+        let summary = Self.startupSummary(
+            displayHost: displayHost,
+            port: port,
+            config: config,
+            xcodeTargets: dependencies.runningXcodeTargets()
+        )
+        logger.info("\(summary)")
         return (host, port)
     }
 
@@ -244,6 +258,52 @@ public final class ProxyServer {
 
     package static func listeningLogLine(displayHost: String, port: Int) -> String {
         "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(ProxyBuildInfo.version))"
+    }
+
+    package static func startupSummary(
+        displayHost: String,
+        port: Int,
+        config: ProxyConfig,
+        xcodeTargets: [DocumentationProviderTarget]
+    ) -> String {
+        var lines = [
+            "XcodeMCPKit \(ProxyBuildInfo.version)",
+            "",
+            "Server",
+            "  URL: http://\(displayHost):\(port)/mcp",
+            "  Upstream processes: \(config.upstreamProcessCount)",
+            "  Auto approve: \(config.autoApproveXcodeDialog ? "enabled" : "disabled")",
+            "",
+            "Xcode",
+        ]
+
+        switch xcodeTargets.count {
+        case 0:
+            lines.append("  Status: not detected")
+        case 1:
+            if let target = xcodeTargets.first {
+                lines.append("  App: \(target.appPath)")
+                lines.append("  PID: \(target.processID)")
+            }
+        default:
+            lines.append("  Detected: \(xcodeTargets.count)")
+            lines.append("  Apps:")
+            for target in xcodeTargets {
+                lines.append("    - \(target.appPath) (PID: \(target.processID))")
+            }
+        }
+
+        lines.append(
+            "  DocumentationSearch: \(documentationSearchStartupStatus(config: config))"
+        )
+        return lines.joined(separator: "\n")
+    }
+
+    private static func documentationSearchStartupStatus(config: ProxyConfig) -> String {
+        if RuntimeCoordinator.documentationProviderServiceIsConfigured(config: config) {
+            return "pending"
+        }
+        return "disabled"
     }
 
     package static func additionalPermissionDialogExecutableCandidates(

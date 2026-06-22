@@ -211,7 +211,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     package let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
-    package let documentationPrewarmTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    package let documentationPrewarmTaskBox =
+        NIOLockedValueBox<Task<DocumentationProvider.ToolListUpdate, Never>?>(nil)
+    package let toolCatalogSummaryLoggedBox = NIOLockedValueBox(false)
     package let debugRecorder: ProxyDebugRecorder
     package let leaseManager: LeaseManager
     package let eventLoop: EventLoop
@@ -314,7 +316,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             pinnedProcessID: pinnedProcessID,
             initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
-            )
+            ),
+            serviceRepairer: LiveDocumentationSearchServiceRepairer(),
+            localSearchProvider: LiveDocumentationAssetSearchProvider()
         )
     }
 
@@ -603,7 +607,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
             if let documentationPrewarmTask {
                 group.addTask {
-                    await documentationPrewarmTask.value
+                    _ = await documentationPrewarmTask.value
                 }
             }
         }
@@ -636,9 +640,18 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
         )
         Task { [weak self] in
-            await self?.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
-                deadlineUptimeNs: deadline
+            guard let self,
+                  let baseResult = await self.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
+                      deadlineUptimeNs: deadline
+                  ) else {
+                return
+            }
+            let finalResult = await self.startupPrewarmToolsListResultWithDocumentationOverlay(
+                baseResult: baseResult,
+                requestTimeout: self.timeAmount(until: deadline),
+                metadata: ["origin": .string("prewarm")]
             )
+            self.logToolCatalogSummaryIfNeeded(finalResult)
         }
     }
 
@@ -649,8 +662,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? min(config.requestTimeout, 30)
             : 30
         let timeout = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
-        let task = Task { [weak self, documentationProviderManager, logger] in
-            guard !Task.isCancelled else { return }
+        let task = Task<DocumentationProvider.ToolListUpdate, Never> {
+            [weak self, documentationProviderManager, logger] in
+            guard !Task.isCancelled else { return .unavailable }
             logger.debug(
                 "Prewarming documentation provider",
                 metadata: [
@@ -661,8 +675,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 requestTimeout: timeout
             )
             self?.recordDocumentationToolListUpdate(update)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return .unavailable }
             logger.debug("Documentation provider prewarm completed")
+            return update
         }
         let previous = documentationPrewarmTaskBox.withLockedValue { taskBox in
             let previous = taskBox
@@ -884,22 +899,13 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 "has_documentation_provider": .string("\(documentationProviderManager != nil)"),
             ]
         )
-        guard let documentationProviderManager else {
-            return baseResult
-        }
-        let update = await documentationToolListUpdate(
-            manager: documentationProviderManager,
-            requestTimeout: timeAmount(until: deadline)
+        let finalResult = await toolsListResultWithDocumentationOverlay(
+            baseResult: baseResult,
+            requestTimeout: timeAmount(until: deadline),
+            metadata: ["session": .string(sessionID)]
         )
-        recordDocumentationToolListUpdate(update)
-        logger.debug(
-            "Applied documentation provider tools/list overlay",
-            metadata: [
-                "session": .string(sessionID),
-                "update": .string(update.debugLabel),
-            ]
-        )
-        return DocumentationProvider.ToolCatalog.applying(update, to: baseResult)
+        logToolCatalogSummaryIfNeeded(finalResult)
+        return finalResult
     }
 
     package func liveXcodeListWindowsResult(
@@ -956,6 +962,139 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package func hasDocumentationSearchService() -> Bool {
         documentationProviderManager != nil
+    }
+
+    private func logToolCatalogSummaryIfNeeded(_ result: JSONValue) {
+        let shouldLog = toolCatalogSummaryLoggedBox.withLockedValue { logged in
+            if logged {
+                return false
+            }
+            logged = true
+            return true
+        }
+        guard shouldLog else {
+            return
+        }
+
+        logger.info("\(ToolCatalogStartupLogFormatter.summary(from: result))")
+    }
+
+    private func toolsListResultWithDocumentationOverlay(
+        baseResult: JSONValue,
+        requestTimeout: TimeAmount?,
+        metadata: Logger.Metadata
+    ) async -> JSONValue {
+        guard let documentationProviderManager else {
+            return baseResult
+        }
+        let update = await documentationToolListUpdateForPublicToolsList(
+            manager: documentationProviderManager,
+            requestTimeout: requestTimeout
+        )
+        return toolsListResultApplyingDocumentationUpdate(
+            update,
+            to: baseResult,
+            metadata: metadata
+        )
+    }
+
+    private func startupPrewarmToolsListResultWithDocumentationOverlay(
+        baseResult: JSONValue,
+        requestTimeout: TimeAmount?,
+        metadata: Logger.Metadata
+    ) async -> JSONValue {
+        guard let documentationProviderManager else {
+            return baseResult
+        }
+        let update: DocumentationProvider.ToolListUpdate
+        if let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) {
+            update = await documentationToolListUpdate(
+                fromPrewarmTask: documentationPrewarmTask,
+                requestTimeout: requestTimeout
+            )
+        } else {
+            update = await documentationProviderManager.startBackgroundDiscovery(
+                requestTimeout: requestTimeout
+            )
+        }
+        return toolsListResultApplyingDocumentationUpdate(
+            update,
+            to: baseResult,
+            metadata: metadata
+        )
+    }
+
+    private func toolsListResultApplyingDocumentationUpdate(
+        _ update: DocumentationProvider.ToolListUpdate,
+        to baseResult: JSONValue,
+        metadata: Logger.Metadata
+    ) -> JSONValue {
+        recordDocumentationToolListUpdate(update)
+        var logMetadata = metadata
+        logMetadata["update"] = .string(update.debugLabel)
+        logger.debug(
+            "Applied documentation provider tools/list overlay",
+            metadata: logMetadata
+        )
+        return DocumentationProvider.ToolCatalog.applying(update, to: baseResult)
+    }
+
+    private func documentationToolListUpdateForPublicToolsList(
+        manager: any DocumentationProviderManaging,
+        requestTimeout: TimeAmount?
+    ) async -> DocumentationProvider.ToolListUpdate {
+        if let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) {
+            let prewarmUpdate = await documentationToolListUpdate(
+                fromPrewarmTask: documentationPrewarmTask,
+                requestTimeout: requestTimeout
+            )
+            if case .available = prewarmUpdate {
+                return prewarmUpdate
+            }
+            documentationPrewarmTaskBox.withLockedValue { $0 = nil }
+        }
+        return await documentationToolListUpdate(
+            manager: manager,
+            requestTimeout: requestTimeout
+        )
+    }
+
+    private func documentationToolListUpdate(
+        fromPrewarmTask task: Task<DocumentationProvider.ToolListUpdate, Never>,
+        requestTimeout: TimeAmount?
+    ) async -> DocumentationProvider.ToolListUpdate {
+        guard requestTimeout?.nanoseconds != 0 else {
+            return .unavailable
+        }
+        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
+            return await task.value
+        }
+        do {
+            return try await withThrowingTaskGroup(of: DocumentationProvider.ToolListUpdate.self) {
+                group in
+                group.addTask {
+                    await task.value
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                    throw TimeoutError()
+                }
+                guard let update = try await group.next() else {
+                    throw TimeoutError()
+                }
+                group.cancelAll()
+                return update
+            }
+        } catch {
+            logger.debug(
+                "documentation provider prewarm did not finish before tools/list timeout",
+                metadata: [
+                    "error": .string(String(describing: error)),
+                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
+                ]
+            )
+            return .unavailable
+        }
     }
 
     private func recordDocumentationToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {

@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import ProxyCore
 
-package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering {
+package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
     package init() {}
 
     package func runningXcodeTargets() -> [DocumentationProviderTarget] {
