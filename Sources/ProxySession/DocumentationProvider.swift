@@ -1524,6 +1524,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let task: Task<CandidateProfile, Error>
     }
 
+    private struct InstalledDocumentationAssetFallback: Sendable {
+        let responseData: Data
+        let descriptor: JSONValue
+    }
+
     private struct PreparationWaitTimedOut: Error {}
 
     private final class PreparationWaiter: @unchecked Sendable {
@@ -1788,7 +1793,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     provider: activeProvider,
                     deadline: activeDeadline
                 ) {
-                case .success(let data):
+                case .success(let data, let replacementProfile):
+                    if let replacementProfile {
+                        await cacheInstalledDocumentationAssetReplacement(
+                            replacementProfile,
+                            replacing: activeProvider.profile
+                        )
+                        invalidatedProvider = true
+                    }
                     return .handled(data, invalidatedProvider: invalidatedProvider)
                 case .rejected(let processID, let permanentlyUnusable):
                     rejectedProcessIDs.insert(processID)
@@ -1841,8 +1853,16 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         provider: provider,
                         deadline: candidateDeadline
                     ) {
-                    case .success(let data):
-                        let didPromote = await promoteToActive(profile)
+                    case .success(let data, let replacementProfile):
+                        let selectedProfile = replacementProfile ?? profile
+                        if let replacementProfile {
+                            await cacheInstalledDocumentationAssetReplacement(
+                                replacementProfile,
+                                replacing: profile
+                            )
+                            invalidatedProvider = true
+                        }
+                        let didPromote = await promoteToActive(selectedProfile)
                         if didPromote {
                             logger.info(
                                 "Selected documentation provider",
@@ -1920,7 +1940,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private enum DocumentationAttemptResult: Sendable {
-        case success(Data)
+        case success(data: Data, replacementProfile: CandidateProfile?)
         case rejected(processID: pid_t, permanentlyUnusable: Bool)
         case failed(any Error)
     }
@@ -1938,7 +1958,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     for: provider.profile.target,
                     timeout: remainingTimeout(until: deadline)
                 )
-                return .success(response)
+                return .success(data: response, replacementProfile: nil)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -1953,37 +1973,52 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
             guard !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
             else {
-                if let localResponse = try await callInstalledDocumentationAssetFallbackIfAvailable(
+                if let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
                     requestData: requestData,
                     target: provider.profile.target,
                     deadline: deadline
                 ) {
-                    await invalidate(provider, reason: "documentation_search_tool_error")
-                    return .success(localResponse)
+                    return .success(
+                        data: fallback.responseData,
+                        replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
+                            provider.profile,
+                            fallback: fallback
+                        )
+                    )
                 }
                 await invalidate(provider, reason: "documentation_search_tool_error")
                 return .rejected(processID: processID, permanentlyUnusable: true)
             }
             if DocumentationProvider.ToolCatalog.responseIsDocumentationProviderFailure(response),
-               let localResponse = try await callInstalledDocumentationAssetFallbackIfAvailable(
+               let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
                    requestData: requestData,
                    target: provider.profile.target,
                    deadline: deadline
                ) {
-                await invalidate(provider, reason: "documentation_search_provider_failure")
-                return .success(localResponse)
+                return .success(
+                    data: fallback.responseData,
+                    replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
+                        provider.profile,
+                        fallback: fallback
+                    )
+                )
             }
-            return .success(response)
+            return .success(data: response, replacementProfile: nil)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            if let localResponse = try await callInstalledDocumentationAssetFallbackIfAvailable(
+            if let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
                 requestData: requestData,
                 target: provider.profile.target,
                 deadline: deadline
             ) {
-                await invalidate(provider, reason: "documentation_provider_call_failed")
-                return .success(localResponse)
+                return .success(
+                    data: fallback.responseData,
+                    replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
+                        provider.profile,
+                        fallback: fallback
+                    )
+                )
             }
             await invalidate(provider, reason: "documentation_provider_call_failed")
             return .failed(error)
@@ -1994,7 +2029,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         requestData: Data,
         target: DocumentationProviderTarget,
         deadline: Deadline?
-    ) async throws -> Data? {
+    ) async throws -> InstalledDocumentationAssetFallback? {
         do {
             return try await callInstalledDocumentationAssetFallback(
                 requestData: requestData,
@@ -2028,6 +2063,22 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if let provider {
             await transport.close(route: provider.profile.route)
         }
+    }
+
+    private func cacheInstalledDocumentationAssetReplacement(
+        _ replacementProfile: CandidateProfile,
+        replacing replacedProfile: CandidateProfile
+    ) async {
+        providerPreparations.removeValue(forKey: replacedProfile.target.processID)?.task.cancel()
+        if let activeProvider, activeProvider.profile.id == replacedProfile.id {
+            self.activeProvider = ActiveProvider(profile: replacementProfile)
+        }
+        if let prepared = preparedProviders[replacedProfile.target.processID],
+           prepared.id == replacedProfile.id
+        {
+            preparedProviders[replacedProfile.target.processID] = replacementProfile
+        }
+        await transport.close(route: replacedProfile.route)
     }
 
     package func shutdown() async {
@@ -2538,12 +2589,22 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return updated
     }
 
+    private func profileByUsingInstalledDocumentationAssetFallback(
+        _ profile: CandidateProfile,
+        fallback: InstalledDocumentationAssetFallback
+    ) -> CandidateProfile {
+        var updated = profile
+        updated.descriptor = fallback.descriptor
+        updated.descriptorSource = .installedDocumentationAsset
+        return updated
+    }
+
     private func callInstalledDocumentationAssetFallback(
         requestData: Data,
         target: DocumentationProviderTarget,
         deadline: Deadline?
-    ) async throws -> Data? {
-        guard await localSearchProvider.descriptor(for: target) != nil else {
+    ) async throws -> InstalledDocumentationAssetFallback? {
+        guard let descriptor = await localSearchProvider.descriptor(for: target) else {
             return nil
         }
         logger.warning(
@@ -2554,11 +2615,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "xcode_version": .string(target.xcodeVersion),
             ]
         )
-        return try await localSearchProvider.callDocumentationSearch(
+        let responseData = try await localSearchProvider.callDocumentationSearch(
             requestData: requestData,
             for: target,
             timeout: remainingTimeout(until: deadline)
         )
+        return InstalledDocumentationAssetFallback(responseData: responseData, descriptor: descriptor)
     }
 
     private func reserveServiceRepairAttempt(for processID: pid_t) -> Bool {

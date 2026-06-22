@@ -1540,20 +1540,33 @@ extension RuntimeCoordinatorTests {
             localSearchProvider: localProvider
         )
 
-        let outcome = try await manager.callDocumentationSearch(
+        let firstOutcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 122, query: "SwiftUI"),
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
-            Issue.record("expected handled outcome, got \(outcome)")
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected handled outcome, got \(firstOutcome)")
             return
         }
-        #expect(invalidatedProvider == false)
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
-        #expect(await localProvider.requestedCallPIDs() == [target.processID])
-        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let secondData, let secondInvalidatedProvider) = secondOutcome else {
+            Issue.record("expected second handled outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(secondInvalidatedProvider == false)
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
         #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeConfigIsBroken()
@@ -1588,20 +1601,33 @@ extension RuntimeCoordinatorTests {
             localSearchProvider: localProvider
         )
 
-        let outcome = try await manager.callDocumentationSearch(
+        let firstOutcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 124, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
-            Issue.record("expected handled outcome, got \(outcome)")
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected handled outcome, got \(firstOutcome)")
             return
         }
-        #expect(invalidatedProvider == false)
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
-        #expect(await localProvider.requestedCallPIDs() == [target.processID])
-        #expect(await localProvider.requestedQueries() == ["UIView"])
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 125, query: "SwiftData"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let secondData, let secondInvalidatedProvider) = secondOutcome else {
+            Issue.record("expected second handled outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(secondInvalidatedProvider == false)
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["UIView", "SwiftData"])
         #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
     @Test func liveDocumentationSearchServiceRepairerSelectsClosestSameMajorAsset()
