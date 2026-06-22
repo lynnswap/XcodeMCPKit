@@ -2090,6 +2090,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard primary.descriptor == nil, fallback.descriptor != nil else {
             return primary
         }
+        guard primary.id == fallback.id else {
+            return fallback
+        }
         var merged = primary
         merged.descriptor = fallback.descriptor
         merged.descriptorSource = fallback.descriptorSource
