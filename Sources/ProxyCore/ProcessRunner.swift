@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import NIOConcurrencyHelpers
 
 final class DispatchGroupLeaveGuard: @unchecked Sendable {
@@ -56,17 +57,54 @@ private final class PipeCollector: @unchecked Sendable {
     }
 }
 
+private final class ProcessTimeoutState: @unchecked Sendable {
+    private let state = NIOLockedValueBox((terminated: false, timedOut: false))
+
+    func markTimedOutIfRunning() -> Bool {
+        state.withLockedValue { state in
+            guard state.terminated == false, state.timedOut == false else {
+                return false
+            }
+            state.timedOut = true
+            return true
+        }
+    }
+
+    func markTerminatedAndCheckTimedOut() -> Bool {
+        state.withLockedValue { state in
+            state.terminated = true
+            return state.timedOut
+        }
+    }
+}
+
 package struct ProcessRequest: Sendable {
     package let label: String
     package let executablePath: String
     package let arguments: [String]
     package let input: String?
+    package let timeoutNanoseconds: Int64?
 
-    package init(label: String, executablePath: String, arguments: [String], input: String?) {
+    package init(
+        label: String,
+        executablePath: String,
+        arguments: [String],
+        input: String?,
+        timeoutNanoseconds: Int64? = nil
+    ) {
         self.label = label
         self.executablePath = executablePath
         self.arguments = arguments
         self.input = input
+        self.timeoutNanoseconds = timeoutNanoseconds
+    }
+}
+
+package struct ProcessTimeoutError: Error, Sendable {
+    package let label: String
+
+    package init(label: String) {
+        self.label = label
     }
 }
 
@@ -106,7 +144,13 @@ package struct ProcessRunner: ProcessRunning {
                 drainGroup: drainGroup,
                 label: "XcodeMCPProxy.ProcessRunner.stderr"
             )
+            let timeoutState = ProcessTimeoutState()
             let didResume = NIOLockedValueBox(false)
+            let timeoutWorkItem = Self.makeTimeoutWorkItem(
+                timeoutNanoseconds: request.timeoutNanoseconds,
+                process: process,
+                timeoutState: timeoutState
+            )
             let resumeOnce: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in
                 let shouldResume = didResume.withLockedValue { didResume in
                     guard didResume == false else { return false }
@@ -130,6 +174,10 @@ package struct ProcessRunner: ProcessRunning {
             process.terminationHandler = { process in
                 DispatchQueue.global().async {
                     drainGroup.wait()
+                    if timeoutState.markTerminatedAndCheckTimedOut() {
+                        resumeOnce(.failure(ProcessTimeoutError(label: request.label)))
+                        return
+                    }
                     let output = ProcessOutput(
                         terminationStatus: process.terminationStatus,
                         stdout: String(decoding: stdoutCollector.collectedData(), as: UTF8.self),
@@ -141,6 +189,12 @@ package struct ProcessRunner: ProcessRunning {
 
             do {
                 try process.run()
+                if let timeoutWorkItem {
+                    DispatchQueue.global().asyncAfter(
+                        deadline: .now() + .nanoseconds(Int(request.timeoutNanoseconds ?? 0)),
+                        execute: timeoutWorkItem
+                    )
+                }
                 try? stdoutPipe.fileHandleForWriting.close()
                 try? stderrPipe.fileHandleForWriting.close()
                 if let input = request.input {
@@ -160,6 +214,28 @@ package struct ProcessRunner: ProcessRunning {
                 try? stderrPipe.fileHandleForWriting.close()
                 try? stdinPipe.fileHandleForWriting.close()
                 resumeOnce(.failure(error))
+            }
+        }
+    }
+
+    private static func makeTimeoutWorkItem(
+        timeoutNanoseconds: Int64?,
+        process: Process,
+        timeoutState: ProcessTimeoutState
+    ) -> DispatchWorkItem? {
+        guard let timeoutNanoseconds, timeoutNanoseconds > 0 else {
+            return nil
+        }
+        return DispatchWorkItem {
+            guard process.isRunning, timeoutState.markTimedOutIfRunning() else {
+                return
+            }
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(1)) {
+                guard process.isRunning else {
+                    return
+                }
+                kill(process.processIdentifier, SIGKILL)
             }
         }
     }

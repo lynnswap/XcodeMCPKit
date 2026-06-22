@@ -845,6 +845,85 @@ private final class ProcessOutputTimeoutWaiter: @unchecked Sendable {
     }
 }
 
+private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable {
+    struct Result: Sendable {
+        let repairResult: DocumentationSearchServiceRepairResult?
+        let timedOut: Bool
+    }
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Result, Never>?
+    private var tasks: [Task<Void, Never>] = []
+    private var resolved = false
+
+    func wait(
+        for task: Task<DocumentationSearchServiceRepairResult, Never>,
+        timeout: TimeAmount
+    ) async -> Result {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                setContinuation(continuation)
+                addTask(Task {
+                    let result = await task.value
+                    self.resume(Result(repairResult: result, timedOut: false))
+                })
+                addTask(Task {
+                    try? await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    task.cancel()
+                    self.resume(Result(repairResult: nil, timedOut: true))
+                })
+            }
+        } onCancel: {
+            task.cancel()
+            resume(Result(repairResult: nil, timedOut: true))
+        }
+    }
+
+    private func setContinuation(_ continuation: CheckedContinuation<Result, Never>) {
+        lock.lock()
+        if resolved {
+            lock.unlock()
+            continuation.resume(returning: Result(repairResult: nil, timedOut: true))
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    private func addTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        if resolved {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        tasks.append(task)
+        lock.unlock()
+    }
+
+    private func resume(_ result: Result) {
+        lock.lock()
+        guard resolved == false else {
+            lock.unlock()
+            return
+        }
+        resolved = true
+        let continuation = continuation
+        self.continuation = nil
+        let tasks = tasks
+        self.tasks.removeAll()
+        lock.unlock()
+
+        for task in tasks {
+            task.cancel()
+        }
+        continuation?.resume(returning: result)
+    }
+}
+
 package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
     private struct SearchArguments {
         let requestID: JSONRPC.ID
@@ -932,6 +1011,9 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         timeout: TimeAmount?
     ) async throws -> [SearchRow] {
         let sql = Self.searchSQL(arguments: arguments)
+        let timeoutNanoseconds = timeout.flatMap { timeout in
+            timeout.nanoseconds > 0 ? timeout.nanoseconds : nil
+        }
         let request = ProcessRequest(
             label: "documentation-search-local",
             executablePath: "/usr/bin/sqlite3",
@@ -940,18 +1022,23 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
                 asset.indexURL.path,
                 sql,
             ],
-            input: nil
+            input: nil,
+            timeoutNanoseconds: timeoutNanoseconds
         )
         let output: ProcessOutput
-        if let timeout, timeout.nanoseconds > 0 {
-            output = try await ProcessOutputTimeoutWaiter().wait(
-                for: Task {
-                    try await processRunner.run(request)
-                },
-                timeout: timeout
-            )
-        } else {
-            output = try await processRunner.run(request)
+        do {
+            if let timeout, timeout.nanoseconds > 0 {
+                output = try await ProcessOutputTimeoutWaiter().wait(
+                    for: Task {
+                        try await processRunner.run(request)
+                    },
+                    timeout: timeout
+                )
+            } else {
+                output = try await processRunner.run(request)
+            }
+        } catch is ProcessTimeoutError {
+            throw TimeoutError()
         }
         guard output.terminationStatus == 0 else {
             throw ControlPlane.Error.invalidResponse(
@@ -2267,16 +2354,23 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         _ profile: CandidateProfile,
         requestTimeout: TimeAmount?
     ) async -> CandidateProfile {
+        guard requestTimeout?.nanoseconds != 0 else {
+            return profile
+        }
+        let deadline = Deadline.fromNow(requestTimeout, clock: clock)
         let refreshed = await profileByRefreshingDescriptor(
             profile,
-            requestTimeout: requestTimeout
+            requestTimeout: remainingTimeout(until: deadline)
         )
         guard refreshed.descriptor == nil else {
             return refreshed
         }
+        guard remainingTimeout(until: deadline)?.nanoseconds != 0 else {
+            return refreshed
+        }
         let repaired = await profileByRepairingDocumentationSearchService(
             refreshed,
-            requestTimeout: requestTimeout
+            requestTimeout: remainingTimeout(until: deadline)
         )
         guard repaired.descriptor == nil else {
             return repaired
@@ -2288,10 +2382,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         _ profile: CandidateProfile,
         requestTimeout: TimeAmount?
     ) async -> CandidateProfile {
-        guard reserveServiceRepairAttempt(for: profile.target.processID) else {
+        guard requestTimeout?.nanoseconds != 0, !Task.isCancelled, !isShutdown else {
             return profile
         }
-        guard requestTimeout?.nanoseconds != 0, !Task.isCancelled, !isShutdown else {
+        guard reserveServiceRepairAttempt(for: profile.target.processID) else {
             return profile
         }
 
@@ -2305,7 +2399,21 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         )
 
         let deadline = Deadline.fromNow(requestTimeout, clock: clock)
-        let repairResult = await serviceRepairer.repairDocumentationSearch(for: profile.target)
+        guard let repairResult = await repairDocumentationSearch(
+            for: profile.target,
+            timeout: remainingTimeout(until: deadline)
+        ) else {
+            serviceRepairAttemptedProcessIDs.remove(profile.target.processID)
+            logger.debug(
+                "Xcode documentation service repair did not finish before timeout",
+                metadata: [
+                    "pid": .string("\(profile.target.processID)"),
+                    "app_path": .string(profile.target.appPath),
+                    "xcode_version": .string(profile.target.xcodeVersion),
+                ]
+            )
+            return profile
+        }
         switch repairResult {
         case .repaired(let report):
             logger.info(
@@ -2338,6 +2446,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     "reason": .string(reason),
                 ]
             )
+            return profile
+        }
+        guard remainingTimeout(until: deadline)?.nanoseconds != 0 else {
             return profile
         }
 
@@ -2380,6 +2491,25 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
             return profile
         }
+    }
+
+    private func repairDocumentationSearch(
+        for target: DocumentationProviderTarget,
+        timeout: TimeAmount?
+    ) async -> DocumentationSearchServiceRepairResult? {
+        guard timeout?.nanoseconds != 0 else {
+            return nil
+        }
+        guard let timeout, timeout.nanoseconds > 0 else {
+            return await serviceRepairer.repairDocumentationSearch(for: target)
+        }
+        let result = await DocumentationSearchServiceRepairWaiter().wait(
+            for: Task {
+                await serviceRepairer.repairDocumentationSearch(for: target)
+            },
+            timeout: timeout
+        )
+        return result.repairResult
     }
 
     private func profileByAddingInstalledDocumentationAssetFallback(

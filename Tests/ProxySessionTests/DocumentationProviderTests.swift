@@ -1319,6 +1319,62 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
     }
 
+    @Test func documentationProviderRepairDoesNotWaitPastRequestTimeout()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 120, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            ),
+            delayNanoseconds: 300_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        let update = try await waitWithTimeout(
+            "documentation repair should not exceed the caller timeout",
+            timeout: .milliseconds(500)
+        ) {
+            await manager.startBackgroundDiscovery(requestTimeout: .milliseconds(20))
+        }
+        if case .available = update {
+            Issue.record("expected repair timeout to avoid advertising DocumentationSearch")
+        }
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await repairer.cancelledPIDs() == [target.processID]
+        })
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
     @Test func documentationProviderUsesInstalledAssetFallbackWhenRepairDoesNotRestoreDescriptor()
         async throws
     {
@@ -1628,6 +1684,7 @@ extension RuntimeCoordinatorTests {
         }
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
+        #expect(requests.first?.timeoutNanoseconds == 20_000_000)
         #expect(await waitUntil(timeout: .seconds(2)) {
             await runner.cancelledRunCount() == 1
         })

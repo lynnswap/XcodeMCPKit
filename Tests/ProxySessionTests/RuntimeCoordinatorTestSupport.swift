@@ -359,21 +359,39 @@ struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
 
 actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
     private let result: DocumentationSearchServiceRepairResult
+    private let delayNanoseconds: UInt64?
     private var repairedProcessIDs: [pid_t] = []
+    private var cancelledProcessIDs: [pid_t] = []
 
-    init(result: DocumentationSearchServiceRepairResult) {
+    init(
+        result: DocumentationSearchServiceRepairResult,
+        delayNanoseconds: UInt64? = nil
+    ) {
         self.result = result
+        self.delayNanoseconds = delayNanoseconds
     }
 
     func repairDocumentationSearch(
         for target: DocumentationProviderTarget
     ) async -> DocumentationSearchServiceRepairResult {
         repairedProcessIDs.append(target.processID)
+        if let delayNanoseconds {
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch is CancellationError {
+                cancelledProcessIDs.append(target.processID)
+            } catch {
+            }
+        }
         return result
     }
 
     func repairedPIDs() -> [pid_t] {
         repairedProcessIDs
+    }
+
+    func cancelledPIDs() -> [pid_t] {
+        cancelledProcessIDs
     }
 }
 

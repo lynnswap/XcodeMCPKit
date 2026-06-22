@@ -62,6 +62,27 @@ struct ProcessRunnerTests {
         #expect(output.terminationStatus == 0)
         #expect(output.stdout == expected)
     }
+
+    @Test func processRunnerTerminatesTimedOutProcess() async throws {
+        let runner = ProcessRunner()
+
+        await #expect(throws: ProcessTimeoutError.self) {
+            _ = try await waitWithTimeout(
+                "ProcessRunner should terminate a timed out process",
+                timeout: .seconds(3)
+            ) {
+                try await runner.run(
+                    ProcessRequest(
+                        label: "timeout",
+                        executablePath: "/bin/sleep",
+                        arguments: ["5"],
+                        input: nil,
+                        timeoutNanoseconds: 100_000_000
+                    )
+                )
+            }
+        }
+    }
 }
 
 private extension String {
