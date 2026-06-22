@@ -519,6 +519,85 @@ actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
     }
 }
 
+actor ReusedRouteRepairTransport: DocumentationProviderRouting {
+    private var openCountValue = 0
+    private var toolsListCountValue = 0
+    private var closedRouteIDs: [String] = []
+
+    func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        openCountValue += 1
+        return DocumentationProviderRoute(
+            id: "reused-\(target.processID)",
+            target: target,
+            upstreamIndex: 0,
+            serverVersion: target.xcodeVersion
+        )
+    }
+
+    func toolsList(
+        route _: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        toolsListCountValue += 1
+        let tools: [Any]
+        if toolsListCountValue == 1 {
+            tools = []
+        } else {
+            tools = [documentationDescriptor(version: "reused").foundationObject]
+        }
+        return try jsonValue(["tools": tools])
+    }
+
+    func callDocumentationSearch(
+        route: DocumentationProviderRoute,
+        requestData: Data,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        guard closedRouteIDs.contains(route.id) == false else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let object = try JSONSerialization.jsonObject(with: requestData, options: [])
+            as? [String: Any]
+        let id = object?["id"] ?? 0
+        return try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"answer\":\"reused\"}",
+                        ],
+                    ],
+                    "isError": false,
+                ],
+            ],
+            options: []
+        )
+    }
+
+    func close(route: DocumentationProviderRoute) async {
+        closedRouteIDs.append(route.id)
+    }
+
+    func openCount() -> Int {
+        openCountValue
+    }
+
+    func toolsListCount() -> Int {
+        toolsListCountValue
+    }
+
+    func closedRoutes() -> [String] {
+        closedRouteIDs
+    }
+}
+
 final class SequencedXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
     private var remainingSequences: [[DocumentationProviderTarget]]

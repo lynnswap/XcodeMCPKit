@@ -2514,7 +2514,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 target: profile.target,
                 requestTimeout: remainingTimeout(until: deadline)
             )
-            await transport.close(route: profile.route)
+            if replacement.route.id != profile.route.id {
+                await transport.close(route: profile.route)
+            }
             let updated = await profileByRefreshingDescriptor(
                 replacement,
                 requestTimeout: remainingTimeout(until: deadline)

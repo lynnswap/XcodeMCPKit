@@ -1319,6 +1319,48 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
     }
 
+    @Test func repairedDocumentationProviderDoesNotCloseReusedRuntimeRoute()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 123, xcodeVersion: "26.6")
+        let transport = ReusedRouteRepairTransport()
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: transport,
+            serviceRepairer: repairer
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-reused")
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"reused\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await transport.openCount() == 2)
+        #expect(await transport.toolsListCount() == 2)
+        #expect(await transport.closedRoutes().isEmpty)
+    }
+
     @Test func documentationProviderRepairDoesNotWaitPastRequestTimeout()
         async throws
     {
