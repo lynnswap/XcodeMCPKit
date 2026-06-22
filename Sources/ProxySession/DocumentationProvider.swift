@@ -788,6 +788,7 @@ private final class ProcessOutputTimeoutWaiter: @unchecked Sendable {
                     guard Task.isCancelled == false else {
                         return
                     }
+                    task.cancel()
                     self.resume(.failure(TimeoutError()))
                 })
             }
@@ -1865,7 +1866,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
             guard !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
             else {
-                if let localResponse = try await callInstalledDocumentationAssetFallback(
+                if let localResponse = try await callInstalledDocumentationAssetFallbackIfAvailable(
                     requestData: requestData,
                     target: provider.profile.target,
                     deadline: deadline
@@ -1877,7 +1878,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 return .rejected(processID: processID, permanentlyUnusable: true)
             }
             if DocumentationProvider.ToolCatalog.responseIsDocumentationProviderFailure(response),
-               let localResponse = try await callInstalledDocumentationAssetFallback(
+               let localResponse = try await callInstalledDocumentationAssetFallbackIfAvailable(
                    requestData: requestData,
                    target: provider.profile.target,
                    deadline: deadline
@@ -1889,7 +1890,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            if let localResponse = try await callInstalledDocumentationAssetFallback(
+            if let localResponse = try await callInstalledDocumentationAssetFallbackIfAvailable(
                 requestData: requestData,
                 target: provider.profile.target,
                 deadline: deadline
@@ -1899,6 +1900,28 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             await invalidate(provider, reason: "documentation_provider_call_failed")
             return .failed(error)
+        }
+    }
+
+    private func callInstalledDocumentationAssetFallbackIfAvailable(
+        requestData: Data,
+        target: DocumentationProviderTarget,
+        deadline: Deadline?
+    ) async throws -> Data? {
+        do {
+            return try await callInstalledDocumentationAssetFallback(
+                requestData: requestData,
+                target: target,
+                deadline: deadline
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            logger.debug(
+                "Installed documentation asset fallback failed",
+                metadata: candidateLogMetadata(target: target, error: error)
+            )
+            return nil
         }
     }
 

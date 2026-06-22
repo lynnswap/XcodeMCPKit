@@ -380,13 +380,15 @@ actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairin
 actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     private let descriptorValue: JSONValue?
     private let responseData: Data
+    private let failsCalls: Bool
     private var descriptorPIDs: [pid_t] = []
     private var callPIDs: [pid_t] = []
     private var queries: [String] = []
 
-    init(descriptor: JSONValue?, responseData: Data) {
+    init(descriptor: JSONValue?, responseData: Data, failsCalls: Bool = false) {
         self.descriptorValue = descriptor
         self.responseData = responseData
+        self.failsCalls = failsCalls
     }
 
     func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
@@ -402,6 +404,9 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
         callPIDs.append(target.processID)
         if let query = try documentationSearchQuery(in: requestData) {
             queries.append(query)
+        }
+        if failsCalls {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         return responseData
     }
@@ -423,6 +428,7 @@ actor StubProcessRunner: ProcessRunning {
     private let output: ProcessOutput
     private let delayNanoseconds: UInt64?
     private var requests: [ProcessRequest] = []
+    private var cancelledRunCountValue = 0
 
     init(output: ProcessOutput, delayNanoseconds: UInt64? = nil) {
         self.output = output
@@ -432,13 +438,22 @@ actor StubProcessRunner: ProcessRunning {
     func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         requests.append(request)
         if let delayNanoseconds {
-            try await Task.sleep(nanoseconds: delayNanoseconds)
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch is CancellationError {
+                cancelledRunCountValue += 1
+                throw CancellationError()
+            }
         }
         return output
     }
 
     func recordedRequests() -> [ProcessRequest] {
         requests
+    }
+
+    func cancelledRunCount() -> Int {
+        cancelledRunCountValue
     }
 }
 

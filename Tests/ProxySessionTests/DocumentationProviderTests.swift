@@ -1628,6 +1628,9 @@ extension RuntimeCoordinatorTests {
         }
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await runner.cancelledRunCount() == 1
+        })
     }
 
     @Test func documentationProviderBackgroundDiscoveryKeepsBaseCatalogWhenDescriptorIsAbsent()
@@ -2164,6 +2167,59 @@ extension RuntimeCoordinatorTests {
         }
         #expect(invalidatedProvider)
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
+        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
+    }
+
+    @Test func documentationProviderManagerContinuesFailoverWhenAssetFallbackFails()
+        async throws
+    {
+        let xcode26 = documentationProviderTarget(processID: 422, xcodeVersion: "26.6")
+        let xcode27 = documentationProviderTarget(processID: 423, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"fallback\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(id: 423, text: "{\"unused\":true}"),
+            failsCalls: true
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
+        #expect(await localProvider.requestedCallPIDs() == [xcode27.processID])
         #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
         #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
         #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
