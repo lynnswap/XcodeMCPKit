@@ -274,6 +274,10 @@ actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouti
     func closeCount() -> Int {
         closedRouteIDs.count
     }
+
+    func openCount() -> Int {
+        openCountValue
+    }
 }
 
 struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {

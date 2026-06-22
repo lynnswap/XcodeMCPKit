@@ -235,6 +235,58 @@ extension RuntimeCoordinatorTests {
         #expect(await upstream.sentCount() == 2)
     }
 
+    @Test func runtimeDocumentationTransportDoesNotOpenFallbackForReusedRouteToolsListFailure()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        await upstream.overloadNextSend()
+        let target = documentationProviderTarget(processID: 741, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let openStarted = TestSignal()
+        let openGate = AsyncGate()
+        let fallback = BlockingFallbackDocumentationProviderTransport(
+            openStarted: openStarted,
+            openGate: openGate
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                fallback: fallback
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let route = DocumentationProviderRoute(
+            id: "upstream-0-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: 0
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [route],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let update = await providerManager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(
+            update,
+            to: try jsonValue(["tools": []])
+        )
+
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(await upstream.sentCount() == 1)
+        #expect(await fallback.openCount() == 0)
+    }
+
     @Test func runtimeDocumentationTransportFallsBackWhenReusedUpstreamRouteFails()
         async throws
     {
