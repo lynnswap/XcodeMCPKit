@@ -1444,6 +1444,73 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
 
+    @Test func activeDocumentationProviderKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 122, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"first\"}")
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"second\"}")
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 122, query: "First"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let firstData, _) = firstOutcome else {
+            Issue.record("expected first handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"first\"}")
+
+        _ = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "Second"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let secondData, _) = secondOutcome else {
+            Issue.record("expected second handled outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"second\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.documentationQueries(for: target.processID) == ["First", "Second"])
+    }
+
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeReturnsNotEnabled()
         async throws
     {

@@ -2057,6 +2057,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     self.activeProvider = ActiveProvider(profile: merged)
                     return merged
                 }
+                if let current = self.activeProvider,
+                   current.profile.id == activeProvider.profile.id
+                {
+                    self.activeProvider = ActiveProvider(profile: updated)
+                    return updated
+                }
                 return updated
             }
             return activeProvider.profile
