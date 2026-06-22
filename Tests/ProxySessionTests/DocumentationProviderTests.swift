@@ -788,6 +788,61 @@ extension RuntimeCoordinatorTests {
         #expect(await documentationProvider.toolListUpdateCount() == 1)
     }
 
+    @Test func sharedToolsListDoesNotWaitPastTimeoutForStartupDocumentationPrewarm()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let prewarmStarted = TestSignal()
+        let prewarmGate = AsyncGate()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            prewarmStarted: prewarmStarted,
+            prewarmBlocker: prewarmGate
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.prewarmDocumentationProvider()
+        try await prewarmStarted.wait(description: "documentation prewarm started")
+
+        let result = try await waitWithTimeout(
+            "tools/list should not wait for the blocked documentation prewarm",
+            timeout: .milliseconds(500)
+        ) {
+            try await manager.sharedToolsList(
+                sessionID: "session-docs-tools-prewarm-timeout",
+                requestTimeoutOverride: .milliseconds(20)
+            )
+        }
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
+        await prewarmGate.signal()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await documentationProvider.prewarmCount() == 1
+        })
+    }
+
     @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -1472,6 +1527,47 @@ extension RuntimeCoordinatorTests {
         #expect(requests.first?.arguments.joined(separator: " ").contains(
             "xcode-26-5.asset/AssetData/documentation-db/index.sql"
         ) == true)
+    }
+
+    @Test func liveDocumentationAssetSearchProviderHonorsSearchTimeout()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let runner = StubProcessRunner(
+            output: ProcessOutput(terminationStatus: 0, stdout: "[]", stderr: ""),
+            delayNanoseconds: 300_000_000
+        )
+        let provider = LiveDocumentationAssetSearchProvider(
+            assetRoot: root,
+            currentOSVersion: { "26.5.1" },
+            processRunner: runner
+        )
+        let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
+
+        await #expect(throws: TimeoutError.self) {
+            _ = try await waitWithTimeout(
+                "local DocumentationSearch should honor the caller timeout",
+                timeout: .milliseconds(500)
+            ) {
+                try await provider.callDocumentationSearch(
+                    requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
+                    for: target,
+                    timeout: .milliseconds(20)
+                )
+            }
+        }
+        let requests = await runner.recordedRequests()
+        #expect(requests.count == 1)
     }
 
     @Test func documentationProviderBackgroundDiscoveryKeepsBaseCatalogWhenDescriptorIsAbsent()

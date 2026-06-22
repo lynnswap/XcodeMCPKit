@@ -36,6 +36,85 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
     package init() {}
 }
 
+private final class DocumentationToolListUpdateWaiter: @unchecked Sendable {
+    struct Result: Sendable {
+        let update: DocumentationProvider.ToolListUpdate
+        let timedOut: Bool
+    }
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Result, Never>?
+    private var tasks: [Task<Void, Never>] = []
+    private var resolved = false
+
+    func wait(
+        for task: Task<DocumentationProvider.ToolListUpdate, Never>,
+        timeout: TimeAmount
+    ) async -> Result {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                setContinuation(continuation)
+                addTask(Task {
+                    let update = await task.value
+                    self.resume(Result(update: update, timedOut: false))
+                })
+                addTask(Task {
+                    try? await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    self.resume(Result(update: .unavailable, timedOut: true))
+                })
+            }
+        } onCancel: {
+            resume(Result(update: .unavailable, timedOut: true))
+        }
+    }
+
+    private func setContinuation(
+        _ continuation: CheckedContinuation<Result, Never>
+    ) {
+        lock.lock()
+        if resolved {
+            lock.unlock()
+            continuation.resume(returning: Result(update: .unavailable, timedOut: true))
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    private func addTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        if resolved {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        tasks.append(task)
+        lock.unlock()
+    }
+
+    private func resume(_ result: Result) {
+        lock.lock()
+        guard resolved == false else {
+            lock.unlock()
+            return
+        }
+        resolved = true
+        let continuation = continuation
+        self.continuation = nil
+        let tasks = tasks
+        self.tasks.removeAll()
+        lock.unlock()
+
+        for task in tasks {
+            task.cancel()
+        }
+        continuation?.resume(returning: result)
+    }
+}
+
 /// The single routing decision for a DocumentationSearch tools/call:
 /// either the provider produced the response, or proxy-managed
 /// DocumentationSearch is unavailable.
@@ -1011,7 +1090,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             update = await documentationToolListUpdate(
                 fromPrewarmTask: documentationPrewarmTask,
                 requestTimeout: requestTimeout
-            )
+            ).update
         } else {
             update = await documentationProviderManager.startBackgroundDiscovery(
                 requestTimeout: requestTimeout
@@ -1044,12 +1123,16 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         requestTimeout: TimeAmount?
     ) async -> DocumentationProvider.ToolListUpdate {
         if let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) {
-            let prewarmUpdate = await documentationToolListUpdate(
+            let prewarmResult = await documentationToolListUpdate(
                 fromPrewarmTask: documentationPrewarmTask,
                 requestTimeout: requestTimeout
             )
+            let prewarmUpdate = prewarmResult.update
             if case .available = prewarmUpdate {
                 return prewarmUpdate
+            }
+            if prewarmResult.timedOut {
+                return .unavailable
             }
             documentationPrewarmTaskBox.withLockedValue { $0 = nil }
         }
@@ -1062,39 +1145,29 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     private func documentationToolListUpdate(
         fromPrewarmTask task: Task<DocumentationProvider.ToolListUpdate, Never>,
         requestTimeout: TimeAmount?
-    ) async -> DocumentationProvider.ToolListUpdate {
+    ) async -> DocumentationToolListUpdateWaiter.Result {
         guard requestTimeout?.nanoseconds != 0 else {
-            return .unavailable
+            return DocumentationToolListUpdateWaiter.Result(update: .unavailable, timedOut: true)
         }
         guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return await task.value
+            return DocumentationToolListUpdateWaiter.Result(
+                update: await task.value,
+                timedOut: false
+            )
         }
-        do {
-            return try await withThrowingTaskGroup(of: DocumentationProvider.ToolListUpdate.self) {
-                group in
-                group.addTask {
-                    await task.value
-                }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
-                    throw TimeoutError()
-                }
-                guard let update = try await group.next() else {
-                    throw TimeoutError()
-                }
-                group.cancelAll()
-                return update
-            }
-        } catch {
+        let result = await DocumentationToolListUpdateWaiter().wait(
+            for: task,
+            timeout: requestTimeout
+        )
+        if result.timedOut {
             logger.debug(
                 "documentation provider prewarm did not finish before tools/list timeout",
                 metadata: [
-                    "error": .string(String(describing: error)),
                     "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
                 ]
             )
-            return .unavailable
         }
+        return result
     }
 
     private func recordDocumentationToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {

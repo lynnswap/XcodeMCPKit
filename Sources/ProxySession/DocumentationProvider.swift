@@ -762,6 +762,88 @@ package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServic
     }
 }
 
+private final class ProcessOutputTimeoutWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<ProcessOutput, Error>?
+    private var tasks: [Task<Void, Never>] = []
+    private var resolved = false
+
+    func wait(
+        for task: Task<ProcessOutput, Error>,
+        timeout: TimeAmount
+    ) async throws -> ProcessOutput {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                setContinuation(continuation)
+                addTask(Task {
+                    do {
+                        let output = try await task.value
+                        self.resume(.success(output))
+                    } catch {
+                        self.resume(.failure(error))
+                    }
+                })
+                addTask(Task {
+                    try? await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    self.resume(.failure(TimeoutError()))
+                })
+            }
+        } onCancel: {
+            task.cancel()
+            resume(.failure(CancellationError()))
+        }
+    }
+
+    private func setContinuation(_ continuation: CheckedContinuation<ProcessOutput, Error>) {
+        lock.lock()
+        if resolved {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    private func addTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        if resolved {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        tasks.append(task)
+        lock.unlock()
+    }
+
+    private func resume(_ result: Result<ProcessOutput, Error>) {
+        lock.lock()
+        guard resolved == false else {
+            lock.unlock()
+            return
+        }
+        resolved = true
+        let continuation = continuation
+        self.continuation = nil
+        let tasks = tasks
+        self.tasks.removeAll()
+        lock.unlock()
+
+        for task in tasks {
+            task.cancel()
+        }
+        switch result {
+        case .success(let output):
+            continuation?.resume(returning: output)
+        case .failure(let error):
+            continuation?.resume(throwing: error)
+        }
+    }
+}
+
 package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
     private struct SearchArguments {
         let requestID: JSONRPC.ID
@@ -811,13 +893,16 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     package func callDocumentationSearch(
         requestData: Data,
         for target: DocumentationProviderTarget,
-        timeout _: TimeAmount?
+        timeout: TimeAmount?
     ) async throws -> Data {
+        guard timeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
         let arguments = try Self.searchArguments(from: requestData)
         guard let asset = installedAsset(for: target) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let rows = try await searchRows(arguments: arguments, asset: asset)
+        let rows = try await searchRows(arguments: arguments, asset: asset, timeout: timeout)
         return try Self.makeResponse(
             requestID: arguments.requestID,
             query: arguments.query,
@@ -842,10 +927,11 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
 
     private func searchRows(
         arguments: SearchArguments,
-        asset: DocumentationSearchInstalledAsset
+        asset: DocumentationSearchInstalledAsset,
+        timeout: TimeAmount?
     ) async throws -> [SearchRow] {
         let sql = Self.searchSQL(arguments: arguments)
-        let output = try await processRunner.run(ProcessRequest(
+        let request = ProcessRequest(
             label: "documentation-search-local",
             executablePath: "/usr/bin/sqlite3",
             arguments: [
@@ -854,7 +940,18 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
                 sql,
             ],
             input: nil
-        ))
+        )
+        let output: ProcessOutput
+        if let timeout, timeout.nanoseconds > 0 {
+            output = try await ProcessOutputTimeoutWaiter().wait(
+                for: Task {
+                    try await processRunner.run(request)
+                },
+                timeout: timeout
+            )
+        } else {
+            output = try await processRunner.run(request)
+        }
         guard output.terminationStatus == 0 else {
             throw ControlPlane.Error.invalidResponse(
                 "local DocumentationSearch sqlite failed: \(output.stderr)"

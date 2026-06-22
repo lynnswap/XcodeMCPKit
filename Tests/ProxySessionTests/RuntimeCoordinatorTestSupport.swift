@@ -421,14 +421,19 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
 
 actor StubProcessRunner: ProcessRunning {
     private let output: ProcessOutput
+    private let delayNanoseconds: UInt64?
     private var requests: [ProcessRequest] = []
 
-    init(output: ProcessOutput) {
+    init(output: ProcessOutput, delayNanoseconds: UInt64? = nil) {
         self.output = output
+        self.delayNanoseconds = delayNanoseconds
     }
 
     func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         requests.append(request)
+        if let delayNanoseconds {
+            try await Task.sleep(nanoseconds: delayNanoseconds)
+        }
         return output
     }
 
