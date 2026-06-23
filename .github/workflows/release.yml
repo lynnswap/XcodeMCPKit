@@ -24,7 +24,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ github.sha }}
 
@@ -75,10 +75,15 @@ jobs:
             echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
           fi
 
-      - name: Setup Swift 6.3
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
-        with:
-          swift-version: "6.3"
+      - name: Select latest Xcode
+        run: |
+          set -euo pipefail
+          xcode_path="$(
+            ruby -e 'paths = Dir["/Applications/Xcode_*.app"]; abort "No versioned Xcode apps found" if paths.empty?; puts paths.max_by { |path| path[/Xcode_(\d+(?:\.\d+)*)\.app\z/, 1].split(".").map(&:to_i) }'
+          )"
+          sudo xcode-select -s "${xcode_path}/Contents/Developer"
+          xcodebuild -version
+          swift --version
 
       - name: Run package checks
         run: scripts/check.sh
@@ -165,7 +170,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ github.sha }}
 
