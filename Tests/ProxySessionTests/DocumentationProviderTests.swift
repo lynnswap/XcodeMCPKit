@@ -407,6 +407,7 @@ extension RuntimeCoordinatorTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -437,7 +438,6 @@ extension RuntimeCoordinatorTests {
         #expect(Date().timeIntervalSince(started) < 0.5)
         guard case .failed(let error, _) = outcome else {
             Issue.record("expected timed-out outcome, got \(outcome)")
-            activePromise.fail(CancellationError())
             return
         }
         #expect(error is TimeoutError)
@@ -445,8 +445,6 @@ extension RuntimeCoordinatorTests {
         try await waitForCondition(timeoutSeconds: 2) {
             manager.debugSnapshot().queuedRequestCount == 0
         }
-
-        activePromise.fail(CancellationError())
     }
 
     @Test func runtimeDocumentationTransportClosesFallbackOpenedAfterRouteInvalidation()
