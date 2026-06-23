@@ -25,6 +25,11 @@ package final class RuntimeDocumentationTargetDiscovery:
         let targetsByProcessID = Dictionary(
             uniqueKeysWithValues: targets.map { ($0.processID, $0) }
         )
-        return candidateProcessIDs.compactMap { targetsByProcessID[$0] }
+        let orderedRuntimeTargets = candidateProcessIDs.compactMap { targetsByProcessID[$0] }
+        let orderedRuntimeProcessIDs = Set(orderedRuntimeTargets.map(\.processID))
+        let remainingLiveTargets = targets.filter {
+            orderedRuntimeProcessIDs.contains($0.processID) == false
+        }
+        return orderedRuntimeTargets + remainingLiveTargets
     }
 }

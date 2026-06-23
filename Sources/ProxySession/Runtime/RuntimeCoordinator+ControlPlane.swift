@@ -201,12 +201,19 @@ extension RuntimeCoordinator {
                 }
                 let unionResult = self.processToolCatalogRegistry.unionToolsListResult()
                     ?? successes[0].result.rawResult
-                let sourceUpstream = successes.sorted {
-                    compareDocumentationVersion(
-                        $0.target.xcodeVersion,
-                        $1.target.xcodeVersion
-                    ) == .orderedDescending
-                }.first?.result.sourceUpstream
+                let hasCompleteProcessCatalog =
+                    successes.count == routes.count && routes.count == processRoutes.count
+                let sourceUpstream: Int?
+                if hasCompleteProcessCatalog {
+                    sourceUpstream = successes.sorted {
+                        compareDocumentationVersion(
+                            $0.target.xcodeVersion,
+                            $1.target.xcodeVersion
+                        ) == .orderedDescending
+                    }.first?.result.sourceUpstream
+                } else {
+                    sourceUpstream = nil
+                }
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: unionResult,
                     sourceUpstream: sourceUpstream,

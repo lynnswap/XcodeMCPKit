@@ -2107,8 +2107,57 @@ struct RuntimeCoordinatorTests {
         }
         #expect(toolNames(in: result) == ["WarmOnlyTool"])
         #expect(await coldUpstream.sentCount() == 0)
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [warmTarget.processID])
+
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let reloadTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-after-cold-warms",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let coldRequest = try await coldUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        let warmReloadRequest = try await sentValue(
+            from: warmUpstream,
+            at: 1,
+            timeout: .seconds(2)
+        )
+        #expect(methodName(from: warmReloadRequest) == "tools/list")
+        await coldUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: coldRequest),
+                    tools: [
+                        toolDescriptor(name: "ColdOnlyTool"),
+                    ]
+                )
+            )
+        )
+        await warmUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: warmReloadRequest),
+                    tools: [
+                        toolDescriptor(name: "WarmOnlyTool"),
+                    ]
+                )
+            )
+        )
+
+        let reloaded = try await waitWithTimeout("waiting for complete process tools/list") {
+            try await reloadTask.value
+        }
+        #expect(toolNames(in: reloaded) == ["ColdOnlyTool", "WarmOnlyTool"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "ColdOnlyTool",
+            "WarmOnlyTool",
+        ])
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
     }
 
     @Test func sessionManagerToolsListDropsStaleProcessCatalogAfterRefreshFailure()
@@ -2179,10 +2228,10 @@ struct RuntimeCoordinatorTests {
             try await task.value
         }
         #expect(toolNames(in: result) == ["Fresh26Tool"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["Fresh26Tool"])
+        #expect(manager.cachedToolsListResult() == nil)
         let catalogs = manager.debugSnapshot().processToolCatalogs
         #expect(catalogs.map(\.processID) == [freshTarget.processID])
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
     @Test func documentationCandidatesPreferWorkspaceOwnersButKeepFallbackProcesses()
@@ -2256,6 +2305,41 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(manager.documentationCandidateProcessOrder() == [badTarget.processID])
+    }
+
+    @Test func runtimeDocumentationDiscoveryKeepsLiveTargetsOutsideRuntimeRoutes()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let staleTarget = xcodeProcessTarget(processID: 80424, xcodeVersion: "27.0")
+        let relaunchedTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: staleTarget, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_relaunch"
+        )
+
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        runtimeBox.value = manager
+        let discovery = RuntimeDocumentationTargetDiscovery(
+            base: StubXcodeTargetDiscovery(targets: [relaunchedTarget]),
+            runtimeBox: runtimeBox
+        )
+
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [
+            relaunchedTarget.processID,
+        ])
     }
 
     @Test func sessionManagerFansOutXcodeListWindowsAcrossProcessRoutesAndCachesOwners()
