@@ -269,6 +269,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let xcodeProcessRoutes: [XcodeProcessRoute]
     package let tabOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
     package let workspaceOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
+    package let unavailableXcodeProcessRoutes =
+        NIOLockedValueBox<[pid_t: UInt64]>([:])
     package let prewarmDocumentationProviderOnStartup: Bool
     package let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -317,7 +319,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? xcodeTargetDiscovery.flatMap { discovery in
                 Self.makeDefaultDocumentationProviderManager(
                     config: config,
-                    discovery: discovery,
+                    discovery: RuntimeDocumentationTargetDiscovery(
+                        base: discovery,
+                        runtimeBox: runtimeBox
+                    ),
                     transport: documentationTransport
                 )
             }
@@ -587,6 +592,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
+        unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
         invalidateControlPlane(
             reason: "debug_reset",
             clearInitialize: true,

@@ -2616,6 +2616,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let filtered = discovery.runningXcodeTargets().filter {
             excludedProcessIDs.contains($0.processID) == false
         }
+        if discovery is any PriorityOrderedXcodeTargetDiscovering {
+            return filtered
+        }
         return filtered.sorted { lhs, rhs in
             let versionComparison = Self.compareVersion(lhs.xcodeVersion, rhs.xcodeVersion)
             if versionComparison != .orderedSame {

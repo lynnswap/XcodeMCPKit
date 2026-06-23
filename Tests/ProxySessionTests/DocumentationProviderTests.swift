@@ -954,6 +954,57 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: older.processID).isEmpty)
     }
 
+    @Test func documentationProviderPreservesRuntimeCandidateOrderForFallback()
+        async throws
+    {
+        let workspaceOwner = xcodeProcessTarget(processID: 752, xcodeVersion: "26.6")
+        let documentationProvider = xcodeProcessTarget(processID: 753, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                workspaceOwner.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"owner\"}")
+                    ),
+                ],
+                documentationProvider.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"provider\"}")
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: PriorityOrderedStubXcodeTargetDiscovery(
+                targets: [workspaceOwner, documentationProvider]
+            ),
+            sessionFactory: factory
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 94, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"provider\"}")
+        #expect(await factory.startedPIDs() == [
+            workspaceOwner.processID,
+            documentationProvider.processID,
+        ])
+        #expect(await factory.documentationQueries(for: workspaceOwner.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: documentationProvider.processID) == ["UIView"])
+        #expect(await factory.stoppedPIDs() == [workspaceOwner.processID])
+    }
+
     @Test func sharedToolsListAdvertisesProxyOwnedDocumentationSearchDescriptor() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

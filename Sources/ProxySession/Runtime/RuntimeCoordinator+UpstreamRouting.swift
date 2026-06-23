@@ -275,6 +275,10 @@ extension RuntimeCoordinator {
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
+        markXcodeProcessRouteUnavailable(
+            upstreamIndex: upstreamIndex,
+            reason: "upstream_exit_\(status)"
+        )
 
         if upstreamIndex == 0 && globalInit.wasInFlight {
             globalInit.timeout?.cancel()
@@ -387,9 +391,13 @@ extension RuntimeCoordinator {
                     code: -32002,
                     message: "upstream overloaded"
                 )
-            case .unavailable:
+            case .unavailable(let reason):
                 // The exit/quarantine machinery owns health for a dead slot;
                 // a send into it must not be misdiagnosed as overload.
+                self.handleUnavailableUpstreamSend(
+                    upstreamIndex: upstreamIndex,
+                    reason: reason
+                )
                 self.failPendingSend(
                     originalRequestData: data,
                     upstreamIndex: upstreamIndex,
@@ -397,6 +405,22 @@ extension RuntimeCoordinator {
                     message: "upstream unavailable"
                 )
             }
+        }
+    }
+
+    private func handleUnavailableUpstreamSend(
+        upstreamIndex: Int,
+        reason: Upstream.UnavailableReason
+    ) {
+        switch reason {
+        case .terminated, .notStarted, .startFailed:
+            markXcodeProcessRouteUnavailable(
+                upstreamIndex: upstreamIndex,
+                reason: "upstream_\(reason)"
+            )
+            clearUpstreamState(upstreamIndex: upstreamIndex)
+        case .shuttingDown:
+            break
         }
     }
 

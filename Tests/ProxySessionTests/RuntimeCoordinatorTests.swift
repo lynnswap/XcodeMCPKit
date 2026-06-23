@@ -1975,6 +1975,143 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let badUpstream = TestUpstreamClient()
+        let goodUpstream = TestUpstreamClient()
+        let badTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
+        let goodTarget = xcodeProcessTarget(processID: 66333, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [badUpstream, goodUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: badTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: goodTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_no_workspace"
+        )
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-skip",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let goodRequest = try await goodUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        await goodUpstream.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: goodRequest),
+                        "result": [
+                            "tools": [
+                                [
+                                    "name": "XcodeRead",
+                                    "description": "read",
+                                ],
+                            ],
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for process-routed tools/list") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(await badUpstream.sentCount() == 0)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+    }
+
+    @Test func documentationCandidatesPreferWorkspaceOwnersButKeepFallbackProcesses()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let badTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
+        let goodTarget = xcodeProcessTarget(processID: 66333, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: badTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: goodTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let result = try jsonValue([
+            "structuredContent": [
+                "message": "* tabIdentifier: tab-good, workspacePath: /tmp/Good.xcworkspace",
+            ],
+        ])
+        #expect(manager.recordXcodeWindowOwners(from: result, upstreamIndex: 1))
+
+        #expect(
+            manager.documentationCandidateProcessOrder() == [
+                goodTarget.processID,
+                badTarget.processID,
+            ]
+        )
+        #expect(
+            manager.documentationCandidateProcessIDs() == Set([
+                badTarget.processID,
+                goodTarget.processID,
+            ])
+        )
+    }
+
+    @Test func documentationCandidatesSkipUnavailableWorkspaceOwner() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let badTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
+        let goodTarget = xcodeProcessTarget(processID: 66333, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: badTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: goodTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let result = try jsonValue([
+            "structuredContent": [
+                "message": "* tabIdentifier: tab-good, workspacePath: /tmp/Good.xcworkspace",
+            ],
+        ])
+        #expect(manager.recordXcodeWindowOwners(from: result, upstreamIndex: 1))
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 1,
+            reason: "test_owner_terminated"
+        )
+
+        #expect(manager.documentationCandidateProcessOrder() == [badTarget.processID])
+    }
+
     @Test func sessionManagerFansOutXcodeListWindowsAcrossProcessRoutesAndCachesOwners()
         async throws
     {

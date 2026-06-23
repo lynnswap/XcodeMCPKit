@@ -270,9 +270,7 @@ extension RuntimeCoordinator {
     package func documentationProviderRoute(
         for target: XcodeProcessTarget
     ) -> DocumentationProviderRoute? {
-        guard let route = xcodeProcessRoutes.first(where: { route in
-            route.target.processID == target.processID
-        }), let upstreamIndex = route.primaryUpstreamIndex else {
+        guard let upstreamIndex = documentationUpstreamIndex(for: target) else {
             return nil
         }
         return DocumentationProviderRoute(

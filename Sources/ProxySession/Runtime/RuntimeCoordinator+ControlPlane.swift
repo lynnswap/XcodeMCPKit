@@ -101,8 +101,17 @@ extension RuntimeCoordinator {
         requestTimeout: TimeAmount?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        let routes = xcodeProcessRoutes.compactMap { route -> ProcessToolsCatalogRoute? in
-            guard let upstreamIndex = route.primaryUpstreamIndex else {
+        let candidateProcessOrder = documentationCandidateProcessOrder()
+        let processRoutes =
+            candidateProcessOrder.map { order in
+                order.compactMap { processID in
+                    xcodeProcessRoutes.first { $0.target.processID == processID }
+                }
+            } ?? xcodeProcessRoutes
+        let routes = processRoutes.compactMap { route -> ProcessToolsCatalogRoute? in
+            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
+                ?? route.primaryUpstreamIndex
+            else {
                 return nil
             }
             return ProcessToolsCatalogRoute(target: route.target, upstreamIndex: upstreamIndex)
