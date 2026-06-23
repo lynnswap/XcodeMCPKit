@@ -26,6 +26,11 @@ extension ControlPlane {
     }
 }
 
+private enum EventLoopFutureWaitResult<Output: Sendable>: Sendable {
+    case value(Output)
+    case timedOut
+}
+
 /// The one place that decides which JSON-RPC error a control-plane or
 /// upstream-acquisition failure surfaces as.
 extension ControlPlane {
@@ -535,20 +540,28 @@ extension RuntimeCoordinator {
         onTimeout: @escaping @Sendable () -> Void = {}
     ) async throws -> Output {
         if let deadlineUptimeNs, let timeout = timeAmount(until: deadlineUptimeNs) {
-            return try await withThrowingTaskGroup(of: Output.self) { group in
+            return try await withThrowingTaskGroup(
+                of: EventLoopFutureWaitResult<Output>.self
+            ) { group in
                 group.addTask {
-                    try await future.get()
+                    .value(try await future.get())
                 }
                 group.addTask {
                     try await Task.sleep(
                         nanoseconds: UInt64(max(0, timeout.nanoseconds))
                     )
-                    onTimeout()
-                    throw TimeoutError()
+                    return .timedOut
                 }
                 let result = try await group.next()!
-                group.cancelAll()
-                return result
+                switch result {
+                case .value(let output):
+                    group.cancelAll()
+                    return output
+                case .timedOut:
+                    onTimeout()
+                    group.cancelAll()
+                    throw TimeoutError()
+                }
             }
         }
         return try await future.get()
