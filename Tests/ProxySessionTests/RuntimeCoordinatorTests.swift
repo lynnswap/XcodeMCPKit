@@ -3828,6 +3828,60 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [0])
     }
 
+    @Test func publicXcodeListWindowsWithNotificationForwardsWholeBatch() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 622, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target,
+                    0,
+                    [
+                        toolDescriptor(name: "XcodeListWindows"),
+                        toolDescriptor(name: "XcodeRead"),
+                    ]
+                ),
+            ]
+        )
+
+        let decision = try #require(
+            manager.immediateToolRoutingDecision(
+                for: [
+                    toolsCallObject(
+                        id: 122,
+                        name: "XcodeListWindows",
+                        arguments: [:]
+                    ),
+                    toolsCallObject(
+                        id: nil,
+                        name: "XcodeRead",
+                        arguments: ["path": "/tmp/file.swift"]
+                    ),
+                ]
+            )
+        )
+
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected XcodeListWindows with notification to forward whole batch")
+            return
+        }
+        #expect(preferredUpstreamIndices == [0])
+    }
+
     @Test func ownerBoundBatchRejectsToolMissingFromOwnerProcess() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

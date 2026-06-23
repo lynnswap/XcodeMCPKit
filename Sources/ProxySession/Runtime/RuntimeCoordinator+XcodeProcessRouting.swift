@@ -28,6 +28,12 @@ extension RuntimeCoordinator {
         case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
     }
 
+    private enum XcodeListWindowsRoutingEligibility {
+        case localOnly
+        case forwardWholeBatch
+        case reject
+    }
+
     package func liveXcodeListWindowsAcrossProcessRoutes(
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
@@ -352,7 +358,12 @@ extension RuntimeCoordinator {
             $0.id != nil && $0.toolName == "XcodeListWindows"
         }
         if xcodeListWindowsRequests.isEmpty == false {
-            guard allResponseBearingItemsAreXcodeListWindowsToolCalls(in: requestJSON) else {
+            switch xcodeListWindowsRoutingEligibility(in: requestJSON) {
+            case .localOnly:
+                return .localXcodeListWindows
+            case .forwardWholeBatch:
+                break
+            case .reject:
                 return .reject(
                     errors: toolRoutingErrors(
                         for: requests,
@@ -361,7 +372,6 @@ extension RuntimeCoordinator {
                     forceBatchArray: requestJSON is [Any]
                 )
             }
-            return .localXcodeListWindows
         }
         let ownerBoundRequests = requests.filter {
             processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
@@ -714,29 +724,38 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func allResponseBearingItemsAreXcodeListWindowsToolCalls(in value: Any) -> Bool {
+    private func xcodeListWindowsRoutingEligibility(
+        in value: Any
+    ) -> XcodeListWindowsRoutingEligibility {
         if let object = value as? [String: Any] {
             return JSONRPC.Message.Inspector.requestID(from: object) != nil
                 && isXcodeListWindowsToolCall(object)
+                ? .localOnly
+                : .reject
         }
         guard let array = value as? [Any],
               array.isEmpty == false else {
-            return false
+            return .reject
         }
         var sawResponseBearingItem = false
+        var sawNotificationOrUnroutedItem = false
         for item in array {
             guard let object = item as? [String: Any] else {
-                return false
+                return .reject
             }
             guard JSONRPC.Message.Inspector.requestID(from: object) != nil else {
+                sawNotificationOrUnroutedItem = true
                 continue
             }
             sawResponseBearingItem = true
             guard isXcodeListWindowsToolCall(object) else {
-                return false
+                return .reject
             }
         }
-        return sawResponseBearingItem
+        guard sawResponseBearingItem else {
+            return .reject
+        }
+        return sawNotificationOrUnroutedItem ? .forwardWholeBatch : .localOnly
     }
 
     private func isXcodeListWindowsToolCall(_ object: [String: Any]) -> Bool {
