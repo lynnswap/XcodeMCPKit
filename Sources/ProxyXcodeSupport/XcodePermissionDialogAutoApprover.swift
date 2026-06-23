@@ -203,8 +203,9 @@ extension XcodePermissionDialog {
                 }
 
                 if hasLoggedTrustedMonitoring == false {
-                    dependencies.logger.info(
-                        "Xcode permission dialog auto-approver is monitoring Xcode.",
+                    dependencies.logger.info("\(Self.monitoringLogSummary())")
+                    dependencies.logger.debug(
+                        "Xcode permission dialog auto-approver monitoring details.",
                         metadata: [
                             "agent_paths": .string(pathCandidateText)
                         ]
@@ -342,8 +343,13 @@ extension XcodePermissionDialog {
 
                 do {
                     try dependencies.axClient.pressDefaultButton(in: matchedWindow.window)
-                    dependencies.logger.info(
-                        "Auto-approved the Xcode permission dialog.",
+                    let summary = Self.approvalLogSummary(
+                        processID: matchedWindow.processID,
+                        buttonTitle: matchedWindow.decision.defaultButtonTitle
+                    )
+                    dependencies.logger.info("\(summary)")
+                    dependencies.logger.debug(
+                        "Auto-approved Xcode permission dialog details.",
                         metadata: [
                             "pid": "\(matchedWindow.processID)",
                             "button": .string(matchedWindow.decision.defaultButtonTitle),
@@ -386,6 +392,22 @@ extension XcodePermissionDialog {
             }
 
             return visibleFingerprints
+        }
+
+        private static func monitoringLogSummary() -> String {
+            """
+            Permission
+              Auto-approver: monitoring
+            """
+        }
+
+        private static func approvalLogSummary(processID: pid_t, buttonTitle: String) -> String {
+            """
+            Permission
+              Auto-approved Xcode permission dialog
+              Xcode PID: \(processID)
+              Button: \(buttonTitle)
+            """
         }
 
         private func logStructurallyEligibleWindowIfNeeded(

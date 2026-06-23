@@ -62,6 +62,79 @@ struct ProcessRunnerTests {
         #expect(output.terminationStatus == 0)
         #expect(output.stdout == expected)
     }
+
+    @Test func processRunnerTerminatesTimedOutProcess() async throws {
+        let runner = ProcessRunner()
+
+        await #expect(throws: ProcessTimeoutError.self) {
+            _ = try await waitWithTimeout(
+                "ProcessRunner should terminate a timed out process",
+                timeout: .seconds(3)
+            ) {
+                try await runner.run(
+                    ProcessRequest(
+                        label: "timeout",
+                        executablePath: "/bin/sleep",
+                        arguments: ["5"],
+                        input: nil,
+                        timeoutNanoseconds: 100_000_000
+                    )
+                )
+            }
+        }
+    }
+
+    @Test func processRunnerTimeoutDoesNotWaitForChildHeldPipeAfterParentExit() async throws {
+        let runner = ProcessRunner()
+        let script = """
+        import subprocess
+
+        subprocess.Popen(["/bin/sleep", "3"])
+        """
+
+        await #expect(throws: ProcessTimeoutError.self) {
+            _ = try await waitWithTimeout(
+                "ProcessRunner should time out without waiting for child-held pipes",
+                timeout: .seconds(2)
+            ) {
+                try await runner.run(
+                    ProcessRequest(
+                        label: "timeout-inherited-pipe",
+                        executablePath: "/usr/bin/python3",
+                        arguments: ["-c", script],
+                        input: nil,
+                        timeoutNanoseconds: 100_000_000
+                    )
+                )
+            }
+        }
+    }
+
+    @Test func processRunnerCancelsRunningProcessPromptly() async throws {
+        let runner = ProcessRunner()
+        let task = Task {
+            try await runner.run(
+                ProcessRequest(
+                    label: "cancel",
+                    executablePath: "/bin/sleep",
+                    arguments: ["5"],
+                    input: nil
+                )
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await waitWithTimeout(
+                "ProcessRunner should finish promptly when cancelled",
+                timeout: .seconds(1)
+            ) {
+                try await task.value
+            }
+        }
+    }
 }
 
 private extension String {

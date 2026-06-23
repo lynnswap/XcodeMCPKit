@@ -169,15 +169,18 @@ package actor ControlPlaneCoordinator {
         }
     }
 
-    package func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async {
+    package func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async -> JSONValue? {
         cancelInvalidatedLoads()
+        if let rawResult = brokerState.toolsCatalogRaw() {
+            syncDebug()
+            return rawResult
+        }
         guard
-            brokerState.toolsCatalogRaw() == nil,
             toolsCatalogLoad == nil,
             prewarmToolsCatalogLoad == nil
         else {
             syncDebug()
-            return
+            return nil
         }
 
         let loadID = startToolsCatalogLoad(
@@ -187,7 +190,7 @@ package actor ControlPlaneCoordinator {
         let waiterID = WaiterID()
 
         do {
-            _ = try await withCheckedThrowingContinuation {
+            return try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<JSONValue, Error>) in
                 registerToolsCatalogWaiter(
                     loadID: loadID,
@@ -202,6 +205,7 @@ package actor ControlPlaneCoordinator {
                 "tools catalog prewarm failed",
                 metadata: ["error": .string(String(describing: error))]
             )
+            return nil
         }
     }
 

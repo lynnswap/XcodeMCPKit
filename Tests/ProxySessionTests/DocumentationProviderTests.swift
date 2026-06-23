@@ -235,6 +235,58 @@ extension RuntimeCoordinatorTests {
         #expect(await upstream.sentCount() == 2)
     }
 
+    @Test func runtimeDocumentationTransportDoesNotOpenFallbackForReusedRouteToolsListFailure()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = ToggleableOverloadUpstreamClient()
+        await upstream.overloadNextSend()
+        let target = documentationProviderTarget(processID: 741, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let openStarted = TestSignal()
+        let openGate = AsyncGate()
+        let fallback = BlockingFallbackDocumentationProviderTransport(
+            openStarted: openStarted,
+            openGate: openGate
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                fallback: fallback
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let route = DocumentationProviderRoute(
+            id: "upstream-0-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: 0
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderRoutes: [route],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let update = await providerManager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(
+            update,
+            to: try jsonValue(["tools": []])
+        )
+
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(await upstream.sentCount() == 1)
+        #expect(await fallback.openCount() == 0)
+    }
+
     @Test func runtimeDocumentationTransportFallsBackWhenReusedUpstreamRouteFails()
         async throws
     {
@@ -680,6 +732,168 @@ extension RuntimeCoordinatorTests {
         #expect(observedTimeout.nanoseconds > 0)
     }
 
+    @Test func sharedToolsListWaitsForStartupDocumentationPrewarm() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let prewarmStarted = TestSignal()
+        let prewarmGate = AsyncGate()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            prewarmStarted: prewarmStarted,
+            prewarmBlocker: prewarmGate
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.prewarmDocumentationProvider()
+        try await prewarmStarted.wait(description: "documentation prewarm started")
+
+        let resultTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-docs-tools-prewarm",
+                requestTimeoutOverride: .seconds(1)
+            )
+        }
+        #expect(
+            await staysTrue(for: .milliseconds(100)) {
+                await documentationProvider.toolListUpdateCount() == 0
+            }
+        )
+
+        await prewarmGate.signal()
+        let result = try await resultTask.value
+
+        #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
+        #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
+        #expect(await documentationProvider.prewarmCount() == 1)
+        #expect(await documentationProvider.toolListUpdateCount() == 1)
+    }
+
+    @Test func sharedToolsListRefreshesAfterConsumingStartupDocumentationPrewarm() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.prewarmDocumentationProvider()
+        try await spinUntil("waiting for documentation prewarm") {
+            await documentationProvider.prewarmCount() == 1
+        }
+
+        let prewarmedResult = try await manager.sharedToolsList(
+            sessionID: "session-docs-tools-prewarm-once",
+            requestTimeoutOverride: .seconds(1)
+        )
+        #expect(toolNames(in: prewarmedResult) == ["XcodeRead", "DocumentationSearch"])
+        #expect(documentationDescriptorDescription(in: prewarmedResult) == "docs-27.0")
+
+        await documentationProvider.invalidate(reason: "test")
+        let refreshedResult = try await manager.sharedToolsList(
+            sessionID: "session-docs-tools-after-prewarm",
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        #expect(toolNames(in: refreshedResult) == ["XcodeRead"])
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: refreshedResult) == nil)
+        #expect(await documentationProvider.toolListUpdateCount() == 2)
+    }
+
+    @Test func sharedToolsListDoesNotWaitPastTimeoutForStartupDocumentationPrewarm()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let prewarmStarted = TestSignal()
+        let prewarmGate = AsyncGate()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
+            prewarmStarted: prewarmStarted,
+            prewarmBlocker: prewarmGate
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.prewarmDocumentationProvider()
+        try await prewarmStarted.wait(description: "documentation prewarm started")
+
+        let result = try await waitWithTimeout(
+            "tools/list should not wait for the blocked documentation prewarm",
+            timeout: .milliseconds(500)
+        ) {
+            try await manager.sharedToolsList(
+                sessionID: "session-docs-tools-prewarm-timeout",
+                requestTimeoutOverride: .milliseconds(20)
+            )
+        }
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
+        await prewarmGate.signal()
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await documentationProvider.prewarmCount() == 1
+        })
+    }
+
     @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -1028,6 +1242,1028 @@ extension RuntimeCoordinatorTests {
             to: try jsonValue(["tools": []])
         )
         #expect(documentationDescriptorDescription(in: cachedResult) == "docs-27.0")
+    }
+
+    @Test func documentationProviderBackgroundDiscoveryRetriesTransientDescriptorUnavailable()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 116, xcodeVersion: "27.0")
+        let transport = TransientUnavailableDescriptorTransport()
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: transport
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-transient")
+        #expect(await transport.toolsListCount() == 2)
+    }
+
+    @Test func documentationProviderBackgroundDiscoveryRepairsDescriptorMissingService()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 117, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+    }
+
+    @Test func repairedDocumentationProviderKeepsReopenedRouteForSearch()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 118, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"repaired\"}")
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 118, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"repaired\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
+        #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
+    }
+
+    @Test func repairedDocumentationProviderDoesNotCloseReusedRuntimeRoute()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 123, xcodeVersion: "26.6")
+        let transport = ReusedRouteRepairTransport()
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: transport,
+            serviceRepairer: repairer
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+        #expect(documentationDescriptorDescription(in: result) == "docs-reused")
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"reused\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await transport.openCount() == 2)
+        #expect(await transport.toolsListCount() == 2)
+        #expect(await transport.closedRoutes().isEmpty)
+    }
+
+    @Test func documentationProviderRepairDoesNotWaitPastRequestTimeout()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 120, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            ),
+            delayNanoseconds: 300_000_000
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        let update = try await waitWithTimeout(
+            "documentation repair should not exceed the caller timeout",
+            timeout: .milliseconds(500)
+        ) {
+            await manager.startBackgroundDiscovery(requestTimeout: .milliseconds(20))
+        }
+        if case .available = update {
+            Issue.record("expected repair timeout to avoid advertising DocumentationSearch")
+        }
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await repairer.cancelledPIDs() == [target.processID]
+        })
+        #expect(await factory.startedPIDs() == [target.processID])
+    }
+
+    @Test func documentationProviderUsesInstalledAssetFallbackWhenRepairDoesNotRestoreDescriptor()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 119, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 120,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer,
+            localSearchProvider: localProvider
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-fallback")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 120, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID])
+        #expect(await localProvider.requestedQueries() == ["UIView"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+    }
+
+    @Test func activeDocumentationProviderKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 122, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"first\"}")
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"second\"}")
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 122, query: "First"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let firstData, _) = firstOutcome else {
+            Issue.record("expected first handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"first\"}")
+
+        _ = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "Second"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let secondData, _) = secondOutcome else {
+            Issue.record("expected second handled outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"second\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.documentationQueries(for: target.processID) == ["First", "Second"])
+    }
+
+    @Test func backgroundDiscoveryKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"closed\"}")
+                    ),
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"reopened\"}")
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "26.5",
+                    osVersion: "26.2",
+                    documentationRelease: 900339,
+                    changedDefault: true
+                )
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            serviceRepairer: repairer
+        )
+
+        _ = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 125, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"reopened\"}")
+        #expect(await repairer.repairedPIDs() == [target.processID])
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+    }
+
+    @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeReturnsNotEnabled()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 121, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 122,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 122, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let secondData, let secondInvalidatedProvider) = secondOutcome else {
+            Issue.record("expected second handled outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(secondInvalidatedProvider == false)
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
+    }
+
+    @Test func documentationProviderInvalidatesCachedAssetFallbackWhenLocalSearchFails()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 126, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 126,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            failAfterSuccessfulCallCount: 1
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 126, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected first handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .unavailable(let reason) = secondOutcome else {
+            Issue.record("expected unavailable outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(reason.message == DocumentationProvider.UnavailableReason.userFacingMessage)
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(
+            update,
+            to: try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "asset-fallback").foundationObject,
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+    }
+
+    @Test func documentationProviderKeepsCachedAssetFallbackAfterRequestTimeout()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 128, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 128,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 1
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 128, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected first handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let timeoutOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 129, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .failed(let error, let timeoutInvalidatedProvider) = timeoutOutcome else {
+            Issue.record("expected failed timeout outcome, got \(timeoutOutcome)")
+            return
+        }
+        #expect(error is TimeoutError)
+        #expect(timeoutInvalidatedProvider == false)
+
+        let retryOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 130, query: "AppKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let retryData, let retryInvalidatedProvider) = retryOutcome else {
+            Issue.record("expected retry handled outcome, got \(retryOutcome)")
+            return
+        }
+        #expect(retryInvalidatedProvider == false)
+        #expect(try toolContentText(in: retryData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [
+            target.processID,
+            target.processID,
+            target.processID,
+        ])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit", "AppKit"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+    }
+
+    @Test func documentationProviderKeepsLiveProviderAfterInitialAssetFallbackRequestTimeout()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 129, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled,
+                        userCallResponses: [.notEnabled]
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 131,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 0
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let timeoutOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 131, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .failed(let error, let timeoutInvalidatedProvider) = timeoutOutcome else {
+            Issue.record("expected failed timeout outcome, got \(timeoutOutcome)")
+            return
+        }
+        #expect(error is TimeoutError)
+        #expect(timeoutInvalidatedProvider == false)
+
+        let retryOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 132, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let retryData, let retryInvalidatedProvider) = retryOutcome else {
+            Issue.record("expected retry handled outcome, got \(retryOutcome)")
+            return
+        }
+        #expect(retryInvalidatedProvider)
+        #expect(try toolContentText(in: retryData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI", "UIKit"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 2)
+    }
+
+    @Test func documentationProviderTriesNextCandidateAfterInitialAssetFallbackTimeout()
+        async throws
+    {
+        let newer = documentationProviderTarget(processID: 130, xcodeVersion: "26.6")
+        let older = documentationProviderTarget(processID: 131, xcodeVersion: "26.5")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                newer.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+                older.processID: [
+                    .init(
+                        serverVersion: "26.5",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 133,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 0
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [newer, older]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 133, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"older\"}")
+        #expect(await localProvider.requestedCallPIDs() == [newer.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
+        #expect(await factory.documentationQueries(for: newer.processID) == ["SwiftUI"])
+        #expect(await factory.documentationQueries(for: older.processID) == ["SwiftUI"])
+    }
+
+    @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeConfigIsBroken()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 124, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .toolErrorText(
+                            "The file “config.json” couldn’t be opened because there is no such file."
+                        ),
+                        userCallResponses: [.successText("{\"answer\":\"after-error\"}")]
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 124,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 124, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 125, query: "SwiftData"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let secondData, let secondInvalidatedProvider) = secondOutcome else {
+            Issue.record("expected second handled outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(secondInvalidatedProvider == false)
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["UIView", "SwiftData"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
+    }
+
+    @Test func liveDocumentationSearchServiceRepairerSelectsClosestSameMajorAsset()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.6",
+            documentationRelease: 950001
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-3",
+            xcodeVersion: "26.3",
+            osVersion: "26.2",
+            documentationRelease: 900124
+        )
+        let writtenValues = NIOLockedValueBox<[String]>([])
+        let repairer = LiveDocumentationSearchServiceRepairer(
+            assetRoot: root,
+            currentOSVersion: { "26.5.1" },
+            readConfigURLOverride: { nil },
+            writeConfigURLOverride: { value in
+                writtenValues.withLockedValue { $0.append(value) }
+                return true
+            }
+        )
+
+        let result = await repairer.repairDocumentationSearch(
+            for: documentationProviderTarget(processID: 118, xcodeVersion: "26.6")
+        )
+
+        guard case .repaired(let report) = result else {
+            Issue.record("expected repaired result, got \(result)")
+            return
+        }
+        #expect(report.xcodeVersion == "26.5")
+        #expect(report.osVersion == "26.2")
+        #expect(report.documentationRelease == 900339)
+        #expect(report.changedDefault)
+        #expect(report.configURL.hasPrefix("/"))
+        #expect(report.configURL.contains("xcode-26-5.asset/AssetData/config.json"))
+        #expect(writtenValues.withLockedValue { $0 } == [report.configURL])
+    }
+
+    @Test func documentationAssetLocatorTreatsTrailingZeroXcodeVersionsAsExactMatch()
+        throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26",
+            xcodeVersion: "26",
+            osVersion: "26.0",
+            documentationRelease: 900100
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-0-0",
+            xcodeVersion: "26.0.0",
+            osVersion: "26.0",
+            documentationRelease: 900200
+        )
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: root)
+
+        let asset = try #require(
+            DocumentationSearchAssetLocator.bestAsset(
+                for: "26.0",
+                currentOSVersion: "26.0",
+                from: scan.assets
+            )
+        )
+
+        #expect(asset.xcodeVersion == "26.0.0")
+        #expect(asset.documentationRelease == 900200)
+    }
+
+    @Test func liveDocumentationAssetSearchProviderReturnsInstalledAssetResults()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let runner = StubProcessRunner(output: ProcessOutput(
+            terminationStatus: 0,
+            stdout: """
+                [{"asset_id":"/documentation/UIKit/UIView","type":"symbol","framework":"UIKit","title":"UIView","content":"UIView\\nClass of UIKit"}]
+                """,
+            stderr: ""
+        ))
+        let provider = LiveDocumentationAssetSearchProvider(
+            assetRoot: root,
+            currentOSVersion: { "26.5.1" },
+            processRunner: runner
+        )
+        let target = documentationProviderTarget(processID: 123, xcodeVersion: "26.6")
+
+        #expect(await provider.descriptor(for: target) != nil)
+        let response = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "UIView"),
+            for: target,
+            timeout: .seconds(1)
+        )
+
+        let maybeText = try toolContentText(in: response)
+        let text = try #require(maybeText)
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
+        )
+        #expect(payload["source"] as? String == "installed-documentation-asset")
+        let documents = try #require(payload["documents"] as? [[String: Any]])
+        let firstTitle = documents.first?["title"] as? String
+        #expect(firstTitle == "UIView")
+        let requests = await runner.recordedRequests()
+        #expect(requests.count == 1)
+        #expect(requests.first?.arguments.prefix(2) == ["-readonly", "-json"])
+        #expect(requests.first?.arguments.joined(separator: " ").contains(
+            "xcode-26-5.asset/AssetData/documentation-db/index.sql"
+        ) == true)
+    }
+
+    @Test func liveDocumentationAssetSearchProviderTreatsEmptySQLiteOutputAsNoResults()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let runner = StubProcessRunner(output: ProcessOutput(
+            terminationStatus: 0,
+            stdout: "",
+            stderr: ""
+        ))
+        let provider = LiveDocumentationAssetSearchProvider(
+            assetRoot: root,
+            currentOSVersion: { "26.5.1" },
+            processRunner: runner
+        )
+        let target = documentationProviderTarget(processID: 127, xcodeVersion: "26.6")
+
+        let response = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "NoMatch"),
+            for: target,
+            timeout: .seconds(1)
+        )
+
+        let maybeText = try toolContentText(in: response)
+        let text = try #require(maybeText)
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
+        )
+        let documents = try #require(payload["documents"] as? [[String: Any]])
+        #expect(documents.isEmpty)
+        #expect(payload["source"] as? String == "installed-documentation-asset")
+    }
+
+    @Test func liveDocumentationAssetSearchProviderHonorsSearchTimeout()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let runner = StubProcessRunner(
+            output: ProcessOutput(terminationStatus: 0, stdout: "[]", stderr: ""),
+            delayNanoseconds: 300_000_000
+        )
+        let provider = LiveDocumentationAssetSearchProvider(
+            assetRoot: root,
+            currentOSVersion: { "26.5.1" },
+            processRunner: runner
+        )
+        let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
+
+        await #expect(throws: TimeoutError.self) {
+            _ = try await waitWithTimeout(
+                "local DocumentationSearch should honor the caller timeout",
+                timeout: .milliseconds(500)
+            ) {
+                try await provider.callDocumentationSearch(
+                    requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
+                    for: target,
+                    timeout: .milliseconds(20)
+                )
+            }
+        }
+        let requests = await runner.recordedRequests()
+        #expect(requests.count == 1)
+        #expect(requests.first?.timeoutNanoseconds == 20_000_000)
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            await runner.cancelledRunCount() == 1
+        })
     }
 
     @Test func documentationProviderBackgroundDiscoveryKeepsBaseCatalogWhenDescriptorIsAbsent()
@@ -1506,7 +2742,7 @@ extension RuntimeCoordinatorTests {
 
         let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
         let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
-        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(documentationDescriptorDescription(in: result) == "docs-26.6")
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 84, query: "SwiftUI"),
@@ -1518,8 +2754,9 @@ extension RuntimeCoordinatorTests {
             return
         }
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"actual\"}")
-        #expect(await factory.startedPIDs() == [xcode27.processID])
+        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
         #expect(await factory.requestCount(processID: xcode27.processID, method: "tools/list") == 1)
+        #expect(await factory.requestCount(processID: xcode26.processID, method: "tools/list") == 1)
         #expect(await factory.documentationQueries(for: xcode27.processID) == ["SwiftUI"])
         #expect(await factory.documentationQueries(for: xcode26.processID).isEmpty)
     }
@@ -1554,6 +2791,107 @@ extension RuntimeCoordinatorTests {
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
+        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
+    }
+
+    @Test func documentationProviderManagerContinuesFailoverWhenAssetFallbackFails()
+        async throws
+    {
+        let xcode26 = documentationProviderTarget(processID: 422, xcodeVersion: "26.6")
+        let xcode27 = documentationProviderTarget(processID: 423, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"fallback\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(id: 423, text: "{\"unused\":true}"),
+            failsCalls: true
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 75, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"fallback\"}")
+        #expect(await localProvider.requestedCallPIDs() == [xcode27.processID])
+        #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
+    }
+
+    @Test func documentationProviderManagerRetriesProviderFailureOnNextCandidate()
+        async throws
+    {
+        let xcode26 = documentationProviderTarget(processID: 424, xcodeVersion: "26.6")
+        let xcode27 = documentationProviderTarget(processID: 427, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"fallback\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .toolErrorText(
+                            "The file “config.json” couldn’t be opened because there is no such file."
+                        )
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 77, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
 

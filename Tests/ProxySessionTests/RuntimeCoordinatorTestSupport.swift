@@ -77,6 +77,58 @@ func documentationDescriptorDescription(in result: JSONValue) -> String? {
     return description
 }
 
+private struct TestDocumentationAssetInfoPlist: Encodable {
+    let properties: TestDocumentationAssetProperties
+
+    private enum CodingKeys: String, CodingKey {
+        case properties = "MobileAssetProperties"
+    }
+}
+
+private struct TestDocumentationAssetProperties: Encodable {
+    let documentationRelease: String
+    let xcodeVersion: String
+    let osVersion: String
+
+    private enum CodingKeys: String, CodingKey {
+        case documentationRelease = "DocumentationRelease"
+        case xcodeVersion = "XcodeVersion"
+        case osVersion = "OSVersion"
+    }
+}
+
+func makeInstalledDocumentationAsset(
+    root: URL,
+    name: String,
+    xcodeVersion: String,
+    osVersion: String,
+    documentationRelease: Int
+) throws {
+    let assetURL = root.appendingPathComponent("\(name).asset", isDirectory: true)
+    let assetDataURL = assetURL.appendingPathComponent("AssetData", isDirectory: true)
+    let databaseURL = assetDataURL.appendingPathComponent("documentation-db", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: databaseURL,
+        withIntermediateDirectories: true
+    )
+    let plist = TestDocumentationAssetInfoPlist(
+        properties: TestDocumentationAssetProperties(
+            documentationRelease: String(documentationRelease),
+            xcodeVersion: xcodeVersion,
+            osVersion: osVersion
+        )
+    )
+    try PropertyListEncoder().encode(plist).write(
+        to: assetURL.appendingPathComponent("Info.plist", isDirectory: false)
+    )
+    try Data("{}".utf8).write(
+        to: assetDataURL.appendingPathComponent("config.json", isDirectory: false)
+    )
+    try Data("-- sqlite index placeholder".utf8).write(
+        to: databaseURL.appendingPathComponent("index.sql", isDirectory: false)
+    )
+}
+
 func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
     try JSONSerialization.data(
         withJSONObject: [
@@ -274,6 +326,10 @@ actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouti
     func closeCount() -> Int {
         closedRouteIDs.count
     }
+
+    func openCount() -> Int {
+        openCountValue
+    }
 }
 
 struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
@@ -298,6 +354,272 @@ struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
         timeout _: TimeAmount?
     ) async throws -> Data {
         throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+}
+
+actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+    private let result: DocumentationSearchServiceRepairResult
+    private let delayNanoseconds: UInt64?
+    private var repairedProcessIDs: [pid_t] = []
+    private var cancelledProcessIDs: [pid_t] = []
+
+    init(
+        result: DocumentationSearchServiceRepairResult,
+        delayNanoseconds: UInt64? = nil
+    ) {
+        self.result = result
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func repairDocumentationSearch(
+        for target: DocumentationProviderTarget
+    ) async -> DocumentationSearchServiceRepairResult {
+        repairedProcessIDs.append(target.processID)
+        if let delayNanoseconds {
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch is CancellationError {
+                cancelledProcessIDs.append(target.processID)
+            } catch {
+            }
+        }
+        return result
+    }
+
+    func repairedPIDs() -> [pid_t] {
+        repairedProcessIDs
+    }
+
+    func cancelledPIDs() -> [pid_t] {
+        cancelledProcessIDs
+    }
+}
+
+actor StubDocumentationSearchProvider: DocumentationSearchProviding {
+    private let descriptorValue: JSONValue?
+    private let responseData: Data
+    private let failsCalls: Bool
+    private let failAfterSuccessfulCallCount: Int?
+    private let timeoutOnceAfterSuccessfulCallCount: Int?
+    private var descriptorPIDs: [pid_t] = []
+    private var callPIDs: [pid_t] = []
+    private var queries: [String] = []
+    private var successfulCallCount = 0
+    private var didThrowTimeout = false
+
+    init(
+        descriptor: JSONValue?,
+        responseData: Data,
+        failsCalls: Bool = false,
+        failAfterSuccessfulCallCount: Int? = nil,
+        timeoutOnceAfterSuccessfulCallCount: Int? = nil
+    ) {
+        self.descriptorValue = descriptor
+        self.responseData = responseData
+        self.failsCalls = failsCalls
+        self.failAfterSuccessfulCallCount = failAfterSuccessfulCallCount
+        self.timeoutOnceAfterSuccessfulCallCount = timeoutOnceAfterSuccessfulCallCount
+    }
+
+    func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
+        descriptorPIDs.append(target.processID)
+        return descriptorValue
+    }
+
+    func callDocumentationSearch(
+        requestData: Data,
+        for target: DocumentationProviderTarget,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        callPIDs.append(target.processID)
+        if let query = try documentationSearchQuery(in: requestData) {
+            queries.append(query)
+        }
+        if failsCalls {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        if let timeoutOnceAfterSuccessfulCallCount,
+           successfulCallCount >= timeoutOnceAfterSuccessfulCallCount,
+           didThrowTimeout == false
+        {
+            didThrowTimeout = true
+            throw TimeoutError()
+        }
+        if let failAfterSuccessfulCallCount,
+           successfulCallCount >= failAfterSuccessfulCallCount
+        {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        successfulCallCount += 1
+        return responseData
+    }
+
+    func requestedDescriptorPIDs() -> [pid_t] {
+        descriptorPIDs
+    }
+
+    func requestedCallPIDs() -> [pid_t] {
+        callPIDs
+    }
+
+    func requestedQueries() -> [String] {
+        queries
+    }
+}
+
+actor StubProcessRunner: ProcessRunning {
+    private let output: ProcessOutput
+    private let delayNanoseconds: UInt64?
+    private var requests: [ProcessRequest] = []
+    private var cancelledRunCountValue = 0
+
+    init(output: ProcessOutput, delayNanoseconds: UInt64? = nil) {
+        self.output = output
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        requests.append(request)
+        if let delayNanoseconds {
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch is CancellationError {
+                cancelledRunCountValue += 1
+                throw CancellationError()
+            }
+        }
+        return output
+    }
+
+    func recordedRequests() -> [ProcessRequest] {
+        requests
+    }
+
+    func cancelledRunCount() -> Int {
+        cancelledRunCountValue
+    }
+}
+
+actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
+    private var toolsListCountValue = 0
+
+    func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        DocumentationProviderRoute(
+            id: "transient-\(target.processID)",
+            target: target,
+            upstreamIndex: nil,
+            serverVersion: target.xcodeVersion
+        )
+    }
+
+    func toolsList(
+        route _: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        toolsListCountValue += 1
+        if toolsListCountValue == 1 {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        return try jsonValue([
+            "tools": [
+                documentationDescriptor(version: "transient").foundationObject,
+            ],
+        ])
+    }
+
+    func callDocumentationSearch(
+        route _: DocumentationProviderRoute,
+        requestData _: Data,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    func toolsListCount() -> Int {
+        toolsListCountValue
+    }
+}
+
+actor ReusedRouteRepairTransport: DocumentationProviderRouting {
+    private var openCountValue = 0
+    private var toolsListCountValue = 0
+    private var closedRouteIDs: [String] = []
+
+    func openRoute(
+        for target: DocumentationProviderTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        openCountValue += 1
+        return DocumentationProviderRoute(
+            id: "reused-\(target.processID)",
+            target: target,
+            upstreamIndex: 0,
+            serverVersion: target.xcodeVersion
+        )
+    }
+
+    func toolsList(
+        route _: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        toolsListCountValue += 1
+        let tools: [Any]
+        if toolsListCountValue == 1 {
+            tools = []
+        } else {
+            tools = [documentationDescriptor(version: "reused").foundationObject]
+        }
+        return try jsonValue(["tools": tools])
+    }
+
+    func callDocumentationSearch(
+        route: DocumentationProviderRoute,
+        requestData: Data,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        guard closedRouteIDs.contains(route.id) == false else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let object = try JSONSerialization.jsonObject(with: requestData, options: [])
+            as? [String: Any]
+        let id = object?["id"] ?? 0
+        return try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"answer\":\"reused\"}",
+                        ],
+                    ],
+                    "isError": false,
+                ],
+            ],
+            options: []
+        )
+    }
+
+    func close(route: DocumentationProviderRoute) async {
+        closedRouteIDs.append(route.id)
+    }
+
+    func openCount() -> Int {
+        openCountValue
+    }
+
+    func toolsListCount() -> Int {
+        toolsListCountValue
+    }
+
+    func closedRoutes() -> [String] {
+        closedRouteIDs
     }
 }
 
