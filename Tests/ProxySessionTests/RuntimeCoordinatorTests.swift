@@ -2774,7 +2774,7 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(forceBatchArray)
-        #expect(errors.map(\.id.key).contains("113"))
+        #expect(errors.map(\.id.key) == ["112", "113"])
         #expect(errors.first?.message.contains("not available") == true)
     }
 
@@ -2974,7 +2974,7 @@ struct RuntimeCoordinatorTests {
         }
         #expect(forceBatchArray == false)
         #expect(errors.map(\.id.key) == ["104"])
-        #expect(errors.first?.message.contains("is not available") == true)
+        #expect(errors.first?.message.contains("not available") == true)
     }
 
     @Test func ownerBoundBatchRejectsMixedOwnersButPinsSingleOwner() async throws {

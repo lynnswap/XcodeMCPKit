@@ -282,13 +282,10 @@ extension RuntimeCoordinator {
 
         if ownerResolution.unresolved.isEmpty == false {
             return .reject(
-                errors: ownerResolution.unresolved.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "unable to resolve Xcode window owner for tool '\(request.toolName)'"
-                    )
-                },
+                errors: toolRoutingErrors(
+                    for: requests,
+                    message: "unable to resolve Xcode window owner for one or more tools"
+                ),
                 forceBatchArray: requestJSON is [Any]
             )
         }
@@ -314,53 +311,56 @@ extension RuntimeCoordinator {
             $0.target.processID == ownerProcessID
         }) else {
             return .reject(
-                errors: ownerResolution.resolved.compactMap { resolved in
-                    guard let id = resolved.request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "Xcode process that owns '\(resolved.ownerLabel)' is no longer available"
-                    )
-                },
+                errors: toolRoutingErrors(
+                    for: requests,
+                    message: "Xcode process that owns one or more tools is no longer available"
+                ),
                 forceBatchArray: requestJSON is [Any]
             )
         }
         let ownerUpstreamIndex = firstUsableInitializedUpstreamIndex(in: ownerRoute)
 
-        let missingToolErrors = requests.compactMap { request -> ToolRoutingError? in
+        let hasMissingTools = requests.contains { request in
             guard processToolCatalogRegistry.catalog(forProcessID: ownerProcessID) != nil,
                   processToolCatalogRegistry.hasTool(
                       request.toolName,
                       processID: ownerProcessID
-                  ) == false,
-                  let id = request.id else {
-                return nil
+                  ) == false else {
+                return false
             }
-            return ToolRoutingError(
-                id: id,
-                message: "tool '\(request.toolName)' is not available in the selected Xcode process"
-            )
+            return true
         }
-        if missingToolErrors.isEmpty == false {
+        if hasMissingTools {
             return .reject(
-                errors: missingToolErrors,
+                errors: toolRoutingErrors(
+                    for: requests,
+                    message: "one or more tools are not available in the selected Xcode process"
+                ),
                 forceBatchArray: requestJSON is [Any]
             )
         }
 
         guard let ownerUpstreamIndex else {
             return .reject(
-                errors: ownerResolution.resolved.compactMap { resolved in
-                    guard let id = resolved.request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "no available upstream for Xcode process that owns '\(resolved.ownerLabel)'"
-                    )
-                },
+                errors: toolRoutingErrors(
+                    for: requests,
+                    message: "no available upstream for Xcode process that owns one or more tools"
+                ),
                 forceBatchArray: requestJSON is [Any]
             )
         }
 
         return .forward(preferredUpstreamIndex: ownerUpstreamIndex)
+    }
+
+    private func toolRoutingErrors(
+        for requests: [ToolRoutingRequest],
+        message: String
+    ) -> [ToolRoutingError] {
+        requests.compactMap { request in
+            guard let id = request.id else { return nil }
+            return ToolRoutingError(id: id, message: message)
+        }
     }
 
     private func catalogToolRoutingDecision(
