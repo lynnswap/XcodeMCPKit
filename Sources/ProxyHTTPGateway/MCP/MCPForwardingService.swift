@@ -227,6 +227,30 @@ package struct MCPForwardingService: Sendable {
         guard let parsedRequestJSONValue = JSONValue(any: requestObject) else {
             return .unavailable
         }
+        if upstreamIndexOverride == nil,
+            name == "XcodeListWindows"
+        {
+            do {
+                let result = try await sessionManager.liveXcodeListWindowsResult(
+                    route: .anyHealthy,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+                guard let resultObject = result.foundationObject as? [String: Any] else {
+                    return .unavailable
+                }
+                if let isError = resultObject["isError"] as? Bool,
+                    isError
+                {
+                    return .unavailable
+                }
+                return .success(resultObject)
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .unavailable
+            }
+        }
+
         let preferredUpstreamIndex: Int?
         if let upstreamIndexOverride {
             preferredUpstreamIndex = upstreamIndexOverride

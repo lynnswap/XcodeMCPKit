@@ -2258,6 +2258,11 @@ struct RuntimeCoordinatorTests {
         #expect(methodName(from: request0) == "tools/call")
         #expect(toolCallName(from: request0) == "XcodeListWindows")
         let message0 = "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace"
+
+        let request1 = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: request1) == "tools/call")
+        #expect(toolCallName(from: request1) == "XcodeListWindows")
+        let message1 = "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
         await upstream0.yield(
             .message(
                 try makeXcodeListWindowsResponse(
@@ -2266,11 +2271,6 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-
-        let request1 = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
-        #expect(methodName(from: request1) == "tools/call")
-        #expect(toolCallName(from: request1) == "XcodeListWindows")
-        let message1 = "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
         await upstream1.yield(
             .message(
                 try makeXcodeListWindowsResponse(

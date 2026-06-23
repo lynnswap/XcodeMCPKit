@@ -2412,6 +2412,58 @@ extension HTTPHandlerTests {
         #expect(sessionManager.requestTimeoutNotificationCount() == 0)
     }
 
+    @Test func forwardingServiceInternalXcodeListWindowsUsesLiveWindowAggregation()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 0.2)
+        let eventLoop = EmbeddedEventLoop()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: tab-live, workspacePath: /Work/Live.xcworkspace"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+        sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: 0))
+
+        let forwardingService = MCPForwardingService(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListWindows",
+            arguments: [:],
+            sessionID: "session-live-windows",
+            eventLoop: eventLoop
+        )
+
+        switch result {
+        case .success(let result):
+            let content = try #require(result["content"] as? [[String: Any]])
+            let text = try #require(content.first?["text"] as? String)
+            #expect(text.contains("tab-live"))
+        case .cancelled:
+            Issue.record("expected live XcodeListWindows aggregation to succeed")
+        case .timeout:
+            Issue.record("expected live XcodeListWindows aggregation to succeed")
+        case .unavailable:
+            Issue.record("expected live XcodeListWindows aggregation to succeed")
+        }
+
+        #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 1)
+        #expect(sessionManager.assignedUpstreamIDCount() == 0)
+    }
+
     @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream

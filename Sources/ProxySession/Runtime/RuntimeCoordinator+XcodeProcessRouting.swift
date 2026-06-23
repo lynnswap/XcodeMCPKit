@@ -16,55 +16,109 @@ extension RuntimeCoordinator {
         let workspacePath: String?
     }
 
+    private struct XcodeListWindowsRoute: Sendable {
+        let ordinal: Int
+        let target: XcodeProcessTarget
+        let upstreamIndex: Int
+    }
+
+    private enum XcodeListWindowsOutcome: Sendable {
+        case success(ordinal: Int, target: XcodeProcessTarget, upstreamIndex: Int, result: JSONValue)
+        case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
+    }
+
     package func liveXcodeListWindowsAcrossProcessRoutes(
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
-        var results: [JSONValue] = []
-        var lastError: (any Error)?
-
         let unavailable = unavailableXcodeProcessIDs()
-        for route in xcodeProcessRoutes where unavailable.contains(route.target.processID) == false {
+        let routes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
+            guard unavailable.contains(route.target.processID) == false else {
+                return nil
+            }
             guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
                 ?? route.primaryUpstreamIndex
             else {
-                continue
+                return nil
             }
-            do {
-                let result = try await awaitControlPlaneOperation {
-                    try await self.controlPlaneCoordinator.listWindows(
-                        route: .pinnedUpstream(upstreamIndex),
-                        deadlineUptimeNs: deadlineUptimeNs
-                    )
-                }
-                _ = recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
-                markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
-                results.append(result)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastError = error
-                markXcodeProcessRouteUnavailable(
-                    upstreamIndex: upstreamIndex,
-                    reason: "xcode_list_windows_failed"
-                )
-                logger.debug(
-                    "XcodeListWindows process route failed",
-                    metadata: [
-                        "pid": .string("\(route.target.processID)"),
-                        "upstream": .string("\(upstreamIndex)"),
-                        "error": .string(String(describing: error)),
-                    ]
-                )
-            }
+            return XcodeListWindowsRoute(
+                ordinal: ordinal,
+                target: route.target,
+                upstreamIndex: upstreamIndex
+            )
         }
 
-        if let merged = Self.mergedXcodeListWindowsResult(results) {
-            return merged
+        guard routes.isEmpty == false else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        if let lastError {
-            throw lastError
+
+        return try await withThrowingTaskGroup(
+            of: XcodeListWindowsOutcome.self,
+            returning: JSONValue.self
+        ) { group in
+            for route in routes {
+                group.addTask {
+                    do {
+                        let result = try await self.awaitControlPlaneOperation {
+                            try await self.controlPlaneCoordinator.listWindows(
+                                route: .pinnedUpstream(route.upstreamIndex),
+                                deadlineUptimeNs: deadlineUptimeNs
+                            )
+                        }
+                        return .success(
+                            ordinal: route.ordinal,
+                            target: route.target,
+                            upstreamIndex: route.upstreamIndex,
+                            result: result
+                        )
+                    } catch {
+                        return .failure(
+                            target: route.target,
+                            upstreamIndex: route.upstreamIndex,
+                            error: error
+                        )
+                    }
+                }
+            }
+
+            var results: [(ordinal: Int, result: JSONValue)] = []
+            var lastError: (any Error)?
+            while let outcome = try await group.next() {
+                switch outcome {
+                case .success(let ordinal, _, let upstreamIndex, let result):
+                    _ = recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
+                    markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+                    results.append((ordinal: ordinal, result: result))
+                case .failure(let target, let upstreamIndex, let error):
+                    if error is CancellationError {
+                        throw CancellationError()
+                    }
+                    lastError = error
+                    markXcodeProcessRouteUnavailable(
+                        upstreamIndex: upstreamIndex,
+                        reason: "xcode_list_windows_failed"
+                    )
+                    logger.debug(
+                        "XcodeListWindows process route failed",
+                        metadata: [
+                            "pid": .string("\(target.processID)"),
+                            "upstream": .string("\(upstreamIndex)"),
+                            "error": .string(String(describing: error)),
+                        ]
+                    )
+                }
+            }
+
+            let orderedResults = results
+                .sorted { $0.ordinal < $1.ordinal }
+                .map(\.result)
+            if let merged = Self.mergedXcodeListWindowsResult(orderedResults) {
+                return merged
+            }
+            if let lastError {
+                throw lastError
+            }
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
     package func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int? {
