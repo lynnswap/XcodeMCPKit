@@ -108,6 +108,7 @@ extension RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
         let launchRecorder = XcodeLaunchRecorder()
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -115,18 +116,21 @@ extension RuntimeCoordinatorTests {
             upstreams: [upstream],
             upstreamReadinessGate: makeTestReadinessGate(
                 readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true,
                 launchRecorder: launchRecorder
             )
         )
         defer { manager.shutdownAndWait() }
 
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() == 1
-        })
+        _ = try await waitWithTimeout("waiting for Xcode launch attempt", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 0)
+        }
         #expect(await upstream.startCount() == 0)
         #expect(await upstream.sentCount() == 0)
 
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         #expect(await launchRecorder.launchCount() == 1)
         #expect(await upstream.startCount() > 0)
@@ -139,6 +143,7 @@ extension RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
         let launchRecorder = XcodeLaunchRecorder(outcomes: [false, true])
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -146,17 +151,30 @@ extension RuntimeCoordinatorTests {
             upstreams: [upstream],
             upstreamReadinessGate: makeTestReadinessGate(
                 readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true,
                 launchRecorder: launchRecorder
             )
         )
         defer { manager.shutdownAndWait() }
 
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() == 2
-        })
+        _ = try await waitWithTimeout("waiting for first Xcode launch attempt", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 0)
+        }
+        _ = try await waitWithTimeout(
+            "waiting for readiness poll after failed launch",
+            timeout: .seconds(2)
+        ) {
+            try await sleepRecorder.nextSleep(at: 0)
+        }
+        await sleepRecorder.resumeNext()
+        _ = try await waitWithTimeout("waiting for retried Xcode launch attempt", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 1)
+        }
         #expect(await upstream.startCount() == 0)
 
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
     }
 
@@ -168,6 +186,7 @@ extension RuntimeCoordinatorTests {
         let readiness = ReadinessFlag(isReady: false)
         let availability = AvailabilityFlag(isAvailable: false)
         let launchRecorder = XcodeLaunchRecorder()
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -176,19 +195,26 @@ extension RuntimeCoordinatorTests {
             upstreamReadinessGate: makeTestReadinessGate(
                 readiness: readiness,
                 availability: availability,
-                launchRetryIntervalNanoseconds: 2_000_000,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true,
+                launchRetryIntervalNanoseconds: 0,
                 launchRecorder: launchRecorder
             )
         )
         defer { manager.shutdownAndWait() }
 
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() >= 2
-        })
+        _ = try await waitWithTimeout("waiting for first Xcode launch attempt", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 0)
+        }
+        await sleepRecorder.resumeNext()
+        _ = try await waitWithTimeout("waiting for retried Xcode launch attempt", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 1)
+        }
         #expect(await upstream.startCount() == 0)
 
         await availability.setAvailable(true)
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         #expect(await upstream.startCount() > 0)
     }
@@ -201,6 +227,7 @@ extension RuntimeCoordinatorTests {
         let readiness = ReadinessFlag(isReady: false)
         let availability = AvailabilityFlag(isAvailable: true)
         let launchRecorder = XcodeLaunchRecorder()
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -209,6 +236,8 @@ extension RuntimeCoordinatorTests {
             upstreamReadinessGate: makeTestReadinessGate(
                 readiness: readiness,
                 availability: availability,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true,
                 launchRecorder: launchRecorder
             )
         )
@@ -218,14 +247,22 @@ extension RuntimeCoordinatorTests {
         #expect(await launchRecorder.launchCount() == 0)
         #expect(await upstream.startCount() == 0)
 
+        _ = try await waitWithTimeout(
+            "waiting for readiness poll sleep",
+            timeout: .seconds(2)
+        ) {
+            try await sleepRecorder.nextSleep(at: 0)
+        }
         await availability.setAvailable(false)
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await launchRecorder.launchCount() == 1
-        })
+        await sleepRecorder.resumeNext()
+        _ = try await waitWithTimeout("waiting for Xcode launch after quit", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 0)
+        }
         #expect(await upstream.startCount() == 0)
 
         await availability.setAvailable(true)
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         #expect(await upstream.startCount() > 0)
     }
@@ -370,9 +407,7 @@ extension RuntimeCoordinatorTests {
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let upstreamID = try extractUpstreamID(from: sent)
         await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.isInitialized()
-        })
+        _ = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
 
         await readiness.setReady(false)
         await upstream.yield(.exit(1))
@@ -405,9 +440,7 @@ extension RuntimeCoordinatorTests {
         let firstInit = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let firstInitID = try extractUpstreamID(from: firstInit)
         await upstream.yield(.message(try makeInitializeResponse(id: firstInitID)))
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.isInitialized()
-        })
+        _ = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
 
         await upstream.yield(.exit(1))
         _ = try await waitWithTimeout(
@@ -423,9 +456,7 @@ extension RuntimeCoordinatorTests {
         let secondInit = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         let secondInitID = try extractUpstreamID(from: secondInit)
         await upstream.yield(.message(try makeInitializeResponse(id: secondInitID)))
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.isInitialized()
-        })
+        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
 
         await upstream.yield(.exit(1))
         let secondDelay = try await waitWithTimeout(

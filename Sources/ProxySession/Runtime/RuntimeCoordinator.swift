@@ -41,13 +41,19 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 package struct RuntimeCoordinatorTestHooks: Sendable {
     package var documentationPrewarmWaitStarted: (@Sendable () -> Void)?
     package var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    package var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    package var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
 
     package init(
         documentationPrewarmWaitStarted: (@Sendable () -> Void)? = nil,
-        initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil
+        initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
+        upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
+        toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil
     ) {
         self.documentationPrewarmWaitStarted = documentationPrewarmWaitStarted
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
+        self.upstreamEventHandled = upstreamEventHandled
+        self.toolsListRefreshCompleted = toolsListRefreshCompleted
     }
 }
 
@@ -577,6 +583,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     case .exit(let status):
                         self.handleUpstreamExit(status, upstreamIndex: upstreamIndex)
                     }
+                    self.testHooks.upstreamEventHandled?(upstreamIndex)
                 }
             }
         }

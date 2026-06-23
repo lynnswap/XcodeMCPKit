@@ -800,7 +800,8 @@ private final class ProcessOutputTimeoutWaiter: @unchecked Sendable {
 
     func wait(
         for task: Task<ProcessOutput, Error>,
-        timeout: TimeAmount
+        timeout: TimeAmount,
+        clock: ClockClient
     ) async throws -> ProcessOutput {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -814,7 +815,7 @@ private final class ProcessOutputTimeoutWaiter: @unchecked Sendable {
                     }
                 })
                 addTask(Task {
-                    try? await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
+                    await clock.sleep(.nanoseconds(timeout.nanoseconds))
                     guard Task.isCancelled == false else {
                         return
                     }
@@ -888,7 +889,8 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
 
     func wait(
         for task: Task<DocumentationSearchServiceRepairResult, Never>,
-        timeout: TimeAmount
+        timeout: TimeAmount,
+        clock: ClockClient
     ) async -> Result {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -898,7 +900,7 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
                     self.resume(Result(repairResult: result, timedOut: false))
                 })
                 addTask(Task {
-                    try? await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
+                    await clock.sleep(.nanoseconds(timeout.nanoseconds))
                     guard Task.isCancelled == false else {
                         return
                     }
@@ -981,16 +983,19 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     private let assetRoot: URL
     private let currentOSVersion: @Sendable () -> String
     private let processRunner: any ProcessRunning
+    private let clock: ClockClient
 
     package init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
         currentOSVersion: @escaping @Sendable () -> String =
             DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
-        processRunner: any ProcessRunning = ProcessRunner()
+        processRunner: any ProcessRunning = ProcessRunner(),
+        clock: ClockClient = .liveValue
     ) {
         self.assetRoot = assetRoot
         self.currentOSVersion = currentOSVersion
         self.processRunner = processRunner
+        self.clock = clock
     }
 
     package func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
@@ -1063,7 +1068,8 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
                     for: Task {
                         try await processRunner.run(request)
                     },
-                    timeout: timeout
+                    timeout: timeout,
+                    clock: clock
                 )
             } else {
                 output = try await processRunner.run(request)
@@ -1552,6 +1558,21 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
     }
 }
 
+package struct DocumentationProviderManagerTestHooks: Sendable {
+    package var providerPreparationReused: @Sendable (pid_t) -> Void
+    package var providerPreparationWaitTimedOut: @Sendable (pid_t) -> Void
+
+    package init(
+        providerPreparationReused: @escaping @Sendable (pid_t) -> Void = { _ in },
+        providerPreparationWaitTimedOut: @escaping @Sendable (pid_t) -> Void = { _ in }
+    ) {
+        self.providerPreparationReused = providerPreparationReused
+        self.providerPreparationWaitTimedOut = providerPreparationWaitTimedOut
+    }
+
+    package static let noop = Self()
+}
+
 package actor DocumentationProviderManager: DocumentationProviderManaging {
     private enum CandidateBackend: Sendable {
         case xcode(route: DocumentationProviderRoute, descriptor: JSONValue?)
@@ -1676,6 +1697,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let serviceRepairer: any DocumentationSearchServiceRepairing
     private let localSearchProvider: any DocumentationSearchProviding
     private let clock: ClockClient
+    private let testHooks: DocumentationProviderManagerTestHooks
     private let logger: Logger
     private let descriptorRefreshRetryDelayNanoseconds: Int64 = 250_000_000
     private var activeProvider: ActiveProvider?
@@ -1694,6 +1716,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
         clock: ClockClient = .liveValue,
+        testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.discovery = discovery
@@ -1704,6 +1727,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.serviceRepairer = serviceRepairer
         self.localSearchProvider = localSearchProvider
         self.clock = clock
+        self.testHooks = testHooks
         self.logger = logger
     }
 
@@ -1716,6 +1740,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
         clock: ClockClient = .liveValue,
+        testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
     ) {
         self.init(
@@ -1730,6 +1755,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             serviceRepairer: serviceRepairer,
             localSearchProvider: localSearchProvider,
             clock: clock,
+            testHooks: testHooks,
             logger: logger
         )
     }
@@ -2352,6 +2378,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let preparation: ProviderPreparation
         if let existing = providerPreparations[target.processID] {
             preparation = existing
+            testHooks.providerPreparationReused(target.processID)
         } else {
             let timeout = providerSelectionTimeout
             preparation = ProviderPreparation(
@@ -2368,6 +2395,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         do {
             profile = try await waitForPreparation(preparation, requestTimeout: requestTimeout)
         } catch is PreparationWaitTimedOut {
+            testHooks.providerPreparationWaitTimedOut(target.processID)
             throw TimeoutError()
         } catch is CancellationError {
             throw CancellationError()
@@ -2768,7 +2796,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             for: Task {
                 await serviceRepairer.repairDocumentationSearch(for: target)
             },
-            timeout: timeout
+            timeout: timeout,
+            clock: clock
         )
         return result.repairResult
     }

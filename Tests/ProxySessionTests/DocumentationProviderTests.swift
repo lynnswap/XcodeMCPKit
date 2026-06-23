@@ -714,11 +714,17 @@ extension RuntimeCoordinatorTests {
             return activePromise.futureResult
         }
         _ = activeFuture
-        try await waitForCondition(timeoutSeconds: 2) {
+        try await waitWithTimeout(
+            "waiting for active lease registration",
+            timeout: .seconds(2)
+        ) {
+            try await eventLoop.submit { () }.get()
+        }
+        #expect(
             manager.debugSnapshot().leases.contains { lease in
                 lease.leaseID == activeLeaseID.uuidString && lease.state == .active
             }
-        }
+        )
 
         let started = Date()
         let outcome = try await providerManager.callDocumentationSearch(
@@ -733,9 +739,7 @@ extension RuntimeCoordinatorTests {
         }
         #expect(error is TimeoutError)
         #expect(await upstream.sentCount() == 0)
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
     }
 
     @Test func runtimeDocumentationTransportClosesFallbackOpenedAfterRouteInvalidation()
@@ -896,11 +900,9 @@ extension RuntimeCoordinatorTests {
         } catch {
             Issue.record("expected CancellationError for documentation tools/list, got \(error)")
         }
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            let snapshot = manager.debugSnapshot()
-            return snapshot.queuedRequestCount == 0
-                && snapshot.upstreams[0].activeCorrelatedRequestCount == 0
-        })
+        let toolsListSnapshot = manager.debugSnapshot()
+        #expect(toolsListSnapshot.queuedRequestCount == 0)
+        #expect(toolsListSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
 
         let searchTask = Task {
             try await manager.documentationProviderCall(
@@ -926,11 +928,9 @@ extension RuntimeCoordinatorTests {
         } catch {
             Issue.record("expected CancellationError for documentation search, got \(error)")
         }
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            let snapshot = manager.debugSnapshot()
-            return snapshot.queuedRequestCount == 0
-                && snapshot.upstreams[0].activeCorrelatedRequestCount == 0
-        })
+        let searchSnapshot = manager.debugSnapshot()
+        #expect(searchSnapshot.queuedRequestCount == 0)
+        #expect(searchSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func runtimeDocumentationTransportFallsBackToDirectCandidateWhenNoUpstreamRouteExists()
@@ -1111,8 +1111,8 @@ extension RuntimeCoordinatorTests {
         )
 
         manager.prewarmDocumentationProvider()
-        try await spinUntil("waiting for documentation prewarm") {
-            await documentationProvider.prewarmCount() == 1
+        try await waitWithTimeout("waiting for documentation prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
         }
 
         let prewarmedResult = try await manager.sharedToolsList(
@@ -1201,8 +1201,8 @@ extension RuntimeCoordinatorTests {
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(await documentationProvider.toolListUpdateCount() == 0)
         await prewarmGate.signal()
-        try await spinUntil("waiting for documentation prewarm to finish") {
-            await documentationProvider.prewarmCount() == 1
+        try await waitWithTimeout("waiting for documentation prewarm to finish") {
+            try await documentationProvider.waitForPrewarmCount(1)
         }
     }
 
@@ -1475,8 +1475,8 @@ extension RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
 
-        try await spinUntil("waiting for documentation provider startup prewarm") {
-            await documentationProvider.prewarmCount() == 1
+        try await waitWithTimeout("waiting for documentation provider startup prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
         }
 
         let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
@@ -1580,12 +1580,27 @@ extension RuntimeCoordinatorTests {
     {
         let target = documentationProviderTarget(processID: 116, xcodeVersion: "27.0")
         let transport = TransientUnavailableDescriptorTransport()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
-            transport: transport
+            transport: transport,
+            clock: clock
         )
 
-        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let updateTask = Task {
+            await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        }
+        try await waitWithTimeout("waiting for first transient descriptor refresh") {
+            try await transport.waitForToolsListCount(1)
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(250)
+        )
+        let update = try await waitWithTimeout("waiting for descriptor refresh retry") {
+            await updateTask.value
+        }
         let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
 
         #expect(documentationDescriptorDescription(in: result) == "docs-transient")
@@ -1747,6 +1762,8 @@ extension RuntimeCoordinatorTests {
         async throws
     {
         let target = documentationProviderTarget(processID: 120, xcodeVersion: "26.6")
+        let repairGate = OperationGate<pid_t>()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1775,27 +1792,40 @@ extension RuntimeCoordinatorTests {
                     changedDefault: true
                 )
             ),
-            delayNanoseconds: 300_000_000
+            gate: repairGate
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
             sessionFactory: factory,
-            serviceRepairer: repairer
+            serviceRepairer: repairer,
+            clock: clock
         )
 
+        let updateTask = Task {
+            await manager.startBackgroundDiscovery(requestTimeout: .milliseconds(20))
+        }
+        try await waitWithTimeout("waiting for documentation repair to suspend") {
+            try await repairGate.waitUntilWaiting(for: target.processID, count: 1)
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(20)
+        )
         let update = try await waitWithTimeout(
             "documentation repair should not exceed the caller timeout",
             timeout: .milliseconds(500)
         ) {
-            await manager.startBackgroundDiscovery(requestTimeout: .milliseconds(20))
+            await updateTask.value
         }
         if case .available = update {
             Issue.record("expected repair timeout to avoid advertising DocumentationSearch")
         }
         #expect(await repairer.repairedPIDs() == [target.processID])
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await repairer.cancelledPIDs() == [target.processID]
-        })
+        _ = try await waitWithTimeout("waiting for repair cancellation") {
+            try await repairer.nextCancelledPID(at: 0)
+        }
+        #expect(await repairer.cancelledPIDs() == [target.processID])
         #expect(await factory.startedPIDs() == [target.processID])
     }
 
@@ -2571,35 +2601,50 @@ extension RuntimeCoordinatorTests {
             osVersion: "26.2",
             documentationRelease: 900339
         )
+        let runGate = OperationGate<Int>()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let runner = StubProcessRunner(
             output: ProcessOutput(terminationStatus: 0, stdout: "[]", stderr: ""),
-            delayNanoseconds: 300_000_000
+            gate: runGate
         )
         let provider = LiveDocumentationAssetSearchProvider(
             assetRoot: root,
             currentOSVersion: { "26.5.1" },
-            processRunner: runner
+            processRunner: runner,
+            clock: clock
         )
         let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
 
+        let searchTask = Task {
+            try await provider.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
+                for: target,
+                timeout: .milliseconds(20)
+            )
+        }
+        try await waitWithTimeout("waiting for local DocumentationSearch process to suspend") {
+            try await runGate.waitUntilWaiting(for: 1, count: 1)
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(20)
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await waitWithTimeout(
                 "local DocumentationSearch should honor the caller timeout",
                 timeout: .milliseconds(500)
             ) {
-                try await provider.callDocumentationSearch(
-                    requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
-                    for: target,
-                    timeout: .milliseconds(20)
-                )
+                try await searchTask.value
             }
         }
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
         #expect(requests.first?.timeoutNanoseconds == 20_000_000)
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            await runner.cancelledRunCount() == 1
-        })
+        _ = try await waitWithTimeout("waiting for local search process cancellation") {
+            try await runner.nextCancelledRunCount(at: 0)
+        }
+        #expect(await runner.cancelledRunCount() == 1)
     }
 
     @Test func documentationProviderBackgroundDiscoveryKeepsBaseCatalogWhenDescriptorIsAbsent()
@@ -3248,6 +3293,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerPreservesTimeForFallbackWhenNewestHangs() async throws {
         let xcode26 = documentationProviderTarget(processID: 425, xcodeVersion: "26.6")
         let xcode27 = documentationProviderTarget(processID: 426, xcodeVersion: "27.0")
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3270,13 +3316,31 @@ extension RuntimeCoordinatorTests {
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
-            sessionFactory: factory
+            sessionFactory: factory,
+            clock: clock
         )
 
-        let outcome = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 88, query: "UIView"),
-            requestTimeoutOverride: .milliseconds(200)
+        let outcomeTask = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 88, query: "UIView"),
+                requestTimeoutOverride: .milliseconds(200)
+            )
+        }
+        try await waitWithTimeout("waiting for newest candidate documentation search") {
+            try await factory.waitForRequestCount(
+                1,
+                processID: xcode27.processID,
+                method: "tools/call"
+            )
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(100)
         )
+        let outcome = try await waitWithTimeout("waiting for fallback candidate response") {
+            try await outcomeTask.value
+        }
 
         guard case .handled(let responseData, let invalidatedProvider) = outcome else {
             Issue.record("expected handled outcome, got \(outcome)")
@@ -3482,6 +3546,8 @@ extension RuntimeCoordinatorTests {
 
     @Test func documentationProviderManagerCoalescesConcurrentBackgroundDiscovery() async throws {
         let target = documentationProviderTarget(processID: 470, xcodeVersion: "27.0")
+        let startGate = OperationGate<pid_t>()
+        let preparationReused = TestSignal()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -3493,16 +3559,38 @@ extension RuntimeCoordinatorTests {
                     ),
                 ],
             ],
-            startDelayNanoseconds: 100_000_000
+            startGate: startGate
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
+            sessionFactory: factory,
+            testHooks: DocumentationProviderManagerTestHooks(
+                providerPreparationReused: { processID in
+                    if processID == target.processID {
+                        preparationReused.signal()
+                    }
+                }
+            )
         )
 
-        async let firstUpdate = manager.startBackgroundDiscovery(requestTimeout: .seconds(2))
-        async let secondUpdate = manager.startBackgroundDiscovery(requestTimeout: .seconds(2))
-        let results = await [firstUpdate, secondUpdate]
+        let firstUpdate = Task {
+            await manager.startBackgroundDiscovery(requestTimeout: .seconds(2))
+        }
+        try await waitWithTimeout("waiting for first documentation provider preparation") {
+            try await startGate.waitUntilWaiting(for: target.processID, count: 1)
+        }
+        let secondUpdate = Task {
+            await manager.startBackgroundDiscovery(requestTimeout: .seconds(2))
+        }
+        try await preparationReused.wait(
+            description: "waiting for second discovery to reuse the in-flight preparation"
+        )
+        #expect(await factory.startAttempts() == [target.processID])
+        await startGate.release(target.processID)
+
+        let results = try await waitWithTimeout("waiting for coalesced background discovery") {
+            await [firstUpdate.value, secondUpdate.value]
+        }
 
         for update in results {
             let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
@@ -3515,6 +3603,8 @@ extension RuntimeCoordinatorTests {
 
     @Test func documentationProviderManagerCoalescesConcurrentInitialDocumentationSearch() async throws {
         let target = documentationProviderTarget(processID: 480, xcodeVersion: "27.0")
+        let startGate = OperationGate<pid_t>()
+        let preparationReused = TestSignal()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -3527,22 +3617,44 @@ extension RuntimeCoordinatorTests {
                     ),
                 ],
             ],
-            startDelayNanoseconds: 100_000_000
+            startGate: startGate
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
+            sessionFactory: factory,
+            testHooks: DocumentationProviderManagerTestHooks(
+                providerPreparationReused: { processID in
+                    if processID == target.processID {
+                        preparationReused.signal()
+                    }
+                }
+            )
         )
 
-        async let firstOutcome = manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 101, query: "UIView"),
-            requestTimeoutOverride: .seconds(2)
+        let firstOutcome = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 101, query: "UIView"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await waitWithTimeout("waiting for first documentation search preparation") {
+            try await startGate.waitUntilWaiting(for: target.processID, count: 1)
+        }
+        let secondOutcome = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 102, query: "SwiftUI"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await preparationReused.wait(
+            description: "waiting for second search to reuse the in-flight preparation"
         )
-        async let secondOutcome = manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 102, query: "SwiftUI"),
-            requestTimeoutOverride: .seconds(2)
-        )
-        let outcomes = try await [firstOutcome, secondOutcome]
+        #expect(await factory.startAttempts() == [target.processID])
+        await startGate.release(target.processID)
+
+        let outcomes = try await waitWithTimeout("waiting for coalesced documentation searches") {
+            try await [firstOutcome.value, secondOutcome.value]
+        }
 
         var ids: [Int64] = []
         for outcome in outcomes {
@@ -3562,6 +3674,10 @@ extension RuntimeCoordinatorTests {
         async throws
     {
         let target = documentationProviderTarget(processID: 485, xcodeVersion: "27.0")
+        let startGate = OperationGate<pid_t>()
+        let preparationReused = TestSignal()
+        let preparationTimedOut = TestSignal()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -3573,29 +3689,66 @@ extension RuntimeCoordinatorTests {
                     ),
                 ],
             ],
-            startDelayNanoseconds: 500_000_000
+            startGate: startGate
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
+            sessionFactory: factory,
+            clock: clock,
+            testHooks: DocumentationProviderManagerTestHooks(
+                providerPreparationReused: { processID in
+                    if processID == target.processID {
+                        preparationReused.signal()
+                    }
+                },
+                providerPreparationWaitTimedOut: { processID in
+                    if processID == target.processID {
+                        preparationTimedOut.signal()
+                    }
+                }
+            )
         )
 
-        let shortStart = Date()
-        let shortOutcome = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 85, query: "too soon"),
-            requestTimeoutOverride: .milliseconds(1)
+        let shortRequest = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 85, query: "too soon"),
+                requestTimeoutOverride: .milliseconds(1)
+            )
+        }
+        try await waitWithTimeout("waiting for shared preparation to suspend") {
+            try await startGate.waitUntilWaiting(for: target.processID, count: 1)
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(1)
         )
-        #expect(Date().timeIntervalSince(shortStart) < 0.1)
+        try await preparationTimedOut.wait(
+            description: "waiting for short preparation wait timeout"
+        )
+        let shortOutcome = try await waitWithTimeout("waiting for short request outcome") {
+            try await shortRequest.value
+        }
         guard case .failed(let error, _) = shortOutcome else {
             Issue.record("expected timeout outcome, got \(shortOutcome)")
             return
         }
         #expect(error is TimeoutError)
 
-        let followUpOutcome = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 86, query: "SwiftUI"),
-            requestTimeoutOverride: .seconds(2)
+        let followUpRequest = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 86, query: "SwiftUI"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await preparationReused.wait(
+            description: "waiting for follow-up request to reuse the in-flight preparation"
         )
+        #expect(await factory.startAttempts() == [target.processID])
+        await startGate.release(target.processID)
+        let followUpOutcome = try await waitWithTimeout("waiting for follow-up request outcome") {
+            try await followUpRequest.value
+        }
         guard case .handled(let responseData, _) = followUpOutcome else {
             Issue.record("expected handled outcome, got \(followUpOutcome)")
             return

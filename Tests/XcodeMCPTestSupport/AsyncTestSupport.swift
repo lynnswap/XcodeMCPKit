@@ -19,8 +19,16 @@ package actor RecordedValues<Value: Sendable> {
         let continuation: CheckedContinuation<Value, Error>
     }
 
+    private struct MatchingWaiter {
+        let id: UUID
+        let startingAt: Int
+        let predicate: @Sendable (Value) -> Bool
+        let continuation: CheckedContinuation<Value, Error>
+    }
+
     private var values: [Value] = []
     private var waiters: [Waiter] = []
+    private var matchingWaiters: [MatchingWaiter] = []
 
     package init() {}
 
@@ -39,6 +47,16 @@ package actor RecordedValues<Value: Sendable> {
             }
         }
         waiters = remaining
+
+        var remainingMatchingWaiters: [MatchingWaiter] = []
+        for waiter in matchingWaiters {
+            if index >= waiter.startingAt, waiter.predicate(value) {
+                waiter.continuation.resume(returning: value)
+            } else {
+                remainingMatchingWaiters.append(waiter)
+            }
+        }
+        matchingWaiters = remainingMatchingWaiters
     }
 
     package func snapshot() -> [Value] {
@@ -71,12 +89,304 @@ package actor RecordedValues<Value: Sendable> {
         }
     }
 
+    package func nextValue(
+        startingAt startIndex: Int = 0,
+        matching predicate: @escaping @Sendable (Value) -> Bool
+    ) async throws -> Value {
+        let startIndex = max(startIndex, 0)
+        if let existing = firstValue(startingAt: startIndex, matching: predicate) {
+            return existing
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if let existing = firstValue(startingAt: startIndex, matching: predicate) {
+                    continuation.resume(returning: existing)
+                    return
+                }
+                matchingWaiters.append(
+                    MatchingWaiter(
+                        id: waiterID,
+                        startingAt: startIndex,
+                        predicate: predicate,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelMatchingWaiter(id: waiterID) }
+        }
+    }
+
     private func cancelWaiter(id: UUID) {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else {
             return
         }
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelMatchingWaiter(id: UUID) {
+        guard let index = matchingWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = matchingWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func firstValue(
+        startingAt startIndex: Int,
+        matching predicate: @Sendable (Value) -> Bool
+    ) -> Value? {
+        guard startIndex < values.count else {
+            return nil
+        }
+        for index in startIndex..<values.count where predicate(values[index]) {
+            return values[index]
+        }
+        return nil
+    }
+}
+
+package final class LockedRecordedValues<Value: Sendable>: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let index: Int
+        let continuation: CheckedContinuation<Value, Error>
+    }
+
+    private struct State {
+        var values: [Value] = []
+        var waiters: [Waiter] = []
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    package init() {}
+
+    package func append(_ value: Value) {
+        let waitersToResume = state.withLockedValue { state -> [(Waiter, Value)] in
+            state.values.append(value)
+
+            var remaining: [Waiter] = []
+            var resumptions: [(Waiter, Value)] = []
+            for waiter in state.waiters {
+                if state.values.indices.contains(waiter.index) {
+                    resumptions.append((waiter, state.values[waiter.index]))
+                } else {
+                    remaining.append(waiter)
+                }
+            }
+            state.waiters = remaining
+            return resumptions
+        }
+
+        for (waiter, value) in waitersToResume {
+            waiter.continuation.resume(returning: value)
+        }
+    }
+
+    package func count() -> Int {
+        state.withLockedValue { $0.values.count }
+    }
+
+    private func value(at index: Int) -> Value? {
+        state.withLockedValue { state in
+            guard state.values.indices.contains(index) else {
+                return nil
+            }
+            return state.values[index]
+        }
+    }
+
+    package func nextValue(at index: Int) async throws -> Value {
+        if let existing = value(at: index) {
+            return existing
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let existing = state.withLockedValue { state -> Value? in
+                    if state.values.indices.contains(index) {
+                        return state.values[index]
+                    }
+                    state.waiters.append(
+                        Waiter(id: waiterID, index: index, continuation: continuation)
+                    )
+                    return nil
+                }
+                if let existing {
+                    continuation.resume(returning: existing)
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter(id: waiterID)
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        let waiter = state.withLockedValue { state -> Waiter? in
+            guard let index = state.waiters.firstIndex(where: { $0.id == id }) else {
+                return nil
+            }
+            return state.waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(throwing: CancellationError())
+    }
+}
+
+package actor OperationGate<Key: Hashable & Sendable> {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private struct SuspensionWaiter {
+        let id: UUID
+        let key: Key
+        let minimumWaiters: Int
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var waitersByKey: [Key: [Waiter]] = [:]
+    private var releaseCreditsByKey: [Key: Int] = [:]
+    private var suspensionWaiters: [SuspensionWaiter] = []
+
+    package init() {}
+
+    package func wait(for key: Key) async throws {
+        if consumeReleaseCredit(for: key) {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if consumeReleaseCredit(for: key) {
+                    continuation.resume(returning: ())
+                    return
+                }
+                waitersByKey[key, default: []].append(
+                    Waiter(id: waiterID, continuation: continuation)
+                )
+                resumeReadySuspensionWaiters()
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID, key: key)
+            }
+        }
+    }
+
+    package func waitUntilWaiting(for key: Key, count minimumWaiters: Int) async throws {
+        guard waitingCount(for: key) < minimumWaiters else {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if waitingCount(for: key) >= minimumWaiters {
+                    continuation.resume(returning: ())
+                    return
+                }
+                suspensionWaiters.append(
+                    SuspensionWaiter(
+                        id: waiterID,
+                        key: key,
+                        minimumWaiters: minimumWaiters,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelSuspensionWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func release(_ key: Key, count: Int = 1) {
+        guard count > 0 else {
+            return
+        }
+
+        var resumptions: [CheckedContinuation<Void, Error>] = []
+        var remainingReleaseCount = count
+        while remainingReleaseCount > 0 {
+            guard var waiters = waitersByKey[key], waiters.isEmpty == false else {
+                releaseCreditsByKey[key, default: 0] += remainingReleaseCount
+                break
+            }
+            let waiter = waiters.removeFirst()
+            if waiters.isEmpty {
+                waitersByKey.removeValue(forKey: key)
+            } else {
+                waitersByKey[key] = waiters
+            }
+            resumptions.append(waiter.continuation)
+            remainingReleaseCount -= 1
+        }
+
+        for continuation in resumptions {
+            continuation.resume(returning: ())
+        }
+    }
+
+    private func waitingCount(for key: Key) -> Int {
+        waitersByKey[key]?.count ?? 0
+    }
+
+    private func consumeReleaseCredit(for key: Key) -> Bool {
+        guard let credits = releaseCreditsByKey[key], credits > 0 else {
+            return false
+        }
+        if credits == 1 {
+            releaseCreditsByKey.removeValue(forKey: key)
+        } else {
+            releaseCreditsByKey[key] = credits - 1
+        }
+        return true
+    }
+
+    private func cancelWaiter(id: UUID, key: Key) {
+        guard var waiters = waitersByKey[key],
+              let index = waiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        if waiters.isEmpty {
+            waitersByKey.removeValue(forKey: key)
+        } else {
+            waitersByKey[key] = waiters
+        }
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelSuspensionWaiter(id: UUID) {
+        guard let index = suspensionWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = suspensionWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumeReadySuspensionWaiters() {
+        var ready: [SuspensionWaiter] = []
+        var remaining: [SuspensionWaiter] = []
+        for waiter in suspensionWaiters {
+            if waitingCount(for: waiter.key) >= waiter.minimumWaiters {
+                ready.append(waiter)
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        suspensionWaiters = remaining
+        for waiter in ready {
+            waiter.continuation.resume(returning: ())
+        }
     }
 }
 
@@ -111,6 +421,9 @@ package func waitUntil(
     pollInterval: Duration = .milliseconds(10),
     _ condition: @escaping @Sendable () async -> Bool
 ) async -> Bool {
+    // Use this only as a guard around external I/O or OS-driven eventual state.
+    // Intra-process concurrency tests should prefer RecordedValues, OperationGate,
+    // or TestClock so the awaited synchronization point is explicit.
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
 
@@ -125,46 +438,6 @@ package func waitUntil(
     }
 
     return await condition()
-}
-
-package func spinUntil(
-    _ description: String = "condition was not satisfied",
-    maxIterations: Int = 200,
-    _ condition: @escaping @Sendable () async -> Bool
-) async throws {
-    for _ in 0..<maxIterations {
-        if await condition() {
-            return
-        }
-        await Task.yield()
-    }
-    throw AsyncTestTimeoutError(description: description)
-}
-
-package func waitUntilCount(
-    _ expectedCount: Int,
-    count: @escaping @Sendable () async -> Int,
-    timeout: Duration = .seconds(5)
-) async -> Bool {
-    await waitUntil(timeout: timeout) {
-        await count() >= expectedCount
-    }
-}
-
-package func nextValue<Value: Sendable>(
-    _ description: String,
-    timeout: Duration = .seconds(5),
-    value: @escaping @Sendable () async throws -> Value?
-) async throws -> Value {
-    try await waitWithTimeout(description, timeout: timeout) {
-        while true {
-            try Task.checkCancellation()
-            if let next = try await value() {
-                return next
-            }
-            await Task.yield()
-        }
-    }
 }
 
 package func shutdown(_ group: EventLoopGroup) async {

@@ -55,18 +55,92 @@ extension ControlPlane {
 
 extension ControlPlane {
     package final class DebugMirror: Sendable {
-        private let state = NIOLockedValueBox<ControlPlane.DebugSnapshot?>(nil)
+        private struct Waiter {
+            let id: UUID
+            let predicate: @Sendable (ControlPlane.DebugSnapshot) -> Bool
+            let continuation: CheckedContinuation<ControlPlane.DebugSnapshot, Error>
+        }
+
+        private struct State {
+            var snapshot: ControlPlane.DebugSnapshot?
+            var waiters: [Waiter] = []
+        }
+
+        private let state = NIOLockedValueBox(State())
 
         package init() {}
 
         package func snapshot() -> ControlPlane.DebugSnapshot? {
-            state.withLockedValue { $0 }
+            state.withLockedValue { $0.snapshot }
         }
 
         package func overwrite(_ snapshot: ControlPlane.DebugSnapshot?) {
-            state.withLockedValue { state in
-                state = snapshot
+            let resumptions = state.withLockedValue { state -> [Waiter] in
+                state.snapshot = snapshot
+                guard let snapshot else {
+                    return []
+                }
+                var ready: [Waiter] = []
+                var remaining: [Waiter] = []
+                for waiter in state.waiters {
+                    if waiter.predicate(snapshot) {
+                        ready.append(waiter)
+                    } else {
+                        remaining.append(waiter)
+                    }
+                }
+                state.waiters = remaining
+                return ready
             }
+
+            if let snapshot {
+                for waiter in resumptions {
+                    waiter.continuation.resume(returning: snapshot)
+                }
+            }
+        }
+
+        package func waitForSnapshot(
+            matching predicate: @escaping @Sendable (ControlPlane.DebugSnapshot) -> Bool
+        ) async throws -> ControlPlane.DebugSnapshot {
+            if let snapshot = self.snapshot(), predicate(snapshot) {
+                return snapshot
+            }
+
+            let waiterID = UUID()
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let immediate = state.withLockedValue {
+                        state -> ControlPlane.DebugSnapshot? in
+                        if let snapshot = state.snapshot, predicate(snapshot) {
+                            return snapshot
+                        }
+                        state.waiters.append(
+                            Waiter(
+                                id: waiterID,
+                                predicate: predicate,
+                                continuation: continuation
+                            )
+                        )
+                        return nil
+                    }
+                    if let immediate {
+                        continuation.resume(returning: immediate)
+                    }
+                }
+            } onCancel: {
+                cancelWaiter(id: waiterID)
+            }
+        }
+
+        private func cancelWaiter(id: UUID) {
+            let waiter = state.withLockedValue { state -> Waiter? in
+                guard let index = state.waiters.firstIndex(where: { $0.id == id }) else {
+                    return nil
+                }
+                return state.waiters.remove(at: index)
+            }
+            waiter?.continuation.resume(throwing: CancellationError())
         }
     }
 }
