@@ -1965,7 +1965,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                return .failed(error)
+                await invalidate(provider, reason: "installed_documentation_asset_call_failed")
+                return .rejected(processID: processID, permanentlyUnusable: true)
             }
         }
         do {

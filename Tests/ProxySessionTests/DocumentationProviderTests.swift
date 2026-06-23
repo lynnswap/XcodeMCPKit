@@ -1718,6 +1718,78 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
+    @Test func documentationProviderInvalidatesCachedAssetFallbackWhenLocalSearchFails()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 126, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 126,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            failAfterSuccessfulCallCount: 1
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 126, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome else {
+            Issue.record("expected first handled outcome, got \(firstOutcome)")
+            return
+        }
+        #expect(firstInvalidatedProvider)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .unavailable(let reason) = secondOutcome else {
+            Issue.record("expected unavailable outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(reason.message == DocumentationProvider.UnavailableReason.userFacingMessage)
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(
+            update,
+            to: try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "asset-fallback").foundationObject,
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ])
+        )
+
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+    }
+
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeConfigIsBroken()
         async throws
     {
