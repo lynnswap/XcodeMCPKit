@@ -19,8 +19,16 @@ package actor RecordedValues<Value: Sendable> {
         let continuation: CheckedContinuation<Value, Error>
     }
 
+    private struct MatchingWaiter {
+        let id: UUID
+        let startingAt: Int
+        let predicate: @Sendable (Value) -> Bool
+        let continuation: CheckedContinuation<Value, Error>
+    }
+
     private var values: [Value] = []
     private var waiters: [Waiter] = []
+    private var matchingWaiters: [MatchingWaiter] = []
 
     package init() {}
 
@@ -39,6 +47,16 @@ package actor RecordedValues<Value: Sendable> {
             }
         }
         waiters = remaining
+
+        var remainingMatchingWaiters: [MatchingWaiter] = []
+        for waiter in matchingWaiters {
+            if index >= waiter.startingAt, waiter.predicate(value) {
+                waiter.continuation.resume(returning: value)
+            } else {
+                remainingMatchingWaiters.append(waiter)
+            }
+        }
+        matchingWaiters = remainingMatchingWaiters
     }
 
     package func snapshot() -> [Value] {
@@ -71,12 +89,63 @@ package actor RecordedValues<Value: Sendable> {
         }
     }
 
+    package func nextValue(
+        startingAt startIndex: Int = 0,
+        matching predicate: @escaping @Sendable (Value) -> Bool
+    ) async throws -> Value {
+        let startIndex = max(startIndex, 0)
+        if let existing = firstValue(startingAt: startIndex, matching: predicate) {
+            return existing
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if let existing = firstValue(startingAt: startIndex, matching: predicate) {
+                    continuation.resume(returning: existing)
+                    return
+                }
+                matchingWaiters.append(
+                    MatchingWaiter(
+                        id: waiterID,
+                        startingAt: startIndex,
+                        predicate: predicate,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelMatchingWaiter(id: waiterID) }
+        }
+    }
+
     private func cancelWaiter(id: UUID) {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else {
             return
         }
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelMatchingWaiter(id: UUID) {
+        guard let index = matchingWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = matchingWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func firstValue(
+        startingAt startIndex: Int,
+        matching predicate: @Sendable (Value) -> Bool
+    ) -> Value? {
+        guard startIndex < values.count else {
+            return nil
+        }
+        for index in startIndex..<values.count where predicate(values[index]) {
+            return values[index]
+        }
+        return nil
     }
 }
 
@@ -122,7 +191,7 @@ package final class LockedRecordedValues<Value: Sendable>: @unchecked Sendable {
         state.withLockedValue { $0.values.count }
     }
 
-    package func value(at index: Int) -> Value? {
+    private func value(at index: Int) -> Value? {
         state.withLockedValue { state in
             guard state.values.indices.contains(index) else {
                 return nil
@@ -266,14 +335,7 @@ package actor OperationGate<Key: Hashable & Sendable> {
         }
     }
 
-    package func releaseAll(for key: Key) {
-        let waiters = waitersByKey.removeValue(forKey: key) ?? []
-        for waiter in waiters {
-            waiter.continuation.resume(returning: ())
-        }
-    }
-
-    package func waitingCount(for key: Key) -> Int {
+    private func waitingCount(for key: Key) -> Int {
         waitersByKey[key]?.count ?? 0
     }
 
@@ -376,48 +438,6 @@ package func waitUntil(
     }
 
     return await condition()
-}
-
-package func spinUntil(
-    _ description: String = "condition was not satisfied",
-    maxIterations: Int = 200,
-    _ condition: @escaping @Sendable () async -> Bool
-) async throws {
-    // Legacy fallback for places that cannot expose an explicit async event yet.
-    // New deterministic tests should use continuation-backed primitives instead.
-    for _ in 0..<maxIterations {
-        if await condition() {
-            return
-        }
-        await Task.yield()
-    }
-    throw AsyncTestTimeoutError(description: description)
-}
-
-package func waitUntilCount(
-    _ expectedCount: Int,
-    count: @escaping @Sendable () async -> Int,
-    timeout: Duration = .seconds(5)
-) async -> Bool {
-    await waitUntil(timeout: timeout) {
-        await count() >= expectedCount
-    }
-}
-
-package func nextValue<Value: Sendable>(
-    _ description: String,
-    timeout: Duration = .seconds(5),
-    value: @escaping @Sendable () async throws -> Value?
-) async throws -> Value {
-    try await waitWithTimeout(description, timeout: timeout) {
-        while true {
-            try Task.checkCancellation()
-            if let next = try await value() {
-                return next
-            }
-            await Task.yield()
-        }
-    }
 }
 
 package func shutdown(_ group: EventLoopGroup) async {

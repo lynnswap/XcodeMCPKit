@@ -1559,16 +1559,13 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
 }
 
 package struct DocumentationProviderManagerTestHooks: Sendable {
-    package var providerPreparationStarted: @Sendable (pid_t) -> Void
     package var providerPreparationReused: @Sendable (pid_t) -> Void
     package var providerPreparationWaitTimedOut: @Sendable (pid_t) -> Void
 
     package init(
-        providerPreparationStarted: @escaping @Sendable (pid_t) -> Void = { _ in },
         providerPreparationReused: @escaping @Sendable (pid_t) -> Void = { _ in },
         providerPreparationWaitTimedOut: @escaping @Sendable (pid_t) -> Void = { _ in }
     ) {
-        self.providerPreparationStarted = providerPreparationStarted
         self.providerPreparationReused = providerPreparationReused
         self.providerPreparationWaitTimedOut = providerPreparationWaitTimedOut
     }
@@ -2393,7 +2390,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 }
             )
             providerPreparations[target.processID] = preparation
-            testHooks.providerPreparationStarted(target.processID)
         }
         let profile: CandidateProfile
         do {

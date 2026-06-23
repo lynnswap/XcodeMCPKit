@@ -18,14 +18,11 @@ extension RefreshCodeIssues {
     }
 
     package struct TestHooks: Sendable {
-        package var permitAcquired: @Sendable (_ key: String, _ permit: Permit) -> Void
         package var waiterQueued: @Sendable (_ key: String, _ permit: Permit) -> Void
 
         package init(
-            permitAcquired: @escaping @Sendable (_ key: String, _ permit: Permit) -> Void = { _, _ in },
             waiterQueued: @escaping @Sendable (_ key: String, _ permit: Permit) -> Void = { _, _ in }
         ) {
-            self.permitAcquired = permitAcquired
             self.waiterQueued = waiterQueued
         }
 
@@ -148,7 +145,6 @@ extension RefreshCodeIssues {
                 pendingForKey: 0,
                 pendingTotal: pendingWaiterCount
             )
-            testHooks.permitAcquired(key, permit)
             return permit
         }
 
@@ -298,7 +294,6 @@ extension RefreshCodeIssues {
             } else {
                 waitersByKey[key] = waiters
             }
-            testHooks.permitAcquired(key, next.permit)
             next.continuation.resume(returning: next.permit)
             return
         }

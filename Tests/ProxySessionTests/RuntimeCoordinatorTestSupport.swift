@@ -1326,6 +1326,13 @@ actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
     func nextSent(at index: Int) async throws -> Data {
         try await sentMessages.nextValue(at: index)
     }
+
+    func nextSent(
+        startingAt index: Int,
+        matching predicate: @escaping @Sendable (Data) -> Bool
+    ) async throws -> Data {
+        try await sentMessages.nextValue(startingAt: index, matching: predicate)
+    }
 }
 
 actor ReadinessFlag {
@@ -1427,11 +1434,16 @@ actor AvailabilityFlag {
 actor ControlledReadinessSleep {
     private var sleeps: [UInt64] = []
     private var sleepContinuations: [CheckedContinuation<Void, Never>] = []
+    private var releaseCredits = 0
     private var waiters: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
 
     func sleep(nanoseconds: UInt64) async {
         sleeps.append(nanoseconds)
         resumeReadyWaiters()
+        if releaseCredits > 0 {
+            releaseCredits -= 1
+            return
+        }
         await withCheckedContinuation { continuation in
             sleepContinuations.append(continuation)
         }
@@ -1447,7 +1459,10 @@ actor ControlledReadinessSleep {
     }
 
     func resumeNext() {
-        guard !sleepContinuations.isEmpty else { return }
+        guard !sleepContinuations.isEmpty else {
+            releaseCredits += 1
+            return
+        }
         sleepContinuations.removeFirst().resume()
     }
 
@@ -1846,11 +1861,11 @@ func sentValue(
     at index: Int,
     timeout: Duration = .seconds(5)
 ) async throws -> Data {
-    try await nextValue(
+    try await waitWithTimeout(
         "waiting for sent message \(index + 1)",
         timeout: timeout
     ) {
-        await upstream.sentValue(at: index)
+        try await upstream.nextSent(at: index)
     }
 }
 
@@ -1859,11 +1874,11 @@ func sentValue(
     at index: Int,
     timeout: Duration = .seconds(5)
 ) async throws -> Data {
-    try await nextValue(
+    try await waitWithTimeout(
         "waiting for sent message \(index + 1)",
         timeout: timeout
     ) {
-        await upstream.sentValue(at: index)
+        try await upstream.nextSent(at: index)
     }
 }
 
@@ -1872,11 +1887,11 @@ func sentValue(
     at index: Int,
     timeout: Duration = .seconds(5)
 ) async throws -> Data {
-    try await nextValue(
+    try await waitWithTimeout(
         "waiting for sent message \(index + 1)",
         timeout: timeout
     ) {
-        await upstream.sentValue(at: index)
+        try await upstream.nextSent(at: index)
     }
 }
 
@@ -1885,12 +1900,10 @@ func sentMessage(
     matching predicate: @escaping @Sendable (Data) -> Bool,
     timeout: Duration = .seconds(5)
 ) async throws -> Data {
-    try await nextValue(
+    try await waitWithTimeout(
         "waiting for matching sent message",
         timeout: timeout
     ) {
-        try Task.checkCancellation()
-        let sent = await upstream.sent()
-        return sent.first(where: predicate)
+        try await upstream.nextSent(matching: predicate)
     }
 }

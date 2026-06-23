@@ -4208,12 +4208,14 @@ struct RuntimeCoordinatorTests {
         let serverInfo = try #require(result["serverInfo"] as? [String: Any])
         #expect(serverInfo["name"] as? String == "cached-handshake")
 
-        let secondWarmRetry = try await nextValue(
+        let secondWarmRetry = try await waitWithTimeout(
             "primary should start another warm initialize after overload",
             timeout: .seconds(2)
         ) {
-            let sent = await upstream0.sent()
-            return sent.dropFirst(3).first(where: { methodName(from: $0) == "initialize" })
+            try await upstream0.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "initialize" }
+            )
         }
         #expect(methodName(from: secondWarmRetry) == "initialize")
     }

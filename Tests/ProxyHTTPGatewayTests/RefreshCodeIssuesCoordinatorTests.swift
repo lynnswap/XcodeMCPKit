@@ -8,10 +8,10 @@ import XcodeMCPTestSupport
 struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorSerializesRequestsForSameKey() async throws {
         let clock = TestClock()
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
             waitClock: clock,
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
@@ -36,9 +36,8 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        let queued = try await nextHookEvent(hookEvents, at: 1, "waiting for second waiter to queue")
-        #expect(queued.kind == .waiterQueued)
-        #expect(queued.key == "windowtab-same")
+        let queuedKey = try await nextQueuedKey(queuedKeys, at: 0, "waiting for second waiter to queue")
+        #expect(queuedKey == "windowtab-same")
         #expect(await acquisitions.snapshot() == ["first"])
         await releaseFirst.signal()
 
@@ -82,10 +81,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorAcceptsManyQueuedWaitersForSameKey() async throws {
         let clock = TestClock()
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
             waitClock: clock,
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let releaseFirst = AsyncGate()
         let completionCount = RecordedValues<String>()
@@ -117,7 +116,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        _ = try await nextHookEvent(hookEvents, at: 100, "waiting for queued waiters")
+        _ = try await nextQueuedKey(queuedKeys, at: 99, "waiting for queued waiters")
         #expect(await completionCount.count() == 1)
 
         await releaseFirst.signal()
@@ -131,10 +130,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorTimeoutRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
             waitClock: clock,
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
@@ -167,7 +166,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for timed waiter to queue")
+        _ = try await nextQueuedKey(queuedKeys, at: 0, "waiting for timed waiter to queue")
         await clock.sleep(untilSuspendedBy: 1)
         clock.advance(by: .milliseconds(50))
         _ = try await nextRecorded(outcomes, at: 0, "waiting for timed-out waiter to finish")
@@ -191,10 +190,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorNilRequestTimeoutKeepsQueuedWaiterWaiting() async throws {
         let clock = TestClock()
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
             waitClock: clock,
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let releaseFirst = AsyncGate()
         let firstAcquired = AsyncGate()
@@ -224,7 +223,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for unbounded waiter to queue")
+        _ = try await nextQueuedKey(queuedKeys, at: 0, "waiting for unbounded waiter to queue")
         clock.advance(by: .seconds(10))
         #expect(await outcomes.count() == 0)
 
@@ -236,10 +235,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorCancellationRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
             waitClock: clock,
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
@@ -271,7 +270,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for cancellable waiter to queue")
+        _ = try await nextQueuedKey(queuedKeys, at: 0, "waiting for cancellable waiter to queue")
         cancelledTask.cancel()
         _ = try await nextRecorded(outcomes, at: 0, "waiting for cancelled waiter to finish")
         #expect(await outcomes.snapshot() == ["cancelled"])
@@ -294,10 +293,10 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorResetCancelsQueuedWaiters() async throws {
         let clock = TestClock()
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
             waitClock: clock,
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
@@ -328,7 +327,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for reset waiter to queue")
+        _ = try await nextQueuedKey(queuedKeys, at: 0, "waiting for reset waiter to queue")
         await coordinator.reset()
 
         _ = try await nextRecorded(outcomes, at: 0, "waiting for queued waiter to cancel")
@@ -383,9 +382,9 @@ struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorResetKeepsSameKeySerializedUntilCancelledExecutionExits()
         async throws
     {
-        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let queuedKeys = LockedRecordedValues<String>()
         let coordinator = RefreshCodeIssues.Coordinator(
-            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+            testHooks: refreshCoordinatorHooks(recording: queuedKeys)
         )
         let activeStarted = TestSignal()
         let activeCancellationObserved = TestSignal()
@@ -438,7 +437,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for second execution to queue")
+        _ = try await nextQueuedKey(queuedKeys, at: 0, "waiting for second execution to queue")
         #expect(await acquisitions.snapshot() == ["first", "first-cancelling"])
 
         await allowActiveExit.signal()
@@ -456,44 +455,12 @@ struct RefreshCodeIssuesCoordinatorTests {
     }
 }
 
-private struct RefreshCoordinatorHookEvent: Sendable {
-    enum Kind: Sendable {
-        case permitAcquired
-        case waiterQueued
-    }
-
-    let kind: Kind
-    let key: String
-    let queuePosition: Int
-    let pendingForKey: Int
-    let pendingTotal: Int
-}
-
 private func refreshCoordinatorHooks(
-    recording events: LockedRecordedValues<RefreshCoordinatorHookEvent>
+    recording queuedKeys: LockedRecordedValues<String>
 ) -> RefreshCodeIssues.Coordinator.TestHooks {
     RefreshCodeIssues.Coordinator.TestHooks(
-        permitAcquired: { key, permit in
-            events.append(
-                RefreshCoordinatorHookEvent(
-                    kind: .permitAcquired,
-                    key: key,
-                    queuePosition: permit.queuePosition,
-                    pendingForKey: permit.pendingForKey,
-                    pendingTotal: permit.pendingTotal
-                )
-            )
-        },
-        waiterQueued: { key, permit in
-            events.append(
-                RefreshCoordinatorHookEvent(
-                    kind: .waiterQueued,
-                    key: key,
-                    queuePosition: permit.queuePosition,
-                    pendingForKey: permit.pendingForKey,
-                    pendingTotal: permit.pendingTotal
-                )
-            )
+        waiterQueued: { key, _ in
+            queuedKeys.append(key)
         }
     )
 }
@@ -508,12 +475,12 @@ private func nextRecorded<Value: Sendable>(
     }
 }
 
-private func nextHookEvent(
-    _ events: LockedRecordedValues<RefreshCoordinatorHookEvent>,
+private func nextQueuedKey(
+    _ queuedKeys: LockedRecordedValues<String>,
     at index: Int,
     _ description: String
-) async throws -> RefreshCoordinatorHookEvent {
+) async throws -> String {
     try await waitWithTimeout(description) {
-        try await events.nextValue(at: index)
+        try await queuedKeys.nextValue(at: index)
     }
 }

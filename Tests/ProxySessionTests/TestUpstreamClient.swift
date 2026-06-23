@@ -53,6 +53,12 @@ actor TestUpstreamClient: UpstreamSlotControlling {
         try await sentMessages.nextValue(at: index)
     }
 
+    func nextSent(
+        matching predicate: @escaping @Sendable (Data) -> Bool
+    ) async throws -> Data {
+        try await sentMessages.nextValue(matching: predicate)
+    }
+
     func startCount() async -> Int {
         startCountValue
     }
