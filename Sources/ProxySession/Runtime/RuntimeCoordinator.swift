@@ -39,101 +39,18 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 }
 
 package struct RuntimeCoordinatorTestHooks: Sendable {
-    package var documentationPrewarmWaitStarted: (@Sendable () -> Void)?
     package var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
 
     package init(
-        documentationPrewarmWaitStarted: (@Sendable () -> Void)? = nil,
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil
     ) {
-        self.documentationPrewarmWaitStarted = documentationPrewarmWaitStarted
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
-    }
-}
-
-private final class DocumentationToolListUpdateWaiter: @unchecked Sendable {
-    struct Result: Sendable {
-        let update: DocumentationProvider.ToolListUpdate
-        let timedOut: Bool
-    }
-
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Result, Never>?
-    private var tasks: [Task<Void, Never>] = []
-    private var resolved = false
-
-    func wait(
-        for task: Task<DocumentationProvider.ToolListUpdate, Never>,
-        timeout: TimeAmount,
-        clock: ClockClient
-    ) async -> Result {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                setContinuation(continuation)
-                addTask(Task {
-                    let update = await task.value
-                    self.resume(Result(update: update, timedOut: false))
-                })
-                addTask(Task {
-                    await clock.sleep(.nanoseconds(timeout.nanoseconds))
-                    guard Task.isCancelled == false else {
-                        return
-                    }
-                    self.resume(Result(update: .unavailable, timedOut: true))
-                })
-            }
-        } onCancel: {
-            resume(Result(update: .unavailable, timedOut: true))
-        }
-    }
-
-    private func setContinuation(
-        _ continuation: CheckedContinuation<Result, Never>
-    ) {
-        lock.lock()
-        if resolved {
-            lock.unlock()
-            continuation.resume(returning: Result(update: .unavailable, timedOut: true))
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-    }
-
-    private func addTask(_ task: Task<Void, Never>) {
-        lock.lock()
-        if resolved {
-            lock.unlock()
-            task.cancel()
-            return
-        }
-        tasks.append(task)
-        lock.unlock()
-    }
-
-    private func resume(_ result: Result) {
-        lock.lock()
-        guard resolved == false else {
-            lock.unlock()
-            return
-        }
-        resolved = true
-        let continuation = continuation
-        self.continuation = nil
-        let tasks = tasks
-        self.tasks.removeAll()
-        lock.unlock()
-
-        for task in tasks {
-            task.cancel()
-        }
-        continuation?.resume(returning: result)
     }
 }
 
@@ -1121,128 +1038,41 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     private func toolsListResultWithDocumentationOverlay(
         baseResult: JSONValue,
-        requestTimeout: TimeAmount?,
+        requestTimeout _: TimeAmount?,
         metadata: Logger.Metadata
     ) async -> JSONValue {
-        guard let documentationProviderManager else {
+        guard documentationProviderManager != nil else {
             return baseResult
         }
-        let update = await documentationToolListUpdateForPublicToolsList(
-            manager: documentationProviderManager,
-            requestTimeout: requestTimeout
-        )
-        return toolsListResultApplyingDocumentationUpdate(
-            update,
-            to: baseResult,
+        return toolsListResultExposingProxyOwnedDocumentationSearch(
+            baseResult: baseResult,
             metadata: metadata
         )
     }
 
     private func startupPrewarmToolsListResultWithDocumentationOverlay(
         baseResult: JSONValue,
-        requestTimeout: TimeAmount?,
+        requestTimeout _: TimeAmount?,
         metadata: Logger.Metadata
     ) async -> JSONValue {
-        guard let documentationProviderManager else {
+        guard documentationProviderManager != nil else {
             return baseResult
         }
-        let update: DocumentationProvider.ToolListUpdate
-        if let prewarmResult = await consumeDocumentationPrewarmTaskUpdate(
-            requestTimeout: requestTimeout
-        ) {
-            update = prewarmResult.update
-        } else {
-            update = await documentationProviderManager.startBackgroundDiscovery(
-                requestTimeout: requestTimeout
-            )
-        }
-        return toolsListResultApplyingDocumentationUpdate(
-            update,
-            to: baseResult,
+        return toolsListResultExposingProxyOwnedDocumentationSearch(
+            baseResult: baseResult,
             metadata: metadata
         )
     }
 
-    private func toolsListResultApplyingDocumentationUpdate(
-        _ update: DocumentationProvider.ToolListUpdate,
-        to baseResult: JSONValue,
+    private func toolsListResultExposingProxyOwnedDocumentationSearch(
+        baseResult: JSONValue,
         metadata: Logger.Metadata
     ) -> JSONValue {
-        recordDocumentationToolListUpdate(update)
-        var logMetadata = metadata
-        logMetadata["update"] = .string(update.debugLabel)
         logger.debug(
-            "Applied documentation provider tools/list overlay",
-            metadata: logMetadata
+            "Applied proxy-owned DocumentationSearch tools/list overlay",
+            metadata: metadata
         )
-        return DocumentationProvider.ToolCatalog.applying(update, to: baseResult)
-    }
-
-    private func documentationToolListUpdateForPublicToolsList(
-        manager: any DocumentationProviderManaging,
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationProvider.ToolListUpdate {
-        if let prewarmResult = await consumeDocumentationPrewarmTaskUpdate(
-            requestTimeout: requestTimeout
-        ) {
-            let prewarmUpdate = prewarmResult.update
-            if case .available = prewarmUpdate {
-                return prewarmUpdate
-            }
-            if prewarmResult.timedOut {
-                return .unavailable
-            }
-        }
-        return await documentationToolListUpdate(
-            manager: manager,
-            requestTimeout: requestTimeout
-        )
-    }
-
-    private func consumeDocumentationPrewarmTaskUpdate(
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationToolListUpdateWaiter.Result? {
-        guard let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) else {
-            return nil
-        }
-        let result = await documentationToolListUpdate(
-            fromPrewarmTask: documentationPrewarmTask,
-            requestTimeout: requestTimeout
-        )
-        if result.timedOut == false {
-            documentationPrewarmTaskBox.withLockedValue { $0 = nil }
-        }
-        return result
-    }
-
-    private func documentationToolListUpdate(
-        fromPrewarmTask task: Task<DocumentationProvider.ToolListUpdate, Never>,
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationToolListUpdateWaiter.Result {
-        guard requestTimeout?.nanoseconds != 0 else {
-            return DocumentationToolListUpdateWaiter.Result(update: .unavailable, timedOut: true)
-        }
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return DocumentationToolListUpdateWaiter.Result(
-                update: await task.value,
-                timedOut: false
-            )
-        }
-        testHooks.documentationPrewarmWaitStarted?()
-        let result = await DocumentationToolListUpdateWaiter().wait(
-            for: task,
-            timeout: requestTimeout,
-            clock: clock
-        )
-        if result.timedOut {
-            logger.debug(
-                "documentation provider prewarm did not finish before tools/list timeout",
-                metadata: [
-                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
-                ]
-            )
-        }
-        return result
+        return DocumentationProvider.ToolCatalog.exposingProxyOwnedSearch(in: baseResult)
     }
 
     private func recordDocumentationToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {
@@ -1264,45 +1094,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             "Documentation provider invalidated",
             metadata: ["reason": .string(reason)]
         )
-    }
-
-    private func documentationToolListUpdate(
-        manager: any DocumentationProviderManaging,
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationProvider.ToolListUpdate {
-        guard requestTimeout?.nanoseconds != 0 else {
-            return .unavailable
-        }
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return await manager.toolListUpdate(requestTimeout: requestTimeout)
-        }
-        do {
-            return try await withThrowingTaskGroup(of: DocumentationProvider.ToolListUpdate.self) {
-                group in
-                group.addTask {
-                    await manager.toolListUpdate(requestTimeout: requestTimeout)
-                }
-                let clock = self.clock
-                group.addTask {
-                    await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
-                    throw TimeoutError()
-                }
-                guard let update = try await group.next() else {
-                    throw TimeoutError()
-                }
-                group.cancelAll()
-                return update
-            }
-        } catch {
-            logger.debug(
-                "documentation provider tools/list update failed",
-                metadata: [
-                    "error": .string(String(describing: error)),
-                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
-                ]
-            )
-            return .unavailable
-        }
     }
 
     func encodeJSONRPCResultBuffer(

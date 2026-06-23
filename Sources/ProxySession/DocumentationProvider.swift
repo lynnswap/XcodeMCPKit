@@ -210,6 +210,23 @@ extension DocumentationProvider {
     package enum ToolCatalog {
         package static let toolName = "DocumentationSearch"
 
+        package static let proxyDescriptor: JSONValue = .object([
+            "name": .string(toolName),
+            "description": .string("Search Apple developer documentation."),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "query": .object([
+                        "type": .string("string"),
+                        "description": .string("Documentation search query."),
+                    ]),
+                ]),
+                "required": .array([
+                    .string("query"),
+                ]),
+            ]),
+        ])
+
         package static func applying(
             _ update: DocumentationProvider.ToolListUpdate,
             to result: JSONValue
@@ -222,6 +239,10 @@ extension DocumentationProvider {
             case .available(let descriptor):
                 return replacingDocumentationSearch(in: result, with: descriptor)
             }
+        }
+
+        package static func exposingProxyOwnedSearch(in result: JSONValue) -> JSONValue {
+            replacingDocumentationSearch(in: result, with: proxyDescriptor)
         }
 
         package static func descriptor(in result: JSONValue) -> JSONValue? {

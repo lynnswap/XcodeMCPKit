@@ -2238,6 +2238,17 @@ struct RuntimeCoordinatorTests {
         #expect(timeout?.nanoseconds == TimeAmount.seconds(60).nanoseconds)
     }
 
+    @Test func controlPlaneTimeoutStaysShortForSlowDiscoveryWork() throws {
+        let disabledDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 0)
+        #expect(disabledDefault?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+
+        let longDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 300)
+        #expect(longDefault?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+
+        let shortDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 3)
+        #expect(shortDefault?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
+    }
+
     @Test func sessionManagerStillAutoInitializesWhenRequestTimeoutIsDisabled() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
