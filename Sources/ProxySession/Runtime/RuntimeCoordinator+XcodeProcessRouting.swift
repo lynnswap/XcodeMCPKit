@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import ProxyCore
 import ProxyMCP
 
 extension RuntimeCoordinator {
@@ -147,16 +148,11 @@ extension RuntimeCoordinator {
         return nil
     }
 
-    private struct WindowEntry {
-        let tabIdentifier: String
-        let workspacePath: String
-    }
-
-    private static func windowEntries(in result: JSONValue) -> [WindowEntry] {
+    private static func windowEntries(in result: JSONValue) -> [XcodeListWindowsEntry] {
         guard let message = xcodeListWindowsMessage(in: result) else {
             return []
         }
-        return parseXcodeListWindowsMessage(message)
+        return XcodeListWindowsMessageParser.parse(message)
     }
 
     private static func xcodeListWindowsMessage(in result: JSONValue) -> String? {
@@ -193,41 +189,4 @@ extension RuntimeCoordinator {
         return fallbackText
     }
 
-    private static func parseXcodeListWindowsMessage(_ message: String) -> [WindowEntry] {
-        message
-            .split(separator: "\n")
-            .compactMap { line -> WindowEntry? in
-                var rawLine = String(line)
-                if rawLine.hasSuffix("\r") {
-                    rawLine.removeLast()
-                }
-                rawLine.removeLeadingSpacesAndTabs()
-                let prefix = "* tabIdentifier: "
-                guard rawLine.hasPrefix(prefix) else { return nil }
-                let delimiter = ", workspacePath: "
-                let searchStart = rawLine.index(rawLine.startIndex, offsetBy: prefix.count)
-                guard let delimiterRange = rawLine.range(
-                    of: delimiter,
-                    options: [],
-                    range: searchStart..<rawLine.endIndex
-                ) else {
-                    return nil
-                }
-                let tabIdentifier = String(rawLine[searchStart..<delimiterRange.lowerBound])
-                let workspacePath = String(rawLine[delimiterRange.upperBound...])
-                guard tabIdentifier.isEmpty == false, workspacePath.isEmpty == false else {
-                    return nil
-                }
-                return WindowEntry(tabIdentifier: tabIdentifier, workspacePath: workspacePath)
-            }
-    }
-}
-
-private extension String {
-    mutating func removeLeadingSpacesAndTabs() {
-        let trimmedStart = drop { $0 == " " || $0 == "\t" }
-        if trimmedStart.startIndex != startIndex {
-            self = String(trimmedStart)
-        }
-    }
 }
