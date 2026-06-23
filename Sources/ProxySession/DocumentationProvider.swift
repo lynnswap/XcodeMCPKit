@@ -567,6 +567,34 @@ package enum DocumentationSearchAssetLocator {
         }
     }
 
+    package static func latestAsset(
+        from assets: [DocumentationSearchInstalledAsset]
+    ) -> DocumentationSearchInstalledAsset? {
+        assets.max { lhs, rhs in
+            isNewer(rhs, than: lhs)
+        }
+    }
+
+    private static func isNewer(
+        _ lhs: DocumentationSearchInstalledAsset,
+        than rhs: DocumentationSearchInstalledAsset
+    ) -> Bool {
+        let xcodeComparison = compareVersion(lhs.xcodeVersion, rhs.xcodeVersion)
+        if xcodeComparison != .orderedSame {
+            return xcodeComparison == .orderedDescending
+        }
+        let lhsDocumentationRelease = lhs.documentationRelease ?? 0
+        let rhsDocumentationRelease = rhs.documentationRelease ?? 0
+        if lhsDocumentationRelease != rhsDocumentationRelease {
+            return lhsDocumentationRelease > rhsDocumentationRelease
+        }
+        let osComparison = compareVersion(lhs.osVersion, rhs.osVersion)
+        if osComparison != .orderedSame {
+            return osComparison == .orderedDescending
+        }
+        return lhs.assetURL.path < rhs.assetURL.path
+    }
+
     private static func isBetter(
         _ lhs: DocumentationSearchInstalledAsset,
         than rhs: DocumentationSearchInstalledAsset,
@@ -1002,19 +1030,15 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     }
 
     private let assetRoot: URL
-    private let currentOSVersion: @Sendable () -> String
     private let processRunner: any ProcessRunning
     private let clock: ClockClient
 
     package init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
-        currentOSVersion: @escaping @Sendable () -> String =
-            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
         processRunner: any ProcessRunning = ProcessRunner(),
         clock: ClockClient = .liveValue
     ) {
         self.assetRoot = assetRoot
-        self.currentOSVersion = currentOSVersion
         self.processRunner = processRunner
         self.clock = clock
     }
@@ -1048,17 +1072,13 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     }
 
     private func installedAsset(
-        for target: XcodeProcessTarget
+        for _: XcodeProcessTarget
     ) -> DocumentationSearchInstalledAsset? {
         guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
         else {
             return nil
         }
-        return DocumentationSearchAssetLocator.bestAsset(
-            for: target.xcodeVersion,
-            currentOSVersion: currentOSVersion(),
-            from: scan.assets
-        )
+        return DocumentationSearchAssetLocator.latestAsset(from: scan.assets)
     }
 
     private func searchRows(
@@ -1209,9 +1229,9 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
               AND content IS NOT NULL
               AND \(whereClause)
             ORDER BY CASE
-                WHEN lower(title) = \(queryLiteral) THEN 0
-                WHEN lower(title) LIKE \(prefixLiteral) THEN 1
-                WHEN lower(title) LIKE \(containsLiteral) THEN 2
+                WHEN lower(title) = \(queryLiteral) OR lower(asset_id) = \(queryLiteral) THEN 0
+                WHEN lower(title) LIKE \(prefixLiteral) OR lower(asset_id) LIKE \(prefixLiteral) THEN 1
+                WHEN lower(title) LIKE \(containsLiteral) OR lower(asset_id) LIKE \(containsLiteral) THEN 2
                 WHEN lower(content) LIKE \(prefixLiteral) THEN 3
                 ELSE 4
               END,
@@ -1223,7 +1243,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
 
     private static func likeClause(for term: String) -> String {
         let pattern = sqliteStringLiteral("%\(term)%")
-        return "(lower(title) LIKE \(pattern) OR lower(content) LIKE \(pattern))"
+        return "(lower(title) LIKE \(pattern) OR lower(asset_id) LIKE \(pattern) OR lower(content) LIKE \(pattern))"
     }
 
     private static func sqliteStringLiteral(_ value: String) -> String {
@@ -1237,13 +1257,18 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         rows: [SearchRow]
     ) throws -> Data {
         let documents = rows.map { row -> [String: Any] in
+            let type = row.type ?? ""
+            let content = row.content ?? ""
             var document: [String: Any] = [
                 "title": row.title ?? "",
-                "type": row.type ?? "",
-                "content": row.content ?? "",
+                "type": type,
+                "kind": type,
+                "content": content,
+                "contents": content,
             ]
             if let assetID = row.assetID {
                 document["identifier"] = assetID
+                document["uri"] = assetID
                 document["url"] = "https://developer.apple.com\(assetID)"
             }
             if let framework = row.framework, framework.isEmpty == false {
@@ -1717,6 +1742,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let initializeParams: [String: JSONValue]
     private let serviceRepairer: any DocumentationSearchServiceRepairing
     private let localSearchProvider: any DocumentationSearchProviding
+    private let preferLocalSearchProvider: Bool
     private let clock: ClockClient
     private let testHooks: DocumentationProviderManagerTestHooks
     private let logger: Logger
@@ -1735,6 +1761,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
+        preferLocalSearchProvider: Bool = false,
         clock: ClockClient = .liveValue,
         testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
@@ -1745,6 +1772,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.initializeParams = initializeParams
         self.serviceRepairer = serviceRepairer
         self.localSearchProvider = localSearchProvider
+        self.preferLocalSearchProvider = preferLocalSearchProvider
         self.clock = clock
         self.testHooks = testHooks
         self.logger = logger
@@ -1757,6 +1785,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
+        preferLocalSearchProvider: Bool = false,
         clock: ClockClient = .liveValue,
         testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
@@ -1771,6 +1800,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             initializeParams: initializeParams,
             serviceRepairer: serviceRepairer,
             localSearchProvider: localSearchProvider,
+            preferLocalSearchProvider: preferLocalSearchProvider,
             clock: clock,
             testHooks: testHooks,
             logger: logger
@@ -2652,6 +2682,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard startupTimeout?.nanoseconds != 0 else {
             throw TimeoutError()
         }
+        if preferLocalSearchProvider,
+           let localProfile = await installedDocumentationAssetPrimaryProfile(for: target)
+        {
+            return localProfile
+        }
         let route = try await transport.openRoute(
             for: target,
             requestTimeout: startupTimeout,
@@ -2675,6 +2710,29 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             backend: .xcode(route: route, descriptor: nil),
             serverVersion: route.serverVersion,
             descriptorLookupCompleted: false
+        )
+    }
+
+    private func installedDocumentationAssetPrimaryProfile(
+        for target: XcodeProcessTarget
+    ) async -> CandidateProfile? {
+        guard let descriptor = await localSearchProvider.descriptor(for: target) else {
+            return nil
+        }
+        logger.info(
+            "Using installed documentation asset as primary DocumentationSearch provider",
+            metadata: [
+                "pid": .string("\(target.processID)"),
+                "app_path": .string(target.appPath),
+                "xcode_version": .string(target.xcodeVersion),
+            ]
+        )
+        return CandidateProfile(
+            id: UUID(),
+            target: target,
+            backend: .installedDocumentationAsset(descriptor: descriptor),
+            serverVersion: "installed-documentation-asset",
+            descriptorLookupCompleted: true
         )
     }
 

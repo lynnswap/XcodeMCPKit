@@ -356,7 +356,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 initializeParamsOverride: config.initializeParamsOverride
             ),
             serviceRepairer: LiveDocumentationSearchServiceRepairer(),
-            localSearchProvider: LiveDocumentationAssetSearchProvider()
+            localSearchProvider: LiveDocumentationAssetSearchProvider(),
+            preferLocalSearchProvider: true
         )
     }
 
