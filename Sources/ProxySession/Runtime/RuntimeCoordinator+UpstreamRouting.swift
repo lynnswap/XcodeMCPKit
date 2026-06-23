@@ -410,15 +410,15 @@ extension RuntimeCoordinator {
             case .unavailable(let reason):
                 // The exit/quarantine machinery owns health for a dead slot;
                 // a send into it must not be misdiagnosed as overload.
-                self.handleUnavailableUpstreamSend(
-                    upstreamIndex: upstreamIndex,
-                    reason: reason
-                )
                 self.failPendingSend(
                     originalRequestData: data,
                     upstreamIndex: upstreamIndex,
                     code: -32001,
                     message: "upstream unavailable"
+                )
+                self.handleUnavailableUpstreamSend(
+                    upstreamIndex: upstreamIndex,
+                    reason: reason
                 )
             }
         }

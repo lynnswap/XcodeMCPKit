@@ -1379,6 +1379,45 @@ actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
     }
 }
 
+actor AlwaysUnavailableUpstreamClient: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let sentMessages = RecordedValues<Data>()
+    private let reason: Upstream.UnavailableReason
+
+    init(reason: Upstream.UnavailableReason = .startFailed) {
+        self.reason = reason
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        await sentMessages.append(data)
+        return .unavailable(reason)
+    }
+
+    func sentCount() async -> Int {
+        await sentMessages.count()
+    }
+
+    func sentValue(at index: Int) async -> Data? {
+        await sentMessages.value(at: index)
+    }
+
+    func nextSent(at index: Int) async throws -> Data {
+        try await sentMessages.nextValue(at: index)
+    }
+}
+
 actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
@@ -1772,6 +1811,24 @@ func waitForSentCount(
 
 func waitForSentCount(
     _ upstream: ToggleableOverloadUpstreamClient,
+    count: Int,
+    timeoutSeconds: UInt64
+) async throws {
+    do {
+        _ = try await waitWithTimeout(
+            "waiting for sent message \(count)",
+            timeout: .seconds(Int64(timeoutSeconds))
+        ) {
+            try await upstream.nextSent(at: count - 1)
+        }
+    } catch {
+        let actual = await upstream.sentCount()
+        throw WaitForSentCountError.timeout(expected: count, actual: actual)
+    }
+}
+
+func waitForSentCount(
+    _ upstream: AlwaysUnavailableUpstreamClient,
     count: Int,
     timeoutSeconds: UInt64
 ) async throws {

@@ -265,6 +265,45 @@ struct RuntimeCoordinatorTests {
         #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
     }
 
+    @Test func sessionManagerRetriesProcessPrimaryInitializeWhenSendIsUnavailable()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let unavailableUpstream = AlwaysUnavailableUpstreamClient(reason: .startFailed)
+        let retryUpstream = TestUpstreamClient()
+        let newerTarget = xcodeProcessTarget(processID: 27102, xcodeVersion: "27.0")
+        let olderTarget = xcodeProcessTarget(processID: 26602, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [unavailableUpstream, retryUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(unavailableUpstream, count: 1, timeoutSeconds: 2)
+        let retriedInitialize = try await sentValue(from: retryUpstream, at: 0, timeout: .seconds(2))
+        let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
+        await retryUpstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil)
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+    }
+
     @Test func sessionManagerMarksPrimaryUsableBeforeInitializeReturns() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
