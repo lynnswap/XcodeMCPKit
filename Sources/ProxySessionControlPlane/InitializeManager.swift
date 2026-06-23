@@ -7,8 +7,8 @@ import ProxyMCP
 package final class InitializeManager: Sendable {
     package enum PrimaryInitializePhase: Sendable, Equatable {
         case idle
-        case pendingSend
-        case sent(upstreamID: Int64)
+        case pendingSend(upstreamIndex: Int)
+        case sent(upstreamIndex: Int, upstreamID: Int64)
 
         var isInFlight: Bool {
             switch self {
@@ -20,8 +20,17 @@ package final class InitializeManager: Sendable {
         }
 
         var upstreamID: Int64? {
-            guard case .sent(let upstreamID) = self else { return nil }
+            guard case .sent(_, let upstreamID) = self else { return nil }
             return upstreamID
+        }
+
+        var upstreamIndex: Int? {
+            switch self {
+            case .idle:
+                return nil
+            case .pendingSend(let upstreamIndex), .sent(let upstreamIndex, _):
+                return upstreamIndex
+            }
         }
     }
 
@@ -60,6 +69,7 @@ package final class InitializeManager: Sendable {
     package struct FailureResult: Sendable {
         package let pending: [PendingInitialize]
         package let timeout: RuntimeScheduledTimeout?
+        package let upstreamIndex: Int?
         package let upstreamID: Int64?
         package let shouldRetryEagerInitialize: Bool
     }
@@ -69,12 +79,14 @@ package final class InitializeManager: Sendable {
         package let timeout: RuntimeScheduledTimeout?
         package let hadGlobalInit: Bool
         package let wasInFlight: Bool
+        package let primaryInitUpstreamIndex: Int?
         package let primaryInitUpstreamID: Int64?
     }
 
     package struct Snapshot: Sendable {
         package let hasInitResult: Bool
         package let initInFlight: Bool
+        package let activePrimaryUpstreamIndex: Int?
         package let didWarmSecondary: Bool
         package let shouldRetryEagerInitializePrimaryAfterWarmInitFailure: Bool
         package let isShuttingDown: Bool
@@ -115,7 +127,7 @@ package final class InitializeManager: Sendable {
         brokerState.initializeResult() != nil
     }
 
-    package func beginEagerInitializePrimary() -> (
+    package func beginEagerInitializePrimary(upstreamIndex: Int) -> (
         shouldSendRequest: Bool,
         shouldScheduleTimeout: Bool
     ) {
@@ -126,20 +138,23 @@ package final class InitializeManager: Sendable {
             else {
                 return (false, false)
             }
-            state.primaryInitializePhase = .pendingSend
+            state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
             return (true, true)
         }
     }
 
-    package func beginPrimaryInitializeSend(upstreamID: Int64) -> Bool {
+    package func beginPrimaryInitializeSend(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard !state.isShuttingDown,
                   brokerState.initializeResult() == nil,
-                  state.primaryInitializePhase == .pendingSend
+                  state.primaryInitializePhase == .pendingSend(upstreamIndex: upstreamIndex)
             else {
                 return false
             }
-            state.primaryInitializePhase = .sent(upstreamID: upstreamID)
+            state.primaryInitializePhase = .sent(
+                upstreamIndex: upstreamIndex,
+                upstreamID: upstreamID
+            )
             return true
         }
     }
@@ -148,6 +163,7 @@ package final class InitializeManager: Sendable {
         sessionID: String,
         sessionGeneration: UInt64,
         originalID: JSONRPC.ID,
+        primaryUpstreamIndex: Int,
         on eventLoop: EventLoop
     ) -> RegisterDecision {
         state.withLockedValue { state in
@@ -192,7 +208,7 @@ package final class InitializeManager: Sendable {
                 )
             }
 
-            state.primaryInitializePhase = .pendingSend
+            state.primaryInitializePhase = .pendingSend(upstreamIndex: primaryUpstreamIndex)
             return RegisterDecision(
                 promise: promise,
                 cachedResult: nil,
@@ -200,6 +216,42 @@ package final class InitializeManager: Sendable {
                 shouldScheduleTimeout: true,
                 isShuttingDown: false
             )
+        }
+    }
+
+    package func pendingPrimaryInitializeUpstreamIndex() -> Int? {
+        state.withLockedValue { state in
+            guard case .pendingSend(let upstreamIndex) = state.primaryInitializePhase else {
+                return nil
+            }
+            return upstreamIndex
+        }
+    }
+
+    package func activePrimaryInitializeUpstreamIndex() -> Int? {
+        state.withLockedValue { $0.primaryInitializePhase.upstreamIndex }
+    }
+
+    package func primaryInitializeMatches(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+        state.withLockedValue { state in
+            state.primaryInitializePhase == .sent(
+                upstreamIndex: upstreamIndex,
+                upstreamID: upstreamID
+            )
+        }
+    }
+
+    package func preparePrimaryInitializeRetry(upstreamIndex: Int) -> Bool {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown,
+                  brokerState.initializeResult() == nil,
+                  state.primaryInitializePhase == .idle,
+                  state.initPending.isEmpty == false
+            else {
+                return false
+            }
+            state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
+            return true
         }
     }
 
@@ -259,6 +311,7 @@ package final class InitializeManager: Sendable {
                 policy: .onlyWithoutCachedInitialize
             )
             let upstreamID = state.primaryInitializePhase.upstreamID
+            let upstreamIndex = state.primaryInitializePhase.upstreamIndex
             let timeout = state.initTimeout
             state.primaryInitializePhase = .idle
             state.initTimeout = nil
@@ -267,6 +320,7 @@ package final class InitializeManager: Sendable {
             return FailureResult(
                 pending: pending,
                 timeout: timeout,
+                upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID,
                 shouldRetryEagerInitialize: shouldRetryEagerInitialize
             )
@@ -289,13 +343,14 @@ package final class InitializeManager: Sendable {
                 timeout: state.initTimeout,
                 hadGlobalInit: brokerState.initializeResult() != nil,
                 wasInFlight: state.primaryInitializePhase.isInFlight,
+                primaryInitUpstreamIndex: state.primaryInitializePhase.upstreamIndex,
                 primaryInitUpstreamID: state.primaryInitializePhase.upstreamID
             )
 
-            if upstreamIndex == 0, state.primaryInitializePhase.isInFlight {
+            if state.primaryInitializePhase.upstreamIndex == upstreamIndex,
+               state.primaryInitializePhase.isInFlight
+            {
                 state.primaryInitializePhase = .idle
-                state.initTimeout = nil
-                state.initPending.removeAll()
             }
 
             return result
@@ -359,6 +414,7 @@ package final class InitializeManager: Sendable {
             Snapshot(
                 hasInitResult: brokerState.initializeResult() != nil,
                 initInFlight: state.primaryInitializePhase.isInFlight,
+                activePrimaryUpstreamIndex: state.primaryInitializePhase.upstreamIndex,
                 didWarmSecondary: state.didWarmSecondary,
                 shouldRetryEagerInitializePrimaryAfterWarmInitFailure: state
                     .warmInitRecoveryIntent == .retryPrimaryWhenNoCachedInitialize,

@@ -276,15 +276,11 @@ extension RuntimeCoordinator {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
 
-        if upstreamIndex == 0 && globalInit.wasInFlight {
-            globalInit.timeout?.cancel()
+        let exitedActivePrimaryInitialize =
+            globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
+        if exitedActivePrimaryInitialize {
             if let upstreamID = globalInit.primaryInitUpstreamID {
-                upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
-            }
-            for item in globalInit.pending {
-                item.eventLoop.execute {
-                    item.promise.fail(TimeoutError())
-                }
+                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
             }
         }
 
@@ -302,6 +298,24 @@ extension RuntimeCoordinator {
                 reason: .upstreamExit
             )
         )
+
+        if exitedActivePrimaryInitialize {
+            if retryPrimaryInitializeOnAlternativeUpstream(
+                failedUpstreamIndex: upstreamIndex,
+                failedUpstreamID: nil,
+                reason: "primary_upstream_exit_\(status)"
+            ) {
+                return
+            }
+            globalInit.timeout?.cancel()
+            _ = initializeManager.completePrimaryInitializeFailure()
+            for item in globalInit.pending {
+                removePendingInitializeSessionIfCurrent(item)
+                item.eventLoop.execute {
+                    item.promise.fail(TimeoutError())
+                }
+            }
+        }
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
@@ -329,7 +343,7 @@ extension RuntimeCoordinator {
             }
         } else if globalInit.hadGlobalInit {
             if shouldResetGlobalInit {
-                let primaryInitInFlight = upstreamHealthManager.primaryInitInFlight()
+                let primaryInitInFlight = initializeManager.snapshot().initInFlight
                 if primaryInitInFlight {
                     initializeManager
                         .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
@@ -1051,9 +1065,8 @@ extension RuntimeCoordinator {
             nowUptimeNs: nowUptimeNs
         )
         transition?.cancelledInitTimeout?.cancel()
-        if upstreamIndex == 0, initSnapshot.initInFlight {
-            failInitPending(error: TimeoutError())
-        }
+        let violatedActivePrimaryInitialize =
+            initSnapshot.activePrimaryUpstreamIndex == upstreamIndex && initSnapshot.initInFlight
         upstreamRouter.reset(upstreamIndex: upstreamIndex)
         releaseLeases(
             leaseManager.abandonActiveLeases(
@@ -1072,7 +1085,8 @@ extension RuntimeCoordinator {
                 ]
             )
         }
-        let clearInitialize = upstreamIndex == 0 && initSnapshot.hasInitResult == false
+        let clearInitialize = violatedActivePrimaryInitialize
+            && initSnapshot.hasInitResult == false
         let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if clearInitialize || clearToolsCatalog {
             invalidateControlPlane(
@@ -1080,6 +1094,17 @@ extension RuntimeCoordinator {
                 clearInitialize: clearInitialize,
                 clearToolsCatalog: clearToolsCatalog
             )
+        }
+
+        if violatedActivePrimaryInitialize {
+            if retryPrimaryInitializeOnAlternativeUpstream(
+                failedUpstreamIndex: upstreamIndex,
+                failedUpstreamID: nil,
+                reason: "primary_protocol_violation"
+            ) {
+                return
+            }
+            failInitPending(error: TimeoutError())
         }
 
         if upstreamIndex == 0 {

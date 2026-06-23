@@ -945,10 +945,16 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) -> EventLoopFuture<ByteBuffer> {
         _ = session(id: sessionID)
         let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
+        let primaryUpstreamIndex = primaryInitializeUpstreamIndex()
+        guard primaryUpstreamIndex != nil || initializeManager.isInitialized() else {
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
+        }
+
         let decision = initializeManager.registerInitialize(
             sessionID: sessionID,
             sessionGeneration: sessionGeneration,
             originalID: originalID,
+            primaryUpstreamIndex: primaryUpstreamIndex ?? 0,
             on: eventLoop
         )
         let cachedResult = decision.cachedResult

@@ -36,9 +36,14 @@ extension RuntimeCoordinator {
     }
 
     func startPrimaryUpstreamSlot() {
-        guard let primary = upstreams.first else { return }
-        addRuntimeTask { [primary] in
-            await primary.start()
+        startUpstreamSlot(0)
+    }
+
+    func startUpstreamSlot(_ upstreamIndex: Int) {
+        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else { return }
+        let upstream = upstreams[upstreamIndex]
+        addRuntimeTask { [upstream] in
+            await upstream.start()
         }
     }
 

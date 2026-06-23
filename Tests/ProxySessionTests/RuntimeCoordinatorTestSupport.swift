@@ -1727,6 +1727,18 @@ func makeInitializeResponse(id: Int64, serverName: String?) throws -> Data {
     return try JSONSerialization.data(withJSONObject: response, options: [])
 }
 
+func makeInitializeErrorResponse(id: Int64, message: String = "initialize failed") throws -> Data {
+    let response: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": [
+            "code": -32000,
+            "message": message,
+        ],
+    ]
+    return try JSONSerialization.data(withJSONObject: response, options: [])
+}
+
 func extractUpstreamID(from data: Data) throws -> Int64 {
     let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
     return (object?["id"] as? NSNumber)?.int64Value ?? 0

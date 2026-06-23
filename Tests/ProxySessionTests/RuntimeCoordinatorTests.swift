@@ -165,6 +165,96 @@ struct RuntimeCoordinatorTests {
         #expect(id2 == 2)
     }
 
+    @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterError()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
+        let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let failedInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let failedUpstreamID = try extractUpstreamID(from: failedInitialize)
+        await upstream0.yield(.message(try makeInitializeErrorResponse(id: failedUpstreamID)))
+
+        let retriedInitialize = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
+        await upstream1.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil)
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+    }
+
+    @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterExit()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
+        let newerTarget = xcodeProcessTarget(processID: 27101, xcodeVersion: "27.0")
+        let olderTarget = xcodeProcessTarget(processID: 26601, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        _ = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let exitEventIndex = upstreamEvents.count()
+        await upstream0.yield(.exit(1))
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: exitEventIndex,
+            description: "waiting for primary process-bound upstream exit"
+        )
+
+        let retriedInitialize = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
+        await upstream1.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil)
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+    }
+
     @Test func sessionManagerMarksPrimaryUsableBeforeInitializeReturns() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -2382,6 +2472,41 @@ struct RuntimeCoordinatorTests {
 
         #expect(discovery.runningXcodeTargets().map(\.processID) == [
             relaunchedTarget.processID,
+        ])
+    }
+
+    @Test func runtimeDocumentationDiscoveryDoesNotReaddUnavailableRuntimeRouteTargets()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let unavailableTarget = xcodeProcessTarget(processID: 80426, xcodeVersion: "27.0")
+        let outsideTarget = xcodeProcessTarget(processID: 80427, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: unavailableTarget, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_route_unavailable"
+        )
+
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        runtimeBox.value = manager
+        let discovery = RuntimeDocumentationTargetDiscovery(
+            base: StubXcodeTargetDiscovery(targets: [unavailableTarget, outsideTarget]),
+            runtimeBox: runtimeBox
+        )
+
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [
+            outsideTarget.processID,
         ])
     }
 

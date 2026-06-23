@@ -18,7 +18,9 @@ package final class RuntimeDocumentationTargetDiscovery:
 
     package func runningXcodeTargets() -> [XcodeProcessTarget] {
         let targets = base.runningXcodeTargets()
-        guard let candidateProcessIDs = runtimeBox.value?.documentationCandidateProcessOrder()
+        guard let runtime = runtimeBox.value,
+              let routeProcessIDs = runtime.xcodeProcessRouteProcessIDs(),
+              let candidateProcessIDs = runtime.documentationCandidateProcessOrder()
         else {
             return targets
         }
@@ -26,9 +28,8 @@ package final class RuntimeDocumentationTargetDiscovery:
             uniqueKeysWithValues: targets.map { ($0.processID, $0) }
         )
         let orderedRuntimeTargets = candidateProcessIDs.compactMap { targetsByProcessID[$0] }
-        let orderedRuntimeProcessIDs = Set(orderedRuntimeTargets.map(\.processID))
         let remainingLiveTargets = targets.filter {
-            orderedRuntimeProcessIDs.contains($0.processID) == false
+            routeProcessIDs.contains($0.processID) == false
         }
         return orderedRuntimeTargets + remainingLiveTargets
     }
