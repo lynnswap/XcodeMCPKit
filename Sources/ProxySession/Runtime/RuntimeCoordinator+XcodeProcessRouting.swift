@@ -304,7 +304,7 @@ extension RuntimeCoordinator {
             $0.toolName == "XcodeListWindows"
         }
         if xcodeListWindowsRequests.isEmpty == false {
-            guard xcodeListWindowsRequests.count == requests.count else {
+            guard allItemsAreXcodeListWindowsToolCalls(in: requestJSON) else {
                 return .reject(
                     errors: toolRoutingErrors(
                         for: requests,
@@ -625,6 +625,31 @@ extension RuntimeCoordinator {
             guard let object = item as? [String: Any] else { return nil }
             return toolRoutingRequest(in: object)
         }
+    }
+
+    private func allItemsAreXcodeListWindowsToolCalls(in value: Any) -> Bool {
+        if let object = value as? [String: Any] {
+            return isXcodeListWindowsToolCall(object)
+        }
+        guard let array = value as? [Any],
+              array.isEmpty == false else {
+            return false
+        }
+        return array.allSatisfy { item in
+            guard let object = item as? [String: Any] else {
+                return false
+            }
+            return isXcodeListWindowsToolCall(object)
+        }
+    }
+
+    private func isXcodeListWindowsToolCall(_ object: [String: Any]) -> Bool {
+        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
+              let params = object["params"] as? [String: Any],
+              params["name"] as? String == "XcodeListWindows" else {
+            return false
+        }
+        return true
     }
 
     private func toolRoutingRequest(in object: [String: Any]) -> ToolRoutingRequest? {

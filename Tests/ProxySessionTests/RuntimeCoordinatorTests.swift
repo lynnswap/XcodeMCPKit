@@ -2998,6 +2998,54 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+    @Test func publicXcodeListWindowsMixedNonToolBatchIsRejected() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 620, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "XcodeListWindows")]),
+            ]
+        )
+
+        let decision = try #require(
+            manager.immediateToolRoutingDecision(
+                for: [
+                    toolsCallObject(
+                        id: 119,
+                        name: "XcodeListWindows",
+                        arguments: [:]
+                    ),
+                    [
+                        "jsonrpc": "2.0",
+                        "id": 120,
+                        "method": "resources/list",
+                    ],
+                ]
+            )
+        )
+
+        guard case .reject(let errors, let forceBatchArray) = decision else {
+            Issue.record("expected mixed XcodeListWindows batch to reject")
+            return
+        }
+        #expect(errors.map(\.id.key) == ["119"])
+        #expect(forceBatchArray)
+    }
+
     @Test func ownerBoundBatchRejectsToolMissingFromOwnerProcess() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
