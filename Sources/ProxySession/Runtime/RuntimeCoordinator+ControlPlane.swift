@@ -113,9 +113,7 @@ extension RuntimeCoordinator {
                 }
             } ?? xcodeProcessRoutes
         let routes = processRoutes.compactMap { route -> ProcessToolsCatalogRoute? in
-            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
-                ?? route.primaryUpstreamIndex
-            else {
+            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route) else {
                 return nil
             }
             return ProcessToolsCatalogRoute(target: route.target, upstreamIndex: upstreamIndex)

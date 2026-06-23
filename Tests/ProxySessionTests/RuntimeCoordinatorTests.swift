@@ -2060,6 +2060,57 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func sessionManagerToolsListSkipsColdProcessRouteCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let coldUpstream = TestUpstreamClient()
+        let warmUpstream = TestUpstreamClient()
+        let coldTarget = xcodeProcessTarget(processID: 80423, xcodeVersion: "27.0")
+        let warmTarget = xcodeProcessTarget(processID: 66334, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [coldUpstream, warmUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: coldTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: warmTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-skip-cold",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let warmRequest = try await warmUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        await warmUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: warmRequest),
+                    tools: [
+                        toolDescriptor(name: "WarmOnlyTool"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for warm process tools/list") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["WarmOnlyTool"])
+        #expect(await coldUpstream.sentCount() == 0)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [warmTarget.processID])
+    }
+
     @Test func sessionManagerToolsListDropsStaleProcessCatalogAfterRefreshFailure()
         async throws
     {
