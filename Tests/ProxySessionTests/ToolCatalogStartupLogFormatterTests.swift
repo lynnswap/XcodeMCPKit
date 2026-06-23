@@ -5,7 +5,7 @@ import Testing
 
 @Suite
 struct ToolCatalogStartupLogFormatterTests {
-    @Test func summaryListsAvailableToolsOnePerLine() throws {
+    @Test func summaryListsAvailableToolsInline() throws {
         let result = try #require(JSONValue(any: [
             "tools": [
                 ["name": "XcodeRead"],
@@ -20,10 +20,7 @@ struct ToolCatalogStartupLogFormatterTests {
         Tools
           DocumentationSearch: available
           Count: 3
-          Available:
-            - BuildProject
-            - DocumentationSearch
-            - XcodeRead
+          Available: BuildProject, DocumentationSearch, XcodeRead
         """)
     }
 
@@ -40,8 +37,32 @@ struct ToolCatalogStartupLogFormatterTests {
         Tools
           DocumentationSearch: unavailable
           Count: 1
-          Available:
-            - XcodeRead
+          Available: XcodeRead
+        """)
+    }
+
+    @Test func summaryGroupsAvailableToolsUnderProcessWhenKnown() throws {
+        let result = try #require(JSONValue(any: [
+            "tools": [
+                ["name": "XcodeRead"],
+                ["name": "DocumentationSearch"],
+            ],
+        ]))
+
+        let summary = ToolCatalogStartupLogFormatter.summary(
+            from: result,
+            process: ToolCatalogStartupLogFormatter.Process(
+                appPath: "/Applications/Xcode_27.app",
+                processID: 75132
+            )
+        )
+
+        #expect(summary == """
+        Tools
+          - /Applications/Xcode_27.app (PID: 75132)
+            DocumentationSearch: available
+            Count: 2
+            Available: DocumentationSearch, XcodeRead
         """)
     }
 }

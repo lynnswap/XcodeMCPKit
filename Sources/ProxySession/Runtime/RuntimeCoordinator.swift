@@ -1040,7 +1040,25 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return
         }
 
-        logger.info("\(ToolCatalogStartupLogFormatter.summary(from: result))")
+        let summary = ToolCatalogStartupLogFormatter.summary(
+            from: result,
+            process: toolCatalogSourceProcess()
+        )
+        logger.info("\(summary)")
+    }
+
+    private func toolCatalogSourceProcess() -> ToolCatalogStartupLogFormatter.Process? {
+        guard let upstreamIndex = canonicalBrokerState.toolsSourceUpstream(),
+              let route = xcodeProcessRoutes.first(where: {
+                  $0.upstreamIndices.contains(upstreamIndex)
+              })
+        else {
+            return nil
+        }
+        return ToolCatalogStartupLogFormatter.Process(
+            appPath: route.target.appPath,
+            processID: route.target.processID
+        )
     }
 
     private func toolsListResultWithDocumentationOverlay(
