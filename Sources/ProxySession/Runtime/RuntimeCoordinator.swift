@@ -639,6 +639,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
         unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
+        clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
             clearInitialize: true,

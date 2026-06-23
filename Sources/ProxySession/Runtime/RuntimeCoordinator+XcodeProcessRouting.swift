@@ -35,9 +35,7 @@ extension RuntimeCoordinator {
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
-                ?? route.primaryUpstreamIndex
-            else {
+            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route) else {
                 return nil
             }
             return XcodeListWindowsRoute(
@@ -243,6 +241,11 @@ extension RuntimeCoordinator {
         workspaceOwnerProcessIDs.withLockedValue { owners in
             owners = owners.filter { $0.value != processID }
         }
+    }
+
+    package func clearXcodeWindowOwners() {
+        tabOwnerProcessIDs.withLockedValue { $0.removeAll() }
+        workspaceOwnerProcessIDs.withLockedValue { $0.removeAll() }
     }
 
     package func documentationUpstreamIndex(for target: XcodeProcessTarget) -> Int? {

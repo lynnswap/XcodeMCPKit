@@ -2544,6 +2544,81 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: workspaceRequest) == 0)
     }
 
+    @Test func sessionManagerSkipsUninitializedProcessRoutesDuringWindowFanout()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 514, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 515, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let firstTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let firstRequest = try await upstream0.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        #expect(await upstream1.sentCount() == 0)
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: firstRequest),
+                    message: "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace"
+                )
+            )
+        )
+        _ = try await firstTask.value
+
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let secondTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let secondRequest0 = try await upstream0.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        let secondRequest1 = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: secondRequest0),
+                    message: "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace"
+                )
+            )
+        )
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: secondRequest1),
+                    message: "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
+                )
+            )
+        )
+        _ = try await secondTask.value
+    }
+
     @Test func mergedXcodeListWindowsPreservesToolErrors() throws {
         let successMessage = "* tabIdentifier: tab-ok, workspacePath: /Work/OK.xcworkspace"
         let success = try jsonValue([
@@ -6976,6 +7051,44 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.cachedToolsListAvailable == false)
         #expect(snapshot.sessions.isEmpty)
         #expect(snapshot.leases.isEmpty)
+    }
+
+    @Test func sessionManagerDebugResetClearsXcodeWindowOwners() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 522, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        let request = toolsCallObject(
+            id: 1000,
+            name: "BuildProject",
+            arguments: ["tabIdentifier": "tab-a"]
+        )
+        #expect(manager.preferredUpstreamIndex(for: request) == 0)
+
+        manager.debugReset()
+
+        #expect(manager.preferredUpstreamIndex(for: request) == nil)
     }
 
     @Test func sessionManagerDebugResetCancelsQueuedRequests() async throws {
