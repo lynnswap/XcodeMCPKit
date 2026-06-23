@@ -2457,6 +2457,93 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
     }
 
+    @Test func sessionManagerCachesDuplicateWorkspaceOwnerByRoutePriority() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 512, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 513, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ]
+        )
+        defer { manager.shutdownAndWait() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        await upstream0.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init0)))
+        )
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+
+        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        await upstream1.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init1)))
+        )
+        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let request0 = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        let request1 = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        let workspacePath = "/Work/Shared.xcworkspace"
+        let message0 = "* tabIdentifier: tab-a, workspacePath: \(workspacePath)"
+        let message1 = "* tabIdentifier: tab-b, workspacePath: \(workspacePath)"
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request0),
+                    message: message0
+                )
+            )
+        )
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request1),
+                    message: message1
+                )
+            )
+        )
+
+        let result = try await task.value
+        guard case .object(let resultObject) = result,
+              case .object(let structuredContent)? = resultObject["structuredContent"],
+              case .string(let mergedMessage)? = structuredContent["message"] else {
+            Issue.record("expected merged XcodeListWindows structuredContent")
+            return
+        }
+        #expect(mergedMessage == "\(message0)\n\(message1)")
+
+        let workspaceRequest: [String: Any] = [
+            "method": "tools/call",
+            "params": [
+                "name": "XcodeSomeWorkspaceScopedTool",
+                "arguments": [
+                    "workspacePath": workspacePath,
+                ],
+            ],
+        ]
+        #expect(manager.preferredUpstreamIndex(for: workspaceRequest) == 0)
+    }
+
     @Test func mergedXcodeListWindowsPreservesToolErrors() throws {
         let successMessage = "* tabIdentifier: tab-ok, workspacePath: /Work/OK.xcworkspace"
         let success = try jsonValue([

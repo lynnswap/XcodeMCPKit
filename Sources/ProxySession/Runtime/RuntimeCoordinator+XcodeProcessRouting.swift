@@ -80,14 +80,15 @@ extension RuntimeCoordinator {
                 }
             }
 
-            var results: [(ordinal: Int, result: JSONValue)] = []
+            var results: [(ordinal: Int, upstreamIndex: Int, result: JSONValue)] = []
             var lastError: (any Error)?
             while let outcome = try await group.next() {
                 switch outcome {
                 case .success(let ordinal, _, let upstreamIndex, let result):
-                    _ = recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
                     markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
-                    results.append((ordinal: ordinal, result: result))
+                    results.append(
+                        (ordinal: ordinal, upstreamIndex: upstreamIndex, result: result)
+                    )
                 case .failure(let target, let upstreamIndex, let error):
                     if error is CancellationError {
                         throw CancellationError()
@@ -108,9 +109,9 @@ extension RuntimeCoordinator {
                 }
             }
 
-            let orderedResults = results
-                .sorted { $0.ordinal < $1.ordinal }
-                .map(\.result)
+            let orderedRouteResults = results.sorted { $0.ordinal < $1.ordinal }
+            recordXcodeWindowOwners(fromOrderedRouteResults: orderedRouteResults)
+            let orderedResults = orderedRouteResults.map(\.result)
             if let merged = Self.mergedXcodeListWindowsResult(orderedResults) {
                 return merged
             }
@@ -519,22 +520,60 @@ extension RuntimeCoordinator {
         from result: JSONValue,
         upstreamIndex: Int
     ) -> Bool {
+        recordXcodeWindowOwners(
+            from: result,
+            upstreamIndex: upstreamIndex,
+            removeExistingOwners: true,
+            overwriteExistingOwners: true
+        )
+    }
+
+    private func recordXcodeWindowOwners(
+        fromOrderedRouteResults results: [(ordinal: Int, upstreamIndex: Int, result: JSONValue)]
+    ) {
+        let processIDs = Set(results.compactMap { processID(forUpstreamIndex: $0.upstreamIndex) })
+        for processID in processIDs {
+            removeXcodeWindowOwners(forProcessID: processID)
+        }
+        for result in results {
+            _ = recordXcodeWindowOwners(
+                from: result.result,
+                upstreamIndex: result.upstreamIndex,
+                removeExistingOwners: false,
+                overwriteExistingOwners: false
+            )
+        }
+    }
+
+    @discardableResult
+    private func recordXcodeWindowOwners(
+        from result: JSONValue,
+        upstreamIndex: Int,
+        removeExistingOwners: Bool,
+        overwriteExistingOwners: Bool
+    ) -> Bool {
         guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
             return false
         }
-        removeXcodeWindowOwners(forProcessID: processID)
+        if removeExistingOwners {
+            removeXcodeWindowOwners(forProcessID: processID)
+        }
         let entries = Self.windowEntries(in: result)
         guard entries.isEmpty == false else {
             return false
         }
         tabOwnerProcessIDs.withLockedValue { owners in
             for entry in entries {
-                owners[entry.tabIdentifier] = processID
+                if overwriteExistingOwners || owners[entry.tabIdentifier] == nil {
+                    owners[entry.tabIdentifier] = processID
+                }
             }
         }
         workspaceOwnerProcessIDs.withLockedValue { owners in
             for entry in entries {
-                owners[entry.workspacePath] = processID
+                if overwriteExistingOwners || owners[entry.workspacePath] == nil {
+                    owners[entry.workspacePath] = processID
+                }
             }
         }
         return true
