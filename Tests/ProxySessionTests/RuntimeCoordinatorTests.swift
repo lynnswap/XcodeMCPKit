@@ -2060,6 +2060,49 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func sessionManagerToolsListDoesNotFallbackWhenAllProcessRoutesUnavailable()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 80426, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 66335, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_unavailable"
+        )
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 1,
+            reason: "test_unavailable"
+        )
+
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            _ = try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-all-unavailable",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        #expect(await upstream0.sentCount() == 0)
+        #expect(await upstream1.sentCount() == 0)
+        #expect(manager.cachedToolsListResult() == nil)
+    }
+
     @Test func sessionManagerToolsListSkipsColdProcessRouteCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

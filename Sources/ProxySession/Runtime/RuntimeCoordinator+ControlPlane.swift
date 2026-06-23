@@ -119,14 +119,7 @@ extension RuntimeCoordinator {
             return ProcessToolsCatalogRoute(target: route.target, upstreamIndex: upstreamIndex)
         }
         guard routes.isEmpty == false else {
-            return try await loadCanonicalToolsCatalogFromRoute(
-                .anyHealthy,
-                requestTimeout: requestTimeout,
-                rpcHandle: ControlPlane.RPCHandle(),
-                startedAt: startedAt,
-                purpose: "tools",
-                failureRouteMetadata: nil
-            )
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
         return try await withThrowingTaskGroup(
