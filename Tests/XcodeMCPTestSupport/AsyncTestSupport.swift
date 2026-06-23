@@ -167,26 +167,6 @@ package func nextValue<Value: Sendable>(
     }
 }
 
-package func staysTrue(
-    for duration: Duration,
-    _ condition: @escaping @Sendable () async -> Bool
-) async -> Bool {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: duration)
-
-    while clock.now < deadline {
-        if Task.isCancelled {
-            return false
-        }
-        guard await condition() else {
-            return false
-        }
-        await Task.yield()
-    }
-
-    return await condition()
-}
-
 package func shutdown(_ group: EventLoopGroup) async {
     await withCheckedContinuation { continuation in
         group.shutdownGracefully { _ in

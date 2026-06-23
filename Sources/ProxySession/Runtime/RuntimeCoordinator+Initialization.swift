@@ -371,6 +371,7 @@ extension RuntimeCoordinator {
                     upstreamIndex: upstreamIndex,
                     expectedUpstreamID: expectedUpstreamID
                 ) else {
+                    self.testHooks.initializedNotificationStaleIgnored?(upstreamIndex)
                     return
                 }
                 self.recordTraffic(

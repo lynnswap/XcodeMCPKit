@@ -4165,11 +4165,19 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = BlockingInitializedNotificationUpstreamClient()
+        let staleInitializedIgnored = TestSignal()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                initializedNotificationStaleIgnored: { upstreamIndex in
+                    if upstreamIndex == 1 {
+                        staleInitializedIgnored.signal()
+                    }
+                }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -4190,19 +4198,16 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         await upstream1.releaseBlockedInitializedNotification(.accepted)
-
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                let snapshot = manager.testStateSnapshot().upstreams[1]
-                if snapshot.isInitialized {
-                    return false
-                }
-                guard case .quarantined = snapshot.healthState else {
-                    return false
-                }
-                return true
-            }
+        try await staleInitializedIgnored.wait(
+            description: "stale initialized notification completion should be ignored"
         )
+
+        let snapshot = manager.testStateSnapshot().upstreams[1]
+        #expect(snapshot.isInitialized == false)
+        guard case .quarantined = snapshot.healthState else {
+            Issue.record("expected upstream to remain quarantined")
+            return
+        }
     }
 
     @Test func sessionManagerShutdownStopsUpstreamsBeforeDrainingRuntimeTasks() async throws {

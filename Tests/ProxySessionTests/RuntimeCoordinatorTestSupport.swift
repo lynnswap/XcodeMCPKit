@@ -1005,35 +1005,31 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var prewarmTimeouts: [TimeAmount?] = []
     private var toolListTimeouts: [TimeAmount?] = []
     private var callTimeouts: [TimeAmount?] = []
-    private let prewarmDelayNanoseconds: UInt64?
-    private let toolListDelayNanoseconds: UInt64?
     private let prewarmStarted: TestSignal?
     private let prewarmBlocker: AsyncGate?
+    private let toolListStarted: TestSignal?
+    private let toolListBlocker: AsyncGate?
 
     init(
         toolListUpdate: DocumentationProvider.ToolListUpdate,
         callOutcomes: [DocumentationProvider.CallOutcome] = [],
-        prewarmDelayNanoseconds: UInt64? = nil,
-        toolListDelayNanoseconds: UInt64? = nil,
         prewarmStarted: TestSignal? = nil,
-        prewarmBlocker: AsyncGate? = nil
+        prewarmBlocker: AsyncGate? = nil,
+        toolListStarted: TestSignal? = nil,
+        toolListBlocker: AsyncGate? = nil
     ) {
         self.update = toolListUpdate
         self.callOutcomes = callOutcomes
-        self.prewarmDelayNanoseconds = prewarmDelayNanoseconds
-        self.toolListDelayNanoseconds = toolListDelayNanoseconds
         self.prewarmStarted = prewarmStarted
         self.prewarmBlocker = prewarmBlocker
+        self.toolListStarted = toolListStarted
+        self.toolListBlocker = toolListBlocker
     }
 
     func startBackgroundDiscovery(requestTimeout: TimeAmount?) async
         -> DocumentationProvider.ToolListUpdate
     {
         prewarmStarted?.signal()
-        if let prewarmDelayNanoseconds {
-            try? await Task.sleep(nanoseconds: prewarmDelayNanoseconds)
-            guard !Task.isCancelled else { return .unavailable }
-        }
         if let prewarmBlocker {
             do {
                 try await prewarmBlocker.wait()
@@ -1043,13 +1039,18 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
             guard !Task.isCancelled else { return .unavailable }
         }
         prewarmTimeouts.append(requestTimeout)
-        return await toolListUpdate(requestTimeout: requestTimeout)
+        return update
     }
 
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate {
         toolListTimeouts.append(requestTimeout)
-        if let toolListDelayNanoseconds {
-            try? await Task.sleep(nanoseconds: toolListDelayNanoseconds)
+        toolListStarted?.signal()
+        if let toolListBlocker {
+            do {
+                try await toolListBlocker.wait()
+            } catch {
+                return .unavailable
+            }
             guard !Task.isCancelled else { return .unavailable }
         }
         return update
