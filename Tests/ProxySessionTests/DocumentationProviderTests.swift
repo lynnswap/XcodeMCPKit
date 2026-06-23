@@ -2173,7 +2173,7 @@ extension RuntimeCoordinatorTests {
         #expect(firstTitle == "UIView")
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
-        #expect(requests.first?.arguments.first == "-json")
+        #expect(requests.first?.arguments.prefix(2) == ["-readonly", "-json"])
         #expect(requests.first?.arguments.joined(separator: " ").contains(
             "xcode-26-5.asset/AssetData/documentation-db/index.sql"
         ) == true)

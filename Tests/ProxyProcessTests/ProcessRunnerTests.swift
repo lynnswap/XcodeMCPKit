@@ -84,14 +84,12 @@ struct ProcessRunnerTests {
         }
     }
 
-    @Test func processRunnerTimeoutDoesNotWaitForInheritedPipeEOF() async throws {
+    @Test func processRunnerTimeoutDoesNotWaitForChildHeldPipeAfterParentExit() async throws {
         let runner = ProcessRunner()
         let script = """
         import subprocess
-        import time
 
         subprocess.Popen(["/bin/sleep", "3"])
-        time.sleep(3)
         """
 
         await #expect(throws: ProcessTimeoutError.self) {

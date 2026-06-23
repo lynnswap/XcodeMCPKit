@@ -57,24 +57,74 @@ private final class PipeCollector: @unchecked Sendable {
     }
 }
 
-private final class ProcessTimeoutState: @unchecked Sendable {
-    private let state = NIOLockedValueBox((terminated: false, timedOut: false))
+private final class ProcessTimeoutController: @unchecked Sendable {
+    typealias Action = @Sendable () -> Void
 
-    func markTimedOutIfRunning() -> Bool {
+    private struct State {
+        var timeoutNanoseconds: Int64?
+        var workItem: DispatchWorkItem?
+        var action: Action?
+        var scheduled = false
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    func configure(timeoutNanoseconds: Int64?, action: @escaping Action) {
+        guard let timeoutNanoseconds, timeoutNanoseconds > 0 else {
+            return
+        }
+        let workItem = DispatchWorkItem { [self] in
+            fire()
+        }
         state.withLockedValue { state in
-            guard state.terminated == false, state.timedOut == false else {
-                return false
-            }
-            state.timedOut = true
-            return true
+            state.timeoutNanoseconds = timeoutNanoseconds
+            state.workItem = workItem
+            state.action = action
         }
     }
 
-    func markTerminatedAndCheckTimedOut() -> Bool {
-        state.withLockedValue { state in
-            state.terminated = true
-            return state.timedOut
+    func schedule() {
+        let scheduled = state.withLockedValue { state -> (DispatchWorkItem, Int64)? in
+            guard
+                state.scheduled == false,
+                let workItem = state.workItem,
+                let timeoutNanoseconds = state.timeoutNanoseconds,
+                state.action != nil
+            else {
+                return nil
+            }
+            state.scheduled = true
+            return (workItem, timeoutNanoseconds)
         }
+        guard let scheduled else {
+            return
+        }
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + .nanoseconds(Int(scheduled.1)),
+            execute: scheduled.0
+        )
+    }
+
+    func cancel() {
+        state.withLockedValue { state in
+            state.workItem?.cancel()
+            state.timeoutNanoseconds = nil
+            state.workItem = nil
+            state.action = nil
+        }
+    }
+
+    private func fire() {
+        let action = state.withLockedValue { state -> Action? in
+            guard let action = state.action else {
+                return nil
+            }
+            state.timeoutNanoseconds = nil
+            state.workItem = nil
+            state.action = nil
+            return action
+        }
+        action?()
     }
 }
 
@@ -197,6 +247,7 @@ package struct ProcessRunner: ProcessRunning {
                 let stderrPipe = Pipe()
                 let stdinPipe = Pipe()
                 let drainGroup = DispatchGroup()
+                let timeoutController = ProcessTimeoutController()
                 let stdoutCollector = PipeCollector(
                     fileHandle: stdoutPipe.fileHandleForReading,
                     drainGroup: drainGroup,
@@ -207,22 +258,23 @@ package struct ProcessRunner: ProcessRunning {
                     drainGroup: drainGroup,
                     label: "XcodeMCPProxy.ProcessRunner.stderr"
                 )
-                let timeoutState = ProcessTimeoutState()
                 let didResume = NIOLockedValueBox(false)
-                let timeoutWorkItem = Self.makeTimeoutWorkItem(
-                    timeoutNanoseconds: request.timeoutNanoseconds,
-                    process: process,
-                    timeoutState: timeoutState
-                )
-                let resumeOnce: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in
+                let reserveResume: @Sendable () -> Bool = {
                     let shouldResume = didResume.withLockedValue { didResume in
                         guard didResume == false else { return false }
                         didResume = true
                         return true
                     }
-                    guard shouldResume else { return }
+                    return shouldResume
+                }
+                let resumeReserved: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in
+                    timeoutController.cancel()
                     cancellationState.complete()
                     continuation.resume(with: result)
+                }
+                let resumeOnce: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in
+                    guard reserveResume() else { return }
+                    resumeReserved(result)
                 }
 
                 process.executableURL = URL(fileURLWithPath: request.executablePath)
@@ -251,6 +303,13 @@ package struct ProcessRunner: ProcessRunning {
                     try? stderrPipe.fileHandleForWriting.close()
                     try? stdinPipe.fileHandleForWriting.close()
                 }
+                timeoutController.configure(timeoutNanoseconds: request.timeoutNanoseconds) {
+                    guard reserveResume() else {
+                        return
+                    }
+                    cancelResources()
+                    resumeReserved(.failure(ProcessTimeoutError(label: request.label)))
+                }
                 guard cancellationState.install(cleanup: cancelResources, resume: resumeOnce) else {
                     cancelResources()
                     resumeOnce(.failure(CancellationError()))
@@ -259,12 +318,6 @@ package struct ProcessRunner: ProcessRunning {
 
                 process.terminationHandler = { process in
                     DispatchQueue.global().async {
-                        if timeoutState.markTerminatedAndCheckTimedOut() {
-                            stdoutCollector.cancel()
-                            stderrCollector.cancel()
-                            resumeOnce(.failure(ProcessTimeoutError(label: request.label)))
-                            return
-                        }
                         drainGroup.wait()
                         let output = ProcessOutput(
                             terminationStatus: process.terminationStatus,
@@ -281,12 +334,7 @@ package struct ProcessRunner: ProcessRunning {
                         cancelResources()
                         return
                     }
-                    if let timeoutWorkItem {
-                        DispatchQueue.global().asyncAfter(
-                            deadline: .now() + .nanoseconds(Int(request.timeoutNanoseconds ?? 0)),
-                            execute: timeoutWorkItem
-                        )
-                    }
+                    timeoutController.schedule()
                     try? stdoutPipe.fileHandleForWriting.close()
                     try? stderrPipe.fileHandleForWriting.close()
                     if let input = request.input {
@@ -310,28 +358,6 @@ package struct ProcessRunner: ProcessRunning {
             }
         } onCancel: {
             cancellationState.cancel()
-        }
-    }
-
-    private static func makeTimeoutWorkItem(
-        timeoutNanoseconds: Int64?,
-        process: Process,
-        timeoutState: ProcessTimeoutState
-    ) -> DispatchWorkItem? {
-        guard let timeoutNanoseconds, timeoutNanoseconds > 0 else {
-            return nil
-        }
-        return DispatchWorkItem {
-            guard process.isRunning, timeoutState.markTimedOutIfRunning() else {
-                return
-            }
-            process.terminate()
-            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(1)) {
-                guard process.isRunning else {
-                    return
-                }
-                kill(process.processIdentifier, SIGKILL)
-            }
         }
     }
 }

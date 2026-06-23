@@ -1021,6 +1021,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
             label: "documentation-search-local",
             executablePath: "/usr/bin/sqlite3",
             arguments: [
+                "-readonly",
                 "-json",
                 asset.indexURL.path,
                 sql,
