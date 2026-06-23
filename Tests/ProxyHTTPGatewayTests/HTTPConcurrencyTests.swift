@@ -1595,6 +1595,9 @@ private func waitUntil(
     interval: Duration = .milliseconds(20),
     condition: @escaping @Sendable () async -> Bool
 ) async -> Bool {
+    // These HTTP tests cross URLSession and NIO channel scheduling boundaries.
+    // Polling here is only a bounded eventual-I/O guard, not an intra-actor
+    // synchronization primitive.
     let intervalNanos = interval.components.seconds * 1_000_000_000
         + Int64(interval.components.attoseconds / 1_000_000_000)
     let deadline = ContinuousClock.now + timeout

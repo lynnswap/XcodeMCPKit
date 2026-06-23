@@ -8,7 +8,11 @@ import XcodeMCPTestSupport
 struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorSerializesRequestsForSameKey() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            waitClock: clock,
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
 
@@ -21,9 +25,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 try await releaseFirst.wait()
             }
         }
-        try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
-        }
+        _ = try await nextRecorded(acquisitions, at: 0, "waiting for first acquisition")
 
         let secondTask = Task<Void, Never> {
             _ = try? await coordinator.withPermit(
@@ -34,7 +36,9 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await clock.sleep(untilSuspendedBy: 1)
+        let queued = try await nextHookEvent(hookEvents, at: 1, "waiting for second waiter to queue")
+        #expect(queued.kind == .waiterQueued)
+        #expect(queued.key == "windowtab-same")
         #expect(await acquisitions.snapshot() == ["first"])
         await releaseFirst.signal()
 
@@ -57,9 +61,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 try await releaseFirst.wait()
             }
         }
-        try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
-        }
+        _ = try await nextRecorded(acquisitions, at: 0, "waiting for first acquisition")
 
         let secondTask = Task<Void, Never> {
             _ = try? await coordinator.withPermit(
@@ -70,9 +72,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        try await spinUntil("waiting for second acquisition") {
-            await acquisitions.count() == 2
-        }
+        _ = try await nextRecorded(acquisitions, at: 1, "waiting for second acquisition")
 
         await releaseFirst.signal()
         _ = await firstTask.value
@@ -82,7 +82,11 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorAcceptsManyQueuedWaitersForSameKey() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            waitClock: clock,
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let releaseFirst = AsyncGate()
         let completionCount = RecordedValues<String>()
 
@@ -95,9 +99,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 try await releaseFirst.wait()
             }
         }
-        try await spinUntil("waiting for first acquisition") {
-            await completionCount.count() == 1
-        }
+        _ = try await nextRecorded(completionCount, at: 0, "waiting for first acquisition")
 
         let queuedTasks = (0..<100).map { index in
             Task<String, Never> {
@@ -115,8 +117,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await Task.yield()
-        await Task.yield()
+        _ = try await nextHookEvent(hookEvents, at: 100, "waiting for queued waiters")
         #expect(await completionCount.count() == 1)
 
         await releaseFirst.signal()
@@ -125,14 +126,16 @@ struct RefreshCodeIssuesCoordinatorTests {
             #expect(await task.value == "success")
         }
 
-        try await spinUntil("waiting for queued completions") {
-            await completionCount.count() == 101
-        }
+        #expect(await completionCount.count() == 101)
     }
 
     @Test func refreshCoordinatorTimeoutRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            waitClock: clock,
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
@@ -146,9 +149,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 try await releaseFirst.wait()
             }
         }
-        try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
-        }
+        _ = try await nextRecorded(acquisitions, at: 0, "waiting for first acquisition")
 
         let secondTask = Task<Void, Never> {
             do {
@@ -166,11 +167,10 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
+        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for timed waiter to queue")
         await clock.sleep(untilSuspendedBy: 1)
         clock.advance(by: .milliseconds(50))
-        try await spinUntil("waiting for timed-out waiter to finish") {
-            await outcomes.count() == 1
-        }
+        _ = try await nextRecorded(outcomes, at: 0, "waiting for timed-out waiter to finish")
         #expect(await outcomes.snapshot() == ["timed-out"])
 
         let thirdTask = Task<Void, Never> {
@@ -191,7 +191,11 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorNilRequestTimeoutKeepsQueuedWaiterWaiting() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            waitClock: clock,
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let releaseFirst = AsyncGate()
         let firstAcquired = AsyncGate()
         let outcomes = RecordedValues<String>()
@@ -220,10 +224,8 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await Task.yield()
-        await Task.yield()
+        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for unbounded waiter to queue")
         clock.advance(by: .seconds(10))
-        await Task.yield()
         #expect(await outcomes.count() == 0)
 
         await releaseFirst.signal()
@@ -234,7 +236,11 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorCancellationRemovesQueuedWaiterDeterministically() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            waitClock: clock,
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
@@ -248,9 +254,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 try await releaseFirst.wait()
             }
         }
-        try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
-        }
+        _ = try await nextRecorded(acquisitions, at: 0, "waiting for first acquisition")
 
         let cancelledTask = Task<Void, Never> {
             do {
@@ -267,11 +271,9 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await clock.sleep(untilSuspendedBy: 1)
+        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for cancellable waiter to queue")
         cancelledTask.cancel()
-        try await spinUntil("waiting for cancelled waiter to finish") {
-            await outcomes.count() == 1
-        }
+        _ = try await nextRecorded(outcomes, at: 0, "waiting for cancelled waiter to finish")
         #expect(await outcomes.snapshot() == ["cancelled"])
 
         let thirdTask = Task<Void, Never> {
@@ -292,7 +294,11 @@ struct RefreshCodeIssuesCoordinatorTests {
 
     @Test func refreshCoordinatorResetCancelsQueuedWaiters() async throws {
         let clock = TestClock()
-        let coordinator = RefreshCodeIssues.Coordinator(waitClock: clock)
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            waitClock: clock,
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let releaseFirst = AsyncGate()
         let acquisitions = RecordedValues<String>()
         let outcomes = RecordedValues<String>()
@@ -306,9 +312,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                 try await releaseFirst.wait()
             }
         }
-        try await spinUntil("waiting for first acquisition") {
-            await acquisitions.count() == 1
-        }
+        _ = try await nextRecorded(acquisitions, at: 0, "waiting for first acquisition")
 
         let queuedTask = Task<Void, Never> {
             do {
@@ -324,12 +328,10 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await clock.sleep(untilSuspendedBy: 1)
+        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for reset waiter to queue")
         await coordinator.reset()
 
-        try await spinUntil("waiting for queued waiter to cancel") {
-            await outcomes.count() == 1
-        }
+        _ = try await nextRecorded(outcomes, at: 0, "waiting for queued waiter to cancel")
         #expect(await outcomes.snapshot() == ["cancelled"])
 
         let thirdTask = Task<Void, Never> {
@@ -373,9 +375,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         try await started.wait(description: "waiting for active execution to start")
         await coordinator.reset()
 
-        try await spinUntil("waiting for active execution to cancel") {
-            await outcomes.count() == 1
-        }
+        _ = try await nextRecorded(outcomes, at: 0, "waiting for active execution to cancel")
         #expect(await outcomes.snapshot() == ["cancelled"])
         _ = await activeTask.value
     }
@@ -383,7 +383,10 @@ struct RefreshCodeIssuesCoordinatorTests {
     @Test func refreshCoordinatorResetKeepsSameKeySerializedUntilCancelledExecutionExits()
         async throws
     {
-        let coordinator = RefreshCodeIssues.Coordinator()
+        let hookEvents = LockedRecordedValues<RefreshCoordinatorHookEvent>()
+        let coordinator = RefreshCodeIssues.Coordinator(
+            testHooks: refreshCoordinatorHooks(recording: hookEvents)
+        )
         let activeStarted = TestSignal()
         let activeCancellationObserved = TestSignal()
         let releaseActive = AsyncGate()
@@ -435,8 +438,7 @@ struct RefreshCodeIssuesCoordinatorTests {
             }
         }
 
-        await Task.yield()
-        await Task.yield()
+        _ = try await nextHookEvent(hookEvents, at: 1, "waiting for second execution to queue")
         #expect(await acquisitions.snapshot() == ["first", "first-cancelling"])
 
         await allowActiveExit.signal()
@@ -451,5 +453,67 @@ struct RefreshCodeIssuesCoordinatorTests {
             "first-cancelled",
             "second",
         ])
+    }
+}
+
+private struct RefreshCoordinatorHookEvent: Sendable {
+    enum Kind: Sendable {
+        case permitAcquired
+        case waiterQueued
+    }
+
+    let kind: Kind
+    let key: String
+    let queuePosition: Int
+    let pendingForKey: Int
+    let pendingTotal: Int
+}
+
+private func refreshCoordinatorHooks(
+    recording events: LockedRecordedValues<RefreshCoordinatorHookEvent>
+) -> RefreshCodeIssues.Coordinator.TestHooks {
+    RefreshCodeIssues.Coordinator.TestHooks(
+        permitAcquired: { key, permit in
+            events.append(
+                RefreshCoordinatorHookEvent(
+                    kind: .permitAcquired,
+                    key: key,
+                    queuePosition: permit.queuePosition,
+                    pendingForKey: permit.pendingForKey,
+                    pendingTotal: permit.pendingTotal
+                )
+            )
+        },
+        waiterQueued: { key, permit in
+            events.append(
+                RefreshCoordinatorHookEvent(
+                    kind: .waiterQueued,
+                    key: key,
+                    queuePosition: permit.queuePosition,
+                    pendingForKey: permit.pendingForKey,
+                    pendingTotal: permit.pendingTotal
+                )
+            )
+        }
+    )
+}
+
+private func nextRecorded<Value: Sendable>(
+    _ values: RecordedValues<Value>,
+    at index: Int,
+    _ description: String
+) async throws -> Value {
+    try await waitWithTimeout(description) {
+        try await values.nextValue(at: index)
+    }
+}
+
+private func nextHookEvent(
+    _ events: LockedRecordedValues<RefreshCoordinatorHookEvent>,
+    at index: Int,
+    _ description: String
+) async throws -> RefreshCoordinatorHookEvent {
+    try await waitWithTimeout(description) {
+        try await events.nextValue(at: index)
     }
 }

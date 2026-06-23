@@ -2411,11 +2411,9 @@ extension HTTPHandlerTests {
         }
 
         do {
-            let deadline = ContinuousClock.now + .seconds(2)
-            while sessionManager.sentUpstreamCount() != 2, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            #expect(sessionManager.sentUpstreamCount() == 2)
+            #expect(await waitUntil(timeout: .seconds(2)) {
+                sessionManager.sentUpstreamCount() == 2
+            })
             #expect(sessionManager.requeuedLeaseCount() == 1)
 
             let inFlightLease = try #require(sessionManager.leaseDebugSnapshots().first)

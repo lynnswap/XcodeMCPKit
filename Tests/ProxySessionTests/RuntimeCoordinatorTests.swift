@@ -85,8 +85,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         manager.handleUpstreamStderr("repeated stderr", upstreamIndex: 0)
@@ -101,8 +109,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let request1 = makeInitializeRequest(id: 1)
@@ -841,8 +857,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-A"
@@ -870,8 +894,14 @@ struct RuntimeCoordinatorTests {
             options: []
         )
         _ = try await future.get()
+        let notificationEventIndex = upstreamEvents.count()
         await upstream.yield(.message(notification))
-        let received = try await nextBufferedNotifications(from: session.router)
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: notificationEventIndex,
+            description: "waiting for cached initialize notification"
+        )
+        let received = session.router.drainBufferedNotifications()
         #expect(received.count == 1)
         #expect(received.first == notification)
 
@@ -885,8 +915,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-handshake"
@@ -909,9 +947,15 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
+        let notificationEventIndex = upstreamEvents.count()
         await upstream.yield(.message(notification))
 
-        let received = try await nextBufferedNotifications(from: session.router)
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: notificationEventIndex,
+            description: "waiting for initialize-handshake notification"
+        )
+        let received = session.router.drainBufferedNotifications()
         #expect(received.count == 1)
         #expect(received.first == notification)
 
@@ -928,8 +972,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let firstFuture = manager.registerInitialize(
@@ -962,10 +1014,16 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
+        let notificationEventIndex = upstreamEvents.count()
         await upstream.yield(.message(notification))
 
         _ = try await cachedFuture.get()
-        let received = try await nextBufferedNotifications(from: session.router)
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: notificationEventIndex,
+            description: "waiting for cached initialize session notification"
+        )
+        let received = session.router.drainBufferedNotifications()
         #expect(received.count == 1)
         #expect(received.first == notification)
 
@@ -1051,8 +1109,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -1096,23 +1162,21 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
+        let eventIndex = upstreamEvents.count()
         await upstream0.yield(.message(notification0))
         await upstream1.yield(.message(notification1))
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: eventIndex,
+            description: "waiting for first cached initialize notification"
+        )
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: eventIndex + 1,
+            description: "waiting for second cached initialize notification"
+        )
 
-        let received = try await waitWithTimeout(
-            "waiting for cached initialize notifications",
-            timeout: .seconds(5)
-        ) {
-            var notifications: [Data] = []
-            while notifications.count < 2 {
-                notifications.append(contentsOf: session.router.drainBufferedNotifications())
-                if notifications.count >= 2 {
-                    return notifications
-                }
-                await Task.yield()
-            }
-            return notifications
-        }
+        let received = session.router.drainBufferedNotifications()
         #expect(Set(received) == Set([notification0, notification1]))
 
         manager.markNotificationClientConnected(sessionID: sessionID)
@@ -1326,9 +1390,7 @@ struct RuntimeCoordinatorTests {
             _ = try await firstTask.value
         }
 
-        try await spinUntil("waiting for first timed-out tools/list to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -1383,8 +1445,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        try await spinUntil("waiting for foreground tools/list waiter to reuse prewarm load") {
-            manager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 1
+        try await waitWithTimeout("waiting for foreground tools/list waiter to reuse prewarm load") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
         }
         #expect(await upstream.sentCount() == 3)
 
@@ -1453,11 +1517,7 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                await upstream.sentCount() >= 4
-            }
-        )
+        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
 
@@ -1516,9 +1576,7 @@ struct RuntimeCoordinatorTests {
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
-        try await spinUntil("waiting for cancelled tools/list to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func sessionManagerSharedToolsListStopsPromotingAfterLoadBecomesShared() async throws {
@@ -1577,8 +1635,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        try await spinUntil("waiting for third tools/list waiter to share the in-flight load") {
-            manager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 3
+        try await waitWithTimeout("waiting for third tools/list waiter to share the in-flight load") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 3
+            }
         }
         #expect(await upstream.sentCount() == 4)
 
@@ -1654,9 +1714,7 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted waiter but received \(error)")
         }
 
-        try await spinUntil("waiting for promoted tools/list cancellation to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func sessionManagerSharedToolsListTimeoutCancelsStalePrewarmLoad() async throws {
@@ -1699,8 +1757,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        try await spinUntil("waiting for foreground tools/list waiter to attach to prewarm load") {
-            manager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 1
+        try await waitWithTimeout("waiting for foreground tools/list waiter to attach to prewarm load") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
         }
         await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
@@ -1711,9 +1771,7 @@ struct RuntimeCoordinatorTests {
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
-        try await spinUntil("waiting for timed-out prewarm tools/list to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -1832,9 +1890,7 @@ struct RuntimeCoordinatorTests {
             _ = try await firstTask.value
         }
 
-        try await spinUntil("waiting for first timed-out list-windows call to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
@@ -1897,9 +1953,7 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError but received \(error)")
         }
 
-        try await spinUntil("waiting for cancelled list-windows call to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func sessionManagerPromotedLiveXcodeListWindowsCancellationRemovesMigratedWaiter()
@@ -1966,9 +2020,7 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted XcodeListWindows waiter but received \(error)")
         }
 
-        try await spinUntil("waiting for promoted list-windows cancellation to release its lease") {
-            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-        }
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func controlPlaneRPCHandleCancelBeforeQueueStartCapturesQueuedState() {
@@ -2110,9 +2162,9 @@ struct RuntimeCoordinatorTests {
             try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
         }
         try await loadStarted.wait(description: "waiting for tools catalog load")
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
-        })
+        _ = try await waitWithTimeout("waiting for tools catalog waiter") {
+            try await debugMirror.waitForSnapshot { $0.waiterCounts.toolsCatalog == 1 }
+        }
 
         brokerState.clearToolsCatalog()
         await releaseLoad.signal()
@@ -2151,9 +2203,9 @@ struct RuntimeCoordinatorTests {
             try await coordinator.listWindows(route: .anyHealthy, deadlineUptimeNs: nil)
         }
         try await loadStarted.wait(description: "waiting for window load")
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            debugMirror.snapshot()?.waiterCounts.windows == 1
-        })
+        _ = try await waitWithTimeout("waiting for window waiter") {
+            try await debugMirror.waitForSnapshot { $0.waiterCounts.windows == 1 }
+        }
 
         brokerState.clearInitialize()
         await releaseLoad.signal()
@@ -2208,9 +2260,9 @@ struct RuntimeCoordinatorTests {
             try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
         }
         try await firstLoadStarted.wait(description: "waiting for stale tools catalog load")
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
-        })
+        _ = try await waitWithTimeout("waiting for stale tools catalog waiter") {
+            try await debugMirror.waitForSnapshot { $0.waiterCounts.toolsCatalog == 1 }
+        }
 
         brokerState.clearToolsCatalog()
         let invalidatedGeneration = brokerState.generation()
@@ -2218,9 +2270,9 @@ struct RuntimeCoordinatorTests {
             try await coordinator.toolsCatalog(deadlineUptimeNs: nil)
         }
         try await secondLoadStarted.wait(description: "waiting for fresh tools catalog load")
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            debugMirror.snapshot()?.waiterCounts.toolsCatalog == 1
-        })
+        _ = try await waitWithTimeout("waiting for fresh tools catalog waiter") {
+            try await debugMirror.waitForSnapshot { $0.waiterCounts.toolsCatalog == 1 }
+        }
 
         await coordinator.cancelLoadsStartedBeforeGeneration(
             invalidatedGeneration,
@@ -2403,10 +2455,6 @@ struct RuntimeCoordinatorTests {
         )
         await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(100))
-        try await spinUntil("waiting for eager initialize timeout", maxIterations: 1_000) {
-            let snapshot = manager.testStateSnapshot()
-            return snapshot.initInFlight == false && snapshot.hasInitResult == false
-        }
 
         _ = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
@@ -2557,9 +2605,7 @@ struct RuntimeCoordinatorTests {
             return eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
         _ = try await queuedFuture.get()
@@ -2577,8 +2623,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // First init establishes the cached init result.
@@ -2596,10 +2650,14 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
         // Simulate primary upstream dying after init succeeded.
+        let exitEventIndex = upstreamEvents.count()
         await upstream.yield(.exit(1))
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.testStateSnapshot().hasInitResult == false
-        }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: exitEventIndex,
+            description: "waiting for primary upstream exit"
+        )
+        #expect(manager.testStateSnapshot().hasInitResult == false)
 
         // A new downstream initialize must trigger a new upstream initialize (no cached response).
         let init2 = manager.registerInitialize(
@@ -2716,17 +2774,13 @@ struct RuntimeCoordinatorTests {
             return eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         await upstream.yield(.exit(1))
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.testStateSnapshot().upstreams[0].initInFlight
-                && manager.debugSnapshot().queuedRequestCount == 1
-        }
 
         let reinitRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(manager.testStateSnapshot().upstreams[0].initInFlight)
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
         let reinitUpstreamID = try extractUpstreamID(from: reinitRequest)
         await upstream.yield(.message(try makeInitializeResponse(id: reinitUpstreamID)))
         _ = try await queuedFuture.get()
@@ -2747,9 +2801,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // First init establishes the cached init result (primary only).
@@ -2774,27 +2835,29 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
         // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
+        let primaryExitEventIndex = upstreamEvents.count()
         await upstream0.yield(.exit(1))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.testStateSnapshot().upstreams[0].isInitialized == false
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: primaryExitEventIndex,
+            description: "waiting for primary upstream exit"
         )
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
 
         // Now simulate the last initialized upstream dying too.
+        let secondaryExitEventIndex = upstreamEvents.count()
         await upstream1.yield(.exit(1))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized == false
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: secondaryExitEventIndex,
+            description: "waiting for secondary upstream exit"
         )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
 
         // Ensure the cached init result is cleared before asserting that a new downstream initialize
         // triggers a fresh upstream initialize. This avoids race/flakiness where the exit event hasn't
         // been processed yet on the event loop.
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.testStateSnapshot().hasInitResult == false
-        }
+        #expect(manager.testStateSnapshot().hasInitResult == false)
 
         // A new downstream initialize must trigger a new upstream initialize (no cached response).
         let init2 = manager.registerInitialize(
@@ -2818,9 +2881,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
@@ -2854,16 +2924,24 @@ struct RuntimeCoordinatorTests {
                 "message": "warm init failed",
             ],
         ]
+        let errorEventIndex = upstreamEvents.count()
         await upstream0.yield(
             .message(try JSONSerialization.data(withJSONObject: errorResponse, options: [])))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.testStateSnapshot().upstreams[0].initInFlight == false
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: errorEventIndex,
+            description: "waiting for primary warm init failure"
         )
+        #expect(manager.testStateSnapshot().upstreams[0].initInFlight == false)
 
         // Now simulate the last initialized upstream dying too. Eager init should kick the global init path again.
+        let secondaryExitEventIndex = upstreamEvents.count()
         await upstream1.yield(.exit(1))
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: secondaryExitEventIndex,
+            description: "waiting for secondary upstream exit"
+        )
         _ = try await sentValue(from: upstream0, at: 3, timeout: .seconds(2))
         _ = manager
     }
@@ -2878,9 +2956,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
@@ -2902,12 +2987,14 @@ struct RuntimeCoordinatorTests {
         let retryID = try extractUpstreamID(from: retry)
 
         // While primary warm init is in flight, last initialized upstream exits.
+        let secondaryExitEventIndex = upstreamEvents.count()
         await upstream1.yield(.exit(1))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized == false
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: secondaryExitEventIndex,
+            description: "waiting for secondary upstream exit"
         )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
 
         // Warm init fails with JSON-RPC error.
         let errorResponse: [String: Any] = [
@@ -2932,9 +3019,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Eager init -> upstream0
@@ -3105,8 +3199,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-A"
@@ -3125,8 +3227,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
@@ -3151,6 +3261,7 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(try makeToolListResponse(id: upstreamID)))
         _ = try await future.get()
 
+        let debugEventIndex = upstreamEvents.count()
         await upstream.yield(.message(try makeToolListResponse(id: 9_999_999)))
         await upstream.yield(
             .stderr("Could not decode agent message: Error Domain=mcpbridge.DecodeError Code=1"))
@@ -3168,13 +3279,10 @@ struct RuntimeCoordinatorTests {
             )
         )
         await upstream.yield(.stdoutBufferSize(2048))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                let snapshot = manager.debugSnapshot()
-                return snapshot.upstreams[0].bufferedStdoutBytes == 2048
-                    && snapshot.upstreams[0].protocolViolationCount == 1
-                    && snapshot.upstreams[0].recentStderr.count == 2
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: debugEventIndex + 4,
+            description: "waiting for upstream debug events"
         )
 
         let snapshot = manager.debugSnapshot()
@@ -3199,19 +3307,12 @@ struct RuntimeCoordinatorTests {
             })
         #expect(snapshot.upstreams[0].recentStderr.allSatisfy { $0.message == "<redacted>" })
 
+        let exitEventIndex = upstreamEvents.count()
         await upstream.yield(.exit(1))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                let snapshot = manager.debugSnapshot()
-                return snapshot.upstreams[0].recentStderr.isEmpty
-                    && snapshot.upstreams[0].lastDecodeError == nil
-                    && snapshot.upstreams[0].lastBridgeError == nil
-                    && snapshot.upstreams[0].protocolViolationCount == 0
-                    && snapshot.upstreams[0].lastProtocolViolationPreview == nil
-                    && snapshot.upstreams[0].lastProtocolViolationPreviewHex == nil
-                    && snapshot.upstreams[0].lastProtocolViolationLeadingByteHex == nil
-                    && snapshot.upstreams[0].bufferedStdoutBytes == 0
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: exitEventIndex,
+            description: "waiting for upstream exit debug reset"
         )
 
         let clearedSnapshot = manager.debugSnapshot()
@@ -3231,10 +3332,19 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
+        let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
         var config = makeConfig(requestTimeout: 2)
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Initialize primary upstream0.
@@ -3266,18 +3376,20 @@ struct RuntimeCoordinatorTests {
             "id": warmup0ID,
             "result": [:],  // invalid (no `tools` array) -> marks upstream unhealthy
         ]
+        let warmup0RefreshIndex = toolsListRefreshes.count()
         await upstream0.yield(
             .message(try JSONSerialization.data(withJSONObject: warmup0Response, options: [])))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                switch manager.testStateSnapshot().upstreams[0].healthState {
-                case .healthy:
-                    return false
-                case .degraded, .quarantined:
-                    return true
-                }
-            }
+        _ = try await waitForRecordedValue(
+            toolsListRefreshes,
+            at: warmup0RefreshIndex,
+            description: "waiting for first tools/list warmup failure"
         )
+        switch manager.testStateSnapshot().upstreams[0].healthState {
+        case .healthy:
+            Issue.record("upstream0 should be degraded after invalid tools/list warmup")
+        case .degraded, .quarantined:
+            break
+        }
 
         // Trigger another warmup; it should prefer upstream1 and fail there too so no healthy upstream exists.
         manager.refreshToolsListIfNeeded()
@@ -3292,12 +3404,13 @@ struct RuntimeCoordinatorTests {
             "id": warmup1ID,
             "result": [:],
         ]
+        let warmup1RefreshIndex = toolsListRefreshes.count()
         await upstream1.yield(
             .message(try JSONSerialization.data(withJSONObject: warmup1Response, options: [])))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.chooseUpstreamIndex() == nil
-            }
+        _ = try await waitForRecordedValue(
+            toolsListRefreshes,
+            at: warmup1RefreshIndex,
+            description: "waiting for second tools/list warmup failure"
         )
 
         let chosen = manager.chooseUpstreamIndex()
@@ -3484,9 +3597,7 @@ struct RuntimeCoordinatorTests {
             return eventLoop.makeSucceededFuture(())
         }
 
-        try await spinUntil("waiting for queued request to be visible") {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         try await spinUntilSentCount(
             upstream1,
@@ -3596,9 +3707,7 @@ struct RuntimeCoordinatorTests {
             return eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         let genericDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-generic",
@@ -3635,9 +3744,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
@@ -3666,12 +3782,14 @@ struct RuntimeCoordinatorTests {
             manager.chooseUpstreamIndex())
         #expect(upstreamIndexA != upstreamIndexB)
 
+        let exitEventIndex = upstreamEvents.count()
         await upstream1.yield(.exit(1))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized == false
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: exitEventIndex,
+            description: "waiting for secondary upstream exit"
         )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
 
         let repinned = try #require(
             manager.chooseUpstreamIndex())
@@ -3725,9 +3843,16 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
@@ -3754,12 +3879,14 @@ struct RuntimeCoordinatorTests {
             sessionID: sessionID, originalID: originalA, upstreamIndex: 1)
         manager.sendUpstream(try makeToolListRequest(id: upstreamIDA), upstreamIndex: 1)
 
+        let exitEventIndex = upstreamEvents.count()
         await upstream1.yield(.exit(1))
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized == false
-            }
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: exitEventIndex,
+            description: "waiting for secondary upstream exit"
         )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
 
         // The proxy should continue serving on upstream0.
         let originalB = JSONRPC.ID(any: NSNumber(value: 201))!
@@ -3818,12 +3945,6 @@ struct RuntimeCoordinatorTests {
         #expect((error?["code"] as? NSNumber)?.intValue == -32002)
         #expect((error?["message"] as? String) == "upstream overloaded")
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().recentTraffic.contains { $0.direction == "outbound" }
-                    == false
-            }
-        )
         let snapshot = manager.debugSnapshot()
         #expect(snapshot.recentTraffic.contains { $0.direction == "outbound" } == false)
     }
@@ -3948,12 +4069,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let retriedInitialize = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: retriedInitialize) == "initialize")
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                let snapshot = manager.testStateSnapshot()
-                return snapshot.hasInitResult == false
-            }
-        )
+        #expect(manager.testStateSnapshot().hasInitResult == false)
     }
 
     @Test func sessionManagerPrimaryInitializedNotificationOverloadClearsSecondaryStateAndToolsCache()
@@ -4136,11 +4252,9 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            if case .quarantined = manager.testStateSnapshot().upstreams[1].healthState {
-                return true
-            }
-            return false
+        guard case .quarantined = manager.testStateSnapshot().upstreams[1].healthState else {
+            Issue.record("expected upstream1 to be quarantined")
+            return
         }
 
         await upstream0.yield(.exit(1))
@@ -4287,11 +4401,15 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -4325,16 +4443,20 @@ struct RuntimeCoordinatorTests {
                 "message": "warm init failed",
             ],
         ]
+        let errorEventIndex = upstreamEvents.count()
         await upstream0.yield(
             .message(try JSONSerialization.data(withJSONObject: errorResponse, options: []))
         )
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: errorEventIndex,
+            description: "waiting for warm init failure"
+        )
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            let snapshot = manager.testStateSnapshot()
-            return snapshot.shouldRetryEagerInitializePrimaryAfterWarmInitFailure
-                && snapshot.upstreams[0].isInitialized == false
-                && snapshot.upstreams[0].initInFlight == false
-        }
+        let snapshot = manager.testStateSnapshot()
+        #expect(snapshot.shouldRetryEagerInitializePrimaryAfterWarmInitFailure)
+        #expect(snapshot.upstreams[0].isInitialized == false)
+        #expect(snapshot.upstreams[0].initInFlight == false)
 
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
@@ -4440,9 +4562,7 @@ struct RuntimeCoordinatorTests {
             eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         manager.abandonRequestLease(
             queuedLeaseID,
@@ -4782,11 +4902,7 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                await upstream.sentCount() >= 3
-            }
-        )
+        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
 
         let restartedInitRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         let object = try #require(
@@ -4861,9 +4977,7 @@ struct RuntimeCoordinatorTests {
             return eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         manager.handleUpstreamProtocolViolation(
             StdioFramer.ProtocolViolation(
@@ -5002,9 +5116,7 @@ struct RuntimeCoordinatorTests {
             eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         manager.onRequestTimeout(
             sessionID: activeDescriptor.sessionID,
@@ -5023,14 +5135,10 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().queuedRequestCount == 0
-            }
-        )
         await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             try await queuedFuture.get()
         }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
 
         activePromise.fail(CancellationError())
     }
@@ -5131,9 +5239,7 @@ struct RuntimeCoordinatorTests {
             eventLoop.makeSucceededFuture(())
         }
 
-        try await waitForCondition(timeoutSeconds: 2) {
-            manager.debugSnapshot().queuedRequestCount == 1
-        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         manager.debugReset()
 

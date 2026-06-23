@@ -146,6 +146,7 @@ extension RuntimeCoordinator {
 
     func markToolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64) {
         upstreamHealthManager.markToolsListRefreshSucceeded(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs)
+        testHooks.toolsListRefreshCompleted?(upstreamIndex, true)
     }
 
     func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String)
@@ -167,6 +168,7 @@ extension RuntimeCoordinator {
                 "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )
+        testHooks.toolsListRefreshCompleted?(upstreamIndex, false)
     }
 
     func isValidToolsListResult(_ value: JSONValue) -> Bool {

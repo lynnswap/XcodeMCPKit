@@ -123,6 +123,9 @@ struct ProcessRunnerTests {
             )
         }
 
+        // This is an OS process integration test. Give /bin/sleep time to exec
+        // before asserting cancellation behavior; unit-level timeout tests use
+        // manual clocks instead.
         try await Task.sleep(nanoseconds: 100_000_000)
         task.cancel()
 

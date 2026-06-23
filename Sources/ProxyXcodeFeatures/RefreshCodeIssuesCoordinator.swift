@@ -17,6 +17,21 @@ extension RefreshCodeIssues {
         package let pendingTotal: Int
     }
 
+    package struct TestHooks: Sendable {
+        package var permitAcquired: @Sendable (_ key: String, _ permit: Permit) -> Void
+        package var waiterQueued: @Sendable (_ key: String, _ permit: Permit) -> Void
+
+        package init(
+            permitAcquired: @escaping @Sendable (_ key: String, _ permit: Permit) -> Void = { _, _ in },
+            waiterQueued: @escaping @Sendable (_ key: String, _ permit: Permit) -> Void = { _, _ in }
+        ) {
+            self.permitAcquired = permitAcquired
+            self.waiterQueued = waiterQueued
+        }
+
+        package static let noop = Self()
+    }
+
     package enum AcquireError: Error {
         case queueWaitTimedOut
     }
@@ -42,15 +57,18 @@ extension RefreshCodeIssues {
     private var pendingWaiterCount = 0
     private var activeExecutionsByKey: [String: ActiveExecution] = [:]
     private var waitersByKey: [String: [Waiter]] = [:]
+    private let testHooks: TestHooks
 
     package static func makeDefault() -> RefreshCodeIssues.Coordinator {
         RefreshCodeIssues.Coordinator()
     }
 
     package init(
-        waitClock: any Clock<Duration> & Sendable = ContinuousClock()
+        waitClock: any Clock<Duration> & Sendable = ContinuousClock(),
+        testHooks: TestHooks = .noop
     ) {
         self.waitClock = waitClock
+        self.testHooks = testHooks
     }
 
     package nonisolated func scheduleReset() {
@@ -125,11 +143,13 @@ extension RefreshCodeIssues {
     private func acquire(key: String, requestTimeout: TimeAmount?) async throws -> Permit {
         if busyKeys.contains(key) == false {
             busyKeys.insert(key)
-            return Permit(
+            let permit = Permit(
                 queuePosition: 0,
                 pendingForKey: 0,
                 pendingTotal: pendingWaiterCount
             )
+            testHooks.permitAcquired(key, permit)
+            return permit
         }
 
         let waiterCountForKey = waitersByKey[key]?.count ?? 0
@@ -164,6 +184,7 @@ extension RefreshCodeIssues {
                         }
                         waitersByKey[key, default: []].append(waiter)
                         pendingWaiterCount += 1
+                        testHooks.waiterQueued(key, permit)
 
                         if Task.isCancelled {
                             failWaiter(
@@ -277,6 +298,7 @@ extension RefreshCodeIssues {
             } else {
                 waitersByKey[key] = waiters
             }
+            testHooks.permitAcquired(key, next.permit)
             next.continuation.resume(returning: next.permit)
             return
         }

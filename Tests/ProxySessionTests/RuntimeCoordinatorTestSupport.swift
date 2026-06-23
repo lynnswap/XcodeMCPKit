@@ -361,27 +361,29 @@ struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
 
 actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
     private let result: DocumentationSearchServiceRepairResult
-    private let delayNanoseconds: UInt64?
+    private let gate: OperationGate<pid_t>?
     private var repairedProcessIDs: [pid_t] = []
     private var cancelledProcessIDs: [pid_t] = []
+    private let cancelledPIDValues = RecordedValues<pid_t>()
 
     init(
         result: DocumentationSearchServiceRepairResult,
-        delayNanoseconds: UInt64? = nil
+        gate: OperationGate<pid_t>? = nil
     ) {
         self.result = result
-        self.delayNanoseconds = delayNanoseconds
+        self.gate = gate
     }
 
     func repairDocumentationSearch(
         for target: DocumentationProviderTarget
     ) async -> DocumentationSearchServiceRepairResult {
         repairedProcessIDs.append(target.processID)
-        if let delayNanoseconds {
+        if let gate {
             do {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
+                try await gate.wait(for: target.processID)
             } catch is CancellationError {
                 cancelledProcessIDs.append(target.processID)
+                await cancelledPIDValues.append(target.processID)
             } catch {
             }
         }
@@ -394,6 +396,10 @@ actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairin
 
     func cancelledPIDs() -> [pid_t] {
         cancelledProcessIDs
+    }
+
+    func nextCancelledPID(at index: Int) async throws -> pid_t {
+        try await cancelledPIDValues.nextValue(at: index)
     }
 }
 
@@ -471,22 +477,25 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
 
 actor StubProcessRunner: ProcessRunning {
     private let output: ProcessOutput
-    private let delayNanoseconds: UInt64?
+    private let gate: OperationGate<Int>?
     private var requests: [ProcessRequest] = []
     private var cancelledRunCountValue = 0
+    private let cancelledRunValues = RecordedValues<Int>()
 
-    init(output: ProcessOutput, delayNanoseconds: UInt64? = nil) {
+    init(output: ProcessOutput, gate: OperationGate<Int>? = nil) {
         self.output = output
-        self.delayNanoseconds = delayNanoseconds
+        self.gate = gate
     }
 
     func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         requests.append(request)
-        if let delayNanoseconds {
+        let runIndex = requests.count
+        if let gate {
             do {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
+                try await gate.wait(for: runIndex)
             } catch is CancellationError {
                 cancelledRunCountValue += 1
+                await cancelledRunValues.append(cancelledRunCountValue)
                 throw CancellationError()
             }
         }
@@ -500,10 +509,15 @@ actor StubProcessRunner: ProcessRunning {
     func cancelledRunCount() -> Int {
         cancelledRunCountValue
     }
+
+    func nextCancelledRunCount(at index: Int) async throws -> Int {
+        try await cancelledRunValues.nextValue(at: index)
+    }
 }
 
 actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
     private var toolsListCountValue = 0
+    private let toolsListCountValues = RecordedValues<Int>()
 
     func openRoute(
         for target: DocumentationProviderTarget,
@@ -523,6 +537,7 @@ actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
         timeout _: TimeAmount?
     ) async throws -> JSONValue {
         toolsListCountValue += 1
+        await toolsListCountValues.append(toolsListCountValue)
         if toolsListCountValue == 1 {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
@@ -543,6 +558,13 @@ actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
 
     func toolsListCount() -> Int {
         toolsListCountValue
+    }
+
+    func waitForToolsListCount(_ count: Int) async throws {
+        guard count > 0 else {
+            return
+        }
+        _ = try await toolsListCountValues.nextValue(at: count - 1)
     }
 }
 
@@ -702,20 +724,20 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private var requestCountsByPID: [pid_t: [String: Int]] = [:]
     private var documentationQueriesByPID: [pid_t: [String]] = [:]
     private var requestCountWaiters: [RequestCountWaiter] = []
-    private let startDelayNanoseconds: UInt64?
+    private let startGate: OperationGate<pid_t>?
 
     init(
         plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]],
-        startDelayNanoseconds: UInt64? = nil
+        startGate: OperationGate<pid_t>? = nil
     ) {
         self.plansByPID = plansByPID
-        self.startDelayNanoseconds = startDelayNanoseconds
+        self.startGate = startGate
     }
 
     func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
         startAttemptProcessIDs.append(target.processID)
-        if let startDelayNanoseconds {
-            try await Task.sleep(nanoseconds: startDelayNanoseconds)
+        if let startGate {
+            try await startGate.wait(for: target.processID)
         }
         guard var plans = plansByPID[target.processID],
               plans.isEmpty == false else {
@@ -1005,6 +1027,7 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     private var prewarmTimeouts: [TimeAmount?] = []
     private var toolListTimeouts: [TimeAmount?] = []
     private var callTimeouts: [TimeAmount?] = []
+    private let prewarmCountValues = RecordedValues<Int>()
     private let prewarmStarted: TestSignal?
     private let prewarmBlocker: AsyncGate?
     private let toolListStarted: TestSignal?
@@ -1039,6 +1062,7 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
             guard !Task.isCancelled else { return .unavailable }
         }
         prewarmTimeouts.append(requestTimeout)
+        await prewarmCountValues.append(prewarmTimeouts.count)
         return update
     }
 
@@ -1083,6 +1107,13 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     func prewarmCount() -> Int {
         prewarmTimeouts.count
+    }
+
+    func waitForPrewarmCount(_ count: Int) async throws {
+        guard count > 0 else {
+            return
+        }
+        _ = try await prewarmCountValues.nextValue(at: count - 1)
     }
 
     func toolListUpdateCount() -> Int {
@@ -1436,6 +1467,7 @@ actor ControlledReadinessSleep {
 actor XcodeLaunchRecorder {
     private var count = 0
     private var outcomes: [Bool]
+    private let launches = LockedRecordedValues<Int>()
 
     init(outcomes: [Bool] = []) {
         self.outcomes = outcomes
@@ -1443,6 +1475,8 @@ actor XcodeLaunchRecorder {
 
     func launch() -> Bool {
         count += 1
+        let currentCount = count
+        launches.append(currentCount)
         guard outcomes.isEmpty == false else {
             return true
         }
@@ -1452,12 +1486,17 @@ actor XcodeLaunchRecorder {
     func launchCount() -> Int {
         count
     }
+
+    func nextLaunch(at index: Int) async throws -> Int {
+        try await launches.nextValue(at: index)
+    }
 }
 
 func makeTestReadinessGate(
     readiness: ReadinessFlag,
     availability: AvailabilityFlag? = nil,
     sleepRecorder: ControlledReadinessSleep? = nil,
+    recordPollSleeps: Bool = false,
     launchRetryIntervalNanoseconds: UInt64 = 5_000_000_000,
     launchRecorder: XcodeLaunchRecorder? = nil
 ) -> UpstreamReadinessGate {
@@ -1491,9 +1530,11 @@ func makeTestReadinessGate(
             DispatchTime.now().uptimeNanoseconds
         },
         sleepNanoseconds: { nanoseconds in
-            if let sleepRecorder, nanoseconds >= 1_000_000_000 {
+            if let sleepRecorder, recordPollSleeps || nanoseconds >= 1_000_000_000 {
                 await sleepRecorder.sleep(nanoseconds: nanoseconds)
             } else {
+                // Readiness polling models OS process availability. Tests that
+                // need to assert a poll point pass sleepRecorder instead.
                 try? await Task.sleep(nanoseconds: nanoseconds)
             }
         },
@@ -1686,22 +1727,15 @@ enum WaitForSentCountError: Error {
     case timeout(expected: Int, actual: Int)
 }
 
-func waitForCondition(
-    timeoutSeconds: UInt64,
-    pollNanoseconds: UInt64 = 50_000_000,
-    _ condition: @escaping @Sendable () -> Bool
-) async throws {
-    _ = pollNanoseconds
-    let reached = await waitUntil(timeout: .seconds(Int64(timeoutSeconds))) {
-        condition()
+func waitForRecordedValue<Value: Sendable>(
+    _ values: LockedRecordedValues<Value>,
+    at index: Int,
+    description: String,
+    timeout: Duration = .seconds(2)
+) async throws -> Value {
+    try await waitWithTimeout(description, timeout: timeout) {
+        try await values.nextValue(at: index)
     }
-    if !reached {
-        throw WaitForConditionError.timeout
-    }
-}
-
-enum WaitForConditionError: Error {
-    case timeout
 }
 
 func methodName(from data: Data) -> String? {
@@ -1858,24 +1892,5 @@ func sentMessage(
         try Task.checkCancellation()
         let sent = await upstream.sent()
         return sent.first(where: predicate)
-    }
-}
-
-func nextBufferedNotifications(
-    from router: ProxyRouter,
-    timeout: Duration = .seconds(5)
-) async throws -> [Data] {
-    try await waitWithTimeout(
-        "waiting for buffered notifications",
-        timeout: timeout
-    ) {
-        while true {
-            try Task.checkCancellation()
-            let drained = router.drainBufferedNotifications()
-            if !drained.isEmpty {
-                return drained
-            }
-            await Task.yield()
-        }
     }
 }
