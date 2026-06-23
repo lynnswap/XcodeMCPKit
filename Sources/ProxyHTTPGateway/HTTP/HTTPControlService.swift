@@ -2,6 +2,7 @@ import Foundation
 import NIO
 import ProxyXcodeFeatures
 import ProxySession
+import ProxySessionControlPlane
 
 package final class HTTPControlService: Sendable {
     package struct DebugSnapshot: Codable, Sendable {

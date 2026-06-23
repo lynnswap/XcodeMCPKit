@@ -1,3 +1,4 @@
+import ProxyCLICommon
 import ProxyCore
 import XcodeMCPProxy
 

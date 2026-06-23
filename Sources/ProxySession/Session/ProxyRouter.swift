@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import ProxyCore
 import ProxyMCP
 
 package final class ProxyRouter: Sendable {
@@ -263,5 +264,3 @@ package final class ProxyRouter: Sendable {
         )
     }
 }
-
-struct TimeoutError: Error {}

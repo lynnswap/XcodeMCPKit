@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import ProxyCore
 
 extension ControlPlaneCoordinator {
     func replaceToolsCatalogRequestLoad(

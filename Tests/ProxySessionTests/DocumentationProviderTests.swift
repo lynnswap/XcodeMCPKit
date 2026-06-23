@@ -6,6 +6,8 @@ import NIOEmbedded
 import Testing
 import ProxyCore
 import ProxyMCP
+import ProxySessionControlPlane
+import ProxySessionUpstream
 import XcodeMCPTestSupport
 @testable import ProxySession
 

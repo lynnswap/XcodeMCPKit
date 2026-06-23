@@ -9,6 +9,7 @@ import ProxyMCP
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import ProxySession
+import ProxySessionControlPlane
 
 extension HTTPPostService {
     package func resolveLocalHandling(

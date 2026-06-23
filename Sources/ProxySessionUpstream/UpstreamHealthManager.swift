@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import ProxyCore
 
 package final class UpstreamHealthManager: Sendable {
     package struct ProbeRequest: Sendable {

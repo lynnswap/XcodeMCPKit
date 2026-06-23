@@ -1,6 +1,7 @@
-import ProxyCore
 import Darwin
 import Foundation
+import ProxyCLICommon
+import ProxyCore
 
 package struct ExistingProxyServerClient: DependencyClient {
     package var terminateExistingServer:

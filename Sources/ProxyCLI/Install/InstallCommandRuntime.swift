@@ -1,6 +1,7 @@
-import ProxyCore
 import Foundation
-import XcodeMCPProxy
+import ProxyBuildInfo
+import ProxyCLICommon
+import ProxyCore
 
 extension XcodeMCPProxyInstallCommand {
     package struct Runtime {

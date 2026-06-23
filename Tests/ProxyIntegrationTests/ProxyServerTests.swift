@@ -3,6 +3,7 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import ProxySession
+import ProxySessionUpstream
 import Testing
 import XcodeMCPTestSupport
 

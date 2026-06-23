@@ -1,6 +1,8 @@
 import Foundation
 import Logging
 import NIO
+import ProxySessionControlPlane
+import ProxySessionUpstream
 import ProxyCore
 import ProxyMCP
 

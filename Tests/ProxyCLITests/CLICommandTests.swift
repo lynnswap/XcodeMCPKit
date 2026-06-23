@@ -1,8 +1,9 @@
 import ProxyCore
 import Foundation
 import Testing
-import ProxyCLI
-import XcodeMCPProxy
+import ProxyAdapterCLI
+import ProxyBuildInfo
+import ProxyCLICommon
 
 @Suite
 struct CLICommandTests {

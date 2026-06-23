@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOFoundationCompat
+import ProxySessionUpstream
 import ProxyCore
 import ProxyMCP
 

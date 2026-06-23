@@ -6,8 +6,7 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOHTTP1
 import Testing
-import XcodeMCPProxy
-import ProxyCLI
+import ProxyAdapterCLI
 import XcodeMCPTestSupport
 
 @Suite(.serialized)
