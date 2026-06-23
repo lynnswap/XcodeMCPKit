@@ -77,8 +77,6 @@ extension RuntimeCoordinatorTests {
         #expect(plan.xcodeProcessRoutes.count == 1)
         #expect(plan.xcodeProcessRoutes.first?.target.processID == target.processID)
         #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [0, 1])
-        #expect(plan.documentationRoutes.map(\.target.processID) == [target.processID])
-        #expect(plan.documentationRoutes.first?.upstreamIndex == 0)
         for upstream in plan.upstreams {
             let environment = try upstreamEnvironment(from: upstream)
             #expect(try upstreamCommand(from: upstream) == target.mcpbridgePath)
@@ -111,11 +109,6 @@ extension RuntimeCoordinatorTests {
             older.processID,
         ])
         #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0], [1]])
-        #expect(plan.documentationRoutes.map(\.target.processID) == [
-            newer.processID,
-            older.processID,
-        ])
-        #expect(plan.documentationRoutes.map(\.upstreamIndex) == [0, 1])
         let firstEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.first))
         let secondEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.dropFirst().first))
         #expect(firstEnvironment["MCP_XCODE_PID"] == "\(newer.processID)")
@@ -144,10 +137,6 @@ extension RuntimeCoordinatorTests {
             pinned.processID,
         ])
         #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0, 1], [2, 3]])
-        #expect(plan.documentationRoutes.map(\.target.processID) == [
-            newer.processID,
-            pinned.processID,
-        ])
         let environments = try plan.upstreams.map { try upstreamEnvironment(from: $0) }
         #expect(environments[0]["MCP_XCODE_PID"] == "\(newer.processID)")
         #expect(environments[1]["MCP_XCODE_PID"] == "\(newer.processID)")
@@ -216,13 +205,7 @@ extension RuntimeCoordinatorTests {
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [
-                DocumentationProviderRoute(
-                    id: "upstream-0-pid-\(target.processID)",
-                    target: target,
-                    upstreamIndex: 0
-                )
-            ],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -298,16 +281,11 @@ extension RuntimeCoordinatorTests {
             ),
             providerSelectionTimeout: .seconds(1)
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -357,16 +335,11 @@ extension RuntimeCoordinatorTests {
             ),
             providerSelectionTimeout: .seconds(1)
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -428,16 +401,11 @@ extension RuntimeCoordinatorTests {
             providerSelectionTimeout: .seconds(1),
             localSearchProvider: localProvider
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -513,16 +481,11 @@ extension RuntimeCoordinatorTests {
             providerSelectionTimeout: .seconds(1),
             localSearchProvider: localProvider
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -619,16 +582,11 @@ extension RuntimeCoordinatorTests {
             serviceRepairer: repairer,
             localSearchProvider: localProvider
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -695,16 +653,11 @@ extension RuntimeCoordinatorTests {
             transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
             providerSelectionTimeout: .seconds(1)
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -789,16 +742,11 @@ extension RuntimeCoordinatorTests {
             ),
             providerSelectionTimeout: .seconds(1)
         )
-        let route = DocumentationProviderRoute(
-            id: "upstream-0-pid-\(target.processID)",
-            target: target,
-            upstreamIndex: 0
-        )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
@@ -894,7 +842,7 @@ extension RuntimeCoordinatorTests {
             config: makeConfig(requestTimeout: 30),
             eventLoop: eventLoop,
             upstreams: [upstream],
-            documentationProviderRoutes: [route],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             startImmediately: false,
             runtimeBox: runtimeBox
         )

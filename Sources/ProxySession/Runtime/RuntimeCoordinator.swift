@@ -145,20 +145,6 @@ package enum DocumentationSearchOutcome: Sendable {
     case unavailable(DocumentationProvider.UnavailableReason)
 }
 
-package struct XcodeProcessRoute: Sendable, Equatable {
-    package let target: XcodeProcessTarget
-    package let upstreamIndices: [Int]
-
-    package var primaryUpstreamIndex: Int? {
-        upstreamIndices.first
-    }
-
-    package init(target: XcodeProcessTarget, upstreamIndices: [Int]) {
-        self.target = target
-        self.upstreamIndices = upstreamIndices
-    }
-}
-
 package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
     case accepted
     case missingRoute
@@ -363,7 +349,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
-    package let documentationProviderRoutes: [DocumentationProviderRoute]
     package let xcodeProcessRoutes: [XcodeProcessRoute]
     package let tabOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
     package let workspaceOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
@@ -426,7 +411,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             upstreams: upstreamPlan.upstreams,
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
-            documentationProviderRoutes: upstreamPlan.documentationRoutes,
             xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
@@ -472,7 +456,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
                 RuntimeScheduledTimeout
         )? = nil,
-        documentationProviderRoutes: [DocumentationProviderRoute] = [],
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
@@ -513,7 +496,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
-        self.documentationProviderRoutes = documentationProviderRoutes
         self.xcodeProcessRoutes = xcodeProcessRoutes
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         self.testHooks = testHooks

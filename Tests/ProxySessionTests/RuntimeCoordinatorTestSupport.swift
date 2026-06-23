@@ -215,6 +215,13 @@ func xcodeProcessTarget(
     )
 }
 
+func xcodeProcessRoute(
+    target: XcodeProcessTarget,
+    upstreamIndices: [Int] = [0]
+) -> XcodeProcessRoute {
+    XcodeProcessRoute(target: target, upstreamIndices: upstreamIndices)
+}
+
 struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
     let targets: [XcodeProcessTarget]
 

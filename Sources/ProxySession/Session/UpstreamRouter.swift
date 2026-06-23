@@ -7,16 +7,13 @@ import ProxyMCP
 extension RuntimeCoordinator {
     package struct DefaultUpstreamPlan: Sendable {
         package let upstreams: [ManagedUpstreamSlot]
-        package let documentationRoutes: [DocumentationProviderRoute]
         package let xcodeProcessRoutes: [XcodeProcessRoute]
 
         package init(
             upstreams: [ManagedUpstreamSlot],
-            documentationRoutes: [DocumentationProviderRoute],
             xcodeProcessRoutes: [XcodeProcessRoute] = []
         ) {
             self.upstreams = upstreams
-            self.documentationRoutes = documentationRoutes
             self.xcodeProcessRoutes = xcodeProcessRoutes
         }
     }
@@ -45,13 +42,11 @@ extension RuntimeCoordinator {
             orderedXcodeTargets.isEmpty == false
             && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
         var upstreams: [ManagedUpstreamSlot] = []
-        var documentationRoutes: [DocumentationProviderRoute] = []
         var xcodeProcessRoutes: [XcodeProcessRoute] = []
         let upstreamCount = max(1, count)
 
         if canUseProcessBoundXcodeUpstreams {
             upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
-            documentationRoutes.reserveCapacity(orderedXcodeTargets.count)
             xcodeProcessRoutes.reserveCapacity(orderedXcodeTargets.count)
 
             for target in orderedXcodeTargets {
@@ -72,17 +67,6 @@ extension RuntimeCoordinator {
 
                 let route = XcodeProcessRoute(target: target, upstreamIndices: upstreamIndices)
                 xcodeProcessRoutes.append(route)
-                if config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false,
-                   let documentationUpstreamIndex = route.primaryUpstreamIndex
-                {
-                    documentationRoutes.append(
-                        DocumentationProviderRoute(
-                            id: "upstream-\(documentationUpstreamIndex)-pid-\(target.processID)",
-                            target: target,
-                            upstreamIndex: documentationUpstreamIndex
-                        )
-                    )
-                }
             }
         } else {
             upstreams.reserveCapacity(upstreamCount)
@@ -100,7 +84,6 @@ extension RuntimeCoordinator {
 
         return DefaultUpstreamPlan(
             upstreams: upstreams,
-            documentationRoutes: documentationRoutes,
             xcodeProcessRoutes: xcodeProcessRoutes
         )
     }
