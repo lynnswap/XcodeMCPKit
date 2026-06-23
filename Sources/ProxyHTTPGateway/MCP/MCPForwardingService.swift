@@ -226,6 +226,9 @@ package struct MCPForwardingService: Sendable {
         guard let parsedRequestJSONValue = JSONValue(any: requestObject) else {
             return .unavailable
         }
+        let preferredUpstreamIndex =
+            upstreamIndexOverride
+            ?? sessionManager.preferredUpstreamIndex(for: requestObject)
 
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
@@ -248,7 +251,7 @@ package struct MCPForwardingService: Sendable {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
-                preferredUpstreamIndex: upstreamIndexOverride
+                preferredUpstreamIndex: preferredUpstreamIndex
             ) { selectedUpstreamIndex in
                 internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
                 self.sessionManager.activateRequestLease(

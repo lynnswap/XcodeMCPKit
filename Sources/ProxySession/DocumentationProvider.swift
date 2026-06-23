@@ -99,15 +99,15 @@ package enum DocumentationSearchServiceRepairResult: Sendable, Equatable {
 
 package protocol DocumentationSearchServiceRepairing: Sendable {
     func repairDocumentationSearch(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult
 }
 
 package protocol DocumentationSearchProviding: Sendable {
-    func descriptor(for target: DocumentationProviderTarget) async -> JSONValue?
+    func descriptor(for target: XcodeProcessTarget) async -> JSONValue?
     func callDocumentationSearch(
         requestData: Data,
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         timeout: TimeAmount?
     ) async throws -> Data
 }
@@ -116,7 +116,7 @@ package struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServic
     package init() {}
 
     package func repairDocumentationSearch(
-        for _: DocumentationProviderTarget
+        for _: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         .skipped("disabled")
     }
@@ -125,13 +125,13 @@ package struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServic
 package struct UnavailableDocumentationSearchProvider: DocumentationSearchProviding {
     package init() {}
 
-    package func descriptor(for _: DocumentationProviderTarget) async -> JSONValue? {
+    package func descriptor(for _: XcodeProcessTarget) async -> JSONValue? {
         nil
     }
 
     package func callDocumentationSearch(
         requestData _: Data,
-        for _: DocumentationProviderTarget,
+        for _: XcodeProcessTarget,
         timeout _: TimeAmount?
     ) async throws -> Data {
         throw UpstreamSlotScheduler.AcquisitionError.unavailable
@@ -145,7 +145,7 @@ package enum DocumentationProviderRouteOwnership: Sendable, Equatable {
 
 package struct DocumentationProviderRoute: Sendable, Equatable {
     package let id: String
-    package let target: DocumentationProviderTarget
+    package let target: XcodeProcessTarget
     package let ownership: DocumentationProviderRouteOwnership
     package let serverVersion: String
 
@@ -169,7 +169,7 @@ package struct DocumentationProviderRoute: Sendable, Equatable {
 
     package init(
         id: String,
-        target: DocumentationProviderTarget,
+        target: XcodeProcessTarget,
         upstreamIndex: Int?,
         serverVersion: String = ""
     ) {
@@ -184,7 +184,7 @@ package struct DocumentationProviderRoute: Sendable, Equatable {
 
 package protocol DocumentationProviderRouting: Sendable {
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute
@@ -366,7 +366,7 @@ extension DocumentationProvider {
 }
 
 package protocol DocumentationProviderSessionMaking: Sendable {
-    func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession
+    func startSession(for target: XcodeProcessTarget) async throws -> any UpstreamSession
 }
 
 package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
@@ -376,7 +376,7 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
         self.baseEnvironment = baseEnvironment
     }
 
-    package func startSession(for target: DocumentationProviderTarget) async throws
+    package func startSession(for target: XcodeProcessTarget) async throws
         -> any UpstreamSession
     {
         var environment = baseEnvironment
@@ -720,7 +720,7 @@ package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServic
     }
 
     package func repairDocumentationSearch(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         let scan: DocumentationSearchAssetScan
         do {
@@ -998,7 +998,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         self.clock = clock
     }
 
-    package func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
+    package func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
         guard installedAsset(for: target) != nil else {
             return nil
         }
@@ -1007,7 +1007,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
 
     package func callDocumentationSearch(
         requestData: Data,
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         timeout: TimeAmount?
     ) async throws -> Data {
         guard timeout?.nanoseconds != 0 else {
@@ -1027,7 +1027,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     }
 
     private func installedAsset(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) -> DocumentationSearchInstalledAsset? {
         guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
         else {
@@ -1459,7 +1459,7 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
     }
 
     package func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -1608,7 +1608,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private struct CandidateProfile: Sendable {
         let id: UUID
-        let target: DocumentationProviderTarget
+        let target: XcodeProcessTarget
         var backend: CandidateBackend
         let serverVersion: String
 
@@ -1692,7 +1692,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let discovery: any XcodeTargetDiscovering
     private let transport: any DocumentationProviderRouting
     private let providerSelectionTimeout: TimeAmount?
-    private let pinnedProcessID: pid_t?
     private let initializeParams: [String: JSONValue]
     private let serviceRepairer: any DocumentationSearchServiceRepairing
     private let localSearchProvider: any DocumentationSearchProviding
@@ -1703,7 +1702,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private var activeProvider: ActiveProvider?
     private var preparedProviders: [pid_t: CandidateProfile] = [:]
     private var providerPreparations: [pid_t: ProviderPreparation] = [:]
-    private var unusableProcessIDs: Set<pid_t> = []
     private var serviceRepairAttemptedProcessIDs: Set<pid_t> = []
     private var isShutdown = false
 
@@ -1711,7 +1709,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         discovery: any XcodeTargetDiscovering,
         transport: any DocumentationProviderRouting,
         providerSelectionTimeout: TimeAmount? = .seconds(30),
-        pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
@@ -1722,7 +1719,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.discovery = discovery
         self.transport = transport
         self.providerSelectionTimeout = providerSelectionTimeout
-        self.pinnedProcessID = pinnedProcessID
         self.initializeParams = initializeParams
         self.serviceRepairer = serviceRepairer
         self.localSearchProvider = localSearchProvider
@@ -1735,7 +1731,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         discovery: any XcodeTargetDiscovering,
         sessionFactory: any DocumentationProviderSessionMaking,
         providerSelectionTimeout: TimeAmount? = .seconds(30),
-        pinnedProcessID: pid_t? = nil,
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
@@ -1750,7 +1745,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 clock: clock
             ),
             providerSelectionTimeout: providerSelectionTimeout,
-            pinnedProcessID: pinnedProcessID,
             initializeParams: initializeParams,
             serviceRepairer: serviceRepairer,
             localSearchProvider: localSearchProvider,
@@ -1775,9 +1769,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         for target in targets {
             guard !Task.isCancelled, !isShutdown else {
                 return .unavailable
-            }
-            guard unusableProcessIDs.contains(target.processID) == false else {
-                continue
             }
             do {
                 let profile = try await preparedProvider(
@@ -1819,7 +1810,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 continue
             }
         }
-        return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+        return .unavailable
     }
 
     package func toolListUpdate(requestTimeout: TimeAmount?) async
@@ -1834,7 +1825,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard !Task.isCancelled else {
             return .unavailable
         }
-        return toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+        let cached = toolListUpdateFromCachedState(requestTimeout: requestTimeout)
+        if case .unchanged = cached {
+            return await startBackgroundDiscovery(requestTimeout: requestTimeout)
+        }
+        return cached
     }
 
     private func toolListUpdateFromCachedState(requestTimeout: TimeAmount?)
@@ -1857,10 +1852,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             if let descriptor = preparedProviders[target.processID]?.descriptor {
                 return .available(descriptor)
             }
-        }
-        let targetIDs = Set(targets.map(\.processID))
-        if targetIDs.isSubset(of: unusableProcessIDs) {
-            return .unavailable
         }
         return .unchanged
     }
@@ -1885,12 +1876,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false,
                 activeProviderIsCurrentBest(
                     activeProvider,
-                    excluding: rejectedProcessIDs.union(unusableProcessIDs)
+                    excluding: rejectedProcessIDs
                 )
             {
                 let fallbackTargets = orderedTargets(
                     excluding: rejectedProcessIDs
-                        .union(unusableProcessIDs)
                         .union([activeProvider.profile.target.processID])
                 )
                 let activeDeadline = makeDeadline(
@@ -1913,12 +1903,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         invalidatedProvider = true
                     }
                     return .handled(data, invalidatedProvider: invalidatedProvider)
-                case .rejected(let processID, let permanentlyUnusable):
+                case .rejected(let processID, _):
                     rejectedProcessIDs.insert(processID)
                     invalidatedProvider = true
-                    if permanentlyUnusable {
-                        unusableProcessIDs.insert(processID)
-                    }
                     continue
                 case .requestFailed(let error):
                     return .failed(error, invalidatedProvider: invalidatedProvider)
@@ -1937,7 +1924,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             }
 
             let targets = orderedTargets(
-                excluding: rejectedProcessIDs.union(unusableProcessIDs)
+                excluding: rejectedProcessIDs
             )
             guard targets.isEmpty == false else {
                 try Task.checkCancellation()
@@ -1996,13 +1983,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                             )
                         }
                         return .handled(data, invalidatedProvider: invalidatedProvider)
-                    case .rejected(let processID, let permanentlyUnusable):
+                    case .rejected(let processID, _):
                         rejectedProcessIDs.insert(processID)
                         invalidatedProvider = true
                         progressed = true
-                        if permanentlyUnusable {
-                            unusableProcessIDs.insert(processID)
-                        }
                         await discardPreparedProvider(processID: processID)
                         continue
                     case .requestFailed(let error):
@@ -2228,7 +2212,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private func attemptInstalledDocumentationAssetFallback(
         requestData: Data,
-        target: DocumentationProviderTarget,
+        target: XcodeProcessTarget,
         deadline: Deadline?
     ) async throws -> InstalledDocumentationAssetFallbackAttempt {
         do {
@@ -2316,7 +2300,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func preparedProvider(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         fetchDescriptor: Bool
     ) async throws -> CandidateProfile {
@@ -2543,18 +2527,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private func orderedTargets(
         excluding excludedProcessIDs: Set<pid_t>
-    ) -> [DocumentationProviderTarget] {
-        let discoveredTargets = discovery.runningXcodeTargets()
-        let filtered: [DocumentationProviderTarget]
-        if let pinnedProcessID {
-            filtered = discoveredTargets.filter {
-                $0.processID == pinnedProcessID
-                    && excludedProcessIDs.contains($0.processID) == false
-            }
-        } else {
-            filtered = discoveredTargets.filter {
-                excludedProcessIDs.contains($0.processID) == false
-            }
+    ) -> [XcodeProcessTarget] {
+        let filtered = discovery.runningXcodeTargets().filter {
+            excludedProcessIDs.contains($0.processID) == false
         }
         return filtered.sorted { lhs, rhs in
             let versionComparison = Self.compareVersion(lhs.xcodeVersion, rhs.xcodeVersion)
@@ -2569,7 +2544,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func openProviderRoute(
-        target: DocumentationProviderTarget,
+        target: XcodeProcessTarget,
         requestTimeout: TimeAmount?
     ) async throws -> CandidateProfile {
         guard !isShutdown else {
@@ -2783,7 +2758,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func repairDocumentationSearch(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         timeout: TimeAmount?
     ) async -> DocumentationSearchServiceRepairResult? {
         guard timeout?.nanoseconds != 0 else {
@@ -2834,7 +2809,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private func callInstalledDocumentationAssetFallback(
         requestData: Data,
-        target: DocumentationProviderTarget,
+        target: XcodeProcessTarget,
         deadline: Deadline?
     ) async throws -> InstalledDocumentationAssetFallback? {
         guard let descriptor = await localSearchProvider.descriptor(for: target) else {
@@ -3019,7 +2994,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func candidateLogMetadata(
-        target: DocumentationProviderTarget,
+        target: XcodeProcessTarget,
         error: any Error
     ) -> Logger.Metadata {
         [

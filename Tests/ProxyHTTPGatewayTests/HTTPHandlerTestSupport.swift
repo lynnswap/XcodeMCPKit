@@ -103,6 +103,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentRequests: [SentRequest] = []
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
+        var preferredUpstreamIndex: Int?
         var requeuedLeaseCount = 0
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
@@ -356,6 +357,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             return state.availableUpstreamIndex
         }
+    }
+
+    func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
+        _ = requestJSON
+        return state.withLockedValue { $0.preferredUpstreamIndex }
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(
@@ -859,6 +865,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setAvailableUpstreamIndices(_ values: [Int?]) {
         state.withLockedValue { $0.availableUpstreamIndices = values }
+    }
+
+    func setPreferredUpstreamIndex(_ value: Int?) {
+        state.withLockedValue { $0.preferredUpstreamIndex = value }
     }
 
     func requestTimeoutNotificationCount() -> Int {

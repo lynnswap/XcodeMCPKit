@@ -17,7 +17,7 @@ struct ProxyServerBuildInfoTests {
             requestTimeout: 300,
             autoApproveXcodeDialog: true
         )
-        let target = DocumentationProviderTarget(
+        let target = XcodeProcessTarget(
             processID: 9004,
             appPath: "/Applications/Xcode.app",
             developerDir: "/Applications/Xcode.app/Contents/Developer",
@@ -38,6 +38,7 @@ struct ProxyServerBuildInfoTests {
         Server
           URL: http://localhost:8765/mcp
           Upstream processes: 2
+          Upstream processes per Xcode: 2
           Auto approve: enabled
 
         Xcode

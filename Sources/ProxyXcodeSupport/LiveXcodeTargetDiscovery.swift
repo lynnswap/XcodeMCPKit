@@ -5,8 +5,8 @@ import ProxyCore
 package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
     package init() {}
 
-    package func runningXcodeTargets() -> [DocumentationProviderTarget] {
-        var targetsByPID: [pid_t: DocumentationProviderTarget] = [:]
+    package func runningXcodeTargets() -> [XcodeProcessTarget] {
+        var targetsByPID: [pid_t: XcodeProcessTarget] = [:]
 
         for application in NSWorkspace.shared.runningApplications {
             guard application.bundleIdentifier == "com.apple.dt.Xcode",
@@ -39,7 +39,7 @@ package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
         }
     }
 
-    private static func target(processID: pid_t, appPath: String) -> DocumentationProviderTarget? {
+    private static func target(processID: pid_t, appPath: String) -> XcodeProcessTarget? {
         let developerDir = URL(fileURLWithPath: appPath)
             .appendingPathComponent("Contents/Developer")
             .path
@@ -50,7 +50,7 @@ package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
             return nil
         }
         let xcodeVersion = Self.xcodeVersion(appPath: appPath)
-        return DocumentationProviderTarget(
+        return XcodeProcessTarget(
             processID: processID,
             appPath: appPath,
             developerDir: developerDir,

@@ -27,7 +27,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     }
 
     package func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -230,7 +230,7 @@ package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationPr
     package init() {}
 
     package func openRoute(
-        for _: DocumentationProviderTarget,
+        for _: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -255,7 +255,7 @@ package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationPr
 
 extension RuntimeCoordinator {
     package func documentationProviderRoute(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) -> DocumentationProviderRoute? {
         documentationProviderRoutes.first { route in
             route.target.processID == target.processID

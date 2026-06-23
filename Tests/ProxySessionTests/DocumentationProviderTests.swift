@@ -59,8 +59,8 @@ extension RuntimeCoordinatorTests {
         ) == nil)
     }
 
-    @Test func defaultUpstreamPlanReusesSingleXcodeProcessWithoutAddingProviderSlot() throws {
-        let target = documentationProviderTarget(processID: 710, xcodeVersion: "27.0")
+    @Test func defaultUpstreamPlanBindsEachSlotToSingleXcodeProcess() throws {
+        let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
         config.upstreamSessionID = "shared-docs-session"
 
@@ -69,28 +69,31 @@ extension RuntimeCoordinatorTests {
                 config: config,
                 sharedSessionID: config.upstreamSessionID,
                 count: 2,
-                documentationTargets: [target]
+                xcodeTargets: [target]
             )
         }
 
         #expect(plan.upstreams.count == 2)
+        #expect(plan.xcodeProcessRoutes.count == 1)
+        #expect(plan.xcodeProcessRoutes.first?.target.processID == target.processID)
+        #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [0, 1])
         #expect(plan.documentationRoutes.map(\.target.processID) == [target.processID])
         #expect(plan.documentationRoutes.first?.upstreamIndex == 0)
         for upstream in plan.upstreams {
             let environment = try upstreamEnvironment(from: upstream)
-            #expect(try upstreamCommand(from: upstream) == config.upstreamCommand)
-            #expect(try upstreamArgs(from: upstream) == config.upstreamArgs)
-            #expect(environment["MCP_XCODE_PID"]?.isEmpty ?? true)
-            #expect(environment["DEVELOPER_DIR"] == nil)
+            #expect(try upstreamCommand(from: upstream) == target.mcpbridgePath)
+            #expect(try upstreamArgs(from: upstream).isEmpty)
+            #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
+            #expect(environment["DEVELOPER_DIR"] == target.developerDir)
             #expect(environment["MCP_XCODE_SESSION_ID"] == "shared-docs-session")
         }
     }
 
-    @Test func defaultUpstreamPlanDoesNotLimitDocumentationCandidatesToUpstreamCount()
+    @Test func defaultUpstreamPlanScalesWithXcodeProcessCount()
         throws
     {
-        let older = documentationProviderTarget(processID: 720, xcodeVersion: "26.6")
-        let newer = documentationProviderTarget(processID: 721, xcodeVersion: "27.0")
+        let older = xcodeProcessTarget(processID: 720, xcodeVersion: "26.6")
+        let newer = xcodeProcessTarget(processID: 721, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
@@ -98,20 +101,32 @@ extension RuntimeCoordinatorTests {
                 config: config,
                 sharedSessionID: config.upstreamSessionID,
                 count: 1,
-                documentationTargets: [older, newer]
+                xcodeTargets: [older, newer]
             )
         }
 
-        #expect(plan.upstreams.count == 1)
-        #expect(plan.documentationRoutes.isEmpty)
-        let upstream = try #require(plan.upstreams.first)
-        #expect(try upstreamCommand(from: upstream) == config.upstreamCommand)
-        #expect(try upstreamArgs(from: upstream) == config.upstreamArgs)
+        #expect(plan.upstreams.count == 2)
+        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [
+            newer.processID,
+            older.processID,
+        ])
+        #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0], [1]])
+        #expect(plan.documentationRoutes.map(\.target.processID) == [
+            newer.processID,
+            older.processID,
+        ])
+        #expect(plan.documentationRoutes.map(\.upstreamIndex) == [0, 1])
+        let firstEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.first))
+        let secondEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.dropFirst().first))
+        #expect(firstEnvironment["MCP_XCODE_PID"] == "\(newer.processID)")
+        #expect(firstEnvironment["DEVELOPER_DIR"] == newer.developerDir)
+        #expect(secondEnvironment["MCP_XCODE_PID"] == "\(older.processID)")
+        #expect(secondEnvironment["DEVELOPER_DIR"] == older.developerDir)
     }
 
-    @Test func defaultUpstreamPlanHonorsPinnedDocumentationProcess() throws {
-        let pinned = documentationProviderTarget(processID: 730, xcodeVersion: "26.6")
-        let newer = documentationProviderTarget(processID: 731, xcodeVersion: "27.0")
+    @Test func defaultUpstreamPlanIgnoresInheritedMCPXcodePIDForProcessRouting() throws {
+        let pinned = xcodeProcessTarget(processID: 730, xcodeVersion: "26.6")
+        let newer = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": "\(pinned.processID)"]) {
@@ -119,28 +134,34 @@ extension RuntimeCoordinatorTests {
                 config: config,
                 sharedSessionID: config.upstreamSessionID,
                 count: 2,
-                documentationTargets: [newer, pinned]
+                xcodeTargets: [newer, pinned]
             )
         }
 
-        #expect(plan.upstreams.count == 2)
-        #expect(plan.documentationRoutes.map(\.target.processID) == [pinned.processID])
-        #expect(plan.documentationRoutes.first?.upstreamIndex == 0)
-        for upstream in plan.upstreams {
-            let environment = try upstreamEnvironment(from: upstream)
-            #expect(environment["MCP_XCODE_PID"] == "\(pinned.processID)")
-            #expect(try upstreamCommand(from: upstream) == config.upstreamCommand)
-            #expect(try upstreamArgs(from: upstream) == config.upstreamArgs)
-        }
+        #expect(plan.upstreams.count == 4)
+        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [
+            newer.processID,
+            pinned.processID,
+        ])
+        #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0, 1], [2, 3]])
+        #expect(plan.documentationRoutes.map(\.target.processID) == [
+            newer.processID,
+            pinned.processID,
+        ])
+        let environments = try plan.upstreams.map { try upstreamEnvironment(from: $0) }
+        #expect(environments[0]["MCP_XCODE_PID"] == "\(newer.processID)")
+        #expect(environments[1]["MCP_XCODE_PID"] == "\(newer.processID)")
+        #expect(environments[2]["MCP_XCODE_PID"] == "\(pinned.processID)")
+        #expect(environments[3]["MCP_XCODE_PID"] == "\(pinned.processID)")
     }
 
-    @Test func runtimeCoordinatorSkipsXcodeDiscoveryWhenDocumentationServiceIsDisabled()
+    @Test func runtimeCoordinatorUsesXcodeDiscoveryWhenProcessRoutingIsEnabled()
         throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let target = documentationProviderTarget(processID: 735, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 735, xcodeVersion: "27.0")
 
         do {
             var config = makeConfig(requestTimeout: 5)
@@ -154,8 +175,9 @@ extension RuntimeCoordinatorTests {
             )
             defer { manager.shutdownAndWait() }
 
-            #expect(discovery.callCount() == 0)
+            #expect(discovery.callCount() == 1)
             #expect(manager.hasDocumentationSearchService() == false)
+            #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [target.processID])
         }
 
         do {
@@ -172,6 +194,7 @@ extension RuntimeCoordinatorTests {
 
             #expect(discovery.callCount() == 0)
             #expect(manager.hasDocumentationSearchService() == false)
+            #expect(manager.xcodeProcessRoutes.isEmpty)
         }
     }
 
@@ -182,7 +205,7 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let target = documentationProviderTarget(processID: 740, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 740, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let providerManager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
@@ -259,7 +282,7 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         await upstream.overloadNextSend()
-        let target = documentationProviderTarget(processID: 741, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 741, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let openStarted = TestSignal()
         let openGate = AsyncGate()
@@ -311,7 +334,7 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         await upstream.overloadNextSend()
-        let target = documentationProviderTarget(processID: 742, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 742, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
@@ -390,7 +413,7 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let target = documentationProviderTarget(processID: 747, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 747, xcodeVersion: "26.6")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let localProvider = StubDocumentationSearchProvider(
             descriptor: documentationDescriptor(version: "asset-fallback"),
@@ -474,7 +497,7 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let target = documentationProviderTarget(processID: 748, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 748, xcodeVersion: "26.6")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let localProvider = StubDocumentationSearchProvider(
             descriptor: documentationDescriptor(version: "asset-fallback"),
@@ -569,7 +592,7 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let target = documentationProviderTarget(processID: 749, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 749, xcodeVersion: "26.6")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let repairer = StubDocumentationSearchServiceRepairer(
             result: .repaired(
@@ -665,7 +688,7 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let target = documentationProviderTarget(processID: 746, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 746, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let providerManager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
@@ -750,7 +773,7 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         await upstream.overloadNextSend()
-        let target = documentationProviderTarget(processID: 743, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 743, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let openStarted = TestSignal()
         let openGate = AsyncGate()
@@ -813,7 +836,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerClosesRouteOpenedAfterPreparationCancellation()
         async throws
     {
-        let target = documentationProviderTarget(processID: 744, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 744, xcodeVersion: "27.0")
         let openStarted = TestSignal()
         let openGate = AsyncGate()
         let transport = BlockingFallbackDocumentationProviderTransport(
@@ -860,7 +883,7 @@ extension RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let target = documentationProviderTarget(processID: 745, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 745, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let route = DocumentationProviderRoute(
             id: "upstream-0-pid-\(target.processID)",
@@ -936,8 +959,8 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportFallsBackToDirectCandidateWhenNoUpstreamRouteExists()
         async throws
     {
-        let newer = documentationProviderTarget(processID: 750, xcodeVersion: "27.0")
-        let older = documentationProviderTarget(processID: 751, xcodeVersion: "26.6")
+        let newer = xcodeProcessTarget(processID: 750, xcodeVersion: "27.0")
+        let older = xcodeProcessTarget(processID: 751, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 newer.processID: [
@@ -1484,6 +1507,43 @@ extension RuntimeCoordinatorTests {
         #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
+    @Test func startupPollsDocumentationProviderUntilAvailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 300),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            clock: clock,
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+        defer { manager.shutdownAndWait() }
+
+        try await waitWithTimeout("waiting for initial documentation provider prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
+        }
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: RuntimeCoordinator.documentationProviderDiscoveryPollInterval
+        )
+        try await waitWithTimeout("waiting for documentation provider poll") {
+            try await documentationProvider.waitForPrewarmCount(2)
+        }
+
+        let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
+        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(30).nanoseconds)
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
+    }
+
     @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -1511,8 +1571,8 @@ extension RuntimeCoordinatorTests {
         #expect(await documentationProvider.shutdownCount() == 1)
     }
 
-    @Test func documentationProviderToolListUpdateDoesNotStartDiscoveryOrSearch() async throws {
-        let target = documentationProviderTarget(processID: 101, xcodeVersion: "27.0")
+    @Test func documentationProviderToolListUpdateStartsDiscoveryWithoutSearch() async throws {
+        let target = xcodeProcessTarget(processID: 101, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1532,16 +1592,17 @@ extension RuntimeCoordinatorTests {
 
         let update = await manager.toolListUpdate(requestTimeout: nil)
 
-        guard case .unchanged = update else {
-            Issue.record("expected unchanged update, got \(update)")
+        guard case .available = update else {
+            Issue.record("expected available update, got \(update)")
             return
         }
-        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.startedPIDs() == [target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 1)
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
 
     @Test func documentationProviderBackgroundDiscoveryFetchesDescriptorWithoutSearch() async throws {
-        let target = documentationProviderTarget(processID: 111, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 111, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1578,7 +1639,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderBackgroundDiscoveryRetriesTransientDescriptorUnavailable()
         async throws
     {
-        let target = documentationProviderTarget(processID: 116, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 116, xcodeVersion: "27.0")
         let transport = TransientUnavailableDescriptorTransport()
         let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let manager = DocumentationProviderManager(
@@ -1610,7 +1671,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderBackgroundDiscoveryRepairsDescriptorMissingService()
         async throws
     {
-        let target = documentationProviderTarget(processID: 117, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 117, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1659,7 +1720,7 @@ extension RuntimeCoordinatorTests {
     @Test func repairedDocumentationProviderKeepsReopenedRouteForSearch()
         async throws
     {
-        let target = documentationProviderTarget(processID: 118, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 118, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1719,7 +1780,7 @@ extension RuntimeCoordinatorTests {
     @Test func repairedDocumentationProviderDoesNotCloseReusedRuntimeRoute()
         async throws
     {
-        let target = documentationProviderTarget(processID: 123, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 123, xcodeVersion: "26.6")
         let transport = ReusedRouteRepairTransport()
         let repairer = StubDocumentationSearchServiceRepairer(
             result: .repaired(
@@ -1761,7 +1822,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderRepairDoesNotWaitPastRequestTimeout()
         async throws
     {
-        let target = documentationProviderTarget(processID: 120, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 120, xcodeVersion: "26.6")
         let repairGate = OperationGate<pid_t>()
         let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
@@ -1832,7 +1893,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderUsesInstalledAssetFallbackWhenRepairDoesNotRestoreDescriptor()
         async throws
     {
-        let target = documentationProviderTarget(processID: 119, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 119, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1902,7 +1963,7 @@ extension RuntimeCoordinatorTests {
     @Test func activeDocumentationProviderKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
         async throws
     {
-        let target = documentationProviderTarget(processID: 122, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -1969,7 +2030,7 @@ extension RuntimeCoordinatorTests {
     @Test func backgroundDiscoveryKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
         async throws
     {
-        let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2026,7 +2087,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeReturnsNotEnabled()
         async throws
     {
-        let target = documentationProviderTarget(processID: 121, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 121, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2084,7 +2145,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderInvalidatesCachedAssetFallbackWhenLocalSearchFails()
         async throws
     {
-        let target = documentationProviderTarget(processID: 126, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 126, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2156,7 +2217,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderKeepsCachedAssetFallbackAfterRequestTimeout()
         async throws
     {
-        let target = documentationProviderTarget(processID: 128, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 128, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2227,7 +2288,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderKeepsLiveProviderAfterInitialAssetFallbackRequestTimeout()
         async throws
     {
-        let target = documentationProviderTarget(processID: 129, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 129, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2287,8 +2348,8 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderTriesNextCandidateAfterInitialAssetFallbackTimeout()
         async throws
     {
-        let newer = documentationProviderTarget(processID: 130, xcodeVersion: "26.6")
-        let older = documentationProviderTarget(processID: 131, xcodeVersion: "26.5")
+        let newer = xcodeProcessTarget(processID: 130, xcodeVersion: "26.6")
+        let older = xcodeProcessTarget(processID: 131, xcodeVersion: "26.5")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 newer.processID: [
@@ -2344,7 +2405,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeConfigIsBroken()
         async throws
     {
-        let target = documentationProviderTarget(processID: 124, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 124, xcodeVersion: "26.6")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2442,7 +2503,7 @@ extension RuntimeCoordinatorTests {
         )
 
         let result = await repairer.repairDocumentationSearch(
-            for: documentationProviderTarget(processID: 118, xcodeVersion: "26.6")
+            for: xcodeProcessTarget(processID: 118, xcodeVersion: "26.6")
         )
 
         guard case .repaired(let report) = result else {
@@ -2519,7 +2580,7 @@ extension RuntimeCoordinatorTests {
             currentOSVersion: { "26.5.1" },
             processRunner: runner
         )
-        let target = documentationProviderTarget(processID: 123, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 123, xcodeVersion: "26.6")
 
         #expect(await provider.descriptor(for: target) != nil)
         let response = try await provider.callDocumentationSearch(
@@ -2569,7 +2630,7 @@ extension RuntimeCoordinatorTests {
             currentOSVersion: { "26.5.1" },
             processRunner: runner
         )
-        let target = documentationProviderTarget(processID: 127, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 127, xcodeVersion: "26.6")
 
         let response = try await provider.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 127, query: "NoMatch"),
@@ -2613,7 +2674,7 @@ extension RuntimeCoordinatorTests {
             processRunner: runner,
             clock: clock
         )
-        let target = documentationProviderTarget(processID: 125, xcodeVersion: "26.6")
+        let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
 
         let searchTask = Task {
             try await provider.callDocumentationSearch(
@@ -2647,10 +2708,10 @@ extension RuntimeCoordinatorTests {
         #expect(await runner.cancelledRunCount() == 1)
     }
 
-    @Test func documentationProviderBackgroundDiscoveryKeepsBaseCatalogWhenDescriptorIsAbsent()
+    @Test func documentationProviderBackgroundDiscoveryRemovesStaleDescriptorWhenAbsent()
         async throws
     {
-        let target = documentationProviderTarget(processID: 115, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 115, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2678,13 +2739,13 @@ extension RuntimeCoordinatorTests {
             ])
         )
 
-        #expect(documentationDescriptorDescription(in: result) == "docs-stale")
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
         #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 1)
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
 
     @Test func documentationSearchDoesNotWaitForBackgroundDescriptorFetch() async throws {
-        let target = documentationProviderTarget(processID: 114, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 114, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2733,7 +2794,7 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerUsesNumericIDsForMCPBridgeStartup() async throws {
-        let target = documentationProviderTarget(processID: 112, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 112, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2760,7 +2821,7 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerUsesConfiguredInitializeParamsForStartup() async throws {
-        let target = documentationProviderTarget(processID: 113, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 113, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2821,8 +2882,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerPrefersNewerXcodeVersionOverToolCount() async throws {
-        let xcode26 = documentationProviderTarget(processID: 399, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 401, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 399, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 401, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -2864,8 +2925,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerUsesDeterministicOrderWithinSameXcodeVersion() async throws {
-        let first = documentationProviderTarget(processID: 501, xcodeVersion: "27.0")
-        let second = documentationProviderTarget(processID: 502, xcodeVersion: "27.0")
+        let first = xcodeProcessTarget(processID: 501, xcodeVersion: "27.0")
+        let second = xcodeProcessTarget(processID: 502, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 first.processID: [
@@ -2905,7 +2966,7 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerSendsActualRequestsAndReusesSuccessfulSession() async throws {
-        let target = documentationProviderTarget(processID: 601, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 601, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2947,7 +3008,7 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerPreservesOrdinaryToolErrors() async throws {
-        let target = documentationProviderTarget(processID: 602, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 602, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -2991,7 +3052,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerPreservesRequestScopedJSONRPCErrors()
         async throws
     {
-        let target = documentationProviderTarget(processID: 603, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 603, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -3038,8 +3099,8 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerDoesNotOverlayPreparedDescriptorForDifferentActiveProvider()
         async throws
     {
-        let xcode26 = documentationProviderTarget(processID: 605, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 606, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 605, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 606, xcodeVersion: "27.0")
         let discovery = SequencedXcodeTargetDiscovery([
             [xcode26],
             [xcode27, xcode26],
@@ -3092,13 +3153,13 @@ extension RuntimeCoordinatorTests {
             activeUpdate,
             to: try jsonValue(["tools": []])
         )
-        #expect(DocumentationProvider.ToolCatalog.descriptor(in: activeResult) == nil)
+        #expect(documentationDescriptorDescription(in: activeResult) == "docs-27.0")
         #expect(await factory.startedPIDs() == [xcode26.processID, xcode27.processID])
     }
 
     @Test func documentationProviderManagerSearchesDescriptorMissingPreparedTarget() async throws {
-        let xcode26 = documentationProviderTarget(processID: 610, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 611, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 610, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 611, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3146,8 +3207,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerRetriesActualRequestWhenNewestIsNotEnabled() async throws {
-        let xcode26 = documentationProviderTarget(processID: 420, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 421, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 420, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 421, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3192,8 +3253,8 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerContinuesFailoverWhenAssetFallbackFails()
         async throws
     {
-        let xcode26 = documentationProviderTarget(processID: 422, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 423, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 422, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 423, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3245,8 +3306,8 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerRetriesProviderFailureOnNextCandidate()
         async throws
     {
-        let xcode26 = documentationProviderTarget(processID: 424, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 427, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 424, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 427, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3291,8 +3352,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerPreservesTimeForFallbackWhenNewestHangs() async throws {
-        let xcode26 = documentationProviderTarget(processID: 425, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 426, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 425, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 426, xcodeVersion: "27.0")
         let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
@@ -3354,8 +3415,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerRetriesActiveNotEnabledOnNextCandidate() async throws {
-        let xcode26 = documentationProviderTarget(processID: 430, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 431, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 430, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 431, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3403,8 +3464,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerRetriesActiveTransportFailureOnNextCandidate() async throws {
-        let xcode26 = documentationProviderTarget(processID: 440, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 441, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 440, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 441, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3452,8 +3513,8 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerRemovesToolOnlyWhenAllCandidatesAreUnusable() async throws {
-        let xcode26 = documentationProviderTarget(processID: 450, xcodeVersion: "26.6")
-        let xcode27 = documentationProviderTarget(processID: 451, xcodeVersion: "27.0")
+        let xcode26 = xcodeProcessTarget(processID: 450, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 451, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -3500,17 +3561,17 @@ extension RuntimeCoordinatorTests {
         #expect(DocumentationProvider.ToolCatalog.descriptor(in: followUpTools) == nil)
     }
 
-    @Test func documentationProviderManagerHonorsPinnedProcessID() async throws {
-        let pinned = documentationProviderTarget(processID: 460, xcodeVersion: "26.6")
-        let other = documentationProviderTarget(processID: 461, xcodeVersion: "27.0")
+    @Test func documentationProviderManagerDoesNotUseInheritedProcessPin() async throws {
+        let older = xcodeProcessTarget(processID: 460, xcodeVersion: "26.6")
+        let other = xcodeProcessTarget(processID: 461, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
-                pinned.processID: [
+                older.processID: [
                     .init(
                         serverVersion: "26.6",
                         toolCount: 20,
                         includesDocumentationSearch: true,
-                        firstDocumentationResponse: .successText("{\"answer\":\"pinned\"}")
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
                     ),
                 ],
                 other.processID: [
@@ -3524,9 +3585,8 @@ extension RuntimeCoordinatorTests {
             ]
         )
         let manager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [pinned, other]),
-            sessionFactory: factory,
-            pinnedProcessID: pinned.processID
+            discovery: StubXcodeTargetDiscovery(targets: [older, other]),
+            sessionFactory: factory
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -3538,14 +3598,14 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected handled outcome, got \(outcome)")
             return
         }
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"pinned\"}")
-        #expect(await factory.startedPIDs() == [pinned.processID])
-        #expect(await factory.documentationQueries(for: pinned.processID) == ["UIView"])
-        #expect(await factory.documentationQueries(for: other.processID).isEmpty)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"other\"}")
+        #expect(await factory.startedPIDs() == [other.processID])
+        #expect(await factory.documentationQueries(for: other.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: older.processID).isEmpty)
     }
 
     @Test func documentationProviderManagerCoalescesConcurrentBackgroundDiscovery() async throws {
-        let target = documentationProviderTarget(processID: 470, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 470, xcodeVersion: "27.0")
         let startGate = OperationGate<pid_t>()
         let preparationReused = TestSignal()
         let factory = ScriptedDocumentationSessionFactory(
@@ -3602,7 +3662,7 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerCoalescesConcurrentInitialDocumentationSearch() async throws {
-        let target = documentationProviderTarget(processID: 480, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 480, xcodeVersion: "27.0")
         let startGate = OperationGate<pid_t>()
         let preparationReused = TestSignal()
         let factory = ScriptedDocumentationSessionFactory(
@@ -3673,7 +3733,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerBoundsSharedPreparationWaitByCallerTimeout()
         async throws
     {
-        let target = documentationProviderTarget(processID: 485, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 485, xcodeVersion: "27.0")
         let startGate = OperationGate<pid_t>()
         let preparationReused = TestSignal()
         let preparationTimedOut = TestSignal()
@@ -3760,7 +3820,7 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
-        let xcode = documentationProviderTarget(processID: 490, xcodeVersion: "27.0")
+        let xcode = xcodeProcessTarget(processID: 490, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode.processID: [
@@ -3800,7 +3860,7 @@ extension RuntimeCoordinatorTests {
     @Test func documentationProviderManagerKeepsPreparedConnectionWhenDocumentationCallIsCancelled()
         async throws
     {
-        let xcode = documentationProviderTarget(processID: 491, xcodeVersion: "27.0")
+        let xcode = xcodeProcessTarget(processID: 491, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode.processID: [

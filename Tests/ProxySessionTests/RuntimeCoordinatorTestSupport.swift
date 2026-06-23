@@ -192,8 +192,8 @@ func jsonRPCErrorMessage(in responseData: Data) throws -> String? {
     return error["message"] as? String
 }
 
-func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
-    DocumentationProviderTarget(
+func xcodeProcessTarget(processID: pid_t) -> XcodeProcessTarget {
+    XcodeProcessTarget(
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
@@ -202,11 +202,11 @@ func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarge
     )
 }
 
-func documentationProviderTarget(
+func xcodeProcessTarget(
     processID: pid_t,
     xcodeVersion: String
-) -> DocumentationProviderTarget {
-    DocumentationProviderTarget(
+) -> XcodeProcessTarget {
+    XcodeProcessTarget(
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
@@ -216,23 +216,23 @@ func documentationProviderTarget(
 }
 
 struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
-    let targets: [DocumentationProviderTarget]
+    let targets: [XcodeProcessTarget]
 
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         targets
     }
 }
 
 final class CountingXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
-    private let targets: [DocumentationProviderTarget]
+    private let targets: [XcodeProcessTarget]
     private var callCountValue = 0
 
-    init(targets: [DocumentationProviderTarget]) {
+    init(targets: [XcodeProcessTarget]) {
         self.targets = targets
     }
 
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         lock.lock()
         callCountValue += 1
         lock.unlock()
@@ -264,7 +264,7 @@ actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouti
     }
 
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -336,7 +336,7 @@ actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouti
 
 struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
     func openRoute(
-        for _: DocumentationProviderTarget,
+        for _: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -375,7 +375,7 @@ actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairin
     }
 
     func repairDocumentationSearch(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         repairedProcessIDs.append(target.processID)
         if let gate {
@@ -429,14 +429,14 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
         self.timeoutOnceAfterSuccessfulCallCount = timeoutOnceAfterSuccessfulCallCount
     }
 
-    func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
+    func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
         descriptorPIDs.append(target.processID)
         return descriptorValue
     }
 
     func callDocumentationSearch(
         requestData: Data,
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         timeout _: TimeAmount?
     ) async throws -> Data {
         callPIDs.append(target.processID)
@@ -520,7 +520,7 @@ actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
     private let toolsListCountValues = RecordedValues<Int>()
 
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -574,7 +574,7 @@ actor ReusedRouteRepairTransport: DocumentationProviderRouting {
     private var closedRouteIDs: [String] = []
 
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -649,15 +649,15 @@ actor ReusedRouteRepairTransport: DocumentationProviderRouting {
 
 final class SequencedXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
-    private var remainingSequences: [[DocumentationProviderTarget]]
-    private var lastSequence: [DocumentationProviderTarget]
+    private var remainingSequences: [[XcodeProcessTarget]]
+    private var lastSequence: [XcodeProcessTarget]
 
-    init(_ sequences: [[DocumentationProviderTarget]]) {
+    init(_ sequences: [[XcodeProcessTarget]]) {
         self.remainingSequences = sequences
         self.lastSequence = sequences.last ?? []
     }
 
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         lock.lock()
         defer { lock.unlock() }
         guard remainingSequences.isEmpty == false else {
@@ -734,7 +734,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         self.startGate = startGate
     }
 
-    func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
+    func startSession(for target: XcodeProcessTarget) async throws -> any UpstreamSession {
         startAttemptProcessIDs.append(target.processID)
         if let startGate {
             try await startGate.wait(for: target.processID)
@@ -1138,6 +1138,10 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
 
     func lastCallTimeout() -> TimeAmount? {
         callTimeouts.last ?? nil
+    }
+
+    func setToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {
+        self.update = update
     }
 }
 
@@ -1761,6 +1765,14 @@ func methodName(from data: Data) -> String? {
     return object["method"] as? String
 }
 
+func toolCallName(from data: Data) -> String? {
+    guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+          let params = object["params"] as? [String: Any] else {
+        return nil
+    }
+    return params["name"] as? String
+}
+
 func makeToolListRequest(id: Int64) throws -> Data {
     try JSONSerialization.data(
         withJSONObject: [
@@ -1778,6 +1790,34 @@ func makeToolListResponse(id: Int64) throws -> Data {
             "jsonrpc": "2.0",
             "id": id,
             "result": [:],
+        ],
+        options: []
+    )
+}
+
+func makeXcodeListWindowsResponse(id: Int64, message: String) throws -> Data {
+    let encodedMessage = String(
+        decoding: try JSONSerialization.data(
+            withJSONObject: ["message": message],
+            options: [.sortedKeys]
+        ),
+        as: UTF8.self
+    )
+    return try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": encodedMessage,
+                    ],
+                ],
+                "structuredContent": [
+                    "message": message,
+                ],
+            ],
         ],
         options: []
     )

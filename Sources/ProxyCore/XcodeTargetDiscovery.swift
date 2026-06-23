@@ -1,6 +1,6 @@
 import Foundation
 
-package struct DocumentationProviderTarget: Sendable, Equatable {
+package struct XcodeProcessTarget: Sendable, Equatable {
     package let processID: pid_t
     package let appPath: String
     package let developerDir: String
@@ -23,5 +23,5 @@ package struct DocumentationProviderTarget: Sendable, Equatable {
 }
 
 package protocol XcodeTargetDiscovering: Sendable {
-    func runningXcodeTargets() -> [DocumentationProviderTarget]
+    func runningXcodeTargets() -> [XcodeProcessTarget]
 }

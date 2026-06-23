@@ -145,6 +145,20 @@ package enum DocumentationSearchOutcome: Sendable {
     case unavailable(DocumentationProvider.UnavailableReason)
 }
 
+package struct XcodeProcessRoute: Sendable, Equatable {
+    package let target: XcodeProcessTarget
+    package let upstreamIndices: [Int]
+
+    package var primaryUpstreamIndex: Int? {
+        upstreamIndices.first
+    }
+
+    package init(target: XcodeProcessTarget, upstreamIndices: [Int]) {
+        self.target = target
+        self.upstreamIndices = upstreamIndices
+    }
+}
+
 package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
     case accepted
     case missingRoute
@@ -184,6 +198,8 @@ package protocol RuntimeCoordinating: Sendable {
     ) async throws -> DocumentationSearchOutcome
     func hasDocumentationSearchService() -> Bool
     func chooseUpstreamIndex() -> Int?
+    func preferredUpstreamIndex(for requestJSON: Any) -> Int?
+    func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
@@ -245,6 +261,14 @@ extension RuntimeCoordinating {
         false
     }
 
+    package func preferredUpstreamIndex(for _: Any) -> Int? {
+        nil
+    }
+
+    package func primaryUpstreamIndex(forXcodeProcessID _: pid_t) -> Int? {
+        nil
+    }
+
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
@@ -287,6 +311,7 @@ extension RuntimeCoordinating {
 
 package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     static let redactedDebugText = "<redacted>"
+    package static let documentationProviderDiscoveryPollInterval: Duration = .seconds(2)
 
     struct TestSnapshot: Sendable {
         struct Upstream: Sendable {
@@ -339,6 +364,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
     package let documentationProviderRoutes: [DocumentationProviderRoute]
+    package let xcodeProcessRoutes: [XcodeProcessRoute]
+    package let tabOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
+    package let workspaceOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
     package let prewarmDocumentationProviderOnStartup: Bool
     package let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -354,18 +382,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let count = max(1, min(config.upstreamProcessCount, 10))
+        let xcodeProcessRoutingEnabled = XcrunArguments.isDefaultMCPBridgeInvocation(
+            config: config
+        )
         let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
             config: config
         )
-        let documentationTargets =
-            documentationServiceEnabled
+        let xcodeTargets =
+            xcodeProcessRoutingEnabled
             ? xcodeTargetDiscovery?.runningXcodeTargets() ?? []
             : []
         let upstreamPlan = Self.makeDefaultUpstreamPlan(
             config: config,
             sharedSessionID: config.upstreamSessionID,
             count: count,
-            documentationTargets: documentationTargets
+            xcodeTargets: xcodeTargets
         )
         let clock = ClockClient.liveValue
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -396,6 +427,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
             documentationProviderRoutes: upstreamPlan.documentationRoutes,
+            xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
             startImmediately: startImmediately,
@@ -411,12 +443,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         guard documentationProviderServiceIsConfigured(config: config) else {
             return nil
         }
-        let environment = ProcessInfo.processInfo.environment
-        let pinnedProcessID = environment["MCP_XCODE_PID"].flatMap(pid_t.init)
         return DocumentationProviderManager(
             discovery: discovery,
             transport: transport,
-            pinnedProcessID: pinnedProcessID,
             initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
             ),
@@ -444,6 +473,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 RuntimeScheduledTimeout
         )? = nil,
         documentationProviderRoutes: [DocumentationProviderRoute] = [],
+        xcodeProcessRoutes: [XcodeProcessRoute] = [],
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
@@ -484,6 +514,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
         self.documentationProviderRoutes = documentationProviderRoutes
+        self.xcodeProcessRoutes = xcodeProcessRoutes
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         self.testHooks = testHooks
         let resolvedReadinessGate =
@@ -776,6 +807,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
             self?.recordDocumentationToolListUpdate(update)
             guard !Task.isCancelled else { return .unavailable }
+            self?.scheduleDocumentationProviderDiscoveryPollIfNeeded(after: update)
             logger.debug("Documentation provider prewarm completed")
             return update
         }
@@ -785,6 +817,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return previous
         }
         previous?.cancel()
+    }
+
+    private func scheduleDocumentationProviderDiscoveryPollIfNeeded(
+        after update: DocumentationProvider.ToolListUpdate
+    ) {
+        guard documentationProviderManager != nil else { return }
+        guard case .available = update else {
+            addRuntimeTask { [weak self] in
+                guard let self else { return }
+                await self.clock.sleep(Self.documentationProviderDiscoveryPollInterval)
+                guard !Task.isCancelled else { return }
+                self.prewarmDocumentationProvider()
+            }
+            return
+        }
     }
 
     package func chooseUpstreamIndex() -> Int? {
@@ -1019,11 +1066,22 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = timeoutDeadline(for: timeout)
-        return try await awaitControlPlaneOperation {
-            try await self.controlPlaneCoordinator.listWindows(
-                route: route,
+        switch route {
+        case .anyHealthy where xcodeProcessRoutes.isEmpty == false:
+            return try await liveXcodeListWindowsAcrossProcessRoutes(
                 deadlineUptimeNs: deadline
             )
+        default:
+            let result = try await awaitControlPlaneOperation {
+                try await self.controlPlaneCoordinator.listWindows(
+                    route: route,
+                    deadlineUptimeNs: deadline
+                )
+            }
+            if case .pinnedUpstream(let upstreamIndex) = route {
+                recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
+            }
+            return result
         }
     }
 

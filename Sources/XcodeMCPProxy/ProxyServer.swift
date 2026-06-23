@@ -14,7 +14,7 @@ public final class ProxyServer {
         package var discoveryClient: DiscoveryClient
         package var executableLookupClient: ExecutableLookupClient
         package var processID: @Sendable () -> Int
-        package var runningXcodeTargets: @Sendable () -> [DocumentationProviderTarget]
+        package var runningXcodeTargets: @Sendable () -> [XcodeProcessTarget]
         package var makeAutoApprover: @Sendable () -> any ProxyServerPermissionDialogAutoApprover
         package var makeRuntimeCoordinator:
             @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
@@ -25,7 +25,7 @@ public final class ProxyServer {
             processID: @escaping @Sendable () -> Int = {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
-            runningXcodeTargets: @escaping @Sendable () -> [DocumentationProviderTarget] = {
+            runningXcodeTargets: @escaping @Sendable () -> [XcodeProcessTarget] = {
                 []
             },
             makeAutoApprover: @escaping @Sendable () -> any ProxyServerPermissionDialogAutoApprover,
@@ -265,18 +265,32 @@ public final class ProxyServer {
         displayHost: String,
         port: Int,
         config: ProxyConfig,
-        xcodeTargets: [DocumentationProviderTarget]
+        xcodeTargets: [XcodeProcessTarget]
     ) -> String {
+        let upstreamsPerXcode = max(1, min(config.upstreamProcessCount, 10))
+        let processRoutingActive =
+            xcodeTargets.isEmpty == false
+            && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
+        let upstreamProcessCount =
+            processRoutingActive
+            ? upstreamsPerXcode * xcodeTargets.count
+            : upstreamsPerXcode
         var lines = [
             "XcodeMCPKit \(ProxyBuildInfo.version)",
             "",
             "Server",
             "  URL: http://\(displayHost):\(port)/mcp",
-            "  Upstream processes: \(config.upstreamProcessCount)",
+            "  Upstream processes: \(upstreamProcessCount)",
             "  Auto approve: \(config.autoApproveXcodeDialog ? "enabled" : "disabled")",
             "",
             "Xcode",
         ]
+        if processRoutingActive {
+            lines.insert(
+                "  Upstream processes per Xcode: \(upstreamsPerXcode)",
+                at: 5
+            )
+        }
 
         switch xcodeTargets.count {
         case 0:

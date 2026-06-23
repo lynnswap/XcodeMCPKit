@@ -2366,6 +2366,52 @@ extension HTTPHandlerTests {
         #expect(sessionManager.requestTimeoutNotificationCount() == 0)
     }
 
+    @Test func forwardingServiceInternalToolUsesPreferredUpstreamWhenNoOverride()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 0.2)
+        let eventLoop = EmbeddedEventLoop()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListNavigatorIssues")
+                return .immediate(
+                    try makeToolSuccessResponse(id: originalID, text: "{\"issues\":[]}")
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+        sessionManager.setPreferredUpstreamIndex(0)
+
+        let forwardingService = MCPForwardingService(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListNavigatorIssues",
+            arguments: ["tabIdentifier": "windowtab-1"],
+            sessionID: "session-preferred",
+            eventLoop: eventLoop
+        )
+        switch result {
+        case .success:
+            break
+        case .cancelled:
+            Issue.record("expected the preferred upstream dispatch to succeed")
+        case .timeout:
+            Issue.record("expected the preferred upstream dispatch to succeed")
+        case .unavailable:
+            Issue.record("expected the preferred upstream to be usable")
+        }
+        #expect(sessionManager.sentToolRequests() == ["XcodeListNavigatorIssues@0"])
+        #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        #expect(sessionManager.requestSuccessNotificationCount() == 1)
+        #expect(sessionManager.requestTimeoutNotificationCount() == 0)
+    }
+
     @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.refreshCodeIssuesMode = .upstream

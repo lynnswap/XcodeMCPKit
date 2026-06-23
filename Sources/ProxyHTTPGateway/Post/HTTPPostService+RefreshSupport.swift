@@ -66,6 +66,9 @@ extension HTTPPostService {
             requestIDs: requestIDs
         )
         let allowsLeaseRetry = Self.isRetryScopedRefreshLeaseRequest(parsedRequestJSON)
+        let preferredUpstreamIndex = sessionManager.preferredUpstreamIndex(
+            for: parsedRequestJSON
+        )
 
         do {
             let session = sessionManager.session(id: sessionID)
@@ -73,7 +76,7 @@ extension HTTPPostService {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
-                preferredUpstreamIndex: nil
+                preferredUpstreamIndex: preferredUpstreamIndex
             ) { selectedUpstreamIndex in
                 cancellationHandle?.activate(upstreamIndex: selectedUpstreamIndex)
 

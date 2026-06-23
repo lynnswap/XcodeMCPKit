@@ -449,6 +449,9 @@ package final class HTTPPostService: Sendable {
         }
         let session = sessionManager.session(id: sessionID)
         let refreshRouting = refreshRequestRouting(from: forwardedRequestJSON)
+        let preferredUpstreamIndex = sessionManager.preferredUpstreamIndex(
+            for: forwardedRequestJSON
+        )
         if refreshRouting != nil, forwardedRequestIDs.isEmpty == false {
             sessionManager.activateRequestLease(
                 leaseID,
@@ -481,7 +484,7 @@ package final class HTTPPostService: Sendable {
             leaseID: leaseID,
             descriptor: descriptor,
             on: eventLoop,
-            preferredUpstreamIndex: nil
+            preferredUpstreamIndex: preferredUpstreamIndex
         ) { upstreamIndex in
             cancellationHandle.activate(upstreamIndex: upstreamIndex)
             self.sessionManager.activateRequestLease(

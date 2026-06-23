@@ -116,7 +116,7 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--upstream-processes n` | Number of upstream `mcpbridge` processes. Default: `1`, max: `10`. |
+| `--upstream-processes n` | Number of upstream `mcpbridge` processes per running Xcode process when the default `xcrun mcpbridge` upstream is used. Default: `1`, max: `10`. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
 | `--auto-approve` | Automatically approve the Xcode permission dialog. Requires Accessibility permission. |
@@ -129,7 +129,7 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
-| `MCP_XCODE_PID` | Passed through to upstream `mcpbridge`; the proxy does not interpret it. |
+| `MCP_XCODE_PID` | Set by the proxy on process-bound upstream `mcpbridge` children. An inherited value is only passed through when process-bound Xcode routing is not active. |
 | `MCP_XCODE_SESSION_ID` | Optional explicit upstream Xcode MCP session ID. |
 | `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |
