@@ -257,7 +257,7 @@ extension RuntimeCoordinatorTests {
         #expect(await upstream.sentCount() == 2)
     }
 
-    @Test func runtimeDocumentationTransportDoesNotOpenFallbackForReusedRouteToolsListFailure()
+    @Test func runtimeDocumentationTransportFallsBackForReusedRouteToolsListFailure()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -293,15 +293,21 @@ extension RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
-        let update = await providerManager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let discoveryTask = Task {
+            await providerManager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        }
+        try await openStarted.wait(description: "waiting for fallback open")
+        await openGate.signal()
+
+        let update = await discoveryTask.value
         let result = DocumentationProvider.ToolCatalog.applying(
             update,
             to: try jsonValue(["tools": []])
         )
 
-        #expect(DocumentationProvider.ToolCatalog.descriptor(in: result) == nil)
+        #expect(documentationDescriptorDescription(in: result) == "docs-fallback")
         #expect(await upstream.sentCount() == 1)
-        #expect(await fallback.openCount() == 0)
+        #expect(await fallback.openCount() == 1)
     }
 
     @Test func runtimeDocumentationTransportFallsBackWhenReusedUpstreamRouteFails()
@@ -352,7 +358,7 @@ extension RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(1)
         )
         let firstRuntimeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        #expect(methodName(from: firstRuntimeRequest) == "tools/call")
+        #expect(methodName(from: firstRuntimeRequest) == "tools/list")
         guard case .handled(let firstData, _) = firstOutcome else {
             Issue.record("expected handled fallback outcome, got \(firstOutcome)")
             return
@@ -420,12 +426,12 @@ extension RuntimeCoordinatorTests {
             )
         }
         let runtimeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        #expect(methodName(from: runtimeRequest) == "tools/call")
+        #expect(methodName(from: runtimeRequest) == "tools/list")
         let runtimeRequestID = try extractUpstreamID(from: runtimeRequest)
         await yieldMessage(
-            try makeDocumentationSearchToolErrorResponse(
+            try makeDocumentationToolsListResponse(
                 id: runtimeRequestID,
-                text: "Tool 'DocumentationSearch' is not enabled."
+                tools: []
             ),
             to: upstream
         )
@@ -435,7 +441,7 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected handled fallback outcome, got \(firstOutcome)")
             return
         }
-        #expect(firstInvalidatedProvider)
+        #expect(firstInvalidatedProvider == false)
         #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
         #expect(await upstream.stopCount() == 0)
 
@@ -500,11 +506,12 @@ extension RuntimeCoordinatorTests {
             )
         }
         let firstRuntimeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: firstRuntimeRequest) == "tools/list")
         let firstRuntimeRequestID = try extractUpstreamID(from: firstRuntimeRequest)
         await yieldMessage(
-            try makeDocumentationSearchToolErrorResponse(
+            try makeDocumentationToolsListResponse(
                 id: firstRuntimeRequestID,
-                text: "Tool 'DocumentationSearch' is not enabled."
+                tools: []
             ),
             to: upstream
         )
@@ -523,23 +530,14 @@ extension RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(1)
             )
         }
-        let secondRuntimeRequest = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
-        let secondRuntimeRequestID = try extractUpstreamID(from: secondRuntimeRequest)
-        await yieldMessage(
-            try makeDocumentationSearchToolErrorResponse(
-                id: secondRuntimeRequestID,
-                text: "Tool 'DocumentationSearch' is not enabled."
-            ),
-            to: upstream
-        )
         let retryOutcome = try await retryTask.value
         guard case .handled(let retryData, let retryInvalidatedProvider) = retryOutcome else {
             Issue.record("expected retry fallback outcome, got \(retryOutcome)")
             return
         }
-        #expect(retryInvalidatedProvider)
+        #expect(retryInvalidatedProvider == false)
         #expect(try toolContentText(in: retryData) == "{\"answer\":\"asset\"}")
-        #expect(await upstream.sentCount() == 2)
+        #expect(await upstream.sentCount() == 1)
         #expect(await upstream.stopCount() == 0)
         #expect(await localProvider.requestedCallPIDs() == [
             target.processID,
@@ -767,13 +765,16 @@ extension RuntimeCoordinatorTests {
         await openGate.signal()
 
         do {
-            _ = try await waitWithTimeout(
+            let outcome = try await waitWithTimeout(
                 "waiting for invalidated documentation search",
                 timeout: .seconds(2)
             ) {
                 try await searchTask.value
             }
-            Issue.record("expected invalidated documentation search to be cancelled")
+            guard case .unavailable = outcome else {
+                Issue.record("expected unavailable outcome for invalidated search, got \(outcome)")
+                return
+            }
         } catch is CancellationError {
         } catch {
             Issue.record("expected CancellationError for invalidated search, got \(error)")
@@ -1836,7 +1837,7 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
 
-    @Test func activeDocumentationProviderKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
+    @Test func documentationProviderRejectsRepairedRouteWhenDescriptorIsStillMissing()
         async throws
     {
         let target = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
@@ -1879,11 +1880,10 @@ extension RuntimeCoordinatorTests {
             requestData: makeDocumentationSearchRequest(id: 122, query: "First"),
             requestTimeoutOverride: .seconds(1)
         )
-        guard case .handled(let firstData, _) = firstOutcome else {
-            Issue.record("expected first handled outcome, got \(firstOutcome)")
+        guard case .unavailable = firstOutcome else {
+            Issue.record("expected unavailable outcome, got \(firstOutcome)")
             return
         }
-        #expect(try toolContentText(in: firstData) == "{\"answer\":\"first\"}")
 
         _ = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
 
@@ -1892,18 +1892,18 @@ extension RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let secondData, _) = secondOutcome else {
-            Issue.record("expected second handled outcome, got \(secondOutcome)")
+        guard case .unavailable = secondOutcome else {
+            Issue.record("expected second unavailable outcome, got \(secondOutcome)")
             return
         }
-        #expect(try toolContentText(in: secondData) == "{\"answer\":\"second\"}")
         #expect(await repairer.repairedPIDs() == [target.processID])
         #expect(await factory.startedPIDs() == [target.processID, target.processID])
         #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
-        #expect(await factory.documentationQueries(for: target.processID) == ["First", "Second"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+        #expect(await factory.documentationQueries(for: target.processID).isEmpty)
     }
 
-    @Test func backgroundDiscoveryKeepsReopenedRouteWhenRepairDoesNotRestoreDescriptor()
+    @Test func backgroundDiscoveryRejectsRepairedRouteWhenDescriptorIsStillMissing()
         async throws
     {
         let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
@@ -1942,22 +1942,24 @@ extension RuntimeCoordinatorTests {
             serviceRepairer: repairer
         )
 
-        _ = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let update = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        #expect(update.debugLabel == "unavailable")
+
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 125, query: "SwiftUI"),
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let responseData, _) = outcome else {
-            Issue.record("expected handled outcome, got \(outcome)")
+        guard case .unavailable = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"reopened\"}")
         #expect(await repairer.repairedPIDs() == [target.processID])
         #expect(await factory.startedPIDs() == [target.processID, target.processID])
         #expect(await factory.stoppedPIDs() == [target.processID])
         #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
-        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+        #expect(await factory.documentationQueries(for: target.processID).isEmpty)
     }
 
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeReturnsNotEnabled()
@@ -2620,7 +2622,7 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
 
-    @Test func documentationSearchDoesNotWaitForBackgroundDescriptorFetch() async throws {
+    @Test func documentationSearchDoesNotCallCandidateWhileDescriptorFetchIsHanging() async throws {
         let target = xcodeProcessTarget(processID: 114, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
@@ -2657,13 +2659,13 @@ extension RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let responseData, _) = outcome else {
-            Issue.record("expected handled outcome, got \(outcome)")
+        guard case .failed(let error, _) = outcome, error is TimeoutError else {
+            Issue.record("expected timeout outcome, got \(outcome)")
             return
         }
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"direct\"}")
         #expect(await factory.startedPIDs() == [target.processID])
-        #expect(await factory.documentationQueries(for: target.processID) == ["UIView"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+        #expect(await factory.documentationQueries(for: target.processID).isEmpty)
 
         discoveryTask.cancel()
         _ = await discoveryTask.value
@@ -3074,12 +3076,12 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected handled outcome, got \(outcome)")
             return
         }
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"actual\"}")
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"advertised\"}")
         #expect(await factory.startedPIDs() == [xcode27.processID, xcode26.processID])
         #expect(await factory.requestCount(processID: xcode27.processID, method: "tools/list") == 1)
         #expect(await factory.requestCount(processID: xcode26.processID, method: "tools/list") == 1)
-        #expect(await factory.documentationQueries(for: xcode27.processID) == ["SwiftUI"])
-        #expect(await factory.documentationQueries(for: xcode26.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: xcode27.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["SwiftUI"])
     }
 
     @Test func documentationProviderManagerRetriesActualRequestWhenNewestIsNotEnabled() async throws {

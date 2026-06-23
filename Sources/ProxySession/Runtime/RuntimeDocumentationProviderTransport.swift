@@ -57,11 +57,24 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
             return try await fallback.toolsList(route: route, timeout: timeout)
         }
         let deadline = Deadline.fromNow(timeout, clock: clock)
-        guard let runtime = runtimeBox.value else { throw CancellationError() }
-        return try await runtime.documentationProviderToolsList(
-            route: route,
-            requestTimeout: try remainingTimeoutOrThrow(until: deadline)
-        )
+        do {
+            guard let runtime = runtimeBox.value else { throw CancellationError() }
+            return try await runtime.documentationProviderToolsList(
+                route: route,
+                requestTimeout: try remainingTimeoutOrThrow(until: deadline)
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let fallbackRoute = try await openFallbackRoute(
+                for: route,
+                timeout: try remainingTimeoutOrThrow(until: deadline)
+            )
+            return try await fallback.toolsList(
+                route: fallbackRoute,
+                timeout: try remainingTimeoutOrThrow(until: deadline)
+            )
+        }
     }
 
     package func callDocumentationSearch(

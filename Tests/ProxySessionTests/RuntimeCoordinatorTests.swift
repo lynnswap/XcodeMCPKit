@@ -1911,6 +1911,70 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+    @Test func sessionManagerToolsListUsesFirstSuccessfulProcessRouteCatalog() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let badUpstream = TestUpstreamClient()
+        let goodUpstream = TestUpstreamClient()
+        let badTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
+        let goodTarget = xcodeProcessTarget(processID: 66333, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [badUpstream, goodUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: badTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: goodTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-race",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let badRequest = try await badUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        #expect(methodName(from: badRequest) == "tools/list")
+        let goodRequest = try await goodUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        #expect(methodName(from: goodRequest) == "tools/list")
+        await goodUpstream.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: goodRequest),
+                        "result": [
+                            "tools": [
+                                [
+                                    "name": "XcodeRead",
+                                    "description": "read",
+                                ],
+                            ],
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for process-routed tools/list") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["XcodeRead"])
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+    }
+
     @Test func sessionManagerFansOutXcodeListWindowsAcrossProcessRoutesAndCachesOwners()
         async throws
     {

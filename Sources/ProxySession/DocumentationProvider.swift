@@ -1632,6 +1632,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let target: XcodeProcessTarget
         var backend: CandidateBackend
         let serverVersion: String
+        var descriptorLookupCompleted: Bool
 
         var descriptor: JSONValue? {
             backend.descriptor
@@ -1720,6 +1721,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let testHooks: DocumentationProviderManagerTestHooks
     private let logger: Logger
     private let descriptorRefreshRetryDelayNanoseconds: Int64 = 250_000_000
+    private let candidateAttemptTimeoutNanoseconds: Int64 = 2_000_000_000
     private var activeProvider: ActiveProvider?
     private var preparedProviders: [pid_t: CandidateProfile] = [:]
     private var providerPreparations: [pid_t: ProviderPreparation] = [:]
@@ -1787,14 +1789,17 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard targets.isEmpty == false else {
             return .unavailable
         }
-        for target in targets {
+        for (index, target) in targets.enumerated() {
             guard !Task.isCancelled, !isShutdown else {
                 return .unavailable
             }
             do {
                 let profile = try await preparedProvider(
                     for: target,
-                    requestTimeout: remainingTimeout(until: deadline),
+                    requestTimeout: timeoutForCandidate(
+                        until: deadline,
+                        remainingCandidateCount: targets.count - index
+                    ),
                     fetchDescriptor: true
                 )
                 if let descriptor = profile.descriptor {
@@ -1910,9 +1915,29 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         remainingCandidateCount: fallbackTargets.count + 1
                     )
                 )
+                let activeProfile: CandidateProfile
+                do {
+                    activeProfile = try await preparedProvider(
+                        for: activeProvider.profile.target,
+                        requestTimeout: remainingTimeout(until: activeDeadline),
+                        fetchDescriptor: true
+                    )
+                } catch {
+                    rejectedProcessIDs.insert(activeProvider.profile.target.processID)
+                    invalidatedProvider = true
+                    lastCandidateFailure = error
+                    await invalidate(activeProvider, reason: "active_documentation_provider_unprepared")
+                    continue
+                }
+                guard profileCanHandleDocumentationSearch(activeProfile) else {
+                    rejectedProcessIDs.insert(activeProvider.profile.target.processID)
+                    invalidatedProvider = true
+                    await invalidate(activeProvider, reason: "active_documentation_provider_missing_descriptor")
+                    continue
+                }
                 switch try await attemptDocumentationSearch(
                     requestData: requestData,
-                    provider: activeProvider,
+                    provider: ActiveProvider(profile: activeProfile),
                     deadline: activeDeadline
                 ) {
                 case .success(let data, let replacementProfile):
@@ -1974,8 +1999,24 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     let profile = try await preparedProvider(
                         for: target,
                         requestTimeout: remainingTimeout(until: candidateDeadline),
-                        fetchDescriptor: false
+                        fetchDescriptor: true
                     )
+                    guard profileCanHandleDocumentationSearch(profile) else {
+                        logger.info(
+                            "Documentation provider candidate cannot handle DocumentationSearch; trying next candidate",
+                            metadata: [
+                                "pid": .string("\(target.processID)"),
+                                "app_path": .string(target.appPath),
+                                "xcode_version": .string(target.xcodeVersion),
+                            ]
+                        )
+                        rejectedProcessIDs.insert(target.processID)
+                        progressed = true
+                        if hasRemainingCandidate {
+                            await discardPreparedProvider(processID: target.processID)
+                        }
+                        continue
+                    }
                     let provider = ActiveProvider(profile: profile)
                     switch try await attemptDocumentationSearch(
                         requestData: requestData,
@@ -2064,6 +2105,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return false
         }
         return first.processID == activeProvider.profile.target.processID
+    }
+
+    private func profileCanHandleDocumentationSearch(_ profile: CandidateProfile) -> Bool {
+        profile.descriptor != nil
     }
 
     private func promoteToActive(_ profile: CandidateProfile) async -> Bool {
@@ -2326,7 +2371,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         fetchDescriptor: Bool
     ) async throws -> CandidateProfile {
         if let activeProvider, activeProvider.profile.target.processID == target.processID {
-            if fetchDescriptor, activeProvider.profile.descriptor == nil {
+            if fetchDescriptor,
+               activeProvider.profile.descriptor == nil,
+               activeProvider.profile.descriptorLookupCompleted == false
+            {
                 let updated = await profileByRefreshingDescriptorWithRepair(
                     activeProvider.profile,
                     requestTimeout: requestTimeout
@@ -2352,7 +2400,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return activeProvider.profile
         }
         if var prepared = preparedProviders[target.processID] {
-            if fetchDescriptor, prepared.descriptor == nil {
+            if fetchDescriptor,
+               prepared.descriptor == nil,
+               prepared.descriptorLookupCompleted == false
+            {
                 let updated = await profileByRefreshingDescriptorWithRepair(
                     prepared,
                     requestTimeout: requestTimeout
@@ -2426,7 +2477,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         fetchDescriptor: Bool
     ) async throws -> CandidateProfile {
         if let activeProvider, activeProvider.profile.id == profile.id {
-            if fetchDescriptor, activeProvider.profile.descriptor == nil {
+            if fetchDescriptor,
+               activeProvider.profile.descriptor == nil,
+               activeProvider.profile.descriptorLookupCompleted == false
+            {
                 let updated = await profileByRefreshingDescriptorWithRepair(
                     activeProvider.profile,
                     requestTimeout: requestTimeout
@@ -2439,7 +2493,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if let prepared = preparedProviders[profile.target.processID],
             prepared.id == profile.id
         {
-            if fetchDescriptor, prepared.descriptor == nil {
+            if fetchDescriptor,
+               prepared.descriptor == nil,
+               prepared.descriptorLookupCompleted == false
+            {
                 let updated = await profileByRefreshingDescriptorWithRepair(
                     prepared,
                     requestTimeout: requestTimeout
@@ -2452,7 +2509,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
         var prepared = profile
         preparedProviders[profile.target.processID] = prepared
-        if fetchDescriptor, prepared.descriptor == nil {
+        if fetchDescriptor,
+           prepared.descriptor == nil,
+           prepared.descriptorLookupCompleted == false
+        {
             prepared = await profileByRefreshingDescriptorWithRepair(
                 prepared,
                 requestTimeout: requestTimeout
@@ -2493,7 +2553,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return fallback
         }
         guard primary.descriptor == nil, fallback.descriptor != nil else {
-            return primary
+            var merged = primary
+            if fallback.descriptorLookupCompleted {
+                merged.descriptorLookupCompleted = true
+            }
+            return merged
         }
         return fallback
     }
@@ -2606,7 +2670,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             id: UUID(),
             target: target,
             backend: .xcode(route: route, descriptor: nil),
-            serverVersion: route.serverVersion
+            serverVersion: route.serverVersion,
+            descriptorLookupCompleted: false
         )
     }
 
@@ -2630,6 +2695,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             route: route,
             descriptor: DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
         )
+        updated.descriptorLookupCompleted = true
         return updated
     }
 
@@ -2814,6 +2880,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         )
         var updated = profile
         updated.backend = .installedDocumentationAsset(descriptor: descriptor)
+        updated.descriptorLookupCompleted = true
         await closeTransportRouteIfPresent(profile)
         return updated
     }
@@ -2824,6 +2891,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     ) async -> CandidateProfile {
         var updated = profile
         updated.backend = .installedDocumentationAsset(descriptor: fallback.descriptor)
+        updated.descriptorLookupCompleted = true
         await closeTransportRouteIfPresent(profile)
         return updated
     }
@@ -2993,15 +3061,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         remainingCandidateCount: Int
     ) -> TimeAmount? {
         guard let remaining = remainingTimeout(until: deadline) else {
-            return nil
+            return .nanoseconds(candidateAttemptTimeoutNanoseconds)
         }
         guard remaining.nanoseconds > 0 else {
             return .nanoseconds(0)
         }
         guard remainingCandidateCount > 1 else {
-            return remaining
+            return .nanoseconds(
+                min(remaining.nanoseconds, candidateAttemptTimeoutNanoseconds)
+            )
         }
-        return .nanoseconds(max(1, remaining.nanoseconds / Int64(remainingCandidateCount)))
+        let fairShare = max(1, remaining.nanoseconds / Int64(remainingCandidateCount))
+        return .nanoseconds(min(fairShare, candidateAttemptTimeoutNanoseconds))
     }
 
     private func makeDeadline(fromTimeout timeout: TimeAmount?) -> Deadline? {
