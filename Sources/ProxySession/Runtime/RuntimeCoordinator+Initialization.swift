@@ -606,8 +606,12 @@ extension RuntimeCoordinator {
             )
             resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
         } else {
+            let removedProcessID = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.target.processID
             processToolCatalogRegistry.removeCatalog(forUpstreamIndex: upstreamIndex)
-            resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
+            resyncProcessToolsCatalogSurfaceAfterRemoving(
+                upstreamIndex: upstreamIndex,
+                processID: removedProcessID
+            )
             removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         }
         return true

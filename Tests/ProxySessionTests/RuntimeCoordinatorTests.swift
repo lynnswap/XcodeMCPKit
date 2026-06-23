@@ -2160,6 +2160,48 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80431, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let catalog = try jsonValue([
+            "tools": [
+                toolDescriptor(name: "StaleSiblingOnlyTool"),
+            ],
+        ])
+        manager.processToolCatalogRegistry.record(
+            target: target,
+            upstreamIndex: 1,
+            associatedUpstreamIndices: [0, 1],
+            rawResult: catalog
+        )
+        manager.setCachedToolsListResult(catalog, sourceUpstream: 1)
+
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_process_route_unavailable"
+        )
+
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+    }
+
     @Test func sessionManagerToolsListDoesNotFallbackWhenAllProcessRoutesUnavailable()
         async throws
     {

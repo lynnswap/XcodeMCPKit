@@ -1031,15 +1031,19 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
 
     private let assetRoot: URL
     private let processRunner: any ProcessRunning
+    private let currentOSVersion: @Sendable () -> String
     private let clock: ClockClient
 
     package init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
         processRunner: any ProcessRunning = ProcessRunner(),
+        currentOSVersion: @escaping @Sendable () -> String =
+            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
         clock: ClockClient = .liveValue
     ) {
         self.assetRoot = assetRoot
         self.processRunner = processRunner
+        self.currentOSVersion = currentOSVersion
         self.clock = clock
     }
 
@@ -1072,13 +1076,17 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     }
 
     private func installedAsset(
-        for _: XcodeProcessTarget
+        for target: XcodeProcessTarget
     ) -> DocumentationSearchInstalledAsset? {
         guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
         else {
             return nil
         }
-        return DocumentationSearchAssetLocator.latestAsset(from: scan.assets)
+        return DocumentationSearchAssetLocator.bestAsset(
+            for: target.xcodeVersion,
+            currentOSVersion: currentOSVersion(),
+            from: scan.assets
+        )
     }
 
     private func searchRows(

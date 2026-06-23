@@ -723,7 +723,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package func resyncProcessToolsCatalogSurfaceAfterRemoving(
-        upstreamIndex removedUpstreamIndex: Int
+        upstreamIndex removedUpstreamIndex: Int,
+        processID removedProcessID: pid_t? = nil
     ) {
         guard xcodeProcessRoutes.isEmpty == false,
               canonicalBrokerState.toolsCatalogRaw() != nil else {
@@ -738,7 +739,16 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
             return
         }
-        if canonicalBrokerState.toolsSourceUpstream() == removedUpstreamIndex {
+        guard let sourceUpstream = canonicalBrokerState.toolsSourceUpstream() else {
+            return
+        }
+        if sourceUpstream == removedUpstreamIndex {
+            canonicalBrokerState.clearToolsCatalog()
+            return
+        }
+        if let removedProcessID,
+           xcodeProcessRoute(forUpstreamIndex: sourceUpstream)?.target.processID == removedProcessID
+        {
             canonicalBrokerState.clearToolsCatalog()
         }
     }

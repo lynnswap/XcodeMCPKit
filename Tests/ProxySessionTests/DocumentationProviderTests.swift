@@ -2594,7 +2594,8 @@ extension RuntimeCoordinatorTests {
         ))
         let provider = LiveDocumentationAssetSearchProvider(
             assetRoot: root,
-            processRunner: runner
+            processRunner: runner,
+            currentOSVersion: { "26.5.1" }
         )
         let target = xcodeProcessTarget(processID: 123, xcodeVersion: "26.6")
 
@@ -2630,7 +2631,7 @@ extension RuntimeCoordinatorTests {
         #expect(requests.first?.arguments.joined(separator: " ").contains("lower(asset_id)") == true)
     }
 
-    @Test func liveDocumentationAssetSearchProviderUsesLatestInstalledAsset()
+    @Test func liveDocumentationAssetSearchProviderUsesTargetCompatibleInstalledAsset()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -2658,7 +2659,8 @@ extension RuntimeCoordinatorTests {
         ))
         let provider = LiveDocumentationAssetSearchProvider(
             assetRoot: root,
-            processRunner: runner
+            processRunner: runner,
+            currentOSVersion: { "27.0" }
         )
         let target = xcodeProcessTarget(processID: 128, xcodeVersion: "26.6")
 
@@ -2671,7 +2673,7 @@ extension RuntimeCoordinatorTests {
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
         #expect(requests.first?.arguments.joined(separator: " ").contains(
-            "xcode-27.asset/AssetData/documentation-db/index.sql"
+            "xcode-26-5.asset/AssetData/documentation-db/index.sql"
         ) == true)
     }
 

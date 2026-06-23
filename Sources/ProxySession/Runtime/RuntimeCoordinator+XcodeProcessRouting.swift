@@ -210,7 +210,10 @@ extension RuntimeCoordinator {
             state[route.target.processID] = unavailableUntil
         }
         processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
-        resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
+        resyncProcessToolsCatalogSurfaceAfterRemoving(
+            upstreamIndex: upstreamIndex,
+            processID: route.target.processID
+        )
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(
             "Temporarily ignoring Xcode process route",
