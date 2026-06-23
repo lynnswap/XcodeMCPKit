@@ -2196,7 +2196,8 @@ struct RuntimeCoordinatorTests {
         }
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(await badUpstream.sentCount() == 0)
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
@@ -2238,6 +2239,49 @@ struct RuntimeCoordinatorTests {
 
         #expect(manager.cachedToolsListResult() == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+    }
+
+    @Test func sessionManagerToolsListClearsPartialCanonicalCatalogWhenProcessRouteUnavailable()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let badTarget = xcodeProcessTarget(processID: 80432, xcodeVersion: "27.0")
+        let goodTarget = xcodeProcessTarget(processID: 66336, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: badTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: goodTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (badTarget, 0, [toolDescriptor(name: "BadOnlyTool")]),
+                (goodTarget, 1, [toolDescriptor(name: "GoodOnlyTool")]),
+            ]
+        )
+        #expect(manager.cachedToolsListResult() != nil)
+
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_process_route_unavailable"
+        )
+
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(
+            manager.debugSnapshot().processToolCatalogs.map(\.processID)
+                == [goodTarget.processID]
+        )
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 

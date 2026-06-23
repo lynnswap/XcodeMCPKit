@@ -194,8 +194,11 @@ extension RuntimeCoordinator {
                 }
                 let unionResult = self.processToolCatalogRegistry.unionToolsListResult()
                     ?? successes[0].result.rawResult
+                let successfulProcessIDs = Set(successes.map { $0.target.processID })
+                let configuredProcessIDs = Set(self.xcodeProcessRoutes.map(\.target.processID))
                 let hasCompleteProcessCatalog =
-                    successes.count == routes.count && routes.count == processRoutes.count
+                    configuredProcessIDs.isEmpty == false
+                    && successfulProcessIDs == configuredProcessIDs
                 let sourceUpstream: Int?
                 if hasCompleteProcessCatalog {
                     sourceUpstream = successes.sorted {

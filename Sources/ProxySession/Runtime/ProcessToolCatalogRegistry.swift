@@ -163,6 +163,12 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
+    package func processIDsWithCatalog() -> Set<pid_t> {
+        state.withLockedValue { state in
+            Set(state.catalogsByProcessID.keys)
+        }
+    }
+
     package func hasTool(_ toolName: String, upstreamIndex: Int) -> Bool {
         catalog(forUpstreamIndex: upstreamIndex)?.toolsByName[toolName] != nil
     }

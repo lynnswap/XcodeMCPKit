@@ -731,12 +731,17 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return
         }
         if let unionResult = processToolCatalogRegistry.unionToolsListResult(),
-           let sourceUpstream = processToolCatalogRegistry.representativeSourceUpstream()
+           let sourceUpstream = processToolCatalogRegistry.representativeSourceUpstream(),
+           processToolCatalogRegistryHasCompleteConfiguredCatalog()
         {
             canonicalBrokerState.syncCanonicalToolsCatalog(
                 unionResult,
                 sourceUpstream: sourceUpstream
             )
+            return
+        }
+        if processToolCatalogRegistry.unionToolsListResult() != nil {
+            canonicalBrokerState.clearToolsCatalog()
             return
         }
         guard let sourceUpstream = canonicalBrokerState.toolsSourceUpstream() else {
@@ -751,6 +756,14 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         {
             canonicalBrokerState.clearToolsCatalog()
         }
+    }
+
+    package func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {
+        let configuredProcessIDs = Set(xcodeProcessRoutes.map(\.target.processID))
+        guard configuredProcessIDs.isEmpty == false else {
+            return false
+        }
+        return processToolCatalogRegistry.processIDsWithCatalog() == configuredProcessIDs
     }
 
     package func refreshToolsListIfNeeded() {
