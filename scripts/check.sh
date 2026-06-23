@@ -34,6 +34,7 @@ run_group() {
 }
 
 run_group "swift test" swift test \
+  --no-parallel \
   -Xswiftc -strict-concurrency=minimal
 
 run_group "ProxyProcessTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \

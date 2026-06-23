@@ -42,7 +42,10 @@ jobs:
           swift --version
 
       - name: Run package tests
-        run: swift test -Xswiftc -strict-concurrency=minimal
+        run: |
+          swift test \
+            --no-parallel \
+            -Xswiftc -strict-concurrency=minimal
 
       - name: Run process tests
         run: |
