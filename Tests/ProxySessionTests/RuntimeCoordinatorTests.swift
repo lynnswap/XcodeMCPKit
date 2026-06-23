@@ -204,6 +204,16 @@ struct RuntimeCoordinatorTests {
         #expect(response["result"] != nil)
         #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
         #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+
+        let recoveryInitialize = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
+        let recoveryUpstreamID = try extractUpstreamID(from: recoveryInitialize)
+        await upstream0.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
+        _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
+        #expect(manager.documentationCandidateProcessOrder() == [
+            newerTarget.processID,
+            olderTarget.processID,
+        ])
     }
 
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterExit()
@@ -4098,7 +4108,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func controlPlaneTimeoutStaysShortForSlowDiscoveryWork() throws {
         let disabledDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 0)
-        #expect(disabledDefault?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        #expect(disabledDefault == nil)
 
         let longDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 300)
         #expect(longDefault?.nanoseconds == TimeAmount.seconds(10).nanoseconds)

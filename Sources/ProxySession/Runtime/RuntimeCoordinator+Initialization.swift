@@ -232,7 +232,7 @@ extension RuntimeCoordinator {
             self.upstreamSlotScheduler.wake()
             if update.shouldWarmSecondary {
                 self.initializeManager.markSecondaryWarmupStarted()
-                self.warmUpSecondaryUpstreams()
+                self.warmUpSecondaryUpstreams(excluding: upstreamIndex)
             }
             self.refreshToolsListIfNeeded()
             self.completePendingInitializes(
@@ -622,6 +622,7 @@ extension RuntimeCoordinator {
             return false
         }
         result.timeout?.cancel()
+        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
         noteUpstreamInitializationSucceeded()
         return true
     }
@@ -631,12 +632,13 @@ extension RuntimeCoordinator {
             return
         }
         result.timeout?.cancel()
+        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
         noteUpstreamInitializationSucceeded()
     }
 
-    func warmUpSecondaryUpstreams() {
+    func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int = 0) {
         guard upstreams.count > 1 else { return }
-        for upstreamIndex in 1..<upstreams.count {
+        for upstreamIndex in upstreams.indices where upstreamIndex != primaryUpstreamIndex {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }

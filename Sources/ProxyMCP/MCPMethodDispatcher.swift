@@ -35,10 +35,8 @@ extension MCP {
         package static func timeoutForControlPlane(
             defaultSeconds: TimeInterval
         ) -> TimeAmount? {
-            let effectiveDefault =
-                defaultSeconds > 0 ? defaultSeconds : controlPlaneFallbackTimeoutSeconds
             return timeout(
-                defaultSeconds: effectiveDefault,
+                defaultSeconds: defaultSeconds,
                 capSeconds: controlPlaneFallbackTimeoutSeconds
             )
         }
