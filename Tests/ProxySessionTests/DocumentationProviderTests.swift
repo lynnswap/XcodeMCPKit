@@ -1919,6 +1919,62 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 2)
     }
 
+    @Test func documentationProviderTriesNextCandidateAfterInitialAssetFallbackTimeout()
+        async throws
+    {
+        let newer = documentationProviderTarget(processID: 130, xcodeVersion: "26.6")
+        let older = documentationProviderTarget(processID: 131, xcodeVersion: "26.5")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                newer.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+                older.processID: [
+                    .init(
+                        serverVersion: "26.5",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 133,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 0
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [newer, older]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 133, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"older\"}")
+        #expect(await localProvider.requestedCallPIDs() == [newer.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
+        #expect(await factory.documentationQueries(for: newer.processID) == ["SwiftUI"])
+        #expect(await factory.documentationQueries(for: older.processID) == ["SwiftUI"])
+    }
+
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeConfigIsBroken()
         async throws
     {

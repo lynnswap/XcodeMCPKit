@@ -1771,6 +1771,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let deadline = Deadline.fromNow(requestTimeoutOverride, clock: clock)
         var rejectedProcessIDs: Set<pid_t> = []
         var invalidatedProvider = false
+        var lastCandidateFailure: (any Error)?
 
         while !Task.isCancelled {
             if let deadline, deadline.hasExpired {
@@ -1817,6 +1818,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     continue
                 case .requestFailed(let error):
                     return .failed(error, invalidatedProvider: invalidatedProvider)
+                case .candidateFailed(let error):
+                    rejectedProcessIDs.insert(activeProvider.profile.target.processID)
+                    lastCandidateFailure = error
+                    continue
                 case .failed(let error):
                     if let deadline, deadline.hasExpired {
                         return .failed(error, invalidatedProvider: invalidatedProvider)
@@ -1834,6 +1839,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 try Task.checkCancellation()
                 if let deadline, deadline.hasExpired {
                     return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                if let lastCandidateFailure {
+                    return .failed(lastCandidateFailure, invalidatedProvider: invalidatedProvider)
                 }
                 return .unavailable(.noAvailableProvider)
             }
@@ -1893,6 +1901,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         continue
                     case .requestFailed(let error):
                         return .failed(error, invalidatedProvider: invalidatedProvider)
+                    case .candidateFailed(let error):
+                        rejectedProcessIDs.insert(target.processID)
+                        lastCandidateFailure = error
+                        progressed = true
+                        continue
                     case .failed(let error):
                         rejectedProcessIDs.insert(target.processID)
                         invalidatedProvider = true
@@ -1953,6 +1966,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case success(data: Data, replacementProfile: CandidateProfile?)
         case rejected(processID: pid_t, permanentlyUnusable: Bool)
         case requestFailed(any Error)
+        case candidateFailed(any Error)
         case failed(any Error)
     }
 
@@ -1960,6 +1974,13 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case success(InstalledDocumentationAssetFallback)
         case unavailable
         case requestFailed(any Error)
+        case candidateFailed(any Error)
+    }
+
+    private enum InstalledDocumentationAssetFailureScope {
+        case request
+        case candidate
+        case provider
     }
 
     private func attemptDocumentationSearch(
@@ -1979,8 +2000,13 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                if installedDocumentationAssetFailureIsRequestScoped(error) {
+                switch installedDocumentationAssetFailureScope(error) {
+                case .request:
                     return .requestFailed(error)
+                case .candidate:
+                    return .candidateFailed(error)
+                case .provider:
+                    break
                 }
                 await invalidate(provider, reason: "installed_documentation_asset_call_failed")
                 return .rejected(processID: processID, permanentlyUnusable: true)
@@ -2031,21 +2057,30 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func installedDocumentationAssetFailureIsRequestScoped(_ error: any Error) -> Bool {
+    private func installedDocumentationAssetFailureScope(_ error: any Error)
+        -> InstalledDocumentationAssetFailureScope
+    {
         if error is TimeoutError {
-            return true
+            return .candidate
         }
         if let controlPlaneError = error as? ControlPlane.Error {
             switch controlPlaneError {
             case .invalidResponse(let message):
-                return message == "missing DocumentationSearch request id"
+                if message == "missing DocumentationSearch request id"
                     || message == "missing DocumentationSearch query"
+                {
+                    return .request
+                }
+                return .provider
             case .upstreamRPC:
-                return true
+                return .request
             }
         }
         let nsError = error as NSError
-        return nsError.domain == NSCocoaErrorDomain
+        if nsError.domain == NSCocoaErrorDomain {
+            return .request
+        }
+        return .provider
     }
 
     private func documentationAttemptResultFromInstalledDocumentationAssetFallback(
@@ -2070,6 +2105,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return nil
         case .requestFailed(let error):
             return .requestFailed(error)
+        case .candidateFailed(let error):
+            return .candidateFailed(error)
         }
     }
 
@@ -2094,10 +2131,14 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "Installed documentation asset fallback failed",
                 metadata: candidateLogMetadata(target: target, error: error)
             )
-            if installedDocumentationAssetFailureIsRequestScoped(error) {
+            switch installedDocumentationAssetFailureScope(error) {
+            case .request:
                 return .requestFailed(error)
+            case .candidate:
+                return .candidateFailed(error)
+            case .provider:
+                return .unavailable
             }
-            return .unavailable
         }
     }
 
