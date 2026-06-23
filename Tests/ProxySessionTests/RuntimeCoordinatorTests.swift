@@ -2200,6 +2200,59 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
+    @Test func sessionManagerToolsListRetriesSiblingBeforeDroppingProcessCatalog()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let unavailableUpstream = AlwaysUnavailableUpstreamClient(reason: .startFailed)
+        let siblingUpstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80433, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [unavailableUpstream, siblingUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-sibling-retry",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        try await waitForSentCount(unavailableUpstream, count: 1, timeoutSeconds: 2)
+        let siblingRequest = try await sentValue(from: siblingUpstream, at: 0, timeout: .seconds(2))
+        await siblingUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: siblingRequest),
+                    tools: [
+                        toolDescriptor(name: "SiblingTool"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for sibling process tools/list") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["SiblingTool"])
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
+            target.processID,
+        ])
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+    }
+
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
         async throws
     {
@@ -2758,6 +2811,68 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: tabBRequest) == 1)
         #expect(manager.preferredUpstreamIndex(for: workspaceBRequest) == 1)
         #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
+    }
+
+    @Test func sessionManagerXcodeListWindowsRetriesSiblingBeforeDroppingProcessRoute()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let unavailableUpstream = AlwaysUnavailableUpstreamClient(reason: .startFailed)
+        let siblingUpstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 515, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [unavailableUpstream, siblingUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        try await waitForSentCount(unavailableUpstream, count: 1, timeoutSeconds: 2)
+        let siblingRequest = try await sentValue(from: siblingUpstream, at: 0, timeout: .seconds(2))
+        #expect(toolCallName(from: siblingRequest) == "XcodeListWindows")
+        let message = "* tabIdentifier: tab-sibling, workspacePath: /Work/S.xcworkspace"
+        await siblingUpstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: siblingRequest),
+                    message: message
+                )
+            )
+        )
+
+        let result = try await task.value
+        guard case .object(let resultObject) = result,
+              case .object(let structuredContent)? = resultObject["structuredContent"],
+              case .string(let resultMessage)? = structuredContent["message"] else {
+            Issue.record("expected XcodeListWindows structuredContent")
+            return
+        }
+        #expect(resultMessage == message)
+        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+        #expect(manager.preferredUpstreamIndex(for: [
+            "method": "tools/call",
+            "params": [
+                "name": "XcodeListNavigatorIssues",
+                "arguments": [
+                    "tabIdentifier": "tab-sibling",
+                ],
+            ],
+        ]) == 1)
     }
 
     @Test func sessionManagerCachesDuplicateWorkspaceOwnerByRoutePriority() async throws {

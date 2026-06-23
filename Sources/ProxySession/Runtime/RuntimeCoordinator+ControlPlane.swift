@@ -67,7 +67,7 @@ extension ControlPlane {
 extension RuntimeCoordinator {
     private struct ProcessToolsCatalogRoute: Sendable {
         let target: XcodeProcessTarget
-        let upstreamIndex: Int
+        let upstreamIndices: [Int]
     }
 
     private enum ProcessToolsCatalogOutcome: Sendable {
@@ -113,10 +113,11 @@ extension RuntimeCoordinator {
                 }
             } ?? xcodeProcessRoutes
         let routes = processRoutes.compactMap { route -> ProcessToolsCatalogRoute? in
-            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route) else {
+            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            guard upstreamIndices.isEmpty == false else {
                 return nil
             }
-            return ProcessToolsCatalogRoute(target: route.target, upstreamIndex: upstreamIndex)
+            return ProcessToolsCatalogRoute(target: route.target, upstreamIndices: upstreamIndices)
         }
         guard routes.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
@@ -128,31 +129,23 @@ extension RuntimeCoordinator {
         ) { group in
             for route in routes {
                 group.addTask {
-                    let rpcHandle = ControlPlane.RPCHandle()
                     do {
-                        let result = try await self.loadCanonicalToolsCatalogFromRoute(
-                            .pinnedUpstream(route.upstreamIndex),
+                        let result = try await self.loadCanonicalToolsCatalogFromProcessRoute(
+                            route,
                             requestTimeout: requestTimeout,
-                            rpcHandle: rpcHandle,
-                            startedAt: startedAt,
-                            purpose: "tools-\(route.upstreamIndex)",
-                            failureRouteMetadata: [
-                                "pid": .string("\(route.target.processID)"),
-                                "app_path": .string(route.target.appPath),
-                                "xcode_version": .string(route.target.xcodeVersion),
-                            ]
+                            startedAt: startedAt
                         )
                         return .success(target: route.target, result: result)
                     } catch is CancellationError {
                         return .failure(
                             target: route.target,
-                            upstreamIndex: route.upstreamIndex,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
                             error: CancellationError()
                         )
                     } catch {
                         return .failure(
                             target: route.target,
-                            upstreamIndex: route.upstreamIndex,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
                             error: error
                         )
                     }
@@ -229,6 +222,44 @@ extension RuntimeCoordinator {
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+    }
+
+    private func loadCanonicalToolsCatalogFromProcessRoute(
+        _ route: ProcessToolsCatalogRoute,
+        requestTimeout: TimeAmount?,
+        startedAt: UInt64
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        var lastFailure: (upstreamIndex: Int, error: any Error)?
+        for upstreamIndex in route.upstreamIndices {
+            let rpcHandle = ControlPlane.RPCHandle()
+            do {
+                return try await loadCanonicalToolsCatalogFromRoute(
+                    .pinnedUpstream(upstreamIndex),
+                    requestTimeout: requestTimeout,
+                    rpcHandle: rpcHandle,
+                    startedAt: startedAt,
+                    purpose: "tools-\(upstreamIndex)",
+                    failureRouteMetadata: [
+                        "pid": .string("\(route.target.processID)"),
+                        "app_path": .string(route.target.appPath),
+                        "xcode_version": .string(route.target.xcodeVersion),
+                        "upstream": .string("\(upstreamIndex)"),
+                    ]
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastFailure = (upstreamIndex, error)
+            }
+        }
+        if let lastFailure {
+            throw ControlPlane.RequestError(
+                route: .pinnedUpstream(lastFailure.upstreamIndex),
+                upstreamIndex: lastFailure.upstreamIndex,
+                underlying: lastFailure.error
+            )
+        }
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
     private func loadCanonicalToolsCatalogFromRoute(

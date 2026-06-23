@@ -3,6 +3,7 @@ import Logging
 import NIOCore
 import ProxyCore
 import ProxyMCP
+import ProxySessionControlPlane
 import ProxySessionUpstream
 
 extension RuntimeCoordinator {
@@ -19,7 +20,7 @@ extension RuntimeCoordinator {
     private struct XcodeListWindowsRoute: Sendable {
         let ordinal: Int
         let target: XcodeProcessTarget
-        let upstreamIndex: Int
+        let upstreamIndices: [Int]
     }
 
     private enum XcodeListWindowsOutcome: Sendable {
@@ -35,13 +36,14 @@ extension RuntimeCoordinator {
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route) else {
+            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            guard upstreamIndices.isEmpty == false else {
                 return nil
             }
             return XcodeListWindowsRoute(
                 ordinal: ordinal,
                 target: route.target,
-                upstreamIndex: upstreamIndex
+                upstreamIndices: upstreamIndices
             )
         }
 
@@ -56,22 +58,20 @@ extension RuntimeCoordinator {
             for route in routes {
                 group.addTask {
                     do {
-                        let result = try await self.awaitControlPlaneOperation {
-                            try await self.controlPlaneCoordinator.listWindows(
-                                route: .pinnedUpstream(route.upstreamIndex),
-                                deadlineUptimeNs: deadlineUptimeNs
-                            )
-                        }
+                        let loaded = try await self.loadXcodeListWindowsFromProcessRoute(
+                            route,
+                            deadlineUptimeNs: deadlineUptimeNs
+                        )
                         return .success(
                             ordinal: route.ordinal,
                             target: route.target,
-                            upstreamIndex: route.upstreamIndex,
-                            result: result
+                            upstreamIndex: loaded.upstreamIndex,
+                            result: loaded.result
                         )
                     } catch {
                         return .failure(
                             target: route.target,
-                            upstreamIndex: route.upstreamIndex,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
                             error: error
                         )
                     }
@@ -118,6 +118,36 @@ extension RuntimeCoordinator {
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+    }
+
+    private func loadXcodeListWindowsFromProcessRoute(
+        _ route: XcodeListWindowsRoute,
+        deadlineUptimeNs: UInt64?
+    ) async throws -> (upstreamIndex: Int, result: JSONValue) {
+        var lastFailure: (upstreamIndex: Int, error: any Error)?
+        for upstreamIndex in route.upstreamIndices {
+            do {
+                let result = try await self.awaitControlPlaneOperation {
+                    try await self.controlPlaneCoordinator.listWindows(
+                        route: .pinnedUpstream(upstreamIndex),
+                        deadlineUptimeNs: deadlineUptimeNs
+                    )
+                }
+                return (upstreamIndex, result)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastFailure = (upstreamIndex, error)
+            }
+        }
+        if let lastFailure {
+            throw ControlPlane.RequestError(
+                route: .pinnedUpstream(lastFailure.upstreamIndex),
+                upstreamIndex: lastFailure.upstreamIndex,
+                underlying: lastFailure.error
+            )
+        }
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
     package func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int? {
