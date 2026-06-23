@@ -1815,6 +1815,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         unusableProcessIDs.insert(processID)
                     }
                     continue
+                case .requestFailed(let error):
+                    return .failed(error, invalidatedProvider: invalidatedProvider)
                 case .failed(let error):
                     if let deadline, deadline.hasExpired {
                         return .failed(error, invalidatedProvider: invalidatedProvider)
@@ -1889,6 +1891,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                             unusableProcessIDs.insert(processID)
                         }
                         continue
+                    case .requestFailed(let error):
+                        return .failed(error, invalidatedProvider: invalidatedProvider)
                     case .failed(let error):
                         rejectedProcessIDs.insert(target.processID)
                         invalidatedProvider = true
@@ -1948,6 +1952,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private enum DocumentationAttemptResult: Sendable {
         case success(data: Data, replacementProfile: CandidateProfile?)
         case rejected(processID: pid_t, permanentlyUnusable: Bool)
+        case requestFailed(any Error)
         case failed(any Error)
     }
 
@@ -1968,6 +1973,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if installedDocumentationAssetFailureIsRequestScoped(error) {
+                    return .requestFailed(error)
+                }
                 await invalidate(provider, reason: "installed_documentation_asset_call_failed")
                 return .rejected(processID: processID, permanentlyUnusable: true)
             }
@@ -2033,6 +2041,23 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             await invalidate(provider, reason: "documentation_provider_call_failed")
             return .failed(error)
         }
+    }
+
+    private func installedDocumentationAssetFailureIsRequestScoped(_ error: any Error) -> Bool {
+        if error is TimeoutError {
+            return true
+        }
+        if let controlPlaneError = error as? ControlPlane.Error {
+            switch controlPlaneError {
+            case .invalidResponse(let message):
+                return message == "missing DocumentationSearch request id"
+                    || message == "missing DocumentationSearch query"
+            case .upstreamRPC:
+                return true
+            }
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSCocoaErrorDomain
     }
 
     private func callInstalledDocumentationAssetFallbackIfAvailable(

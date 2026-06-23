@@ -400,21 +400,25 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     private let responseData: Data
     private let failsCalls: Bool
     private let failAfterSuccessfulCallCount: Int?
+    private let timeoutOnceAfterSuccessfulCallCount: Int?
     private var descriptorPIDs: [pid_t] = []
     private var callPIDs: [pid_t] = []
     private var queries: [String] = []
     private var successfulCallCount = 0
+    private var didThrowTimeout = false
 
     init(
         descriptor: JSONValue?,
         responseData: Data,
         failsCalls: Bool = false,
-        failAfterSuccessfulCallCount: Int? = nil
+        failAfterSuccessfulCallCount: Int? = nil,
+        timeoutOnceAfterSuccessfulCallCount: Int? = nil
     ) {
         self.descriptorValue = descriptor
         self.responseData = responseData
         self.failsCalls = failsCalls
         self.failAfterSuccessfulCallCount = failAfterSuccessfulCallCount
+        self.timeoutOnceAfterSuccessfulCallCount = timeoutOnceAfterSuccessfulCallCount
     }
 
     func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
@@ -433,6 +437,13 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
         }
         if failsCalls {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        if let timeoutOnceAfterSuccessfulCallCount,
+           successfulCallCount >= timeoutOnceAfterSuccessfulCallCount,
+           didThrowTimeout == false
+        {
+            didThrowTimeout = true
+            throw TimeoutError()
         }
         if let failAfterSuccessfulCallCount,
            successfulCallCount >= failAfterSuccessfulCallCount
