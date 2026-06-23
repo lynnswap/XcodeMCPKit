@@ -286,8 +286,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package let sessionRegistry: SessionRegistry
     package let initializeManager: InitializeManager
-    package let upstreamEventTasks = RuntimeTaskSupervisor()
-    package let runtimeTasks = RuntimeTaskSupervisor()
+    package let upstreamEventTasks = AsyncTaskSupervisor()
+    package let runtimeTasks = AsyncTaskSupervisor()
     package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     package let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)

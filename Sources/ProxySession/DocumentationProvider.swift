@@ -1244,6 +1244,7 @@ private final class DocumentationPendingResponse: @unchecked Sendable {
 package actor DocumentationProviderConnection {
     private let session: any UpstreamSession
     private let clock: ClockClient
+    private let tasks = AsyncTaskSupervisor()
     private var eventTask: Task<Void, Never>?
     private var pendingResponses: [String: DocumentationPendingResponse] = [:]
     private var nextID: Int64 = 1
@@ -1255,6 +1256,7 @@ package actor DocumentationProviderConnection {
 
     isolated deinit {
         eventTask?.cancel()
+        tasks.cancelAll()
         failAll(CancellationError())
     }
 
@@ -1270,10 +1272,14 @@ package actor DocumentationProviderConnection {
     }
 
     package func stop() async {
+        let eventTask = self.eventTask
         eventTask?.cancel()
-        eventTask = nil
+        self.eventTask = nil
+        let taskDrain = tasks.beginShutdown()
         failAll(CancellationError())
         await session.stop()
+        await eventTask?.value
+        await taskDrain.wait()
     }
 
     package func sendNotification(_ object: [String: Any]) async throws {
@@ -1314,7 +1320,7 @@ package actor DocumentationProviderConnection {
                 pendingResponses[upstreamIDKey] = pending
                 scheduleTimeoutIfNeeded(id: upstreamIDKey, timeout: timeout, pending: pending)
 
-                Task { [weak self, session] in
+                tasks.run { [weak self, session] in
                     let sendResult = await session.send(upstreamData)
                     guard sendResult == .accepted else {
                         await self?.failPending(
@@ -1325,7 +1331,7 @@ package actor DocumentationProviderConnection {
                 }
             }
         } onCancel: {
-            Task { [weak self] in
+            tasks.run { [weak self] in
                 await self?.failPending(id: upstreamIDKey, error: CancellationError())
             }
         }

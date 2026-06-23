@@ -1,7 +1,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 
-package final class RuntimeTaskSupervisor: @unchecked Sendable {
+package final class AsyncTaskSupervisor: @unchecked Sendable {
     package struct Drain: Sendable {
         fileprivate let tasks: [Task<Void, Never>]
 
