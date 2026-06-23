@@ -366,11 +366,12 @@ extension RuntimeCoordinator {
         guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
             return
         }
-        Task {
+        addRuntimeTask { [weak self] in
+            guard let self else { return }
             if ensureRunning {
-                await upstreams[upstreamIndex].start()
+                await self.upstreams[upstreamIndex].start()
             }
-            switch await upstreams[upstreamIndex].send(data) {
+            switch await self.upstreams[upstreamIndex].send(data) {
             case .accepted:
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
@@ -405,7 +406,7 @@ extension RuntimeCoordinator {
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
         let promise = eventLoop.makePromise(of: ServerRequestResponseForwardingResult.self)
-        Task { [weak self] in
+        let scheduled = addRuntimeTask { [weak self] in
             guard let self else {
                 promise.succeed(.upstreamUnavailable)
                 return
@@ -416,6 +417,9 @@ extension RuntimeCoordinator {
                 responseID: responseID
             )
             promise.succeed(result)
+        }
+        if !scheduled {
+            promise.succeed(.upstreamUnavailable)
         }
         return promise.futureResult
     }

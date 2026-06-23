@@ -136,11 +136,34 @@ package struct UnavailableDocumentationSearchProvider: DocumentationSearchProvid
     }
 }
 
+package enum DocumentationProviderRouteOwnership: Sendable, Equatable {
+    case transportOwned
+    case runtimeBorrowed(upstreamIndex: Int)
+}
+
 package struct DocumentationProviderRoute: Sendable, Equatable {
     package let id: String
     package let target: DocumentationProviderTarget
-    package let upstreamIndex: Int?
+    package let ownership: DocumentationProviderRouteOwnership
     package let serverVersion: String
+
+    package var upstreamIndex: Int? {
+        switch ownership {
+        case .transportOwned:
+            nil
+        case .runtimeBorrowed(let upstreamIndex):
+            upstreamIndex
+        }
+    }
+
+    package var isRuntimeBorrowed: Bool {
+        switch ownership {
+        case .runtimeBorrowed:
+            true
+        case .transportOwned:
+            false
+        }
+    }
 
     package init(
         id: String,
@@ -150,7 +173,9 @@ package struct DocumentationProviderRoute: Sendable, Equatable {
     ) {
         self.id = id
         self.target = target
-        self.upstreamIndex = upstreamIndex
+        self.ownership = upstreamIndex.map {
+            .runtimeBorrowed(upstreamIndex: $0)
+        } ?? .transportOwned
         self.serverVersion = serverVersion
     }
 }
@@ -1244,6 +1269,7 @@ private final class DocumentationPendingResponse: @unchecked Sendable {
 package actor DocumentationProviderConnection {
     private let session: any UpstreamSession
     private let clock: ClockClient
+    private let tasks = AsyncTaskSupervisor()
     private var eventTask: Task<Void, Never>?
     private var pendingResponses: [String: DocumentationPendingResponse] = [:]
     private var nextID: Int64 = 1
@@ -1251,6 +1277,12 @@ package actor DocumentationProviderConnection {
     package init(session: any UpstreamSession, clock: ClockClient = .liveValue) {
         self.session = session
         self.clock = clock
+    }
+
+    isolated deinit {
+        eventTask?.cancel()
+        tasks.cancelAll()
+        failAll(CancellationError())
     }
 
     package func start() {
@@ -1265,10 +1297,14 @@ package actor DocumentationProviderConnection {
     }
 
     package func stop() async {
+        let eventTask = self.eventTask
         eventTask?.cancel()
-        eventTask = nil
+        self.eventTask = nil
+        let taskDrain = tasks.beginShutdown()
         failAll(CancellationError())
         await session.stop()
+        await eventTask?.value
+        await taskDrain.wait()
     }
 
     package func sendNotification(_ object: [String: Any]) async throws {
@@ -1309,7 +1345,7 @@ package actor DocumentationProviderConnection {
                 pendingResponses[upstreamIDKey] = pending
                 scheduleTimeoutIfNeeded(id: upstreamIDKey, timeout: timeout, pending: pending)
 
-                Task { [weak self, session] in
+                let scheduled = tasks.run { [weak self, session] in
                     let sendResult = await session.send(upstreamData)
                     guard sendResult == .accepted else {
                         await self?.failPending(
@@ -1318,9 +1354,15 @@ package actor DocumentationProviderConnection {
                         return
                     }
                 }
+                if !scheduled {
+                    failPending(
+                        id: upstreamIDKey,
+                        error: UpstreamSlotScheduler.AcquisitionError.unavailable
+                    )
+                }
             }
         } onCancel: {
-            Task { [weak self] in
+            tasks.run { [weak self] in
                 await self?.failPending(id: upstreamIDKey, error: CancellationError())
             }
         }
@@ -1509,18 +1551,51 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
 }
 
 package actor DocumentationProviderManager: DocumentationProviderManaging {
-    private enum DescriptorSource: Sendable, Equatable {
-        case xcode
-        case installedDocumentationAsset
+    private enum CandidateBackend: Sendable {
+        case xcode(route: DocumentationProviderRoute, descriptor: JSONValue?)
+        case installedDocumentationAsset(descriptor: JSONValue)
+
+        var descriptor: JSONValue? {
+            switch self {
+            case .xcode(_, let descriptor):
+                descriptor
+            case .installedDocumentationAsset(let descriptor):
+                descriptor
+            }
+        }
+
+        var route: DocumentationProviderRoute? {
+            switch self {
+            case .xcode(let route, _):
+                route
+            case .installedDocumentationAsset:
+                nil
+            }
+        }
+
+        var usesInstalledDocumentationAsset: Bool {
+            switch self {
+            case .installedDocumentationAsset:
+                true
+            case .xcode:
+                false
+            }
+        }
     }
 
     private struct CandidateProfile: Sendable {
         let id: UUID
         let target: DocumentationProviderTarget
-        let route: DocumentationProviderRoute
-        var descriptor: JSONValue?
-        var descriptorSource: DescriptorSource?
+        var backend: CandidateBackend
         let serverVersion: String
+
+        var descriptor: JSONValue? {
+            backend.descriptor
+        }
+
+        var route: DocumentationProviderRoute? {
+            backend.route
+        }
     }
 
     private struct ActiveProvider: Sendable {
@@ -1849,6 +1924,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
             var progressed = false
             for (index, target) in targets.enumerated() {
+                let hasRemainingCandidate = index + 1 < targets.count
                 if let deadline, deadline.hasExpired {
                     return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
                 }
@@ -1899,6 +1975,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         if permanentlyUnusable {
                             unusableProcessIDs.insert(processID)
                         }
+                        await discardPreparedProvider(processID: processID)
                         continue
                     case .requestFailed(let error):
                         return .failed(error, invalidatedProvider: invalidatedProvider)
@@ -1906,11 +1983,15 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         rejectedProcessIDs.insert(target.processID)
                         lastCandidateFailure = error
                         progressed = true
+                        if hasRemainingCandidate {
+                            await discardPreparedProvider(processID: target.processID)
+                        }
                         continue
                     case .failed(let error):
                         rejectedProcessIDs.insert(target.processID)
                         invalidatedProvider = true
                         progressed = true
+                        await discardPreparedProvider(processID: target.processID)
                         if let deadline, deadline.hasExpired {
                             return .failed(error, invalidatedProvider: invalidatedProvider)
                         }
@@ -1923,6 +2004,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                     rejectedProcessIDs.insert(target.processID)
                     invalidatedProvider = true
                     progressed = true
+                    if hasRemainingCandidate {
+                        await discardPreparedProvider(processID: target.processID)
+                    }
                     if let deadline, deadline.hasExpired {
                         return .failed(error, invalidatedProvider: invalidatedProvider)
                     }
@@ -1959,7 +2043,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard previous.profile.id != profile.id else {
             return false
         }
-        await transport.close(route: previous.profile.route)
+        await closeTransportRouteIfPresent(previous.profile)
         return true
     }
 
@@ -1990,7 +2074,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         deadline: Deadline?
     ) async throws -> DocumentationAttemptResult {
         let processID = provider.profile.target.processID
-        if provider.profile.descriptorSource == .installedDocumentationAsset {
+        if provider.profile.backend.usesInstalledDocumentationAsset {
             do {
                 let response = try await localSearchProvider.callDocumentationSearch(
                     requestData: requestData,
@@ -2013,9 +2097,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 return .rejected(processID: processID, permanentlyUnusable: true)
             }
         }
+        guard let route = provider.profile.route else {
+            return .rejected(processID: processID, permanentlyUnusable: true)
+        }
         do {
             let response = try await transport.callDocumentationSearch(
-                route: provider.profile.route,
+                route: route,
                 requestData: requestData,
                 timeout: remainingTimeout(until: deadline)
             )
@@ -2097,7 +2184,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case .success(let fallback):
             return .success(
                 data: fallback.responseData,
-                replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
+                replacementProfile: await profileByUsingInstalledDocumentationAssetFallback(
                     provider,
                     fallback: fallback
                 )
@@ -2154,11 +2241,29 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let provider = activeProvider
         activeProvider = nil
         for profile in prepared.values where profile.id != provider?.profile.id {
-            await transport.close(route: profile.route)
+            await closeTransportRouteIfPresent(profile)
         }
         if let provider {
-            await transport.close(route: provider.profile.route)
+            await closeTransportRouteIfPresent(provider.profile)
         }
+    }
+
+    private func discardPreparedProvider(processID: pid_t) async {
+        providerPreparations.removeValue(forKey: processID)?.task.cancel()
+        guard let profile = preparedProviders.removeValue(forKey: processID) else {
+            return
+        }
+        guard activeProvider?.profile.id != profile.id else {
+            return
+        }
+        await closeTransportRouteIfPresent(profile)
+    }
+
+    private func closeTransportRouteIfPresent(_ profile: CandidateProfile) async {
+        guard let route = profile.route else {
+            return
+        }
+        await transport.close(route: route)
     }
 
     private func cacheInstalledDocumentationAssetReplacement(
@@ -2174,7 +2279,6 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         {
             preparedProviders[replacedProfile.target.processID] = replacementProfile
         }
-        await transport.close(route: replacedProfile.route)
     }
 
     package func shutdown() async {
@@ -2271,7 +2375,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         providerPreparations.removeValue(forKey: target.processID)
         if isShutdown {
-            await transport.close(route: profile.route)
+            await closeTransportRouteIfPresent(profile)
             throw CancellationError()
         }
         return try await cachePreparedProvider(
@@ -2356,10 +2460,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard primary.descriptor == nil, fallback.descriptor != nil else {
             return primary
         }
-        var merged = primary
-        merged.descriptor = fallback.descriptor
-        merged.descriptorSource = fallback.descriptorSource
-        return merged
+        return fallback
     }
 
     private func waitForPreparation(
@@ -2407,7 +2508,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if let activeProvider, activeProvider.profile.id == provider.profile.id {
             self.activeProvider = nil
         }
-        await transport.close(route: provider.profile.route)
+        await closeTransportRouteIfPresent(provider.profile)
     }
 
     private func orderedTargets(
@@ -2478,9 +2579,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return CandidateProfile(
             id: UUID(),
             target: target,
-            route: route,
-            descriptor: nil,
-            descriptorSource: nil,
+            backend: .xcode(route: route, descriptor: nil),
             serverVersion: route.serverVersion
         )
     }
@@ -2494,12 +2593,17 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard toolsListTimeout?.nanoseconds != 0 else {
             throw TimeoutError()
         }
+        guard let route = profile.route else {
+            return profile
+        }
         let toolsResult = try await transport.toolsList(
-            route: profile.route,
+            route: route,
             timeout: toolsListTimeout
         )
-        updated.descriptor = DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
-        updated.descriptorSource = updated.descriptor == nil ? nil : .xcode
+        updated.backend = .xcode(
+            route: route,
+            descriptor: DocumentationProvider.ToolCatalog.descriptor(in: toolsResult)
+        )
         return updated
     }
 
@@ -2610,8 +2714,8 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 target: profile.target,
                 requestTimeout: remainingTimeout(until: deadline)
             )
-            if replacement.route.id != profile.route.id {
-                await transport.close(route: profile.route)
+            if replacement.route?.id != profile.route?.id {
+                await closeTransportRouteIfPresent(profile)
             }
             let updated = await profileByRefreshingDescriptor(
                 replacement,
@@ -2682,18 +2786,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             ]
         )
         var updated = profile
-        updated.descriptor = descriptor
-        updated.descriptorSource = .installedDocumentationAsset
+        updated.backend = .installedDocumentationAsset(descriptor: descriptor)
+        await closeTransportRouteIfPresent(profile)
         return updated
     }
 
     private func profileByUsingInstalledDocumentationAssetFallback(
         _ profile: CandidateProfile,
         fallback: InstalledDocumentationAssetFallback
-    ) -> CandidateProfile {
+    ) async -> CandidateProfile {
         var updated = profile
-        updated.descriptor = fallback.descriptor
-        updated.descriptorSource = .installedDocumentationAsset
+        updated.backend = .installedDocumentationAsset(descriptor: fallback.descriptor)
+        await closeTransportRouteIfPresent(profile)
         return updated
     }
 

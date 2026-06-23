@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.3
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -12,7 +12,7 @@ let strictSwiftSettings: [SwiftSetting] = [
 let package = Package(
     name: "XcodeMCPKit",
     platforms: [
-        .macOS(.v15)
+        .macOS("15.4")
     ],
     products: [
         .executable(

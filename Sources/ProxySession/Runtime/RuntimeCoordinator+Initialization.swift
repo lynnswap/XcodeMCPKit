@@ -361,7 +361,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        Task { [weak self] in
+        addRuntimeTask { [weak self] in
             guard let self else { return }
             let result = await self.upstreams[upstreamIndex].send(data)
             if result == .accepted {

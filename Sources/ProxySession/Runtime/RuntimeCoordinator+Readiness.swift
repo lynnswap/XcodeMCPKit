@@ -28,7 +28,7 @@ extension RuntimeCoordinator {
 
     func startAllUpstreamSlots() {
         for upstream in upstreams {
-            Task {
+            addRuntimeTask { [upstream] in
                 await upstream.start()
             }
         }
@@ -36,7 +36,7 @@ extension RuntimeCoordinator {
 
     func startPrimaryUpstreamSlot() {
         guard let primary = upstreams.first else { return }
-        Task {
+        addRuntimeTask { [primary] in
             await primary.start()
         }
     }

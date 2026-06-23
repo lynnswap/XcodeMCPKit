@@ -52,7 +52,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         if let fallbackRoute = fallbackRouteIfActive(for: route) {
             return try await fallback.toolsList(route: fallbackRoute, timeout: timeout)
         }
-        guard route.upstreamIndex != nil else {
+        guard route.isRuntimeBorrowed else {
             return try await fallback.toolsList(route: route, timeout: timeout)
         }
         let deadline = Deadline.fromNow(timeout, clock: clock)
@@ -75,7 +75,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
                 timeout: timeout
             )
         }
-        guard route.upstreamIndex != nil else {
+        guard route.isRuntimeBorrowed else {
             return try await fallback.callDocumentationSearch(
                 route: route,
                 requestData: requestData,
@@ -119,7 +119,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     }
 
     package func close(route: DocumentationProviderRoute) async {
-        if route.upstreamIndex == nil {
+        if !route.isRuntimeBorrowed {
             await fallback.close(route: route)
             return
         }
@@ -148,7 +148,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     private func fallbackRouteIfActive(
         for route: DocumentationProviderRoute
     ) -> DocumentationProviderRoute? {
-        guard route.upstreamIndex != nil else {
+        guard route.isRuntimeBorrowed else {
             return nil
         }
         return state.withLockedValue { state in
@@ -163,7 +163,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         if let fallbackRoute = fallbackRouteIfActive(for: route) {
             return fallbackRoute
         }
-        guard route.upstreamIndex != nil else {
+        guard route.isRuntimeBorrowed else {
             return route
         }
         let initializeParams = state.withLockedValue { state in

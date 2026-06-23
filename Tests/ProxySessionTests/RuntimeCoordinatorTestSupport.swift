@@ -695,6 +695,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
     private var startAttemptProcessIDs: [pid_t] = []
     private var startedProcessIDs: [pid_t] = []
+    private var stoppedProcessIDs: [pid_t] = []
     private var initializeParamsByPID: [pid_t: [JSONValue]] = [:]
     private var requestCountsByPID: [pid_t: [String: Int]] = [:]
     private var documentationQueriesByPID: [pid_t: [String]] = [:]
@@ -732,8 +733,16 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         startedProcessIDs
     }
 
+    func stoppedPIDs() -> [pid_t] {
+        stoppedProcessIDs
+    }
+
     func startAttempts() -> [pid_t] {
         startAttemptProcessIDs
+    }
+
+    func recordStop(for processID: pid_t) {
+        stoppedProcessIDs.append(processID)
     }
 
     func recordInitializeParams(_ params: JSONValue, for processID: pid_t) {
@@ -898,6 +907,7 @@ actor ScriptedDocumentationSession: UpstreamSession {
 
     func stop() async {
         continuation.finish()
+        await recorder.recordStop(for: processID)
     }
 
     private func toolsList() -> [[String: Any]] {
@@ -1699,14 +1709,21 @@ func makeToolListResponse(id: Int64) throws -> Data {
 }
 
 func makeDocumentationToolsListResponse(id: Int64, version: String) throws -> Data {
+    try makeDocumentationToolsListResponse(
+        id: id,
+        tools: [
+            documentationDescriptor(version: version).foundationObject,
+        ]
+    )
+}
+
+func makeDocumentationToolsListResponse(id: Int64, tools: [Any]) throws -> Data {
     try JSONSerialization.data(
         withJSONObject: [
             "jsonrpc": "2.0",
             "id": id,
             "result": [
-                "tools": [
-                    documentationDescriptor(version: version).foundationObject,
-                ],
+                "tools": tools,
             ],
         ],
         options: []
@@ -1726,6 +1743,25 @@ func makeDocumentationSearchResponse(id: Int64, text: String) throws -> Data {
                     ],
                 ],
                 "isError": false,
+            ],
+        ],
+        options: []
+    )
+}
+
+func makeDocumentationSearchToolErrorResponse(id: Int64, text: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": text,
+                    ],
+                ],
+                "isError": true,
             ],
         ],
         options: []
