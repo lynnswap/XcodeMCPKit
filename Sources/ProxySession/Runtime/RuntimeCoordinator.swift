@@ -289,8 +289,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
     package let xcodeProcessRoutes: [XcodeProcessRoute]
-    package let tabOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
-    package let workspaceOwnerUpstreamIndices = NIOLockedValueBox<[String: Int]>([:])
+    package let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
+    package let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     package let unavailableXcodeProcessRoutes =
         NIOLockedValueBox<[pid_t: UInt64]>([:])
     package let prewarmDocumentationProviderOnStartup: Bool

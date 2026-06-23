@@ -33,14 +33,8 @@ extension RuntimeCoordinator {
                         deadlineUptimeNs: deadlineUptimeNs
                     )
                 }
-                if recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex) {
-                    markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
-                } else {
-                    markXcodeProcessRouteUnavailable(
-                        upstreamIndex: upstreamIndex,
-                        reason: "no_workspace_windows"
-                    )
-                }
+                _ = recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
+                markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
                 results.append(result)
             } catch is CancellationError {
                 throw CancellationError()
@@ -87,11 +81,11 @@ extension RuntimeCoordinator {
             state = state.filter { $0.value > now }
             return state
         }
-        let workspaceOwnerUpstreams = Set(workspaceOwnerUpstreamIndices.withLockedValue(\.values))
-        let tabOwnerUpstreams = Set(tabOwnerUpstreamIndices.withLockedValue(\.values))
-        let ownerUpstreams = workspaceOwnerUpstreams.union(tabOwnerUpstreams)
+        let workspaceOwnerProcesses = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
+        let tabOwnerProcesses = Set(tabOwnerProcessIDs.withLockedValue(\.values))
+        let ownerProcesses = workspaceOwnerProcesses.union(tabOwnerProcesses)
         let ownerProcessIDs = orderedProcessIDs(
-            ownerUpstreams.compactMap(processID(forUpstreamIndex:)),
+            Array(ownerProcesses),
             unavailable: unavailable
         )
 
@@ -164,11 +158,18 @@ extension RuntimeCoordinator {
     }
 
     package func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {
-        tabOwnerUpstreamIndices.withLockedValue { owners in
-            owners = owners.filter { $0.value != upstreamIndex }
+        guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
+            return
         }
-        workspaceOwnerUpstreamIndices.withLockedValue { owners in
-            owners = owners.filter { $0.value != upstreamIndex }
+        removeXcodeWindowOwners(forProcessID: processID)
+    }
+
+    package func removeXcodeWindowOwners(forProcessID processID: pid_t) {
+        tabOwnerProcessIDs.withLockedValue { owners in
+            owners = owners.filter { $0.value != processID }
+        }
+        workspaceOwnerProcessIDs.withLockedValue { owners in
+            owners = owners.filter { $0.value != processID }
         }
     }
 
@@ -246,18 +247,18 @@ extension RuntimeCoordinator {
                 || cachedOwnerBoundToolNames().contains($0.toolName)
         }
 
-        var ownerIndices = resolvedOwnerUpstreamIndices(for: requests)
-        if ownerIndices.unresolved.isEmpty == false {
+        var ownerResolution = resolvedOwnerProcessIDs(for: requests)
+        if ownerResolution.unresolved.isEmpty == false {
             _ = try? await liveXcodeListWindowsResult(
                 route: .anyHealthy,
                 requestTimeoutOverride: requestTimeoutOverride
             )
-            ownerIndices = resolvedOwnerUpstreamIndices(for: requests)
+            ownerResolution = resolvedOwnerProcessIDs(for: requests)
         }
 
-        if ownerIndices.unresolved.isEmpty == false {
+        if ownerResolution.unresolved.isEmpty == false {
             return .reject(
-                errors: ownerIndices.unresolved.compactMap { request in
+                errors: ownerResolution.unresolved.compactMap { request in
                     guard let id = request.id else { return nil }
                     return ToolRoutingError(
                         id: id,
@@ -268,7 +269,7 @@ extension RuntimeCoordinator {
             )
         }
 
-        let distinctOwners = Set(ownerIndices.resolved.map(\.upstreamIndex))
+        let distinctOwners = Set(ownerResolution.resolved.map(\.processID))
         if distinctOwners.count > 1 {
             return .reject(
                 errors: requests.compactMap { request in
@@ -282,15 +283,30 @@ extension RuntimeCoordinator {
             )
         }
 
-        guard let ownerUpstreamIndex = distinctOwners.first else {
+        guard let ownerProcessID = distinctOwners.first else {
             return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
         }
+        guard let ownerRoute = xcodeProcessRoutes.first(where: {
+            $0.target.processID == ownerProcessID
+        }) else {
+            return .reject(
+                errors: ownerResolution.resolved.compactMap { resolved in
+                    guard let id = resolved.request.id else { return nil }
+                    return ToolRoutingError(
+                        id: id,
+                        message: "Xcode process that owns '\(resolved.ownerLabel)' is no longer available"
+                    )
+                },
+                forceBatchArray: requestJSON is [Any]
+            )
+        }
+        let ownerUpstreamIndex = firstUsableInitializedUpstreamIndex(in: ownerRoute)
 
-        let missingToolErrors = ownerIndices.resolved.compactMap { resolved -> ToolRoutingError? in
-            guard processToolCatalogRegistry.catalog(forUpstreamIndex: ownerUpstreamIndex) != nil,
+        let missingToolErrors = ownerResolution.resolved.compactMap { resolved -> ToolRoutingError? in
+            guard processToolCatalogRegistry.catalog(forProcessID: ownerProcessID) != nil,
                   processToolCatalogRegistry.hasTool(
                       resolved.request.toolName,
-                      upstreamIndex: ownerUpstreamIndex
+                      processID: ownerProcessID
                   ) == false,
                   let id = resolved.request.id else {
                 return nil
@@ -307,6 +323,19 @@ extension RuntimeCoordinator {
             )
         }
 
+        guard let ownerUpstreamIndex else {
+            return .reject(
+                errors: ownerResolution.resolved.compactMap { resolved in
+                    guard let id = resolved.request.id else { return nil }
+                    return ToolRoutingError(
+                        id: id,
+                        message: "no available upstream for Xcode process that owns '\(resolved.ownerLabel)'"
+                    )
+                },
+                forceBatchArray: requestJSON is [Any]
+            )
+        }
+
         return .forward(preferredUpstreamIndex: ownerUpstreamIndex)
     }
 
@@ -315,18 +344,22 @@ extension RuntimeCoordinator {
         from result: JSONValue,
         upstreamIndex: Int
     ) -> Bool {
+        guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
+            return false
+        }
+        removeXcodeWindowOwners(forProcessID: processID)
         let entries = Self.windowEntries(in: result)
         guard entries.isEmpty == false else {
             return false
         }
-        tabOwnerUpstreamIndices.withLockedValue { owners in
+        tabOwnerProcessIDs.withLockedValue { owners in
             for entry in entries {
-                owners[entry.tabIdentifier] = upstreamIndex
+                owners[entry.tabIdentifier] = processID
             }
         }
-        workspaceOwnerUpstreamIndices.withLockedValue { owners in
+        workspaceOwnerProcessIDs.withLockedValue { owners in
             for entry in entries {
-                owners[entry.workspacePath] = upstreamIndex
+                owners[entry.workspacePath] = processID
             }
         }
         return true
@@ -393,13 +426,13 @@ extension RuntimeCoordinator {
         }
         if let tabIdentifier = arguments["tabIdentifier"] as? String,
            tabIdentifier.isEmpty == false,
-           let upstreamIndex = tabOwnerUpstreamIndices.withLockedValue({ $0[tabIdentifier] })
+           let upstreamIndex = upstreamIndexForOwner(tabIdentifier: tabIdentifier)
         {
             return upstreamIndex
         }
         if let workspacePath = arguments["workspacePath"] as? String,
            workspacePath.isEmpty == false,
-           let upstreamIndex = workspaceOwnerUpstreamIndices.withLockedValue({ $0[workspacePath] })
+           let upstreamIndex = upstreamIndexForOwner(workspacePath: workspacePath)
         {
             return upstreamIndex
         }
@@ -434,30 +467,46 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func resolvedOwnerUpstreamIndices(
+    private func resolvedOwnerProcessIDs(
         for requests: [ToolRoutingRequest]
     ) -> (
-        resolved: [(request: ToolRoutingRequest, upstreamIndex: Int, ownerLabel: String)],
+        resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)],
         unresolved: [ToolRoutingRequest]
     ) {
-        var resolved: [(request: ToolRoutingRequest, upstreamIndex: Int, ownerLabel: String)] = []
+        var resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)] = []
         var unresolved: [ToolRoutingRequest] = []
         for request in requests {
             if let tabIdentifier = request.tabIdentifier,
                tabIdentifier.isEmpty == false,
-               let upstreamIndex = tabOwnerUpstreamIndices.withLockedValue({ $0[tabIdentifier] }) {
-                resolved.append((request, upstreamIndex, tabIdentifier))
+               let processID = tabOwnerProcessIDs.withLockedValue({ $0[tabIdentifier] }) {
+                resolved.append((request, processID, tabIdentifier))
                 continue
             }
             if let workspacePath = request.workspacePath,
                workspacePath.isEmpty == false,
-               let upstreamIndex = workspaceOwnerUpstreamIndices.withLockedValue({ $0[workspacePath] }) {
-                resolved.append((request, upstreamIndex, workspacePath))
+               let processID = workspaceOwnerProcessIDs.withLockedValue({ $0[workspacePath] }) {
+                resolved.append((request, processID, workspacePath))
                 continue
             }
             unresolved.append(request)
         }
         return (resolved, unresolved)
+    }
+
+    private func upstreamIndexForOwner(tabIdentifier: String) -> Int? {
+        guard let processID = tabOwnerProcessIDs.withLockedValue({ $0[tabIdentifier] }),
+              let route = xcodeProcessRoutes.first(where: { $0.target.processID == processID }) else {
+            return nil
+        }
+        return firstUsableInitializedUpstreamIndex(in: route)
+    }
+
+    private func upstreamIndexForOwner(workspacePath: String) -> Int? {
+        guard let processID = workspaceOwnerProcessIDs.withLockedValue({ $0[workspacePath] }),
+              let route = xcodeProcessRoutes.first(where: { $0.target.processID == processID }) else {
+            return nil
+        }
+        return firstUsableInitializedUpstreamIndex(in: route)
     }
 
     private func cachedOwnerBoundToolNames() -> Set<String> {

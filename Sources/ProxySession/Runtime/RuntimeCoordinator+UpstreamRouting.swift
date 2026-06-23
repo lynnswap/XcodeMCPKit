@@ -549,11 +549,11 @@ extension RuntimeCoordinator {
             processToolCatalogs: processToolCatalogRegistry.debugSnapshots(
                 exposedCatalog: brokerSnapshot.toolsCatalogRaw,
                 canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-                tabOwnerCountsByUpstream: ownerCountsByUpstream(
-                    tabOwnerUpstreamIndices.withLockedValue { $0 }
+                tabOwnerCountsByProcessID: ownerCountsByProcessID(
+                    tabOwnerProcessIDs.withLockedValue { $0 }
                 ),
-                workspaceOwnerCountsByUpstream: ownerCountsByUpstream(
-                    workspaceOwnerUpstreamIndices.withLockedValue { $0 }
+                workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
+                    workspaceOwnerProcessIDs.withLockedValue { $0 }
                 )
             ),
             upstreamStates: upstreamStates,
@@ -572,9 +572,9 @@ extension RuntimeCoordinator {
         leaseManager.createLease(descriptor: descriptor)
     }
 
-    private func ownerCountsByUpstream(_ owners: [String: Int]) -> [Int: Int] {
-        owners.values.reduce(into: [:]) { counts, upstreamIndex in
-            counts[upstreamIndex, default: 0] += 1
+    private func ownerCountsByProcessID(_ owners: [String: pid_t]) -> [pid_t: Int] {
+        owners.values.reduce(into: [:]) { counts, processID in
+            counts[processID, default: 0] += 1
         }
     }
 

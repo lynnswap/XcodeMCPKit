@@ -94,6 +94,12 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
+    package func catalog(forProcessID processID: pid_t) -> Catalog? {
+        state.withLockedValue { state in
+            state.catalogsByProcessID[processID]
+        }
+    }
+
     package func unionToolsListResult() -> JSONValue? {
         state.withLockedValue { state in
             Self.unionToolsListResult(from: Array(state.catalogsByProcessID.values))
@@ -118,6 +124,10 @@ package final class ProcessToolCatalogRegistry: Sendable {
         catalog(forUpstreamIndex: upstreamIndex)?.toolsByName[toolName] != nil
     }
 
+    package func hasTool(_ toolName: String, processID: pid_t) -> Bool {
+        catalog(forProcessID: processID)?.toolsByName[toolName] != nil
+    }
+
     package func toolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
         catalog(forUpstreamIndex: upstreamIndex)?.rawResult
     }
@@ -125,8 +135,8 @@ package final class ProcessToolCatalogRegistry: Sendable {
     package func debugSnapshots(
         exposedCatalog: JSONValue?,
         canonicalSourceUpstream: Int?,
-        tabOwnerCountsByUpstream: [Int: Int],
-        workspaceOwnerCountsByUpstream: [Int: Int]
+        tabOwnerCountsByProcessID: [pid_t: Int],
+        workspaceOwnerCountsByProcessID: [pid_t: Int]
     ) -> [DebugSnapshot] {
         let exposedNames = Set(Self.toolsByName(in: exposedCatalog).keys)
         let conflicts = Self.schemaConflicts(in: state.withLockedValue {
@@ -142,8 +152,11 @@ package final class ProcessToolCatalogRegistry: Sendable {
                     upstreamIndex: catalog.upstreamIndex,
                     toolCount: toolNames.count,
                     ownerBoundToolCount: catalog.ownerBoundToolNames.count,
-                    tabOwnerCount: tabOwnerCountsByUpstream[catalog.upstreamIndex, default: 0],
-                    workspaceOwnerCount: workspaceOwnerCountsByUpstream[catalog.upstreamIndex, default: 0],
+                    tabOwnerCount: tabOwnerCountsByProcessID[catalog.target.processID, default: 0],
+                    workspaceOwnerCount: workspaceOwnerCountsByProcessID[
+                        catalog.target.processID,
+                        default: 0
+                    ],
                     isCanonicalSource: catalog.upstreamIndex == canonicalSourceUpstream,
                     exposurePolicy: "union_latest_xcode_descriptor_runtime_guard",
                     missingFromExposedCatalog: Array(toolNames.subtracting(exposedNames)).sorted(),

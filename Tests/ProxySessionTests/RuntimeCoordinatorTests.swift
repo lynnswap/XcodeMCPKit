@@ -2248,6 +2248,95 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
     }
 
+    @Test func sessionManagerKeepsWindowlessProcessRouteAvailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 600, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 601, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: stale-tab, workspacePath: /Work/Stale.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let request0 = try await upstream0.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request0),
+                    message: ""
+                )
+            )
+        )
+        let request1 = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request1),
+                    message: "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
+                )
+            )
+        )
+        _ = try await task.value
+
+        let processIDs = Set(manager.debugSnapshot().processToolCatalogs.map(\.processID))
+        #expect(processIDs == Set([Int32(target0.processID), Int32(target1.processID)]))
+        #expect(
+            manager.documentationCandidateProcessIDs() == Set([
+                target0.processID,
+                target1.processID,
+            ])
+        )
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 1001,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "stale-tab"]
+                )
+            ) == nil
+        )
+    }
+
     @Test func ownerBoundToolRoutesToCachedWindowOwner() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -2265,6 +2354,8 @@ struct RuntimeCoordinatorTests {
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -2297,6 +2388,55 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(preferredUpstreamIndex == 0)
+    }
+
+    @Test func ownerBoundToolRoutesToUsableSlotInOwningProcess() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 612, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 109,
+                name: "BuildProject",
+                arguments: ["tabIdentifier": "tab-a"]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+
+        guard case .forward(let preferredUpstreamIndex) = decision else {
+            Issue.record("expected owner-bound request to forward")
+            return
+        }
+        #expect(preferredUpstreamIndex == 1)
     }
 
     @Test func ownerBoundToolRefreshesWindowsOnCacheMissBeforeRouting() async throws {
@@ -2460,6 +2600,8 @@ struct RuntimeCoordinatorTests {
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -2513,6 +2655,8 @@ struct RuntimeCoordinatorTests {
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
