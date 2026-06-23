@@ -406,6 +406,16 @@ extension HTTPPostService {
         id: JSONRPC.ID,
         toolName: String
     ) -> [String: Any] {
+        makeToolResultErrorResponseObject(
+            id: id,
+            message: "tool '\(toolName)' is disabled by proxy config"
+        )
+    }
+
+    package static func makeToolResultErrorResponseObject(
+        id: JSONRPC.ID,
+        message: String
+    ) -> [String: Any] {
         [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,
@@ -413,7 +423,7 @@ extension HTTPPostService {
                 "content": [
                     [
                         "type": "text",
-                        "text": "tool '\(toolName)' is disabled by proxy config",
+                        "text": message,
                     ]
                 ],
                 "isError": true,
@@ -479,6 +489,21 @@ extension HTTPPostService {
             return nil
         }
         return try? JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    package static func makeToolRoutingErrorResponseData(
+        errors: [ToolRoutingError],
+        forceBatchArray: Bool
+    ) -> Data? {
+        makeToolResponseData(
+            from: errors.map { error in
+                makeToolResultErrorResponseObject(
+                    id: error.id,
+                    message: error.message
+                )
+            },
+            forceBatchArray: forceBatchArray
+        )
     }
 
     package static func responseObjects(from responseData: Data) -> [[String: Any]] {

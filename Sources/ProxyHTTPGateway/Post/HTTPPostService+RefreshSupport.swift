@@ -66,9 +66,19 @@ extension HTTPPostService {
             requestIDs: requestIDs
         )
         let allowsLeaseRetry = Self.isRetryScopedRefreshLeaseRequest(parsedRequestJSON)
-        let preferredUpstreamIndex = sessionManager.preferredUpstreamIndex(
-            for: parsedRequestJSON
-        )
+        let preferredUpstreamIndex: Int?
+        switch await sessionManager.toolRoutingDecision(
+            for: parsedRequestJSON,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
+        case .forward(let resolvedUpstreamIndex):
+            preferredUpstreamIndex = resolvedUpstreamIndex
+        case .reject:
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
+        }
 
         do {
             let session = sessionManager.session(id: sessionID)

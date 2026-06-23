@@ -12,6 +12,7 @@ package final class HTTPControlService: Sendable {
         package let warmupInFlight: Bool
         package let controlPlane: ControlPlane.DebugSnapshot?
         package let upstreams: [ProxyDebug.UpstreamSnapshot]
+        package let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
         package let recentTraffic: [ProxyDebug.TrafficEvent]
         package let sessions: [SessionRequestPipeline.DebugSnapshot]
         package let leases: [LeaseManager.DebugSnapshot]
@@ -28,6 +29,7 @@ package final class HTTPControlService: Sendable {
             self.warmupInFlight = base.warmupInFlight
             self.controlPlane = base.controlPlane
             self.upstreams = base.upstreams
+            self.processToolCatalogs = base.processToolCatalogs
             self.recentTraffic = base.recentTraffic
             self.sessions = base.sessions
             self.leases = base.leases

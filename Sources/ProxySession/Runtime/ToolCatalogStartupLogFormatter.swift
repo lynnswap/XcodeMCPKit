@@ -12,17 +12,23 @@ package enum ToolCatalogStartupLogFormatter {
         }
     }
 
-    package static func summary(from result: JSONValue, process: Process? = nil) -> String {
+    package static func summary(
+        from result: JSONValue,
+        process: Process? = nil,
+        exposurePolicy: String? = nil
+    ) -> String {
         let names = toolNames(in: result)
         let details = detailsLines(for: names, indent: process == nil ? "  " : "    ")
+        let policyLines = exposurePolicy.map { ["  Exposure: \($0)"] } ?? []
 
         guard let process else {
-            return (["Tools"] + details).joined(separator: "\n")
+            return (["Tools"] + policyLines + details).joined(separator: "\n")
         }
 
         return (
             [
                 "Tools",
+            ] + policyLines + [
                 "  - \(process.appPath) (PID: \(process.processID))",
             ] + details
         ).joined(separator: "\n")

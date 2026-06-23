@@ -80,6 +80,7 @@ package protocol RuntimeCoordinating: Sendable {
     func shutdown() async
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
+    func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
     func registerInitialize(
         sessionID: String,
@@ -100,6 +101,11 @@ package protocol RuntimeCoordinating: Sendable {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationSearchOutcome
     func hasDocumentationSearchService() -> Bool
+    func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision
+    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision?
     func chooseUpstreamIndex() -> Int?
     func preferredUpstreamIndex(for requestJSON: Any) -> Int?
     func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int?
@@ -162,6 +168,21 @@ extension RuntimeCoordinating {
 
     package func hasDocumentationSearchService() -> Bool {
         false
+    }
+
+    package func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
+        cachedToolsListResult()
+    }
+
+    package func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride _: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+    }
+
+    package func immediateToolRoutingDecision(for _: Any) -> ToolRoutingDecision? {
+        nil
     }
 
     package func preferredUpstreamIndex(for _: Any) -> Int? {
@@ -254,6 +275,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     package let canonicalBrokerState: CanonicalBrokerState
     package let controlPlaneDebugMirror = ControlPlane.DebugMirror()
+    package let processToolCatalogRegistry = ProcessToolCatalogRegistry()
 
     package let upstreamHealthManager: UpstreamHealthManager
     package let upstreamSlotScheduler: UpstreamSlotScheduler
@@ -600,6 +622,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clearToolsCatalog: true
         )
         canonicalBrokerState.reset()
+        processToolCatalogRegistry.reset()
     }
 
     package func shutdown() async {
@@ -625,6 +648,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
 
         canonicalBrokerState.reset()
+        processToolCatalogRegistry.reset()
         await controlPlaneCoordinator.invalidate(
             reason: "shutdown",
             clearInitialize: true,
@@ -661,12 +685,38 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         canonicalBrokerState.toolsCatalogRaw()
     }
 
+    package func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
+        processToolCatalogRegistry.toolsListResult(forUpstreamIndex: upstreamIndex)
+            ?? canonicalBrokerState.toolsCatalogRaw()
+    }
+
     package func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int) {
         guard isValidToolsListResult(result) else { return }
         canonicalBrokerState.syncCanonicalToolsCatalog(
             result,
             sourceUpstream: sourceUpstream
         )
+    }
+
+    package func resyncProcessToolsCatalogSurfaceAfterRemoving(
+        upstreamIndex removedUpstreamIndex: Int
+    ) {
+        guard xcodeProcessRoutes.isEmpty == false,
+              canonicalBrokerState.toolsCatalogRaw() != nil else {
+            return
+        }
+        if let unionResult = processToolCatalogRegistry.unionToolsListResult(),
+           let sourceUpstream = processToolCatalogRegistry.representativeSourceUpstream()
+        {
+            canonicalBrokerState.syncCanonicalToolsCatalog(
+                unionResult,
+                sourceUpstream: sourceUpstream
+            )
+            return
+        }
+        if canonicalBrokerState.toolsSourceUpstream() == removedUpstreamIndex {
+            canonicalBrokerState.clearToolsCatalog()
+        }
     }
 
     package func refreshToolsListIfNeeded() {
@@ -1042,7 +1092,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         let summary = ToolCatalogStartupLogFormatter.summary(
             from: result,
-            process: toolCatalogSourceProcess()
+            process: toolCatalogSourceProcess(),
+            exposurePolicy: xcodeProcessRoutes.isEmpty
+                ? nil
+                : "union_latest_xcode_descriptor_runtime_guard"
         )
         logger.info("\(summary)")
     }

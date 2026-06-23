@@ -79,6 +79,68 @@ func documentationDescriptorDescription(in result: JSONValue) -> String? {
     return description
 }
 
+func toolDescriptor(
+    name: String,
+    description: String? = nil,
+    inputProperties: [String: Any] = [:],
+    required: [String] = [],
+    outputSchema: [String: Any]? = nil
+) -> [String: Any] {
+    var descriptor: [String: Any] = [
+        "name": name,
+    ]
+    if let description {
+        descriptor["description"] = description
+    }
+    if inputProperties.isEmpty == false || required.isEmpty == false {
+        var inputSchema: [String: Any] = [
+            "type": "object",
+        ]
+        if inputProperties.isEmpty == false {
+            inputSchema["properties"] = inputProperties
+        }
+        if required.isEmpty == false {
+            inputSchema["required"] = required
+        }
+        descriptor["inputSchema"] = inputSchema
+    }
+    if let outputSchema {
+        descriptor["outputSchema"] = outputSchema
+    }
+    return descriptor
+}
+
+func ownerBoundToolDescriptor(name: String) -> [String: Any] {
+    toolDescriptor(
+        name: name,
+        inputProperties: [
+            "tabIdentifier": [
+                "type": "string",
+            ],
+            "workspacePath": [
+                "type": "string",
+            ],
+        ]
+    )
+}
+
+func toolDescription(in result: JSONValue, name expectedName: String) -> String? {
+    guard case .object(let object) = result,
+          case .array(let tools)? = object["tools"] else {
+        return nil
+    }
+    for tool in tools {
+        guard case .object(let toolObject) = tool,
+              case .string(let name)? = toolObject["name"],
+              name == expectedName,
+              case .string(let description)? = toolObject["description"] else {
+            continue
+        }
+        return description
+    }
+    return nil
+}
+
 private struct TestDocumentationAssetInfoPlist: Encodable {
     let properties: TestDocumentationAssetProperties
 
@@ -146,6 +208,46 @@ func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
         ],
         options: []
     )
+}
+
+func toolsCallObject(
+    id: Int64?,
+    name: String,
+    arguments: [String: Any]
+) -> [String: Any] {
+    var request: [String: Any] = [
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": [
+            "name": name,
+            "arguments": arguments,
+        ],
+    ]
+    if let id {
+        request["id"] = id
+    }
+    return request
+}
+
+func seedProcessToolCatalogs(
+    on manager: RuntimeCoordinator,
+    entries: [(target: XcodeProcessTarget, upstreamIndex: Int, tools: [[String: Any]])]
+) throws {
+    for entry in entries {
+        let result = try jsonValue([
+            "tools": entry.tools,
+        ])
+        manager.processToolCatalogRegistry.record(
+            target: entry.target,
+            upstreamIndex: entry.upstreamIndex,
+            rawResult: result
+        )
+    }
+    if let union = manager.processToolCatalogRegistry.unionToolsListResult(),
+       let sourceUpstream = manager.processToolCatalogRegistry.representativeSourceUpstream()
+    {
+        manager.setCachedToolsListResult(union, sourceUpstream: sourceUpstream)
+    }
 }
 
 func makeJSONRPCResponse(id: Int64, result: [String: Any]) throws -> Data {

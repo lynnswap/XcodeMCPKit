@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import NIOCore
 import ProxyCore
 import ProxyMCP
 import ProxySessionUpstream
@@ -7,6 +8,13 @@ import ProxySessionUpstream
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
         2_000_000_000
+
+    private struct ToolRoutingRequest: Sendable {
+        let id: JSONRPC.ID?
+        let toolName: String
+        let tabIdentifier: String?
+        let workspacePath: String?
+    }
 
     package func liveXcodeListWindowsAcrossProcessRoutes(
         deadlineUptimeNs: UInt64?
@@ -130,6 +138,9 @@ extension RuntimeCoordinator {
         unavailableXcodeProcessRoutes.withLockedValue { state in
             state[route.target.processID] = unavailableUntil
         }
+        processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
+        resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
+        removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(
             "Temporarily ignoring Xcode process route",
             metadata: [
@@ -149,6 +160,15 @@ extension RuntimeCoordinator {
         }
         _ = unavailableXcodeProcessRoutes.withLockedValue { state in
             state.removeValue(forKey: route.target.processID)
+        }
+    }
+
+    package func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {
+        tabOwnerUpstreamIndices.withLockedValue { owners in
+            owners = owners.filter { $0.value != upstreamIndex }
+        }
+        workspaceOwnerUpstreamIndices.withLockedValue { owners in
+            owners = owners.filter { $0.value != upstreamIndex }
         }
     }
 
@@ -188,6 +208,106 @@ extension RuntimeCoordinator {
             return nil
         }
         return indices.first
+    }
+
+    package func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        if let immediate = immediateToolRoutingDecision(for: requestJSON) {
+            return immediate
+        }
+        return await ownerBoundToolRoutingDecision(
+            for: requestJSON,
+            requestTimeoutOverride: requestTimeoutOverride
+        )
+    }
+
+    package func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
+        guard xcodeProcessRoutes.isEmpty == false else {
+            return .forward(preferredUpstreamIndex: nil)
+        }
+        let requests = toolRoutingRequests(in: requestJSON).filter {
+            processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
+                || cachedOwnerBoundToolNames().contains($0.toolName)
+        }
+        guard requests.isEmpty == false else {
+            return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+        }
+        return nil
+    }
+
+    private func ownerBoundToolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        let requests = toolRoutingRequests(in: requestJSON).filter {
+            processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
+                || cachedOwnerBoundToolNames().contains($0.toolName)
+        }
+
+        var ownerIndices = resolvedOwnerUpstreamIndices(for: requests)
+        if ownerIndices.unresolved.isEmpty == false {
+            _ = try? await liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+            ownerIndices = resolvedOwnerUpstreamIndices(for: requests)
+        }
+
+        if ownerIndices.unresolved.isEmpty == false {
+            return .reject(
+                errors: ownerIndices.unresolved.compactMap { request in
+                    guard let id = request.id else { return nil }
+                    return ToolRoutingError(
+                        id: id,
+                        message: "unable to resolve Xcode window owner for tool '\(request.toolName)'"
+                    )
+                },
+                forceBatchArray: requestJSON is [Any]
+            )
+        }
+
+        let distinctOwners = Set(ownerIndices.resolved.map(\.upstreamIndex))
+        if distinctOwners.count > 1 {
+            return .reject(
+                errors: requests.compactMap { request in
+                    guard let id = request.id else { return nil }
+                    return ToolRoutingError(
+                        id: id,
+                        message: "mixed Xcode window owners in one batch are not supported"
+                    )
+                },
+                forceBatchArray: true
+            )
+        }
+
+        guard let ownerUpstreamIndex = distinctOwners.first else {
+            return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+        }
+
+        let missingToolErrors = ownerIndices.resolved.compactMap { resolved -> ToolRoutingError? in
+            guard processToolCatalogRegistry.catalog(forUpstreamIndex: ownerUpstreamIndex) != nil,
+                  processToolCatalogRegistry.hasTool(
+                      resolved.request.toolName,
+                      upstreamIndex: ownerUpstreamIndex
+                  ) == false,
+                  let id = resolved.request.id else {
+                return nil
+            }
+            return ToolRoutingError(
+                id: id,
+                message: "tool '\(resolved.request.toolName)' is not available in the Xcode process that owns '\(resolved.ownerLabel)'"
+            )
+        }
+        if missingToolErrors.isEmpty == false {
+            return .reject(
+                errors: missingToolErrors,
+                forceBatchArray: requestJSON is [Any]
+            )
+        }
+
+        return .forward(preferredUpstreamIndex: ownerUpstreamIndex)
     }
 
     @discardableResult
@@ -284,6 +404,69 @@ extension RuntimeCoordinator {
             return upstreamIndex
         }
         return nil
+    }
+
+    private func toolRoutingRequests(in value: Any) -> [ToolRoutingRequest] {
+        if let object = value as? [String: Any] {
+            return toolRoutingRequest(in: object).map { [$0] } ?? []
+        }
+        guard let array = value as? [Any] else {
+            return []
+        }
+        return array.compactMap { item in
+            guard let object = item as? [String: Any] else { return nil }
+            return toolRoutingRequest(in: object)
+        }
+    }
+
+    private func toolRoutingRequest(in object: [String: Any]) -> ToolRoutingRequest? {
+        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
+              let params = object["params"] as? [String: Any],
+              let toolName = params["name"] as? String,
+              let arguments = params["arguments"] as? [String: Any] else {
+            return nil
+        }
+        return ToolRoutingRequest(
+            id: JSONRPC.Message.Inspector.requestID(from: object),
+            toolName: toolName,
+            tabIdentifier: arguments["tabIdentifier"] as? String,
+            workspacePath: arguments["workspacePath"] as? String
+        )
+    }
+
+    private func resolvedOwnerUpstreamIndices(
+        for requests: [ToolRoutingRequest]
+    ) -> (
+        resolved: [(request: ToolRoutingRequest, upstreamIndex: Int, ownerLabel: String)],
+        unresolved: [ToolRoutingRequest]
+    ) {
+        var resolved: [(request: ToolRoutingRequest, upstreamIndex: Int, ownerLabel: String)] = []
+        var unresolved: [ToolRoutingRequest] = []
+        for request in requests {
+            if let tabIdentifier = request.tabIdentifier,
+               tabIdentifier.isEmpty == false,
+               let upstreamIndex = tabOwnerUpstreamIndices.withLockedValue({ $0[tabIdentifier] }) {
+                resolved.append((request, upstreamIndex, tabIdentifier))
+                continue
+            }
+            if let workspacePath = request.workspacePath,
+               workspacePath.isEmpty == false,
+               let upstreamIndex = workspaceOwnerUpstreamIndices.withLockedValue({ $0[workspacePath] }) {
+                resolved.append((request, upstreamIndex, workspacePath))
+                continue
+            }
+            unresolved.append(request)
+        }
+        return (resolved, unresolved)
+    }
+
+    private func cachedOwnerBoundToolNames() -> Set<String> {
+        let toolsByName = ProcessToolCatalogRegistry.toolsByName(in: cachedToolsListResult())
+        return Set(
+            toolsByName.compactMap { name, tool in
+                ProcessToolCatalogRegistry.isOwnerBoundTool(tool) ? name : nil
+            }
+        )
     }
 
     private static func windowEntries(in result: JSONValue) -> [XcodeListWindowsEntry] {

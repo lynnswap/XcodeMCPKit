@@ -449,9 +449,6 @@ package final class HTTPPostService: Sendable {
         }
         let session = sessionManager.session(id: sessionID)
         let refreshRouting = refreshRequestRouting(from: forwardedRequestJSON)
-        let preferredUpstreamIndex = sessionManager.preferredUpstreamIndex(
-            for: forwardedRequestJSON
-        )
         if refreshRouting != nil, forwardedRequestIDs.isEmpty == false {
             sessionManager.activateRequestLease(
                 leaseID,
@@ -480,55 +477,108 @@ package final class HTTPPostService: Sendable {
                 cancellationHandle: cancellationHandle
             )
         }
-        let future = sessionManager.enqueueOnUpstreamSlot(
-            leaseID: leaseID,
-            descriptor: descriptor,
-            on: eventLoop,
-            preferredUpstreamIndex: preferredUpstreamIndex
-        ) { upstreamIndex in
-            cancellationHandle.activate(upstreamIndex: upstreamIndex)
-            self.sessionManager.activateRequestLease(
-                leaseID,
-                requestIDKey: nil,
-                upstreamIndex: upstreamIndex,
-                timeout: nil
-            )
-            return self.makeTopLevelRequestFuture(
-                filteredRequest: filteredRequest,
-                sessionID: sessionID,
-                headerSessionID: headerSessionID,
-                requestIsBatch: requestIsBatch,
-                prefersEventStream: prefersEventStream,
-                eventLoop: eventLoop,
-                session: session,
-                leaseID: leaseID,
-                upstreamIndex: upstreamIndex,
-                cancellationHandle: cancellationHandle,
-                requestTimeoutOverride: requestTimeoutOverride
-            )
-        }.flatMapError { error in
-            if error is CancellationError {
-                return eventLoop.makeFailedFuture(error)
+        @Sendable func makeRoutingFuture(
+            decision: ToolRoutingDecision
+        ) -> EventLoopFuture<HTTPPostService.Resolution> {
+            guard cancellationHandle.isCancelled == false else {
+                return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
-            cancellationHandle.markCompleted()
-            self.sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .upstreamOverloaded
-            )
-            return eventLoop.makeSucceededFuture(
-                Self.makeUpstreamUnavailableResolution(
-                    localResponseData: localResponseData,
-                    responseIDs: forwardedRequestIDs,
-                    forceBatchArray: filteredRequest.forceBatchArray,
-                    requestIsBatch: requestIsBatch,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+            switch decision {
+            case .reject(let errors, let forceBatchArray):
+                let errorData = Self.makeToolRoutingErrorResponseData(
+                    errors: errors,
+                    forceBatchArray: forceBatchArray || requestIsBatch
                 )
+                let responseData = Self.mergeBatchResponsePayloads(
+                    [
+                        errorData,
+                        localResponseData,
+                    ],
+                    forceBatchArray: forceBatchArray || requestIsBatch
+                )
+                cancellationHandle.markCompleted()
+                self.sessionManager.completeRequestLease(leaseID)
+                return eventLoop.makeSucceededFuture(
+                    Self.makeLocalResponseResolution(
+                        responseData: responseData,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream,
+                        emptyStatus: .accepted
+                    )
+                )
+            case .forward(let preferredUpstreamIndex):
+                return self.sessionManager.enqueueOnUpstreamSlot(
+                    leaseID: leaseID,
+                    descriptor: descriptor,
+                    on: eventLoop,
+                    preferredUpstreamIndex: preferredUpstreamIndex
+                ) { upstreamIndex in
+                    cancellationHandle.activate(upstreamIndex: upstreamIndex)
+                    self.sessionManager.activateRequestLease(
+                        leaseID,
+                        requestIDKey: nil,
+                        upstreamIndex: upstreamIndex,
+                        timeout: nil
+                    )
+                    return self.makeTopLevelRequestFuture(
+                        filteredRequest: filteredRequest,
+                        sessionID: sessionID,
+                        headerSessionID: headerSessionID,
+                        requestIsBatch: requestIsBatch,
+                        prefersEventStream: prefersEventStream,
+                        eventLoop: eventLoop,
+                        session: session,
+                        leaseID: leaseID,
+                        upstreamIndex: upstreamIndex,
+                        cancellationHandle: cancellationHandle,
+                        requestTimeoutOverride: requestTimeoutOverride
+                    )
+                }.flatMapError { error in
+                    if error is CancellationError {
+                        return eventLoop.makeFailedFuture(error)
+                    }
+                    cancellationHandle.markCompleted()
+                    self.sessionManager.failRequestLease(
+                        leaseID,
+                        terminalState: .failed,
+                        reason: .upstreamOverloaded
+                    )
+                    return eventLoop.makeSucceededFuture(
+                        Self.makeUpstreamUnavailableResolution(
+                            localResponseData: localResponseData,
+                            responseIDs: forwardedRequestIDs,
+                            forceBatchArray: filteredRequest.forceBatchArray,
+                            requestIsBatch: requestIsBatch,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    )
+                }
+            }
+        }
+
+        if let immediateDecision = sessionManager.immediateToolRoutingDecision(
+            for: forwardedRequestJSON
+        ) {
+            return HTTPPostService.Operation(
+                future: makeRoutingFuture(decision: immediateDecision),
+                cancellationHandle: cancellationHandle
             )
         }
+
+        let routingPromise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+        let routingTask = Task { [self] in
+            let decision = await sessionManager.toolRoutingDecision(
+                for: forwardedRequestJSON,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+            eventLoop.execute {
+                makeRoutingFuture(decision: decision).cascade(to: routingPromise)
+            }
+        }
+        cancellationHandle.bindRefreshTask(routingTask)
         return HTTPPostService.Operation(
-            future: future,
+            future: routingPromise.futureResult,
             cancellationHandle: cancellationHandle
         )
     }

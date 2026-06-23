@@ -19,6 +19,7 @@ package struct ToolCallNormalizer: Sendable {
         responseMethodsByIDKey: [String: String] = [:],
         responseToolNamesByIDKey: [String: String] = [:],
         toolsCatalogOverride: JSONValue? = nil,
+        upstreamIndex: Int? = nil,
         upstreamData: Data
     ) -> Data {
         guard let payload = try? JSONSerialization.jsonObject(with: upstreamData, options: []) else {
@@ -33,6 +34,7 @@ package struct ToolCallNormalizer: Sendable {
                 responseMethodsByIDKey: responseMethodsByIDKey,
                 responseToolNamesByIDKey: responseToolNamesByIDKey,
                 toolsCatalogOverride: toolsCatalogOverride
+                    ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
             ),
                 JSONSerialization.isValidJSONObject(rewritten),
                 let rewrittenData = try? JSONSerialization.data(withJSONObject: rewritten, options: [])
@@ -56,6 +58,7 @@ package struct ToolCallNormalizer: Sendable {
                     responseMethodsByIDKey: responseMethodsByIDKey,
                     responseToolNamesByIDKey: responseToolNamesByIDKey,
                     toolsCatalogOverride: toolsCatalogOverride
+                        ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
                 )
             else {
                 return item

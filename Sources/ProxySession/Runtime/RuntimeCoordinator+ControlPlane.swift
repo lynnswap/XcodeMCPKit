@@ -33,6 +33,10 @@ private enum EventLoopFutureWaitResult<Output: Sendable>: Sendable {
     case timedOut
 }
 
+private func compareDocumentationVersion(_ lhs: String, _ rhs: String) -> ComparisonResult {
+    lhs.compare(rhs, options: [.numeric])
+}
+
 /// The one place that decides which JSON-RPC error a control-plane or
 /// upstream-acquisition failure surfaces as.
 extension ControlPlane {
@@ -67,7 +71,7 @@ extension RuntimeCoordinator {
     }
 
     private enum ProcessToolsCatalogOutcome: Sendable {
-        case success(CanonicalToolsCatalogLoadResult)
+        case success(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)
         case failure(upstreamIndex: Int, error: any Error)
     }
 
@@ -147,7 +151,7 @@ extension RuntimeCoordinator {
                                 "xcode_version": .string(route.target.xcodeVersion),
                             ]
                         )
-                        return .success(result)
+                        return .success(target: route.target, result: result)
                     } catch is CancellationError {
                         return .failure(upstreamIndex: route.upstreamIndex, error: CancellationError())
                     } catch {
@@ -156,18 +160,46 @@ extension RuntimeCoordinator {
                 }
             }
 
+            var successes: [(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)] = []
             var lastFailure: (upstreamIndex: Int, error: any Error)?
             while let outcome = try await group.next() {
                 switch outcome {
-                case .success(let result):
-                    group.cancelAll()
-                    return result
+                case .success(let target, let result):
+                    successes.append((target: target, result: result))
                 case .failure(let upstreamIndex, let error):
                     if error is CancellationError {
                         continue
                     }
                     lastFailure = (upstreamIndex, error)
                 }
+            }
+
+            if successes.isEmpty == false {
+                for success in successes {
+                    guard let sourceUpstream = success.result.sourceUpstream else {
+                        continue
+                    }
+                    self.processToolCatalogRegistry.record(
+                        target: success.target,
+                        upstreamIndex: sourceUpstream,
+                        rawResult: success.result.rawResult
+                    )
+                }
+                let unionResult = self.processToolCatalogRegistry.unionToolsListResult()
+                    ?? successes[0].result.rawResult
+                let sourceUpstream = successes.sorted {
+                    compareDocumentationVersion(
+                        $0.target.xcodeVersion,
+                        $1.target.xcodeVersion
+                    ) == .orderedDescending
+                }.first?.result.sourceUpstream
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: unionResult,
+                    sourceUpstream: sourceUpstream,
+                    durationMilliseconds: self.elapsedMilliseconds(
+                        sinceUptimeNanoseconds: startedAt
+                    )
+                )
             }
 
             if let lastFailure {

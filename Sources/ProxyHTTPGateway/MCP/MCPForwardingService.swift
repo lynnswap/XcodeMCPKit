@@ -152,6 +152,7 @@ package struct MCPForwardingService: Sendable {
                 responseOriginalIDsByKey: started.transform.responseOriginalIDsByKey,
                 normalizationToolsListResponseIDKey: started.transform.normalizationToolsListResponseIDKey,
                 cacheableToolsListResponseIDKey: started.transform.cacheableToolsListResponseIDKey,
+                upstreamIndex: started.upstreamIndex,
                 upstreamData: data
             )
             let responseData = rewritten.responseData
@@ -226,9 +227,20 @@ package struct MCPForwardingService: Sendable {
         guard let parsedRequestJSONValue = JSONValue(any: requestObject) else {
             return .unavailable
         }
-        let preferredUpstreamIndex =
-            upstreamIndexOverride
-            ?? sessionManager.preferredUpstreamIndex(for: requestObject)
+        let preferredUpstreamIndex: Int?
+        if let upstreamIndexOverride {
+            preferredUpstreamIndex = upstreamIndexOverride
+        } else {
+            switch await sessionManager.toolRoutingDecision(
+                for: requestObject,
+                requestTimeoutOverride: requestTimeoutOverride
+            ) {
+            case .forward(let resolvedUpstreamIndex):
+                preferredUpstreamIndex = resolvedUpstreamIndex
+            case .reject:
+                return .unavailable
+            }
+        }
 
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,

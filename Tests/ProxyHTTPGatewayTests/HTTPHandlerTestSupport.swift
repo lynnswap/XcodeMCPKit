@@ -104,6 +104,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
         var preferredUpstreamIndex: Int?
+        var toolRoutingDecision: ToolRoutingDecision?
         var requeuedLeaseCount = 0
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
@@ -362,6 +363,22 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
         _ = requestJSON
         return state.withLockedValue { $0.preferredUpstreamIndex }
+    }
+
+    func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        _ = requestTimeoutOverride
+        return immediateToolRoutingDecision(for: requestJSON)
+            ?? .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+    }
+
+    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
+        if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
+            return decision
+        }
+        return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(
@@ -869,6 +886,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setPreferredUpstreamIndex(_ value: Int?) {
         state.withLockedValue { $0.preferredUpstreamIndex = value }
+    }
+
+    func setToolRoutingDecision(_ value: ToolRoutingDecision?) {
+        state.withLockedValue { $0.toolRoutingDecision = value }
     }
 
     func requestTimeoutNotificationCount() -> Int {

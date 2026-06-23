@@ -546,6 +546,16 @@ extension RuntimeCoordinator {
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
+            processToolCatalogs: processToolCatalogRegistry.debugSnapshots(
+                exposedCatalog: brokerSnapshot.toolsCatalogRaw,
+                canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
+                tabOwnerCountsByUpstream: ownerCountsByUpstream(
+                    tabOwnerUpstreamIndices.withLockedValue { $0 }
+                ),
+                workspaceOwnerCountsByUpstream: ownerCountsByUpstream(
+                    workspaceOwnerUpstreamIndices.withLockedValue { $0 }
+                )
+            ),
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,
@@ -560,6 +570,12 @@ extension RuntimeCoordinator {
         descriptor: SessionRequestPipeline.Descriptor
     ) -> LeaseManager.ID {
         leaseManager.createLease(descriptor: descriptor)
+    }
+
+    private func ownerCountsByUpstream(_ owners: [String: Int]) -> [Int: Int] {
+        owners.values.reduce(into: [:]) { counts, upstreamIndex in
+            counts[upstreamIndex, default: 0] += 1
+        }
     }
 
     package func activateRequestLease(

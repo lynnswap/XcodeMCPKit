@@ -124,6 +124,7 @@ extension ProxyDebug {
         package let warmupInFlight: Bool
         package let controlPlane: ControlPlane.DebugSnapshot?
         package let upstreams: [ProxyDebug.UpstreamSnapshot]
+        package let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
         package let recentTraffic: [ProxyDebug.TrafficEvent]
         package let sessions: [SessionRequestPipeline.DebugSnapshot]
         package let leases: [LeaseManager.DebugSnapshot]
@@ -136,6 +137,7 @@ extension ProxyDebug {
             warmupInFlight: Bool,
             controlPlane: ControlPlane.DebugSnapshot? = nil,
             upstreams: [ProxyDebug.UpstreamSnapshot],
+            processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot] = [],
             recentTraffic: [ProxyDebug.TrafficEvent],
             sessions: [SessionRequestPipeline.DebugSnapshot],
             leases: [LeaseManager.DebugSnapshot],
@@ -147,6 +149,7 @@ extension ProxyDebug {
             self.warmupInFlight = warmupInFlight
             self.controlPlane = controlPlane
             self.upstreams = upstreams
+            self.processToolCatalogs = processToolCatalogs
             self.recentTraffic = recentTraffic
             self.sessions = sessions
             self.leases = leases

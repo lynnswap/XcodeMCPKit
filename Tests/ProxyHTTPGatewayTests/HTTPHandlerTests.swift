@@ -1283,6 +1283,51 @@ struct HTTPHandlerTests {
         #expect(sessionManager.chooseUpstreamIndexCallCount() == chooseCountBeforeMalformedRequest)
     }
 
+    @Test func httpToolRoutingRejectReturnsToolResultErrorWithoutForwarding() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 3301)))
+        sessionManager.setToolRoutingDecision(
+            .reject(
+                errors: [
+                    ToolRoutingError(
+                        id: requestID,
+                        message: "unable to resolve Xcode window owner for tool 'BuildProject'"
+                    ),
+                ],
+                forceBatchArray: false
+            )
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-reject",
+                payload: toolsCallPayload(
+                    id: 3301,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "missing-tab"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = try #require(body["result"] as? [String: Any])
+            #expect(result["isError"] as? Bool == true)
+            let content = try #require(result["content"] as? [[String: Any]])
+            #expect((content.first?["text"] as? String)?.contains("unable to resolve") == true)
+            #expect(sessionManager.sentMethods().isEmpty)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()

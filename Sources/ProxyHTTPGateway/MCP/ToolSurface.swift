@@ -32,6 +32,7 @@ package struct ToolSurface: Sendable {
         responseOriginalIDsByKey: [String: JSONRPC.ID] = [:],
         normalizationToolsListResponseIDKey: String? = nil,
         cacheableToolsListResponseIDKey: String? = nil,
+        upstreamIndex: Int? = nil,
         upstreamData: Data
     ) -> ToolSurface.RewriteResult {
         let rewrittenResourcesData = rewriteUnsupportedResourcesListResponseIfNeeded(
@@ -61,6 +62,7 @@ package struct ToolSurface: Sendable {
             responseMethodsByIDKey: responseMethodsByIDKey,
             responseToolNamesByIDKey: responseToolNamesByIDKey,
             toolsCatalogOverride: normalizationToolsListResult,
+            upstreamIndex: upstreamIndex,
             upstreamData: cacheableToolsListData
         )
         let responseData = rewriteToolsListResponseIfNeeded(
