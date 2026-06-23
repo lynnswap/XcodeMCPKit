@@ -4212,6 +4212,56 @@ struct RuntimeCoordinatorTests {
         )
     }
 
+    @Test func sessionManagerShutdownStopsUpstreamsBeforeDrainingRuntimeTasks() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = BlockingInitializedNotificationUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1]
+        )
+
+        var didShutdown = false
+        defer {
+            if !didShutdown {
+                manager.shutdownAndWait()
+            }
+        }
+
+        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let init0ID = try extractUpstreamID(from: init0)
+        await upstream1.blockNextInitializedNotification()
+        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
+
+        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let init1ID = try extractUpstreamID(from: init1)
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
+        try await upstream1.waitForBlockedInitializedNotification()
+
+        let shutdownFinished = TestSignal()
+        let shutdownTask = Task {
+            await manager.shutdown()
+            shutdownFinished.signal()
+        }
+
+        do {
+            try await shutdownFinished.wait(
+                timeout: .milliseconds(500),
+                description: "shutdown should stop upstreams before draining blocked runtime tasks"
+            )
+        } catch {
+            await upstream1.releaseBlockedInitializedNotification(.backpressure)
+            await shutdownTask.value
+            throw error
+        }
+        await shutdownTask.value
+        didShutdown = true
+    }
+
     @Test func upstreamHealthManagerIgnoresStaleInitializeCompletionAfterStateReset() {
         let manager = UpstreamHealthManager(upstreamCount: 1)
         manager.markInitInFlight(upstreamIndex: 0, upstreamID: 10)

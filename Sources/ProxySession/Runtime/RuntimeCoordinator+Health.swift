@@ -39,7 +39,7 @@ extension RuntimeCoordinator {
         let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
         let originalID = JSONRPC.ID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
-        let future = probeSession.router.registerRequest(
+        let registration = probeSession.router.registerRequestPending(
             idKey: originalID.key,
             on: eventLoop,
             timeout: probeTimeout
@@ -69,10 +69,15 @@ extension RuntimeCoordinator {
 
         sendUpstream(requestData, upstreamIndex: upstreamIndex)
 
-        Task { [weak self] in
+        addRuntimeTask { [weak self, probeSession, registration] in
             guard let self else { return }
             do {
-                var buffer = try await future.get()
+                var buffer = try await withTaskCancellationHandler {
+                    try await registration.future.get()
+                } onCancel: {
+                    _ = probeSession.router.cancelPending(token: registration.token)
+                    self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                }
                 guard let responseData = buffer.readData(length: buffer.readableBytes),
                     let object = try JSONSerialization.jsonObject(with: responseData, options: [])
                         as? [String: Any],
@@ -95,6 +100,10 @@ extension RuntimeCoordinator {
                     reason: "ok"
                 )
             } catch {
+                if error is CancellationError {
+                    self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                    return
+                }
                 self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                 self.finishHealthProbe(
                     upstreamIndex: upstreamIndex,

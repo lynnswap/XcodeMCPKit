@@ -286,7 +286,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     package let sessionRegistry: SessionRegistry
     package let initializeManager: InitializeManager
-    package let upstreamTaskBox = NIOLockedValueBox<[Task<Void, Never>]>([])
+    package let upstreamEventTasks = RuntimeTaskSupervisor()
+    package let runtimeTasks = RuntimeTaskSupervisor()
     package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     package let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
@@ -538,10 +539,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         runtimeBox.value = self
 
-        var tasks: [Task<Void, Never>] = []
-        tasks.reserveCapacity(upstreams.count)
         for (upstreamIndex, upstream) in upstreams.enumerated() {
-            let task = Task { [weak self] in
+            upstreamEventTasks.run { [weak self, upstream] in
                 guard let self else { return }
                 for await event in upstream.events {
                     switch event {
@@ -561,10 +560,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     }
                 }
             }
-            tasks.append(task)
-        }
-        upstreamTaskBox.withLockedValue { taskBox in
-            taskBox = tasks
         }
 
         if startImmediately {
@@ -583,6 +578,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         if prewarmDocumentationProviderOnStartup {
             prewarmDocumentationProvider()
         }
+    }
+
+    package func addRuntimeTask(
+        _ operation: @escaping @Sendable () async -> Void
+    ) {
+        runtimeTasks.run(operation)
     }
 
     package func session(id: String) -> SessionContext {
@@ -624,6 +625,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamRouter.resetAll()
         _ = leaseManager.resetAll(reason: .clientDisconnected)
         upstreamSlotScheduler.reset()
+        runtimeTasks.cancelAll()
         resetUpstreamReadinessWaiters()
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
@@ -665,14 +667,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clearToolsCatalog: true
         )
 
-        let tasks = upstreamTaskBox.withLockedValue { taskBox -> [Task<Void, Never>] in
-            let current = taskBox
-            taskBox = []
-            return current
-        }
-        for task in tasks {
-            task.cancel()
-        }
+        let runtimeDrain = runtimeTasks.beginShutdown()
         await withTaskGroup(of: Void.self) { group in
             for upstream in upstreams {
                 group.addTask {
@@ -690,9 +685,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 }
             }
         }
-        for task in tasks {
-            await task.value
-        }
+        await upstreamEventTasks.shutdown()
+        await runtimeDrain.wait()
     }
 
     package func isInitialized() -> Bool {
@@ -718,7 +712,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         )
-        Task { [weak self] in
+        addRuntimeTask { [weak self] in
             guard let self,
                   let baseResult = await self.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
                       deadlineUptimeNs: deadline
@@ -1341,7 +1335,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         let invalidatedGeneration = canonicalBrokerState.generation()
         let coordinator = controlPlaneCoordinator
-        Task {
+        addRuntimeTask {
             await coordinator.cancelLoadsStartedBeforeGeneration(
                 invalidatedGeneration,
                 reason: reason
