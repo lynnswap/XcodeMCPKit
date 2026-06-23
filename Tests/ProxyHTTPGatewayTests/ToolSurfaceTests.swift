@@ -4,6 +4,7 @@ import Testing
 import ProxyCore
 import ProxyMCP
 import ProxySession
+import ProxySessionControlPlane
 import ProxyXcodeFeatures
 
 @testable import ProxyHTTPGateway

@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIO
+import ProxySessionUpstream
 import ProxyCore
 import ProxyMCP
 

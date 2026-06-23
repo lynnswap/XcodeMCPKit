@@ -49,6 +49,8 @@ private let requiredSourceDirectories = [
     "Sources/ProxyBuildInfo",
     "Sources/ProxyCore",
     "Sources/ProxyMCP",
+    "Sources/ProxySessionControlPlane",
+    "Sources/ProxySessionUpstream",
     "Sources/ProxySession",
     "Sources/ProxyXcodeSupport",
     "Sources/ProxyXcodeFeatures",
@@ -71,7 +73,8 @@ private let forbiddenImportRules = [
         sourceDirectory: "Sources/ProxyCore",
         forbiddenModules: [
             "ProxyBuildInfo",
-            "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
             "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
@@ -80,9 +83,30 @@ private let forbiddenImportRules = [
         sourceDirectory: "Sources/ProxyMCP",
         forbiddenModules: [
             "ProxyBuildInfo",
-            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
             "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxySessionControlPlane",
+        forbiddenModules: [
+            "ProxyBuildInfo", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+            "AppKit", "ApplicationServices",
+        ]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxySessionUpstream",
+        forbiddenModules: [
+            "ProxyBuildInfo", "ProxySessionControlPlane", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+            "AppKit", "ApplicationServices",
         ]
     ),
     ForbiddenImportRule(
@@ -99,7 +123,8 @@ private let forbiddenImportRules = [
         sourceDirectory: "Sources/ProxyXcodeSupport",
         forbiddenModules: [
             "ProxyBuildInfo",
-            "ProxyMCP", "ProxySession", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeFeatures", "ProxyHTTPGateway",
             "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
@@ -107,21 +132,23 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyXcodeFeatures",
         forbiddenModules: [
-            "ProxyBuildInfo", "ProxySession", "ProxyHTTPGateway", "ProxyStdioTransport",
+            "ProxyBuildInfo", "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyHTTPGateway", "ProxyStdioTransport",
             "XcodeMCPProxy", "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyHTTPGateway",
         forbiddenModules: [
-            "ProxyBuildInfo", "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyBuildInfo", "ProxySessionUpstream", "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyStdioTransport",
         forbiddenModules: [
-            "ProxyBuildInfo", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyBuildInfo", "ProxySessionControlPlane", "ProxySessionUpstream",
+            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
             "ProxyHTTPGateway", "XcodeMCPProxy",
             "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
@@ -129,7 +156,8 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyBuildInfo",
         forbiddenModules: [
-            "ProxyCore", "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyCore", "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream",
+            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
             "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
@@ -141,7 +169,8 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCLI/Common",
         forbiddenModules: [
-            "ProxyBuildInfo", "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyBuildInfo", "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream",
+            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
             "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
@@ -149,21 +178,24 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCLI/Adapter",
         forbiddenModules: [
-            "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures",
             "ProxyHTTPGateway", "XcodeMCPProxy", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCLI/Server",
         forbiddenModules: [
-            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
             "ProxyStdioTransport", "ProxyAdapterCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCLI/Install",
         forbiddenModules: [
-            "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures",
             "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy",
             "ProxyAdapterCLI", "ProxyServerCLI",
         ]

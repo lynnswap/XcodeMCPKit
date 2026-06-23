@@ -1,5 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
+import ProxySessionUpstream
 import ProxyCore
 import ProxyMCP
 

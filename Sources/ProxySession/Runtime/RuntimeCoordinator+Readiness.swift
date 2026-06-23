@@ -1,4 +1,5 @@
 import Foundation
+import ProxySessionUpstream
 import ProxyCore
 
 extension RuntimeCoordinator {

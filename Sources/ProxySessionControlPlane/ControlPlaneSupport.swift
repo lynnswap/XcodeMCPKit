@@ -24,6 +24,12 @@ package struct CanonicalToolsCatalogLoadResult: Sendable {
     package let rawResult: JSONValue
     package let sourceUpstream: Int?
     package let durationMilliseconds: Int
+
+    package init(rawResult: JSONValue, sourceUpstream: Int?, durationMilliseconds: Int) {
+        self.rawResult = rawResult
+        self.sourceUpstream = sourceUpstream
+        self.durationMilliseconds = durationMilliseconds
+    }
 }
 
 extension ControlPlane {

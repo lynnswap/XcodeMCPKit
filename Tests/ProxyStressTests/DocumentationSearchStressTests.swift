@@ -3,6 +3,7 @@ import NIO
 import NIOHTTP1
 import ProxyCore
 import ProxySession
+import ProxySessionUpstream
 import Testing
 import XcodeMCPTestSupport
 

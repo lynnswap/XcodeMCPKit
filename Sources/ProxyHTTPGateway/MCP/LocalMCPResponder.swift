@@ -6,6 +6,7 @@ import ProxyCore
 import ProxyMCP
 import ProxyXcodeFeatures
 import ProxySession
+import ProxySessionControlPlane
 
 package enum LocalPostHandling {
     case pendingResponse(
