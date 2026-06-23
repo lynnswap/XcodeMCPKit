@@ -2650,11 +2650,11 @@ struct RuntimeCoordinatorTests {
         )
 
         let decision = await task.value
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected refreshed owner-bound request to forward")
             return
         }
-        #expect(preferredUpstreamIndex == 1)
+        #expect(preferredUpstreamIndices == [1])
     }
 
     @Test func ownerBoundRefreshUsesUsableSiblingWhenPrimaryUnavailable() async throws {
@@ -2707,11 +2707,11 @@ struct RuntimeCoordinatorTests {
         )
 
         let decision = await task.value
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected refreshed owner-bound request to forward through sibling")
             return
         }
-        #expect(preferredUpstreamIndex == 1)
+        #expect(preferredUpstreamIndices == [1])
     }
 
     @Test func ownerBoundToolRoutesToCachedWindowOwner() async throws {
@@ -2760,11 +2760,11 @@ struct RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(2)
         )
 
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected owner-bound request to forward")
             return
         }
-        #expect(preferredUpstreamIndex == 0)
+        #expect(preferredUpstreamIndices == [0])
     }
 
     @Test func ownerBoundToolRoutesToUsableSlotInOwningProcess() async throws {
@@ -2809,11 +2809,106 @@ struct RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(2)
         )
 
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected owner-bound request to forward")
             return
         }
-        #expect(preferredUpstreamIndex == 1)
+        #expect(preferredUpstreamIndices == [1])
+    }
+
+    @Test func ownerBoundProcessRouteUsesIdleSiblingWhenPrimaryIsBusy() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 614, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 112,
+                name: "BuildProject",
+                arguments: ["tabIdentifier": "tab-a"]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected owner-bound route to expose process slot candidates")
+            return
+        }
+        #expect(preferredUpstreamIndices == [0, 1])
+
+        let activeDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-active",
+            label: "tools/call:LongRunningBuild",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
+        let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: activeLeaseID,
+            descriptor: activeDescriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: 0
+        ) { selectedUpstreamIndex in
+            #expect(selectedUpstreamIndex == 0)
+            return activePromise.futureResult
+        }
+
+        let routedDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-routed",
+            label: "tools/call:BuildProject",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let routedLeaseID = manager.createRequestLease(descriptor: routedDescriptor)
+        let selectedUpstream = NIOLockedValueBox<Int?>(nil)
+        let routedFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: routedLeaseID,
+            descriptor: routedDescriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: preferredUpstreamIndices
+        ) { selectedUpstreamIndex in
+            selectedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        _ = try await routedFuture.get()
+        #expect(selectedUpstream.withLockedValue { $0 } == 1)
+        manager.completeRequestLease(routedLeaseID)
+
+        manager.completeRequestLease(activeLeaseID)
+        activePromise.succeed(())
+        _ = try await activeFuture.get()
     }
 
     @Test func ownerBoundToolKeepsProcessRouteWhenSiblingSlotExits() async throws {
@@ -2860,11 +2955,11 @@ struct RuntimeCoordinatorTests {
             ),
             requestTimeoutOverride: .seconds(2)
         )
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected owner-bound request to use sibling slot")
             return
         }
-        #expect(preferredUpstreamIndex == 1)
+        #expect(preferredUpstreamIndices == [1])
     }
 
     @Test func sessionManagerProcessCatalogRepointsCanonicalSourceWhenSourceSlotExits()
@@ -2948,11 +3043,11 @@ struct RuntimeCoordinatorTests {
             )
         )
 
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected union-only tool to forward")
             return
         }
-        #expect(preferredUpstreamIndex == 0)
+        #expect(preferredUpstreamIndices == [0])
     }
 
     @Test func publicXcodeListWindowsRoutesToLocalAggregation() async throws {
@@ -3044,6 +3139,60 @@ struct RuntimeCoordinatorTests {
         }
         #expect(errors.map(\.id.key) == ["119"])
         #expect(forceBatchArray)
+    }
+
+    @Test func publicXcodeListWindowsNotificationDoesNotRejectOtherRequest() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 621, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target,
+                    0,
+                    [
+                        toolDescriptor(name: "XcodeListWindows"),
+                        toolDescriptor(name: "XcodeRead"),
+                    ]
+                ),
+            ]
+        )
+
+        let decision = try #require(
+            manager.immediateToolRoutingDecision(
+                for: [
+                    toolsCallObject(
+                        id: nil,
+                        name: "XcodeListWindows",
+                        arguments: [:]
+                    ),
+                    toolsCallObject(
+                        id: 121,
+                        name: "XcodeRead",
+                        arguments: ["path": "/tmp/file.swift"]
+                    ),
+                ]
+            )
+        )
+
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected notification-only XcodeListWindows item not to reject batch")
+            return
+        }
+        #expect(preferredUpstreamIndices == [0])
     }
 
     @Test func ownerBoundBatchRejectsToolMissingFromOwnerProcess() async throws {
@@ -3172,11 +3321,11 @@ struct RuntimeCoordinatorTests {
         )
 
         let decision = await task.value
-        guard case .forward(let preferredUpstreamIndex) = decision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected refreshed owner-bound request to forward")
             return
         }
-        #expect(preferredUpstreamIndex == 1)
+        #expect(preferredUpstreamIndices == [1])
     }
 
     @Test func ownerBoundToolRejectsWhenOwnerCannotBeResolvedAfterRefresh() async throws {
@@ -3370,11 +3519,11 @@ struct RuntimeCoordinatorTests {
             ],
             requestTimeoutOverride: .seconds(2)
         )
-        guard case .forward(let preferredUpstreamIndex) = singleOwnerDecision else {
+        guard case .forwardAny(let preferredUpstreamIndices) = singleOwnerDecision else {
             Issue.record("expected single-owner batch to forward")
             return
         }
-        #expect(preferredUpstreamIndex == 0)
+        #expect(preferredUpstreamIndices == [0])
 
         let mixedDecision = await manager.toolRoutingDecision(
             for: [

@@ -27,7 +27,7 @@ package final class UpstreamSlotScheduler: Sendable {
         let leaseID: LeaseManager.ID
         let descriptor: SessionRequestPipeline.Descriptor
         let eventLoop: EventLoop
-        let preferredUpstreamIndex: Int?
+        let preferredUpstreamIndices: [Int]
         let start: @Sendable (Int) -> Void
         let failUnavailable: @Sendable () -> Void
         let failCancelled: @Sendable () -> Void
@@ -79,11 +79,33 @@ package final class UpstreamSlotScheduler: Sendable {
         failUnavailable: @escaping @Sendable () -> Void,
         failCancelled: @escaping @Sendable () -> Void
     ) {
+        enqueueRequest(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] } ?? [],
+            starter: starter,
+            failUnavailable: failUnavailable,
+            failCancelled: failCancelled
+        )
+    }
+
+    package func enqueueRequest(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int],
+        starter: @escaping @Sendable (Int) -> Void,
+        failUnavailable: @escaping @Sendable () -> Void,
+        failCancelled: @escaping @Sendable () -> Void
+    ) {
         let request = PendingRequest(
             leaseID: leaseID,
             descriptor: descriptor,
             eventLoop: eventLoop,
-            preferredUpstreamIndex: preferredUpstreamIndex,
+            preferredUpstreamIndices: Self.uniquePreferredUpstreamIndices(
+                preferredUpstreamIndices
+            ),
             start: starter,
             failUnavailable: failUnavailable,
             failCancelled: failCancelled
@@ -93,6 +115,17 @@ package final class UpstreamSlotScheduler: Sendable {
             state.pendingRequests.append(request)
         }
         dispatchQueuedRequestsIfPossible()
+    }
+
+    private static func uniquePreferredUpstreamIndices(_ indices: [Int]) -> [Int] {
+        var seen = Set<Int>()
+        return indices.filter { index in
+            guard index >= 0, seen.contains(index) == false else {
+                return false
+            }
+            seen.insert(index)
+            return true
+        }
     }
 
     package func releaseUpstreamSlot(upstreamIndex: Int, leaseID: LeaseManager.ID) {
@@ -290,18 +323,26 @@ package final class UpstreamSlotScheduler: Sendable {
                         continue
                     }
 
-                    if let preferredUpstreamIndex = request.preferredUpstreamIndex {
-                        guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil else {
+                    if request.preferredUpstreamIndices.isEmpty == false {
+                        for preferredUpstreamIndex in request.preferredUpstreamIndices {
+                            guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil
+                            else {
+                                continue
+                            }
+                            let evaluation = canUseUpstream(preferredUpstreamIndex)
+                            healthEffects.append(contentsOf: evaluation.effects)
+                            guard evaluation.isUsable else {
+                                continue
+                            }
+                            chosenPendingIndex = pendingIndex
+                            chosenUpstreamIndex = preferredUpstreamIndex
+                            break
+                        }
+                        if chosenPendingIndex != nil {
+                            break
+                        } else {
                             continue
                         }
-                        let evaluation = canUseUpstream(preferredUpstreamIndex)
-                        healthEffects.append(contentsOf: evaluation.effects)
-                        guard evaluation.isUsable else {
-                            continue
-                        }
-                        chosenPendingIndex = pendingIndex
-                        chosenUpstreamIndex = preferredUpstreamIndex
-                        break
                     }
 
                     let selection = selectUpstream(occupied)

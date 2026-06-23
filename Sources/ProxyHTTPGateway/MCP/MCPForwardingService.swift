@@ -251,16 +251,18 @@ package struct MCPForwardingService: Sendable {
             }
         }
 
-        let preferredUpstreamIndex: Int?
+        let preferredUpstreamIndices: [Int]?
         if let upstreamIndexOverride {
-            preferredUpstreamIndex = upstreamIndexOverride
+            preferredUpstreamIndices = [upstreamIndexOverride]
         } else {
             switch await sessionManager.toolRoutingDecision(
                 for: requestObject,
                 requestTimeoutOverride: requestTimeoutOverride
             ) {
             case .forward(let resolvedUpstreamIndex):
-                preferredUpstreamIndex = resolvedUpstreamIndex
+                preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+            case .forwardAny(let resolvedUpstreamIndices):
+                preferredUpstreamIndices = resolvedUpstreamIndices
             case .localXcodeListWindows:
                 return .unavailable
             case .reject:
@@ -289,7 +291,7 @@ package struct MCPForwardingService: Sendable {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
-                preferredUpstreamIndex: preferredUpstreamIndex
+                preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedUpstreamIndex in
                 internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
                 self.sessionManager.activateRequestLease(

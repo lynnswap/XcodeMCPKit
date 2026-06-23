@@ -484,6 +484,57 @@ package final class HTTPPostService: Sendable {
             guard cancellationHandle.isCancelled == false else {
                 return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
+            func makeForwardingFuture(
+                preferredUpstreamIndices: [Int]?
+            ) -> EventLoopFuture<HTTPPostService.Resolution> {
+                self.sessionManager.enqueueOnUpstreamSlot(
+                    leaseID: leaseID,
+                    descriptor: descriptor,
+                    on: eventLoop,
+                    preferredUpstreamIndices: preferredUpstreamIndices
+                ) { upstreamIndex in
+                    cancellationHandle.activate(upstreamIndex: upstreamIndex)
+                    self.sessionManager.activateRequestLease(
+                        leaseID,
+                        requestIDKey: nil,
+                        upstreamIndex: upstreamIndex,
+                        timeout: nil
+                    )
+                    return self.makeTopLevelRequestFuture(
+                        filteredRequest: filteredRequest,
+                        sessionID: sessionID,
+                        headerSessionID: headerSessionID,
+                        requestIsBatch: requestIsBatch,
+                        prefersEventStream: prefersEventStream,
+                        eventLoop: eventLoop,
+                        session: session,
+                        leaseID: leaseID,
+                        upstreamIndex: upstreamIndex,
+                        cancellationHandle: cancellationHandle,
+                        requestTimeoutOverride: requestTimeoutOverride
+                    )
+                }.flatMapError { error in
+                    if error is CancellationError {
+                        return eventLoop.makeFailedFuture(error)
+                    }
+                    cancellationHandle.markCompleted()
+                    self.sessionManager.failRequestLease(
+                        leaseID,
+                        terminalState: .failed,
+                        reason: .upstreamOverloaded
+                    )
+                    return eventLoop.makeSucceededFuture(
+                        Self.makeUpstreamUnavailableResolution(
+                            localResponseData: localResponseData,
+                            responseIDs: forwardedRequestIDs,
+                            forceBatchArray: filteredRequest.forceBatchArray,
+                            requestIsBatch: requestIsBatch,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    )
+                }
+            }
             switch decision {
             case .reject(let errors, let forceBatchArray):
                 let routedErrorIDKeys = Set(errors.map(\.id.key))
@@ -589,53 +640,13 @@ package final class HTTPPostService: Sendable {
                 cancellationHandle.bindRefreshTask(task)
                 return promise.futureResult
             case .forward(let preferredUpstreamIndex):
-                return self.sessionManager.enqueueOnUpstreamSlot(
-                    leaseID: leaseID,
-                    descriptor: descriptor,
-                    on: eventLoop,
-                    preferredUpstreamIndex: preferredUpstreamIndex
-                ) { upstreamIndex in
-                    cancellationHandle.activate(upstreamIndex: upstreamIndex)
-                    self.sessionManager.activateRequestLease(
-                        leaseID,
-                        requestIDKey: nil,
-                        upstreamIndex: upstreamIndex,
-                        timeout: nil
-                    )
-                    return self.makeTopLevelRequestFuture(
-                        filteredRequest: filteredRequest,
-                        sessionID: sessionID,
-                        headerSessionID: headerSessionID,
-                        requestIsBatch: requestIsBatch,
-                        prefersEventStream: prefersEventStream,
-                        eventLoop: eventLoop,
-                        session: session,
-                        leaseID: leaseID,
-                        upstreamIndex: upstreamIndex,
-                        cancellationHandle: cancellationHandle,
-                        requestTimeoutOverride: requestTimeoutOverride
-                    )
-                }.flatMapError { error in
-                    if error is CancellationError {
-                        return eventLoop.makeFailedFuture(error)
-                    }
-                    cancellationHandle.markCompleted()
-                    self.sessionManager.failRequestLease(
-                        leaseID,
-                        terminalState: .failed,
-                        reason: .upstreamOverloaded
-                    )
-                    return eventLoop.makeSucceededFuture(
-                        Self.makeUpstreamUnavailableResolution(
-                            localResponseData: localResponseData,
-                            responseIDs: forwardedRequestIDs,
-                            forceBatchArray: filteredRequest.forceBatchArray,
-                            requestIsBatch: requestIsBatch,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
-                    )
-                }
+                return makeForwardingFuture(
+                    preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] }
+                )
+            case .forwardAny(let preferredUpstreamIndices):
+                return makeForwardingFuture(
+                    preferredUpstreamIndices: preferredUpstreamIndices
+                )
             }
         }
 

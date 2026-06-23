@@ -254,8 +254,12 @@ extension RuntimeCoordinator {
     }
 
     package func firstUsableInitializedUpstreamIndex(in route: XcodeProcessRoute) -> Int? {
+        usableInitializedUpstreamIndices(in: route).first
+    }
+
+    package func usableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
         let states = upstreamHealthManager.statesSnapshot()
-        return route.upstreamIndices.first { upstreamIndex in
+        return route.upstreamIndices.filter { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else {
                 return false
             }
@@ -301,10 +305,10 @@ extension RuntimeCoordinator {
         }
         let requests = toolRoutingRequests(in: requestJSON)
         let xcodeListWindowsRequests = requests.filter {
-            $0.toolName == "XcodeListWindows"
+            $0.id != nil && $0.toolName == "XcodeListWindows"
         }
         if xcodeListWindowsRequests.isEmpty == false {
-            guard allItemsAreXcodeListWindowsToolCalls(in: requestJSON) else {
+            guard allResponseBearingItemsAreXcodeListWindowsToolCalls(in: requestJSON) else {
                 return .reject(
                     errors: toolRoutingErrors(
                         for: requests,
@@ -389,7 +393,7 @@ extension RuntimeCoordinator {
                 forceBatchArray: requestJSON is [Any]
             )
         }
-        let ownerUpstreamIndex = firstUsableInitializedUpstreamIndex(in: ownerRoute)
+        let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
 
         let hasMissingTools = requests.contains { request in
             guard processToolCatalogRegistry.catalog(forProcessID: ownerProcessID) != nil,
@@ -411,7 +415,7 @@ extension RuntimeCoordinator {
             )
         }
 
-        guard let ownerUpstreamIndex else {
+        guard ownerUpstreamIndices.isEmpty == false else {
             return .reject(
                 errors: toolRoutingErrors(
                     for: requests,
@@ -421,7 +425,7 @@ extension RuntimeCoordinator {
             )
         }
 
-        return .forward(preferredUpstreamIndex: ownerUpstreamIndex)
+        return .forwardAny(preferredUpstreamIndices: ownerUpstreamIndices)
     }
 
     private func toolRoutingErrors(
@@ -470,8 +474,7 @@ extension RuntimeCoordinator {
                 forceBatchArray: forceBatchArray
             )
         }
-        guard let route = preferredAvailableRoute(in: effectiveCandidates),
-              let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route) else {
+        guard let route = preferredAvailableRoute(in: effectiveCandidates) else {
             return .reject(
                 errors: requests.compactMap { request in
                     guard let id = request.id else { return nil }
@@ -483,7 +486,9 @@ extension RuntimeCoordinator {
                 forceBatchArray: forceBatchArray
             )
         }
-        return .forward(preferredUpstreamIndex: upstreamIndex)
+        return .forwardAny(
+            preferredUpstreamIndices: usableInitializedUpstreamIndices(in: route)
+        )
     }
 
     private func preferredAvailableRoute(in processIDs: Set<pid_t>) -> XcodeProcessRoute? {
@@ -627,20 +632,29 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func allItemsAreXcodeListWindowsToolCalls(in value: Any) -> Bool {
+    private func allResponseBearingItemsAreXcodeListWindowsToolCalls(in value: Any) -> Bool {
         if let object = value as? [String: Any] {
-            return isXcodeListWindowsToolCall(object)
+            return JSONRPC.Message.Inspector.requestID(from: object) != nil
+                && isXcodeListWindowsToolCall(object)
         }
         guard let array = value as? [Any],
               array.isEmpty == false else {
             return false
         }
-        return array.allSatisfy { item in
+        var sawResponseBearingItem = false
+        for item in array {
             guard let object = item as? [String: Any] else {
                 return false
             }
-            return isXcodeListWindowsToolCall(object)
+            guard JSONRPC.Message.Inspector.requestID(from: object) != nil else {
+                continue
+            }
+            sawResponseBearingItem = true
+            guard isXcodeListWindowsToolCall(object) else {
+                return false
+            }
         }
+        return sawResponseBearingItem
     }
 
     private func isXcodeListWindowsToolCall(_ object: [String: Any]) -> Bool {

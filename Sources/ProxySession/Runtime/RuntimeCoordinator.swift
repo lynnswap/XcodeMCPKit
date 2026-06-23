@@ -116,6 +116,13 @@ package protocol RuntimeCoordinating: Sendable {
         preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int]?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output>
     func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
@@ -217,6 +224,22 @@ extension RuntimeCoordinating {
             descriptor: descriptor,
             on: eventLoop,
             preferredUpstreamIndex: nil,
+            starter: starter
+        )
+    }
+
+    package func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int]?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: preferredUpstreamIndices?.first,
             starter: starter
         )
     }
@@ -842,6 +865,22 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         preferredUpstreamIndex: Int? = nil,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
+        enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] },
+            starter: starter
+        )
+    }
+
+    package func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int]?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
         let hasHealthyUpstream = upstreamHealthManager.initializedHealthyishCount() > 0
         var recoveryInFlight = upstreamHealthManager.anyRecoveryInFlight()
         if hasHealthyUpstream == false, recoveryInFlight == false,
@@ -859,7 +898,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             leaseID: leaseID,
             descriptor: descriptor,
             on: eventLoop,
-            preferredUpstreamIndex: preferredUpstreamIndex,
+            preferredUpstreamIndices: preferredUpstreamIndices ?? [],
             starter: { upstreamIndex in
                 starter(upstreamIndex).cascade(to: promise)
             },
