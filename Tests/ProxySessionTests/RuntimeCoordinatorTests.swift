@@ -2475,6 +2475,63 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndex == 1)
     }
 
+    @Test func ownerBoundRefreshUsesUsableSiblingWhenPrimaryUnavailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let primaryUpstream = TestUpstreamClient()
+        let siblingUpstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 604, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [primaryUpstream, siblingUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+
+        let task = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 1003,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-sibling"]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let request = try await siblingUpstream.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        #expect(await primaryUpstream.sentCount() == 0)
+        await siblingUpstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request),
+                    message: "* tabIdentifier: tab-sibling, workspacePath: /Work/S.xcworkspace"
+                )
+            )
+        )
+
+        let decision = await task.value
+        guard case .forward(let preferredUpstreamIndex) = decision else {
+            Issue.record("expected refreshed owner-bound request to forward through sibling")
+            return
+        }
+        #expect(preferredUpstreamIndex == 1)
+    }
+
     @Test func ownerBoundToolRoutesToCachedWindowOwner() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

@@ -485,13 +485,24 @@ package final class HTTPPostService: Sendable {
             }
             switch decision {
             case .reject(let errors, let forceBatchArray):
+                let routedErrorIDKeys = Set(errors.map(\.id.key))
+                let unroutedRequestIDs = forwardedRequestIDs.filter {
+                    routedErrorIDKeys.contains($0.key) == false
+                }
                 let errorData = Self.makeToolRoutingErrorResponseData(
                     errors: errors,
                     forceBatchArray: forceBatchArray || requestIsBatch
                 )
+                let unroutedErrorData = Self.makeJSONRPCErrorResponseData(
+                    ids: unroutedRequestIDs,
+                    code: -32000,
+                    message: "request not forwarded because tool routing rejected the batch",
+                    forceBatchArray: true
+                )
                 let responseData = Self.mergeBatchResponsePayloads(
                     [
                         errorData,
+                        unroutedErrorData,
                         localResponseData,
                     ],
                     forceBatchArray: forceBatchArray || requestIsBatch

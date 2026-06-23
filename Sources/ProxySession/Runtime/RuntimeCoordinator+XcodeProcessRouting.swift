@@ -24,7 +24,9 @@ extension RuntimeCoordinator {
 
         let unavailable = unavailableXcodeProcessIDs()
         for route in xcodeProcessRoutes where unavailable.contains(route.target.processID) == false {
-            guard let upstreamIndex = route.primaryUpstreamIndex else {
+            guard let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
+                ?? route.primaryUpstreamIndex
+            else {
                 continue
             }
             do {

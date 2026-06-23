@@ -1328,6 +1328,101 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpToolRoutingRejectReturnsErrorsForNonToolBatchItems() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        let toolRequestID = try #require(JSONRPC.ID(any: NSNumber(value: 3301)))
+        let resourceRequestID = try #require(JSONRPC.ID(any: NSNumber(value: 3302)))
+        sessionManager.setToolRoutingDecision(
+            .reject(
+                errors: [
+                    ToolRoutingError(
+                        id: toolRequestID,
+                        message: "unable to resolve Xcode window owner for one or more tools"
+                    ),
+                ],
+                forceBatchArray: true
+            )
+        )
+        let service = HTTPPostService(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let payload: [[String: Any]] = [
+                toolsCallPayload(
+                    id: 3301,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "missing-tab"]
+                ),
+                [
+                    "jsonrpc": "2.0",
+                    "id": 3302,
+                    "method": "resources/list",
+                ],
+            ]
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.makeForwardingOperation(
+                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                    bodyData: bodyData,
+                    localResponseData: nil,
+                    forwardedResponseIDs: [toolRequestID, resourceRequestID],
+                    forceBatchArray: true
+                ),
+                sessionID: "session-routing-reject-batch",
+                headerSessionID: "session-routing-reject-batch",
+                requestIsBatch: true,
+                prefersEventStream: false,
+                eventLoop: group.next(),
+                requestTimeoutOverride: nil,
+                parentCancellationHandle: nil
+            )
+
+            let resolution = try await operation.future.get()
+            let responseData: Data
+            switch resolution {
+            case .responseData(let data, _, _):
+                responseData = data
+            default:
+                Issue.record("expected response data, got \(resolution)")
+                return
+            }
+            let objects = try #require(
+                JSONSerialization.jsonObject(with: responseData, options: []) as? [[String: Any]]
+            )
+            #expect(
+                objects.compactMap { ($0["id"] as? NSNumber)?.intValue }.sorted()
+                    == [3301, 3302]
+            )
+            let toolResponse = try #require(
+                objects.first { ($0["id"] as? NSNumber)?.intValue == 3301 }
+            )
+            let toolResult = try #require(toolResponse["result"] as? [String: Any])
+            #expect(toolResult["isError"] as? Bool == true)
+
+            let resourceResponse = try #require(
+                objects.first { ($0["id"] as? NSNumber)?.intValue == 3302 }
+            )
+            let resourceError = try #require(resourceResponse["error"] as? [String: Any])
+            #expect((resourceError["code"] as? NSNumber)?.intValue == -32000)
+            #expect(
+                (resourceError["message"] as? String)?
+                    .contains("tool routing rejected the batch") == true
+            )
+            #expect(sessionManager.sentMethods().isEmpty)
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        try await group.shutdownGracefully()
+    }
+
     @Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
