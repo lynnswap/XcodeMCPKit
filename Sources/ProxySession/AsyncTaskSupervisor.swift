@@ -26,7 +26,8 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
 
     package init() {}
 
-    package func run(_ operation: @escaping @Sendable () async -> Void) {
+    @discardableResult
+    package func run(_ operation: @escaping @Sendable () async -> Void) -> Bool {
         let record = TaskRecord()
         let accepted = state.withLockedValue { state in
             guard state.acceptsNewTasks else {
@@ -39,9 +40,7 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
             }
             return true
         }
-        if !accepted {
-            record.task?.cancel()
-        }
+        return accepted
     }
 
     package func cancelAll() {

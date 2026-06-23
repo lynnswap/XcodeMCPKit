@@ -406,7 +406,7 @@ extension RuntimeCoordinator {
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
         let promise = eventLoop.makePromise(of: ServerRequestResponseForwardingResult.self)
-        addRuntimeTask { [weak self] in
+        let scheduled = addRuntimeTask { [weak self] in
             guard let self else {
                 promise.succeed(.upstreamUnavailable)
                 return
@@ -417,6 +417,9 @@ extension RuntimeCoordinator {
                 responseID: responseID
             )
             promise.succeed(result)
+        }
+        if !scheduled {
+            promise.succeed(.upstreamUnavailable)
         }
         return promise.futureResult
     }

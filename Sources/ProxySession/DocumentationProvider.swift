@@ -1345,7 +1345,7 @@ package actor DocumentationProviderConnection {
                 pendingResponses[upstreamIDKey] = pending
                 scheduleTimeoutIfNeeded(id: upstreamIDKey, timeout: timeout, pending: pending)
 
-                tasks.run { [weak self, session] in
+                let scheduled = tasks.run { [weak self, session] in
                     let sendResult = await session.send(upstreamData)
                     guard sendResult == .accepted else {
                         await self?.failPending(
@@ -1353,6 +1353,12 @@ package actor DocumentationProviderConnection {
                             error: UpstreamSlotScheduler.AcquisitionError.unavailable)
                         return
                     }
+                }
+                if !scheduled {
+                    failPending(
+                        id: upstreamIDKey,
+                        error: UpstreamSlotScheduler.AcquisitionError.unavailable
+                    )
                 }
             }
         } onCancel: {

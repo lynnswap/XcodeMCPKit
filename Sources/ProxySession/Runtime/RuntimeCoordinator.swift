@@ -580,9 +580,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
+    @discardableResult
     package func addRuntimeTask(
         _ operation: @escaping @Sendable () async -> Void
-    ) {
+    ) -> Bool {
         runtimeTasks.run(operation)
     }
 
