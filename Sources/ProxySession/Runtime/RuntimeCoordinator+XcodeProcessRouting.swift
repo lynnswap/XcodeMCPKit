@@ -538,10 +538,15 @@ extension RuntimeCoordinator {
     package static func mergedXcodeListWindowsResult(
         _ results: [JSONValue]
     ) -> JSONValue? {
-        let messages = results.compactMap(Self.xcodeListWindowsMessage(in:))
+        let successfulResults = results.filter {
+            xcodeListWindowsIsErrorResult($0) == false
+        }
+        let messages = successfulResults.compactMap(Self.xcodeListWindowsMessage(in:))
             .filter { $0.isEmpty == false }
         guard messages.isEmpty == false else {
-            return results.first
+            return successfulResults.first
+                ?? results.first { Self.xcodeListWindowsIsErrorResult($0) }
+                ?? results.first
         }
         let message = messages.joined(separator: "\n")
         let encodedMessage: String
@@ -689,10 +694,21 @@ extension RuntimeCoordinator {
     }
 
     private static func windowEntries(in result: JSONValue) -> [XcodeListWindowsEntry] {
+        guard xcodeListWindowsIsErrorResult(result) == false else {
+            return []
+        }
         guard let message = xcodeListWindowsMessage(in: result) else {
             return []
         }
         return XcodeListWindowsMessageParser.parse(message)
+    }
+
+    private static func xcodeListWindowsIsErrorResult(_ result: JSONValue) -> Bool {
+        guard case .object(let object) = result,
+              case .bool(true)? = object["isError"] else {
+            return false
+        }
+        return true
     }
 
     private static func xcodeListWindowsMessage(in result: JSONValue) -> String? {

@@ -2373,6 +2373,53 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
     }
 
+    @Test func mergedXcodeListWindowsPreservesToolErrors() throws {
+        let successMessage = "* tabIdentifier: tab-ok, workspacePath: /Work/OK.xcworkspace"
+        let success = try jsonValue([
+            "content": [
+                [
+                    "type": "text",
+                    "text": "{\"message\":\"\(successMessage)\"}",
+                ],
+            ],
+            "structuredContent": [
+                "message": successMessage,
+            ],
+        ])
+        let error = try jsonValue([
+            "content": [
+                [
+                    "type": "text",
+                    "text": "XcodeListWindows failed",
+                ],
+            ],
+            "isError": true,
+        ])
+
+        let partialMerge = try #require(
+            RuntimeCoordinator.mergedXcodeListWindowsResult([error, success])
+        )
+        guard case .object(let partialObject) = partialMerge,
+              case .object(let structuredContent)? = partialObject["structuredContent"],
+              case .string(let mergedMessage)? = structuredContent["message"] else {
+            Issue.record("expected merged success result")
+            return
+        }
+        #expect(mergedMessage == successMessage)
+
+        let failedMerge = try #require(
+            RuntimeCoordinator.mergedXcodeListWindowsResult([error])
+        )
+        guard case .object(let failedObject) = failedMerge else {
+            Issue.record("expected tool error result")
+            return
+        }
+        guard case .bool(true)? = failedObject["isError"] else {
+            Issue.record("expected merged failure to preserve isError")
+            return
+        }
+    }
+
     @Test func sessionManagerKeepsWindowlessProcessRouteAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
