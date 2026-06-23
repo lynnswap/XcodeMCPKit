@@ -876,12 +876,8 @@ struct RuntimeCoordinatorTests {
         #expect(received.first == notification)
 
         manager.markNotificationClientConnected(sessionID: sessionID)
-        await upstream.yield(.message(notification))
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                session.router.drainBufferedNotifications().isEmpty
-            }
-        )
+        manager.routeUpstreamMessage(notification, upstreamIndex: 0)
+        #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerRoutesUnmappedNotificationsDuringInitializeHandshake() async throws {
@@ -974,12 +970,8 @@ struct RuntimeCoordinatorTests {
         #expect(received.first == notification)
 
         manager.markNotificationClientConnected(sessionID: sessionID)
-        await upstream.yield(.message(notification))
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                session.router.drainBufferedNotifications().isEmpty
-            }
-        )
+        manager.routeUpstreamMessage(notification, upstreamIndex: 0)
+        #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerDoesNotRecreateRemovedSessionWhenInitializeCompletes() async throws {
@@ -1046,14 +1038,9 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        await upstream.yield(.message(notification))
-
         _ = try await future.get()
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                replacement.router.drainBufferedNotifications().isEmpty
-            }
-        )
+        manager.routeUpstreamMessage(notification, upstreamIndex: 0)
+        #expect(replacement.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerRoutesUnmappedNotificationsToCachedInitializeSessionsUntilClientConnects()
@@ -1129,13 +1116,9 @@ struct RuntimeCoordinatorTests {
         #expect(Set(received) == Set([notification0, notification1]))
 
         manager.markNotificationClientConnected(sessionID: sessionID)
-        await upstream0.yield(.message(notification0))
-        await upstream1.yield(.message(notification1))
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                session.router.drainBufferedNotifications().isEmpty
-            }
-        )
+        manager.routeUpstreamMessage(notification0, upstreamIndex: 0)
+        manager.routeUpstreamMessage(notification1, upstreamIndex: 1)
+        #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerTimeoutResetsInitState() async throws {
@@ -1302,7 +1285,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            clock: clocks.clock
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -1322,31 +1311,39 @@ struct RuntimeCoordinatorTests {
         let firstTask = Task {
             try await manager.sharedToolsList(
                 sessionID: sessionID,
-                requestTimeoutOverride: .milliseconds(50)
+                requestTimeoutOverride: .seconds(5)
             )
         }
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(5)
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for first timed-out tools/list to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
 
         let secondTask = Task {
             try await manager.sharedToolsList(
                 sessionID: sessionID,
-                requestTimeoutOverride: .milliseconds(50)
+                requestTimeoutOverride: .seconds(5)
             )
         }
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(5)
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
         }
@@ -1386,11 +1383,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                await upstream.sentCount() == 3
-            }
-        )
+        try await spinUntil("waiting for foreground tools/list waiter to reuse prewarm load") {
+            manager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 1
+        }
+        #expect(await upstream.sentCount() == 3)
 
         let prewarmUpstreamID = try extractUpstreamID(from: prewarmRequest)
         let response: [String: Any] = [
@@ -1520,11 +1516,9 @@ struct RuntimeCoordinatorTests {
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for cancelled tools/list to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
     }
 
     @Test func sessionManagerSharedToolsListStopsPromotingAfterLoadBecomesShared() async throws {
@@ -1583,11 +1577,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        #expect(
-            await staysTrue(for: .milliseconds(250)) {
-                await upstream.sentCount() == 4
-            }
-        )
+        try await spinUntil("waiting for third tools/list waiter to share the in-flight load") {
+            manager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 3
+        }
+        #expect(await upstream.sentCount() == 4)
 
         firstTask.cancel()
         secondTask.cancel()
@@ -1661,11 +1654,9 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted waiter but received \(error)")
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for promoted tools/list cancellation to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
     }
 
     @Test func sessionManagerSharedToolsListTimeoutCancelsStalePrewarmLoad() async throws {
@@ -1675,7 +1666,13 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = true
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            clock: clocks.clock
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -1698,28 +1695,40 @@ struct RuntimeCoordinatorTests {
         let firstTask = Task {
             try await manager.sharedToolsList(
                 sessionID: sessionID,
-                requestTimeoutOverride: .milliseconds(50)
+                requestTimeoutOverride: .seconds(5)
             )
         }
 
+        try await spinUntil("waiting for foreground tools/list waiter to attach to prewarm load") {
+            manager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 1
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(5),
+            suspendedSleepers: 2
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for timed-out prewarm tools/list to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
 
         let secondTask = Task {
             try await manager.sharedToolsList(
                 sessionID: sessionID,
-                requestTimeoutOverride: .milliseconds(50)
+                requestTimeoutOverride: .seconds(5)
             )
         }
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(5)
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
         }
@@ -1785,7 +1794,13 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            clock: clocks.clock
+        )
         defer { manager.shutdownAndWait() }
 
         let initFuture = manager.registerInitialize(
@@ -1802,31 +1817,39 @@ struct RuntimeCoordinatorTests {
         let firstTask = Task {
             try await manager.liveXcodeListWindowsResult(
                 route: .anyHealthy,
-                requestTimeoutOverride: .milliseconds(50)
+                requestTimeoutOverride: .seconds(5)
             )
         }
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/call")
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(5)
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for first timed-out list-windows call to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
                 route: .anyHealthy,
-                requestTimeoutOverride: .milliseconds(50)
+                requestTimeoutOverride: .seconds(5)
             )
         }
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/call")
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(5)
+        )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
         }
@@ -1874,11 +1897,9 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError but received \(error)")
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for cancelled list-windows call to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
     }
 
     @Test func sessionManagerPromotedLiveXcodeListWindowsCancellationRemovesMigratedWaiter()
@@ -1945,11 +1966,9 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted XcodeListWindows waiter but received \(error)")
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
-            }
-        )
+        try await spinUntil("waiting for promoted list-windows cancellation to release its lease") {
+            manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0
+        }
     }
 
     @Test func controlPlaneRPCHandleCancelBeforeQueueStartCapturesQueuedState() {
@@ -3027,12 +3046,10 @@ struct RuntimeCoordinatorTests {
             options: []
         )
 
-        await yieldMessage(notification, to: upstream0)
+        manager.routeUpstreamMessage(notification, upstreamIndex: 0)
         #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                sessionA.router.drainBufferedNotifications().isEmpty
-                    && sessionB.router.drainBufferedNotifications().isEmpty
-            }
+            sessionA.router.drainBufferedNotifications().isEmpty
+                && sessionB.router.drainBufferedNotifications().isEmpty
         )
     }
 
@@ -3079,13 +3096,8 @@ struct RuntimeCoordinatorTests {
             options: []
         )
 
-        await yieldMessage(notification, to: upstream0)
-
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                session.router.drainBufferedNotifications().isEmpty
-            }
-        )
+        manager.routeUpstreamMessage(notification, upstreamIndex: 0)
+        #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerDropsUnmappedResponsesEvenWhenPinnedTargetsExist() async throws {
@@ -3104,13 +3116,8 @@ struct RuntimeCoordinatorTests {
         _ = session.router.drainBufferedNotifications()
 
         // Unmapped JSON-RPC response (no `method`) must never be routed to sessions.
-        await yieldMessage(try makeToolListResponse(id: 9_999_999), to: upstream)
-
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                session.router.drainBufferedNotifications().isEmpty
-            }
-        )
+        manager.routeUpstreamMessage(try makeToolListResponse(id: 9_999_999), upstreamIndex: 0)
+        #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerDebugSnapshotCapturesTrafficAndStderr() async throws {
@@ -3975,16 +3982,8 @@ struct RuntimeCoordinatorTests {
 
         try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized == false
-            }
-        )
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                await upstream1.sentCount() == 0
-            }
-        )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(await upstream1.sentCount() == 0)
     }
 
     @Test func sessionManagerPrimaryWarmReinitOverloadKeepsHealthySecondaryAvailable() async throws {
@@ -4026,11 +4025,7 @@ struct RuntimeCoordinatorTests {
         let overloadedInitialized = try await sentValue(from: upstream0, at: 3, timeout: .seconds(2))
         #expect(methodName(from: overloadedInitialized) == "notifications/initialized")
         #expect(manager.cachedToolsListResult() != nil)
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized
-            }
-        )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized)
         let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == 1)
     }
@@ -4159,11 +4154,7 @@ struct RuntimeCoordinatorTests {
         let eagerRetry = try await sentValue(from: upstream0, at: 4, timeout: .seconds(2))
         #expect(methodName(from: eagerRetry) == "initialize")
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                manager.testStateSnapshot().upstreams[1].isInitialized == false
-            }
-        )
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
     }
 
     @Test func sessionManagerIgnoresStaleSecondaryInitializedNotificationAfterReset()
@@ -4174,11 +4165,19 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = BlockingInitializedNotificationUpstreamClient()
+        let staleInitializedIgnored = TestSignal()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                initializedNotificationStaleIgnored: { upstreamIndex in
+                    if upstreamIndex == 1 {
+                        staleInitializedIgnored.signal()
+                    }
+                }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -4199,19 +4198,16 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
         await upstream1.releaseBlockedInitializedNotification(.accepted)
-
-        #expect(
-            await staysTrue(for: .milliseconds(200)) {
-                let snapshot = manager.testStateSnapshot().upstreams[1]
-                if snapshot.isInitialized {
-                    return false
-                }
-                guard case .quarantined = snapshot.healthState else {
-                    return false
-                }
-                return true
-            }
+        try await staleInitializedIgnored.wait(
+            description: "stale initialized notification completion should be ignored"
         )
+
+        let snapshot = manager.testStateSnapshot().upstreams[1]
+        #expect(snapshot.isInitialized == false)
+        guard case .quarantined = snapshot.healthState else {
+            Issue.record("expected upstream to remain quarantined")
+            return
+        }
     }
 
     @Test func sessionManagerShutdownStopsUpstreamsBeforeDrainingRuntimeTasks() async throws {

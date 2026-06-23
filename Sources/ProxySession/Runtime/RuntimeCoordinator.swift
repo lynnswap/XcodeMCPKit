@@ -38,6 +38,19 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
     package init() {}
 }
 
+package struct RuntimeCoordinatorTestHooks: Sendable {
+    package var documentationPrewarmWaitStarted: (@Sendable () -> Void)?
+    package var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
+
+    package init(
+        documentationPrewarmWaitStarted: (@Sendable () -> Void)? = nil,
+        initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil
+    ) {
+        self.documentationPrewarmWaitStarted = documentationPrewarmWaitStarted
+        self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
+    }
+}
+
 private final class DocumentationToolListUpdateWaiter: @unchecked Sendable {
     struct Result: Sendable {
         let update: DocumentationProvider.ToolListUpdate
@@ -51,7 +64,8 @@ private final class DocumentationToolListUpdateWaiter: @unchecked Sendable {
 
     func wait(
         for task: Task<DocumentationProvider.ToolListUpdate, Never>,
-        timeout: TimeAmount
+        timeout: TimeAmount,
+        clock: ClockClient
     ) async -> Result {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -61,7 +75,7 @@ private final class DocumentationToolListUpdateWaiter: @unchecked Sendable {
                     self.resume(Result(update: update, timedOut: false))
                 })
                 addTask(Task {
-                    try? await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
+                    await clock.sleep(.nanoseconds(timeout.nanoseconds))
                     guard Task.isCancelled == false else {
                         return
                     }
@@ -320,6 +334,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let documentationProviderManager: (any DocumentationProviderManaging)?
     package let documentationProviderRoutes: [DocumentationProviderRoute]
     package let prewarmDocumentationProviderOnStartup: Bool
+    package let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
 
     /// Composition-root entry point: the Xcode-specific readiness gate and
@@ -425,6 +440,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         documentationProviderRoutes: [DocumentationProviderRoute] = [],
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
+        testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
         startImmediately: Bool = true,
         runtimeBox providedRuntimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
@@ -463,6 +479,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.documentationProviderManager = documentationProviderManager
         self.documentationProviderRoutes = documentationProviderRoutes
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
+        self.testHooks = testHooks
         let resolvedReadinessGate =
             upstreamReadinessGate
             ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
@@ -1164,9 +1181,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 timedOut: false
             )
         }
+        testHooks.documentationPrewarmWaitStarted?()
         let result = await DocumentationToolListUpdateWaiter().wait(
             for: task,
-            timeout: requestTimeout
+            timeout: requestTimeout,
+            clock: clock
         )
         if result.timedOut {
             logger.debug(
@@ -1216,8 +1235,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 group.addTask {
                     await manager.toolListUpdate(requestTimeout: requestTimeout)
                 }
+                let clock = self.clock
                 group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(requestTimeout.nanoseconds))
+                    await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
                     throw TimeoutError()
                 }
                 guard let update = try await group.next() else {

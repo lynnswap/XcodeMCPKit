@@ -1027,6 +1027,7 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let prewarmStarted = TestSignal()
+        let prewarmWaitStarted = TestSignal()
         let prewarmGate = AsyncGate()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
@@ -1038,6 +1039,11 @@ extension RuntimeCoordinatorTests {
             eventLoop: eventLoop,
             upstreams: [upstream],
             documentationProviderManager: documentationProvider,
+            testHooks: RuntimeCoordinatorTestHooks(
+                documentationPrewarmWaitStarted: {
+                    prewarmWaitStarted.signal()
+                }
+            ),
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -1062,11 +1068,10 @@ extension RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(1)
             )
         }
-        #expect(
-            await staysTrue(for: .milliseconds(100)) {
-                await documentationProvider.toolListUpdateCount() == 0
-            }
+        try await prewarmWaitStarted.wait(
+            description: "tools/list should join the startup documentation prewarm"
         )
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
 
         await prewarmGate.signal()
         let result = try await resultTask.value
@@ -1074,7 +1079,7 @@ extension RuntimeCoordinatorTests {
         #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
         #expect(documentationDescriptorDescription(in: result) == "docs-27.0")
         #expect(await documentationProvider.prewarmCount() == 1)
-        #expect(await documentationProvider.toolListUpdateCount() == 1)
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
     @Test func sharedToolsListRefreshesAfterConsumingStartupDocumentationPrewarm() async throws {
@@ -1125,7 +1130,7 @@ extension RuntimeCoordinatorTests {
 
         #expect(toolNames(in: refreshedResult) == ["XcodeRead"])
         #expect(DocumentationProvider.ToolCatalog.descriptor(in: refreshedResult) == nil)
-        #expect(await documentationProvider.toolListUpdateCount() == 2)
+        #expect(await documentationProvider.toolListUpdateCount() == 1)
     }
 
     @Test func sharedToolsListDoesNotWaitPastTimeoutForStartupDocumentationPrewarm()
@@ -1134,8 +1139,10 @@ extension RuntimeCoordinatorTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let upstream = TestUpstreamClient()
         let prewarmStarted = TestSignal()
+        let prewarmWaitStarted = TestSignal()
         let prewarmGate = AsyncGate()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
@@ -1146,7 +1153,13 @@ extension RuntimeCoordinatorTests {
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
+            clock: clock,
             documentationProviderManager: documentationProvider,
+            testHooks: RuntimeCoordinatorTestHooks(
+                documentationPrewarmWaitStarted: {
+                    prewarmWaitStarted.signal()
+                }
+            ),
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -1165,22 +1178,32 @@ extension RuntimeCoordinatorTests {
         manager.prewarmDocumentationProvider()
         try await prewarmStarted.wait(description: "documentation prewarm started")
 
-        let result = try await waitWithTimeout(
-            "tools/list should not wait for the blocked documentation prewarm",
-            timeout: .milliseconds(500)
-        ) {
+        let resultTask = Task {
             try await manager.sharedToolsList(
                 sessionID: "session-docs-tools-prewarm-timeout",
                 requestTimeoutOverride: .milliseconds(20)
             )
         }
+        try await prewarmWaitStarted.wait(
+            description: "tools/list should join the startup documentation prewarm"
+        )
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(20)
+        )
+        let result = try await waitWithTimeout(
+            "tools/list should not wait for the blocked documentation prewarm"
+        ) {
+            try await resultTask.value
+        }
 
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(await documentationProvider.toolListUpdateCount() == 0)
         await prewarmGate.signal()
-        #expect(await waitUntil(timeout: .seconds(2)) {
+        try await spinUntil("waiting for documentation prewarm to finish") {
             await documentationProvider.prewarmCount() == 1
-        })
+        }
     }
 
     @Test func sharedToolsListRemovesStaleDocumentationSearchWhenProviderUnavailable() async throws {
@@ -1224,15 +1247,20 @@ extension RuntimeCoordinatorTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let upstream = TestUpstreamClient()
+        let toolListStarted = TestSignal()
+        let toolListGate = AsyncGate()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            toolListDelayNanoseconds: 50_000_000
+            toolListStarted: toolListStarted,
+            toolListBlocker: toolListGate
         )
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [upstream],
+            clock: clock,
             documentationProviderManager: documentationProvider
         )
         defer { manager.shutdownAndWait() }
@@ -1250,14 +1278,28 @@ extension RuntimeCoordinatorTests {
             sourceUpstream: 0
         )
 
-        let result = try await manager.sharedToolsList(
-            sessionID: "session-docs-timeout",
-            requestTimeoutOverride: .milliseconds(1)
+        let resultTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-docs-timeout",
+                requestTimeoutOverride: .milliseconds(1)
+            )
+        }
+        try await toolListStarted.wait(description: "documentation tools/list update started")
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(1)
         )
+        let result = try await waitWithTimeout(
+            "documentation tools/list should honor the caller timeout"
+        ) {
+            try await resultTask.value
+        }
 
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(manager.cachedToolsListResult() != nil)
         #expect(await documentationProvider.recordedInvalidateReasons().isEmpty)
+        await toolListGate.signal()
     }
 
     @Test func documentationSearchKeepsCanonicalToolsCatalogWhenProviderRecoversAfterInvalidation() async throws {
@@ -1439,7 +1481,7 @@ extension RuntimeCoordinatorTests {
 
         let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(30).nanoseconds)
-        #expect(await documentationProvider.toolListUpdateCount() == 1)
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
     @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {

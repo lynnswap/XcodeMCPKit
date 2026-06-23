@@ -41,5 +41,12 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: Run package checks
-        run: scripts/check.sh
+      - name: Run package tests
+        run: swift test -Xswiftc -strict-concurrency=minimal
+
+      - name: Run process tests
+        run: |
+          XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+            --no-parallel \
+            --filter ProxyProcessTests \
+            -Xswiftc -strict-concurrency=minimal
