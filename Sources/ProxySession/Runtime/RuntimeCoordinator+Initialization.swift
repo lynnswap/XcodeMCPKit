@@ -137,7 +137,8 @@ extension RuntimeCoordinator {
         )
         let handlesPrimaryInitialize = isPrimaryInitialize
             || (
-                upstreamIndex == 0
+                xcodeProcessRoutes.isEmpty
+                    && upstreamIndex == 0
                     && initializeManager.activePrimaryInitializeUpstreamIndex() == nil
             )
 
@@ -354,7 +355,11 @@ extension RuntimeCoordinator {
         ]
         let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
         let handlesPrimaryInitialize = activePrimaryUpstreamIndex == upstreamIndex
-            || (upstreamIndex == 0 && activePrimaryUpstreamIndex == nil)
+            || (
+                xcodeProcessRoutes.isEmpty
+                    && upstreamIndex == 0
+                    && activePrimaryUpstreamIndex == nil
+            )
         if handlesPrimaryInitialize {
             let didRetry = retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,

@@ -210,6 +210,7 @@ struct RuntimeCoordinatorTests {
         await upstream0.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
         _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
         #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
         #expect(manager.documentationCandidateProcessOrder() == [
             newerTarget.processID,
             olderTarget.processID,
