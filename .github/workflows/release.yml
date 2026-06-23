@@ -18,8 +18,8 @@ concurrency:
 jobs:
   build-release:
     name: Build Release
-    runs-on: macos-15
-    timeout-minutes: 30
+    runs-on: macos-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -75,10 +75,10 @@ jobs:
             echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
           fi
 
-      - name: Setup Swift 6.2
+      - name: Setup Swift 6.3
         uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
         with:
-          swift-version: "6.2"
+          swift-version: "6.3"
 
       - name: Run package checks
         run: scripts/check.sh

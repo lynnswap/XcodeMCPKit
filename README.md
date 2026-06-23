@@ -7,8 +7,8 @@ endpoint and automates the `mcpbridge` approval flow.
 
 ## Requirements
 
-- macOS 15.0+
-- Swift 6.2+
+- macOS 15.4+
+- Swift 6.3+
 
 ## Install
 

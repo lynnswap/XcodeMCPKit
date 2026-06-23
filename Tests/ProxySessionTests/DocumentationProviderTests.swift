@@ -10,6 +10,20 @@ import XcodeMCPTestSupport
 @testable import ProxySession
 
 extension RuntimeCoordinatorTests {
+    @Test func documentationProviderConnectionCancelsEventReaderOnDeinit() async throws {
+        let terminated = TestSignal()
+        var connection: DocumentationProviderConnection? = DocumentationProviderConnection(
+            session: HangingDocumentationEventSession(terminationSignal: terminated)
+        )
+
+        await connection?.start()
+        connection = nil
+
+        try await terminated.wait(
+            description: "waiting for documentation provider event reader termination"
+        )
+    }
+
     @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
         var config = makeConfig(requestTimeout: 5)
         let transport = UnavailableDocumentationProviderTransport()
@@ -3354,5 +3368,29 @@ extension RuntimeCoordinatorTests {
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"after-cancel\"}")
         #expect(await factory.startedPIDs() == [xcode.processID])
         #expect(await factory.documentationQueries(for: xcode.processID) == ["UIView", "SwiftUI"])
+    }
+}
+
+private actor HangingDocumentationEventSession: UpstreamSession {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+
+    init(terminationSignal: TestSignal) {
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            continuation.onTermination = { @Sendable _ in
+                terminationSignal.signal()
+            }
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func send(_: Data) async -> Upstream.SendResult {
+        .accepted
+    }
+
+    func stop() async {
+        continuation.finish()
     }
 }

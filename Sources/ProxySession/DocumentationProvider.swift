@@ -1253,6 +1253,11 @@ package actor DocumentationProviderConnection {
         self.clock = clock
     }
 
+    isolated deinit {
+        eventTask?.cancel()
+        failAll(CancellationError())
+    }
+
     package func start() {
         guard eventTask == nil else { return }
         let session = session

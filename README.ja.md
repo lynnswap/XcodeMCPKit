@@ -6,8 +6,8 @@ XcodeMCPKitは、Xcode MCPのためのローカルプロキシです。MCPクラ
 
 ## 要件
 
-- macOS 15.0+
-- Swift 6.2+
+- macOS 15.4+
+- Swift 6.3+
 
 ## インストール
 

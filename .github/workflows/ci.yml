@@ -25,16 +25,16 @@ concurrency:
 jobs:
   package-tests:
     name: Package Tests (macOS)
-    runs-on: macos-15
-    timeout-minutes: 20
+    runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Setup Swift 6.2
+      - name: Setup Swift 6.3
         uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2
         with:
-          swift-version: "6.2"
+          swift-version: "6.3"
 
       - name: Run package checks
         run: scripts/check.sh
