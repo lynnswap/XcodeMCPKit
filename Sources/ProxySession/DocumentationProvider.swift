@@ -1051,6 +1051,9 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         guard let data = output.stdout.data(using: .utf8) else {
             return []
         }
+        guard output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return []
+        }
         return try JSONDecoder().decode([SearchRow].self, from: data)
     }
 

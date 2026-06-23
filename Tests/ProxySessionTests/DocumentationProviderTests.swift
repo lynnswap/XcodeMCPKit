@@ -1994,6 +1994,48 @@ extension RuntimeCoordinatorTests {
         ) == true)
     }
 
+    @Test func liveDocumentationAssetSearchProviderTreatsEmptySQLiteOutputAsNoResults()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let runner = StubProcessRunner(output: ProcessOutput(
+            terminationStatus: 0,
+            stdout: "",
+            stderr: ""
+        ))
+        let provider = LiveDocumentationAssetSearchProvider(
+            assetRoot: root,
+            currentOSVersion: { "26.5.1" },
+            processRunner: runner
+        )
+        let target = documentationProviderTarget(processID: 127, xcodeVersion: "26.6")
+
+        let response = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "NoMatch"),
+            for: target,
+            timeout: .seconds(1)
+        )
+
+        let maybeText = try toolContentText(in: response)
+        let text = try #require(maybeText)
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
+        )
+        let documents = try #require(payload["documents"] as? [[String: Any]])
+        #expect(documents.isEmpty)
+        #expect(payload["source"] as? String == "installed-documentation-asset")
+    }
+
     @Test func liveDocumentationAssetSearchProviderHonorsSearchTimeout()
         async throws
     {
