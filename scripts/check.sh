@@ -5,10 +5,38 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$repo_root"
 
-swift test \
+begin_group() {
+  local name="$1"
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    printf '::group::%s\n' "$name"
+  else
+    printf '==> %s\n' "$name"
+  fi
+}
+
+end_group() {
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    printf '::endgroup::\n'
+  fi
+}
+
+run_group() {
+  local name="$1"
+  shift
+
+  begin_group "$name"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  end_group
+  return "$status"
+}
+
+run_group "swift test" swift test \
   -Xswiftc -strict-concurrency=minimal
 
-XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+run_group "ProxyProcessTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
   --no-parallel \
   --filter ProxyProcessTests \
   -Xswiftc -strict-concurrency=minimal

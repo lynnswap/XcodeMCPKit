@@ -1632,6 +1632,29 @@ func makeDeterministicClockClient(
     )
 }
 
+func makeRuntimeCoordinatorDeterministicClocks()
+    -> (clock: ClockClient, timeoutClock: TestClock, uptimeClock: TestUptimeClock)
+{
+    let timeoutClock = TestClock()
+    let uptimeClock = TestUptimeClock()
+    return (
+        makeDeterministicClockClient(timeoutClock: timeoutClock, uptimeClock: uptimeClock),
+        timeoutClock,
+        uptimeClock
+    )
+}
+
+func advanceRuntimeCoordinatorTimeout(
+    timeoutClock: TestClock,
+    uptimeClock: TestUptimeClock,
+    by duration: Duration,
+    suspendedSleepers: Int = 1
+) async {
+    await timeoutClock.sleep(untilSuspendedBy: suspendedSleepers)
+    uptimeClock.advance(by: duration)
+    timeoutClock.advance(by: duration)
+}
+
 func spinUntilSentCount(
     _ upstream: TestUpstreamClient,
     count: Int,
