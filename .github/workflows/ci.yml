@@ -25,7 +25,7 @@ concurrency:
 jobs:
   package-tests:
     name: Package Tests (macOS)
-    runs-on: macos-latest
+    runs-on: macos-26-arm64
     timeout-minutes: 10
     steps:
       - name: Checkout
