@@ -261,6 +261,8 @@ package struct MCPForwardingService: Sendable {
             ) {
             case .forward(let resolvedUpstreamIndex):
                 preferredUpstreamIndex = resolvedUpstreamIndex
+            case .localXcodeListWindows:
+                return .unavailable
             case .reject:
                 return .unavailable
             }

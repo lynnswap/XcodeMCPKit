@@ -2824,6 +2824,49 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndex == 0)
     }
 
+    @Test func publicXcodeListWindowsRoutesToLocalAggregation() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target0 = xcodeProcessTarget(processID: 618, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 619, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [toolDescriptor(name: "XcodeListWindows")]),
+                (target1, 1, [toolDescriptor(name: "XcodeListWindows")]),
+            ]
+        )
+
+        let decision = try #require(
+            manager.immediateToolRoutingDecision(
+                for: toolsCallObject(
+                    id: 118,
+                    name: "XcodeListWindows",
+                    arguments: [:]
+                )
+            )
+        )
+
+        guard case .localXcodeListWindows = decision else {
+            Issue.record("expected XcodeListWindows to resolve through local aggregation")
+            return
+        }
+    }
+
     @Test func ownerBoundBatchRejectsToolMissingFromOwnerProcess() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

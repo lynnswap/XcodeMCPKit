@@ -300,6 +300,21 @@ extension RuntimeCoordinator {
             return .forward(preferredUpstreamIndex: nil)
         }
         let requests = toolRoutingRequests(in: requestJSON)
+        let xcodeListWindowsRequests = requests.filter {
+            $0.toolName == "XcodeListWindows"
+        }
+        if xcodeListWindowsRequests.isEmpty == false {
+            guard xcodeListWindowsRequests.count == requests.count else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: requests,
+                        message: "XcodeListWindows must be resolved locally before forwarding mixed batches"
+                    ),
+                    forceBatchArray: requestJSON is [Any]
+                )
+            }
+            return .localXcodeListWindows
+        }
         let ownerBoundRequests = requests.filter {
             processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
                 || cachedOwnerBoundToolNames().contains($0.toolName)

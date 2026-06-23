@@ -1423,6 +1423,156 @@ struct HTTPHandlerTests {
         try await group.shutdownGracefully()
     }
 
+    @Test func httpToolRoutingLocalXcodeListWindowsReturnsAggregatedResult() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: tab-http, workspacePath: /Work/HTTP.xcworkspace"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+        sessionManager.setToolRoutingDecision(.localXcodeListWindows)
+        let service = HTTPPostService(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 3303)))
+            let payload = toolsCallPayload(
+                id: 3303,
+                name: "XcodeListWindows",
+                arguments: [:]
+            )
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.makeForwardingOperation(
+                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                    bodyData: bodyData,
+                    localResponseData: nil,
+                    forwardedResponseIDs: [requestID],
+                    forceBatchArray: false
+                ),
+                sessionID: "session-routing-local-windows",
+                headerSessionID: "session-routing-local-windows",
+                requestIsBatch: false,
+                prefersEventStream: false,
+                eventLoop: group.next(),
+                requestTimeoutOverride: nil,
+                parentCancellationHandle: nil
+            )
+
+            let resolution = try await operation.future.get()
+            let responseData: Data
+            switch resolution {
+            case .responseData(let data, _, _):
+                responseData = data
+            default:
+                Issue.record("expected response data, got \(resolution)")
+                return
+            }
+            let object = try #require(
+                JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+            )
+            #expect((object["id"] as? NSNumber)?.intValue == 3303)
+            let result = try #require(object["result"] as? [String: Any])
+            let content = try #require(result["content"] as? [[String: Any]])
+            #expect((content.first?["text"] as? String)?.contains("tab-http") == true)
+            #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
+            #expect(sessionManager.assignedUpstreamIDCount() == 0)
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        try await group.shutdownGracefully()
+    }
+
+    @Test func httpLocalToolFilterExtractsXcodeListWindowsFromBatch() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: tab-batch, workspacePath: /Work/Batch.xcworkspace"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+        let service = HTTPPostService(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let batch: [[String: Any]] = [
+                toolsCallPayload(
+                    id: 3304,
+                    name: "XcodeListWindows",
+                    arguments: [:]
+                ),
+                toolsCallPayload(
+                    id: 3305,
+                    name: "XcodeRead",
+                    arguments: ["filePath": "App.swift"]
+                ),
+            ]
+            let bodyData = try JSONSerialization.data(withJSONObject: batch, options: [])
+            let routing = try service.routeToolCalls(
+                bodyData: bodyData,
+                sessionID: "session-routing-local-windows-batch",
+                forceBatchArray: true,
+                eventLoop: group.next(),
+                requestTimeoutOverride: nil
+            )
+            let localOperation = try #require(routing.localOperation)
+            let forwardedData = try #require(routing.forwardedRequest.bodyData)
+            let forwardedObjects = try #require(
+                JSONSerialization.jsonObject(with: forwardedData, options: []) as? [[String: Any]]
+            )
+            let forwardedObject = try #require(forwardedObjects.first)
+            #expect(forwardedObjects.count == 1)
+            #expect((forwardedObject["id"] as? NSNumber)?.intValue == 3305)
+
+            let localResult = try await localOperation.localResponseFuture.get()
+            let localData = try #require(localResult.responseData)
+            let localObjects = try #require(
+                JSONSerialization.jsonObject(with: localData, options: []) as? [[String: Any]]
+            )
+            #expect(localObjects.count == 1)
+            #expect((localObjects.first?["id"] as? NSNumber)?.intValue == 3304)
+            let result = try #require(localObjects.first?["result"] as? [String: Any])
+            let content = try #require(result["content"] as? [[String: Any]])
+            #expect((content.first?["text"] as? String)?.contains("tab-batch") == true)
+            #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        try await group.shutdownGracefully()
+    }
+
     @Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()

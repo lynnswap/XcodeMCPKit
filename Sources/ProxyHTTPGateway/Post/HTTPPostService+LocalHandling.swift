@@ -164,6 +164,7 @@ extension HTTPPostService {
         var didBlockItem = false
         var blockedResponseObjects: [[String: Any]] = []
         var toolsListRequests: [[String: Any]] = []
+        var xcodeListWindowsRequests: [[String: Any]] = []
         var documentationRequests: [[String: Any]] = []
         var forwardedObjects: [Any] = []
         var routedObjects: [Any] = []
@@ -185,6 +186,9 @@ extension HTTPPostService {
             } else if allowLocalToolRoutes, isToolsListRequest(object) {
                 toolsListRequests.append(object)
                 routedObjects.append(object)
+            } else if allowLocalToolRoutes, isXcodeListWindowsRequest(object) {
+                xcodeListWindowsRequests.append(object)
+                routedObjects.append(object)
             } else if allowLocalToolRoutes, isDocumentationSearchRequest(object) {
                 documentationRequests.append(object)
                 routedObjects.append(object)
@@ -195,7 +199,9 @@ extension HTTPPostService {
         }
 
         let hasLocalToolRoutes =
-            toolsListRequests.isEmpty == false || documentationRequests.isEmpty == false
+            toolsListRequests.isEmpty == false
+                || xcodeListWindowsRequests.isEmpty == false
+                || documentationRequests.isEmpty == false
 
         // Untouched requests forward with their original bytes. A blocked
         // notification produces no response object but must still be dropped.
@@ -268,6 +274,7 @@ extension HTTPPostService {
             let localBatchResult = await makeLocalToolBatchResult(
                 initialLocalResponseData: initialLocalResponseData,
                 toolsListRequests: toolsListRequests,
+                xcodeListWindowsRequests: xcodeListWindowsRequests,
                 documentationRequests: documentationRequests,
                 sessionID: sessionID,
                 forceBatchArray: forceBatchArray,
@@ -324,6 +331,7 @@ extension HTTPPostService {
     private func makeLocalToolBatchResult(
         initialLocalResponseData: Data?,
         toolsListRequests: [[String: Any]],
+        xcodeListWindowsRequests: [[String: Any]],
         documentationRequests: [[String: Any]],
         sessionID: String,
         forceBatchArray: Bool,
@@ -334,6 +342,10 @@ extension HTTPPostService {
             sessionID: sessionID,
             deadline: deadline
         )
+        let xcodeListWindowsResponseData = await makeXcodeListWindowsBatchResponseData(
+            requests: xcodeListWindowsRequests,
+            deadline: deadline
+        )
         let documentationResult = await makeDocumentationSearchBatchResult(
             requests: documentationRequests,
             deadline: deadline
@@ -342,6 +354,7 @@ extension HTTPPostService {
             [
                 initialLocalResponseData,
                 toolsListResponseData,
+                xcodeListWindowsResponseData,
                 documentationResult.responseData,
             ],
             forceBatchArray: true
@@ -421,6 +434,48 @@ extension HTTPPostService {
             from: responseObjects,
             forceBatchArray: true
         )
+    }
+
+    private func makeXcodeListWindowsBatchResponseData(
+        requests: [[String: Any]],
+        deadline: Date?
+    ) async -> Data? {
+        let requestIDs = requests.compactMap {
+            JSONRPC.Message.Inspector.requestID(from: $0)
+        }
+        guard requestIDs.isEmpty == false else {
+            return nil
+        }
+        let requestTimeout = Self.remainingRequestTimeout(until: deadline)
+        if deadline != nil,
+            requestTimeout == nil
+        {
+            return Self.makeJSONRPCErrorResponseData(
+                ids: requestIDs,
+                code: -32000,
+                message: "upstream timeout",
+                forceBatchArray: true
+            )
+        }
+        do {
+            let result = try await sessionManager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: requestTimeout
+            )
+            return Self.makeJSONRPCResultResponseData(
+                ids: requestIDs,
+                result: result,
+                forceBatchArray: true
+            )
+        } catch {
+            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+            return Self.makeJSONRPCErrorResponseData(
+                ids: requestIDs,
+                code: mapped.code,
+                message: mapped.message,
+                forceBatchArray: true
+            )
+        }
     }
 
     private func makeDocumentationSearchBatchResult(
@@ -516,6 +571,16 @@ extension HTTPPostService {
             let params = object["params"] as? [String: Any],
             params["name"] as? String == DocumentationProvider.ToolCatalog.toolName,
             disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false else {
+            return false
+        }
+        return true
+    }
+
+    private func isXcodeListWindowsRequest(_ object: [String: Any]) -> Bool {
+        guard case .request("tools/call", _) = JSONRPC.Message.Inspector.kind(of: object),
+            let params = object["params"] as? [String: Any],
+            params["name"] as? String == "XcodeListWindows",
+            disabledToolNames.contains("XcodeListWindows") == false else {
             return false
         }
         return true

@@ -6,6 +6,7 @@ import ProxyMCP
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import ProxySession
+import ProxySessionControlPlane
 
 package final class HTTPPostService: Sendable {
     package struct FilteredToolCallRequest: Sendable {
@@ -517,6 +518,76 @@ package final class HTTPPostService: Sendable {
                         emptyStatus: .accepted
                     )
                 )
+            case .localXcodeListWindows:
+                guard forwardedRequestIDs.isEmpty == false else {
+                    cancellationHandle.markCompleted()
+                    self.sessionManager.completeRequestLease(leaseID)
+                    return eventLoop.makeSucceededFuture(
+                        Self.makeLocalResponseResolution(
+                            responseData: localResponseData,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream,
+                            emptyStatus: .accepted
+                        )
+                    )
+                }
+                let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+                let responseIDs = forwardedRequestIDs
+                let forceBatchArray = requestIsBatch || filteredRequest.forceBatchArray
+                let task = Task { [self] in
+                    let responseData: Data?
+                    if Task.isCancelled {
+                        responseData = localResponseData
+                    } else {
+                        do {
+                            let result = try await sessionManager.liveXcodeListWindowsResult(
+                                route: .anyHealthy,
+                                requestTimeoutOverride: requestTimeoutOverride
+                            )
+                            let resultData = Self.makeJSONRPCResultResponseData(
+                                ids: responseIDs,
+                                result: result,
+                                forceBatchArray: forceBatchArray
+                            )
+                            responseData = Self.mergeBatchResponsePayloads(
+                                [
+                                    resultData,
+                                    localResponseData,
+                                ],
+                                forceBatchArray: forceBatchArray
+                            )
+                        } catch {
+                            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+                            let errorData = Self.makeJSONRPCErrorResponseData(
+                                ids: responseIDs,
+                                code: mapped.code,
+                                message: mapped.message,
+                                forceBatchArray: forceBatchArray
+                            )
+                            responseData = Self.mergeBatchResponsePayloads(
+                                [
+                                    errorData,
+                                    localResponseData,
+                                ],
+                                forceBatchArray: forceBatchArray
+                            )
+                        }
+                    }
+                    eventLoop.execute {
+                        cancellationHandle.markCompleted()
+                        self.sessionManager.completeRequestLease(leaseID)
+                        promise.succeed(
+                            Self.makeLocalResponseResolution(
+                                responseData: responseData,
+                                sessionID: sessionID,
+                                prefersEventStream: prefersEventStream,
+                                emptyStatus: .accepted
+                            )
+                        )
+                    }
+                }
+                cancellationHandle.bindRefreshTask(task)
+                return promise.futureResult
             case .forward(let preferredUpstreamIndex):
                 return self.sessionManager.enqueueOnUpstreamSlot(
                     leaseID: leaseID,

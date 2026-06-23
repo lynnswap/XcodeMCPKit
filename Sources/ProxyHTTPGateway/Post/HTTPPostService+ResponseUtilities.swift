@@ -475,6 +475,35 @@ extension HTTPPostService {
         return try? JSONSerialization.data(withJSONObject: payload, options: [])
     }
 
+    package static func makeJSONRPCResultResponseObject(
+        id: JSONRPC.ID,
+        result: JSONValue
+    ) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "result": result.foundationObject,
+        ]
+    }
+
+    package static func makeJSONRPCResultResponseData(
+        ids: [JSONRPC.ID],
+        result: JSONValue,
+        forceBatchArray: Bool
+    ) -> Data? {
+        let objects = ids.map {
+            makeJSONRPCResultResponseObject(id: $0, result: result)
+        }
+        guard !objects.isEmpty else {
+            return nil
+        }
+        let payload: Any = (forceBatchArray || objects.count > 1) ? objects : objects[0]
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            return nil
+        }
+        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
     package static func makeToolResponseData(
         from responseObjects: [[String: Any]],
         forceBatchArray: Bool

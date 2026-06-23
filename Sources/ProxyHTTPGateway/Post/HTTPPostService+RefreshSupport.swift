@@ -73,6 +73,11 @@ extension HTTPPostService {
         ) {
         case .forward(let resolvedUpstreamIndex):
             preferredUpstreamIndex = resolvedUpstreamIndex
+        case .localXcodeListWindows:
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
         case .reject:
             return .upstreamUnavailable(
                 responseIDs: requestIDs,
