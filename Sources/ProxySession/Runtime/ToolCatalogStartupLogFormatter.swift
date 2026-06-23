@@ -33,13 +33,15 @@ package enum ToolCatalogStartupLogFormatter {
             names.contains(DocumentationProvider.ToolCatalog.toolName)
             ? "available"
             : "unavailable"
-        let available = names.isEmpty ? "none" : names.joined(separator: ", ")
+        let availableNames = names.isEmpty ? ["none"] : names
 
-        return [
+        var lines = [
             "\(indent)DocumentationSearch: \(documentationSearchStatus)",
             "\(indent)Count: \(names.count)",
-            "\(indent)Available: \(available)",
+            "\(indent)Available:",
         ]
+        lines.append(contentsOf: availableNames.map { "\(indent)  - \($0)" })
+        return lines
     }
 
     private static func toolNames(in result: JSONValue) -> [String] {
