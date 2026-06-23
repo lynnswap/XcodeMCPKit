@@ -1956,6 +1956,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         case failed(any Error)
     }
 
+    private enum InstalledDocumentationAssetFallbackAttempt: Sendable {
+        case success(InstalledDocumentationAssetFallback)
+        case unavailable
+        case requestFailed(any Error)
+    }
+
     private func attemptDocumentationSearch(
         requestData: Data,
         provider: ActiveProvider,
@@ -1988,35 +1994,23 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             )
             guard !DocumentationProvider.ToolCatalog.responseIsDocumentationNotEnabled(response)
             else {
-                if let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
+                if let fallbackResult = try await documentationAttemptResultFromInstalledDocumentationAssetFallback(
                     requestData: requestData,
-                    target: provider.profile.target,
+                    provider: provider.profile,
                     deadline: deadline
                 ) {
-                    return .success(
-                        data: fallback.responseData,
-                        replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
-                            provider.profile,
-                            fallback: fallback
-                        )
-                    )
+                    return fallbackResult
                 }
                 await invalidate(provider, reason: "documentation_search_tool_error")
                 return .rejected(processID: processID, permanentlyUnusable: true)
             }
             if DocumentationProvider.ToolCatalog.responseIsDocumentationProviderFailure(response) {
-                if let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
+                if let fallbackResult = try await documentationAttemptResultFromInstalledDocumentationAssetFallback(
                     requestData: requestData,
-                    target: provider.profile.target,
+                    provider: provider.profile,
                     deadline: deadline
                 ) {
-                    return .success(
-                        data: fallback.responseData,
-                        replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
-                            provider.profile,
-                            fallback: fallback
-                        )
-                    )
+                    return fallbackResult
                 }
                 await invalidate(provider, reason: "documentation_search_provider_failure")
                 return .rejected(processID: processID, permanentlyUnusable: false)
@@ -2025,18 +2019,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            if let fallback = try await callInstalledDocumentationAssetFallbackIfAvailable(
+            if let fallbackResult = try await documentationAttemptResultFromInstalledDocumentationAssetFallback(
                 requestData: requestData,
-                target: provider.profile.target,
+                provider: provider.profile,
                 deadline: deadline
             ) {
-                return .success(
-                    data: fallback.responseData,
-                    replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
-                        provider.profile,
-                        fallback: fallback
-                    )
-                )
+                return fallbackResult
             }
             await invalidate(provider, reason: "documentation_provider_call_failed")
             return .failed(error)
@@ -2060,17 +2048,45 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return nsError.domain == NSCocoaErrorDomain
     }
 
-    private func callInstalledDocumentationAssetFallbackIfAvailable(
+    private func documentationAttemptResultFromInstalledDocumentationAssetFallback(
+        requestData: Data,
+        provider: CandidateProfile,
+        deadline: Deadline?
+    ) async throws -> DocumentationAttemptResult? {
+        switch try await attemptInstalledDocumentationAssetFallback(
+            requestData: requestData,
+            target: provider.target,
+            deadline: deadline
+        ) {
+        case .success(let fallback):
+            return .success(
+                data: fallback.responseData,
+                replacementProfile: profileByUsingInstalledDocumentationAssetFallback(
+                    provider,
+                    fallback: fallback
+                )
+            )
+        case .unavailable:
+            return nil
+        case .requestFailed(let error):
+            return .requestFailed(error)
+        }
+    }
+
+    private func attemptInstalledDocumentationAssetFallback(
         requestData: Data,
         target: DocumentationProviderTarget,
         deadline: Deadline?
-    ) async throws -> InstalledDocumentationAssetFallback? {
+    ) async throws -> InstalledDocumentationAssetFallbackAttempt {
         do {
-            return try await callInstalledDocumentationAssetFallback(
+            guard let fallback = try await callInstalledDocumentationAssetFallback(
                 requestData: requestData,
                 target: target,
                 deadline: deadline
-            )
+            ) else {
+                return .unavailable
+            }
+            return .success(fallback)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -2078,7 +2094,10 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 "Installed documentation asset fallback failed",
                 metadata: candidateLogMetadata(target: target, error: error)
             )
-            return nil
+            if installedDocumentationAssetFailureIsRequestScoped(error) {
+                return .requestFailed(error)
+            }
+            return .unavailable
         }
     }
 

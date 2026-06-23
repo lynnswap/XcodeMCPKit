@@ -1861,6 +1861,64 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
     }
 
+    @Test func documentationProviderKeepsLiveProviderAfterInitialAssetFallbackRequestTimeout()
+        async throws
+    {
+        let target = documentationProviderTarget(processID: 129, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled,
+                        userCallResponses: [.notEnabled]
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 131,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 0
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let timeoutOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 131, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .failed(let error, let timeoutInvalidatedProvider) = timeoutOutcome else {
+            Issue.record("expected failed timeout outcome, got \(timeoutOutcome)")
+            return
+        }
+        #expect(error is TimeoutError)
+        #expect(timeoutInvalidatedProvider == false)
+
+        let retryOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 132, query: "UIKit"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let retryData, let retryInvalidatedProvider) = retryOutcome else {
+            Issue.record("expected retry handled outcome, got \(retryOutcome)")
+            return
+        }
+        #expect(retryInvalidatedProvider)
+        #expect(try toolContentText(in: retryData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI", "UIKit"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 2)
+    }
+
     @Test func documentationProviderFallsBackToInstalledAssetWhenXcodeConfigIsBroken()
         async throws
     {

@@ -84,6 +84,34 @@ struct ProcessRunnerTests {
         }
     }
 
+    @Test func processRunnerTimeoutDoesNotWaitForInheritedPipeEOF() async throws {
+        let runner = ProcessRunner()
+        let script = """
+        import subprocess
+        import time
+
+        subprocess.Popen(["/bin/sleep", "3"])
+        time.sleep(3)
+        """
+
+        await #expect(throws: ProcessTimeoutError.self) {
+            _ = try await waitWithTimeout(
+                "ProcessRunner should time out without waiting for child-held pipes",
+                timeout: .seconds(2)
+            ) {
+                try await runner.run(
+                    ProcessRequest(
+                        label: "timeout-inherited-pipe",
+                        executablePath: "/usr/bin/python3",
+                        arguments: ["-c", script],
+                        input: nil,
+                        timeoutNanoseconds: 100_000_000
+                    )
+                )
+            }
+        }
+    }
+
     @Test func processRunnerCancelsRunningProcessPromptly() async throws {
         let runner = ProcessRunner()
         let task = Task {

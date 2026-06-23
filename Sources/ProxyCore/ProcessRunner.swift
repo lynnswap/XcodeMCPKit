@@ -259,11 +259,13 @@ package struct ProcessRunner: ProcessRunning {
 
                 process.terminationHandler = { process in
                     DispatchQueue.global().async {
-                        drainGroup.wait()
                         if timeoutState.markTerminatedAndCheckTimedOut() {
+                            stdoutCollector.cancel()
+                            stderrCollector.cancel()
                             resumeOnce(.failure(ProcessTimeoutError(label: request.label)))
                             return
                         }
+                        drainGroup.wait()
                         let output = ProcessOutput(
                             terminationStatus: process.terminationStatus,
                             stdout: String(decoding: stdoutCollector.collectedData(), as: UTF8.self),
