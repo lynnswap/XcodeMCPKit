@@ -296,7 +296,7 @@ extension RuntimeCoordinator {
         let distinctOwners = Set(ownerResolution.resolved.map(\.processID))
         if distinctOwners.count > 1 {
             return .reject(
-                errors: ownerBoundRequests.compactMap { request in
+                errors: requests.compactMap { request in
                     guard let id = request.id else { return nil }
                     return ToolRoutingError(
                         id: id,

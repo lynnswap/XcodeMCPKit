@@ -2943,6 +2943,11 @@ struct RuntimeCoordinatorTests {
                     name: "BuildProject",
                     arguments: ["tabIdentifier": "tab-c"]
                 ),
+                toolsCallObject(
+                    id: 114,
+                    name: "SharedTool",
+                    arguments: [:]
+                ),
             ],
             requestTimeoutOverride: .seconds(2)
         )
@@ -2951,7 +2956,7 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(forceBatchArray)
-        #expect(errors.map(\.id.key) == ["107", "108"])
+        #expect(errors.map(\.id.key) == ["107", "108", "114"])
         #expect(errors.allSatisfy { $0.message.contains("mixed Xcode window owners") })
     }
 
