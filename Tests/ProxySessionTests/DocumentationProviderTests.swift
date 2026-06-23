@@ -788,6 +788,57 @@ extension RuntimeCoordinatorTests {
         #expect(await documentationProvider.toolListUpdateCount() == 1)
     }
 
+    @Test func sharedToolsListRefreshesAfterConsumingStartupDocumentationPrewarm() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    [
+                        "name": "XcodeRead",
+                        "description": "read",
+                    ],
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.prewarmDocumentationProvider()
+        try await spinUntil("waiting for documentation prewarm") {
+            await documentationProvider.prewarmCount() == 1
+        }
+
+        let prewarmedResult = try await manager.sharedToolsList(
+            sessionID: "session-docs-tools-prewarm-once",
+            requestTimeoutOverride: .seconds(1)
+        )
+        #expect(toolNames(in: prewarmedResult) == ["XcodeRead", "DocumentationSearch"])
+        #expect(documentationDescriptorDescription(in: prewarmedResult) == "docs-27.0")
+
+        await documentationProvider.invalidate(reason: "test")
+        let refreshedResult = try await manager.sharedToolsList(
+            sessionID: "session-docs-tools-after-prewarm",
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        #expect(toolNames(in: refreshedResult) == ["XcodeRead"])
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: refreshedResult) == nil)
+        #expect(await documentationProvider.toolListUpdateCount() == 2)
+    }
+
     @Test func sharedToolsListDoesNotWaitPastTimeoutForStartupDocumentationPrewarm()
         async throws
     {
@@ -1782,6 +1833,41 @@ extension RuntimeCoordinatorTests {
         #expect(report.configURL.hasPrefix("/"))
         #expect(report.configURL.contains("xcode-26-5.asset/AssetData/config.json"))
         #expect(writtenValues.withLockedValue { $0 } == [report.configURL])
+    }
+
+    @Test func documentationAssetLocatorTreatsTrailingZeroXcodeVersionsAsExactMatch()
+        throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26",
+            xcodeVersion: "26",
+            osVersion: "26.0",
+            documentationRelease: 900100
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-0-0",
+            xcodeVersion: "26.0.0",
+            osVersion: "26.0",
+            documentationRelease: 900200
+        )
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: root)
+
+        let asset = try #require(
+            DocumentationSearchAssetLocator.bestAsset(
+                for: "26.0",
+                currentOSVersion: "26.0",
+                from: scan.assets
+            )
+        )
+
+        #expect(asset.xcodeVersion == "26.0.0")
+        #expect(asset.documentationRelease == 900200)
     }
 
     @Test func liveDocumentationAssetSearchProviderReturnsInstalledAssetResults()

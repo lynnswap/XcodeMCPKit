@@ -600,6 +600,9 @@ package enum DocumentationSearchAssetLocator {
                 return .orderedDescending
             }
         }
+        if lhsParts.isEmpty == false, rhsParts.isEmpty == false {
+            return .orderedSame
+        }
         return lhs.localizedStandardCompare(rhs)
     }
 
@@ -2742,6 +2745,9 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             if lhsValue > rhsValue {
                 return .orderedDescending
             }
+        }
+        if lhsParts.isEmpty == false, rhsParts.isEmpty == false {
+            return .orderedSame
         }
         return lhs.localizedStandardCompare(rhs)
     }

@@ -83,6 +83,32 @@ struct ProcessRunnerTests {
             }
         }
     }
+
+    @Test func processRunnerCancelsRunningProcessPromptly() async throws {
+        let runner = ProcessRunner()
+        let task = Task {
+            try await runner.run(
+                ProcessRequest(
+                    label: "cancel",
+                    executablePath: "/bin/sleep",
+                    arguments: ["5"],
+                    input: nil
+                )
+            )
+        }
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await waitWithTimeout(
+                "ProcessRunner should finish promptly when cancelled",
+                timeout: .seconds(1)
+            ) {
+                try await task.value
+            }
+        }
+    }
 }
 
 private extension String {

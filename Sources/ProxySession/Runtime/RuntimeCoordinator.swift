@@ -1086,11 +1086,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return baseResult
         }
         let update: DocumentationProvider.ToolListUpdate
-        if let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) {
-            update = await documentationToolListUpdate(
-                fromPrewarmTask: documentationPrewarmTask,
-                requestTimeout: requestTimeout
-            ).update
+        if let prewarmResult = await consumeDocumentationPrewarmTaskUpdate(
+            requestTimeout: requestTimeout
+        ) {
+            update = prewarmResult.update
         } else {
             update = await documentationProviderManager.startBackgroundDiscovery(
                 requestTimeout: requestTimeout
@@ -1122,11 +1121,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         manager: any DocumentationProviderManaging,
         requestTimeout: TimeAmount?
     ) async -> DocumentationProvider.ToolListUpdate {
-        if let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) {
-            let prewarmResult = await documentationToolListUpdate(
-                fromPrewarmTask: documentationPrewarmTask,
-                requestTimeout: requestTimeout
-            )
+        if let prewarmResult = await consumeDocumentationPrewarmTaskUpdate(
+            requestTimeout: requestTimeout
+        ) {
             let prewarmUpdate = prewarmResult.update
             if case .available = prewarmUpdate {
                 return prewarmUpdate
@@ -1134,12 +1131,27 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             if prewarmResult.timedOut {
                 return .unavailable
             }
-            documentationPrewarmTaskBox.withLockedValue { $0 = nil }
         }
         return await documentationToolListUpdate(
             manager: manager,
             requestTimeout: requestTimeout
         )
+    }
+
+    private func consumeDocumentationPrewarmTaskUpdate(
+        requestTimeout: TimeAmount?
+    ) async -> DocumentationToolListUpdateWaiter.Result? {
+        guard let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) else {
+            return nil
+        }
+        let result = await documentationToolListUpdate(
+            fromPrewarmTask: documentationPrewarmTask,
+            requestTimeout: requestTimeout
+        )
+        if result.timedOut == false {
+            documentationPrewarmTaskBox.withLockedValue { $0 = nil }
+        }
+        return result
     }
 
     private func documentationToolListUpdate(
