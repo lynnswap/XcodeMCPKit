@@ -2060,6 +2060,80 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func sessionManagerToolsListDropsStaleProcessCatalogAfterRefreshFailure()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let staleUpstream = TestUpstreamClient()
+        let freshUpstream = TestUpstreamClient()
+        let staleTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
+        let freshTarget = xcodeProcessTarget(processID: 66333, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [staleUpstream, freshUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: staleTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: freshTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (staleTarget, 0, [toolDescriptor(name: "Stale27Only")]),
+                (freshTarget, 1, [toolDescriptor(name: "Old26Tool")]),
+            ]
+        )
+        manager.canonicalBrokerState.clearToolsCatalog()
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-refresh-failure",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let staleRequest = try await staleUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        let freshRequest = try await freshUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        await staleUpstream.yield(
+            .message(
+                try makeJSONRPCResponse(
+                    id: try extractUpstreamID(from: staleRequest),
+                    result: ["notTools": []]
+                )
+            )
+        )
+        await freshUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: freshRequest),
+                    tools: [
+                        toolDescriptor(name: "Fresh26Tool"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for refreshed tools/list") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["Fresh26Tool"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["Fresh26Tool"])
+        let catalogs = manager.debugSnapshot().processToolCatalogs
+        #expect(catalogs.map(\.processID) == [freshTarget.processID])
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+    }
+
     @Test func documentationCandidatesPreferWorkspaceOwnersButKeepFallbackProcesses()
         async throws
     {
@@ -2552,6 +2626,47 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(preferredUpstreamIndex == 1)
+    }
+
+    @Test func sessionManagerProcessCatalogRepointsCanonicalSourceWhenSourceSlotExits()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "SharedTool")]),
+            ]
+        )
+
+        #expect(manager.clearUpstreamState(upstreamIndex: 0))
+
+        var snapshot = manager.debugSnapshot()
+        let catalog = try #require(snapshot.processToolCatalogs.first)
+        #expect(catalog.upstreamIndex == 1)
+        #expect(catalog.isCanonicalSource)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["SharedTool"])
+
+        #expect(manager.clearUpstreamState(upstreamIndex: 1))
+
+        snapshot = manager.debugSnapshot()
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(snapshot.processToolCatalogs.isEmpty)
     }
 
     @Test func nonOwnerUnionToolRoutesToCatalogOwnerProcess() async throws {

@@ -72,7 +72,7 @@ extension RuntimeCoordinator {
 
     private enum ProcessToolsCatalogOutcome: Sendable {
         case success(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)
-        case failure(upstreamIndex: Int, error: any Error)
+        case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
     }
 
     func loadCanonicalToolsCatalog(
@@ -153,28 +153,41 @@ extension RuntimeCoordinator {
                         )
                         return .success(target: route.target, result: result)
                     } catch is CancellationError {
-                        return .failure(upstreamIndex: route.upstreamIndex, error: CancellationError())
+                        return .failure(
+                            target: route.target,
+                            upstreamIndex: route.upstreamIndex,
+                            error: CancellationError()
+                        )
                     } catch {
-                        return .failure(upstreamIndex: route.upstreamIndex, error: error)
+                        return .failure(
+                            target: route.target,
+                            upstreamIndex: route.upstreamIndex,
+                            error: error
+                        )
                     }
                 }
             }
 
             var successes: [(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)] = []
-            var lastFailure: (upstreamIndex: Int, error: any Error)?
+            var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
             while let outcome = try await group.next() {
                 switch outcome {
                 case .success(let target, let result):
                     successes.append((target: target, result: result))
-                case .failure(let upstreamIndex, let error):
+                case .failure(let target, let upstreamIndex, let error):
                     if error is CancellationError {
                         continue
                     }
-                    lastFailure = (upstreamIndex, error)
+                    failures.append((target, upstreamIndex, error))
                 }
             }
 
             if successes.isEmpty == false {
+                for failure in failures {
+                    self.processToolCatalogRegistry.removeCatalog(
+                        forProcessID: failure.target.processID
+                    )
+                }
                 for success in successes {
                     guard let sourceUpstream = success.result.sourceUpstream else {
                         continue
@@ -205,6 +218,7 @@ extension RuntimeCoordinator {
                 )
             }
 
+            let lastFailure = failures.last
             if let lastFailure {
                 throw ControlPlane.RequestError(
                     route: .pinnedUpstream(lastFailure.upstreamIndex),

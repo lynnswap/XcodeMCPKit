@@ -489,8 +489,14 @@ extension RuntimeCoordinator {
             )
         }
         debugRecorder.resetUpstream(upstreamIndex)
-        if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) {
-            processToolCatalogRegistry.removeUpstreamMapping(forUpstreamIndex: upstreamIndex)
+        if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+           let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
+        {
+            processToolCatalogRegistry.removeUpstreamMapping(
+                forUpstreamIndex: upstreamIndex,
+                replacementUpstreamIndex: replacementUpstreamIndex
+            )
+            resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
         } else {
             processToolCatalogRegistry.removeCatalog(forUpstreamIndex: upstreamIndex)
             resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)

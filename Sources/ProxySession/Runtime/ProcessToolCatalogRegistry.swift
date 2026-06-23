@@ -74,15 +74,38 @@ package final class ProcessToolCatalogRegistry: Sendable {
 
     package func removeCatalog(forUpstreamIndex upstreamIndex: Int) {
         state.withLockedValue { state in
-            guard let processID = state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
+            guard let processID = state.processIDByUpstreamIndex[upstreamIndex]
             else { return }
             state.catalogsByProcessID.removeValue(forKey: processID)
+            state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
+                $0.value != processID
+            }
         }
     }
 
-    package func removeUpstreamMapping(forUpstreamIndex upstreamIndex: Int) {
-        _ = state.withLockedValue { state in
-            state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
+    package func removeUpstreamMapping(
+        forUpstreamIndex upstreamIndex: Int,
+        replacementUpstreamIndex: Int? = nil
+    ) {
+        state.withLockedValue { state in
+            guard let processID = state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
+            else { return }
+            if let replacementUpstreamIndex {
+                state.processIDByUpstreamIndex[replacementUpstreamIndex] = processID
+            }
+            guard let replacementUpstreamIndex,
+                  let catalog = state.catalogsByProcessID[processID],
+                  catalog.upstreamIndex == upstreamIndex else {
+                return
+            }
+            state.catalogsByProcessID[processID] = Catalog(
+                target: catalog.target,
+                upstreamIndex: replacementUpstreamIndex,
+                rawResult: catalog.rawResult,
+                toolsByName: catalog.toolsByName,
+                fingerprintsByName: catalog.fingerprintsByName,
+                ownerBoundToolNames: catalog.ownerBoundToolNames
+            )
         }
     }
 
