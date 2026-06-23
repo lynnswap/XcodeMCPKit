@@ -22,7 +22,8 @@ extension RuntimeCoordinator {
         var results: [JSONValue] = []
         var lastError: (any Error)?
 
-        for route in xcodeProcessRoutes {
+        let unavailable = unavailableXcodeProcessIDs()
+        for route in xcodeProcessRoutes where unavailable.contains(route.target.processID) == false {
             guard let upstreamIndex = route.primaryUpstreamIndex else {
                 continue
             }
@@ -76,11 +77,7 @@ extension RuntimeCoordinator {
         guard xcodeProcessRoutes.isEmpty == false else {
             return nil
         }
-        let now = nowUptimeNanoseconds()
-        let unavailable = unavailableXcodeProcessRoutes.withLockedValue { state in
-            state = state.filter { $0.value > now }
-            return state
-        }
+        let unavailable = unavailableXcodeProcessIDs()
         let workspaceOwnerProcesses = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
         let tabOwnerProcesses = Set(tabOwnerProcessIDs.withLockedValue(\.values))
         let ownerProcesses = workspaceOwnerProcesses.union(tabOwnerProcesses)
@@ -91,7 +88,7 @@ extension RuntimeCoordinator {
 
         let nonOwnerProcessIDs = orderedProcessIDs(
             xcodeProcessRoutes.compactMap { route -> pid_t? in
-                guard unavailable[route.target.processID] == nil,
+                guard unavailable.contains(route.target.processID) == false,
                       ownerProcessIDs.contains(route.target.processID) == false
                 else {
                     return nil
@@ -109,14 +106,23 @@ extension RuntimeCoordinator {
 
     private func orderedProcessIDs(
         _ processIDs: [pid_t],
-        unavailable: [pid_t: UInt64]
+        unavailable: Set<pid_t>
     ) -> [pid_t] {
         var seen = Set<pid_t>()
         return processIDs.compactMap { processID -> pid_t? in
-            guard unavailable[processID] == nil, seen.insert(processID).inserted else {
+            guard unavailable.contains(processID) == false,
+                  seen.insert(processID).inserted else {
                 return nil
             }
             return processID
+        }
+    }
+
+    private func unavailableXcodeProcessIDs() -> Set<pid_t> {
+        let now = nowUptimeNanoseconds()
+        return unavailableXcodeProcessRoutes.withLockedValue { state in
+            state = state.filter { $0.value > now }
+            return Set(state.keys)
         }
     }
 
@@ -228,11 +234,19 @@ extension RuntimeCoordinator {
         guard xcodeProcessRoutes.isEmpty == false else {
             return .forward(preferredUpstreamIndex: nil)
         }
-        let requests = toolRoutingRequests(in: requestJSON).filter {
+        let requests = toolRoutingRequests(in: requestJSON)
+        let ownerBoundRequests = requests.filter {
             processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
                 || cachedOwnerBoundToolNames().contains($0.toolName)
         }
-        guard requests.isEmpty == false else {
+        guard ownerBoundRequests.isEmpty == false else {
+            if let catalogDecision = catalogToolRoutingDecision(
+                for: requests,
+                requiredProcessID: nil,
+                forceBatchArray: requestJSON is [Any]
+            ) {
+                return catalogDecision
+            }
             return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
         }
         return nil
@@ -302,18 +316,18 @@ extension RuntimeCoordinator {
         }
         let ownerUpstreamIndex = firstUsableInitializedUpstreamIndex(in: ownerRoute)
 
-        let missingToolErrors = ownerResolution.resolved.compactMap { resolved -> ToolRoutingError? in
+        let missingToolErrors = requests.compactMap { request -> ToolRoutingError? in
             guard processToolCatalogRegistry.catalog(forProcessID: ownerProcessID) != nil,
                   processToolCatalogRegistry.hasTool(
-                      resolved.request.toolName,
+                      request.toolName,
                       processID: ownerProcessID
                   ) == false,
-                  let id = resolved.request.id else {
+                  let id = request.id else {
                 return nil
             }
             return ToolRoutingError(
                 id: id,
-                message: "tool '\(resolved.request.toolName)' is not available in the Xcode process that owns '\(resolved.ownerLabel)'"
+                message: "tool '\(request.toolName)' is not available in the selected Xcode process"
             )
         }
         if missingToolErrors.isEmpty == false {
@@ -337,6 +351,81 @@ extension RuntimeCoordinator {
         }
 
         return .forward(preferredUpstreamIndex: ownerUpstreamIndex)
+    }
+
+    private func catalogToolRoutingDecision(
+        for requests: [ToolRoutingRequest],
+        requiredProcessID: pid_t?,
+        forceBatchArray: Bool
+    ) -> ToolRoutingDecision? {
+        let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
+            let processIDs = processToolCatalogRegistry.processIDsHavingTool(toolName)
+            return processIDs.isEmpty ? nil : processIDs
+        }
+        guard processIDSets.isEmpty == false else {
+            return nil
+        }
+
+        let candidateProcessIDs = processIDSets.dropFirst().reduce(processIDSets[0]) {
+            $0.intersection($1)
+        }
+        let effectiveCandidates: Set<pid_t>
+        if let requiredProcessID {
+            effectiveCandidates = candidateProcessIDs.contains(requiredProcessID)
+                ? [requiredProcessID]
+                : []
+        } else {
+            effectiveCandidates = candidateProcessIDs
+        }
+        guard effectiveCandidates.isEmpty == false else {
+            return .reject(
+                errors: requests.compactMap { request in
+                    guard let id = request.id else { return nil }
+                    return ToolRoutingError(
+                        id: id,
+                        message: "no single Xcode process provides all requested tools"
+                    )
+                },
+                forceBatchArray: forceBatchArray
+            )
+        }
+        guard let route = preferredAvailableRoute(in: effectiveCandidates),
+              let upstreamIndex = firstUsableInitializedUpstreamIndex(in: route) else {
+            return .reject(
+                errors: requests.compactMap { request in
+                    guard let id = request.id else { return nil }
+                    return ToolRoutingError(
+                        id: id,
+                        message: "no available upstream for an Xcode process that provides tool '\(request.toolName)'"
+                    )
+                },
+                forceBatchArray: forceBatchArray
+            )
+        }
+        return .forward(preferredUpstreamIndex: upstreamIndex)
+    }
+
+    private func preferredAvailableRoute(in processIDs: Set<pid_t>) -> XcodeProcessRoute? {
+        let unavailable = unavailableXcodeProcessIDs()
+        return xcodeProcessRoutes
+            .filter {
+                processIDs.contains($0.target.processID)
+                    && unavailable.contains($0.target.processID) == false
+            }
+            .sorted { lhs, rhs in
+                let versionComparison = lhs.target.xcodeVersion.compare(
+                    rhs.target.xcodeVersion,
+                    options: [.numeric]
+                )
+                if versionComparison != .orderedSame {
+                    return versionComparison == .orderedDescending
+                }
+                if lhs.target.appPath != rhs.target.appPath {
+                    return lhs.target.appPath < rhs.target.appPath
+                }
+                return lhs.target.processID < rhs.target.processID
+            }
+            .first { firstUsableInitializedUpstreamIndex(in: $0) != nil }
     }
 
     @discardableResult

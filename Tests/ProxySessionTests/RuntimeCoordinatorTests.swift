@@ -2337,6 +2337,70 @@ struct RuntimeCoordinatorTests {
         )
     }
 
+    @Test func ownerBoundRefreshSkipsUnavailableProcessRoutes() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 602, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 603, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_unavailable"
+        )
+
+        let task = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 1002,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-b"]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let request1 = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request1),
+                    message: "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
+                )
+            )
+        )
+
+        let decision = await task.value
+        guard case .forward(let preferredUpstreamIndex) = decision else {
+            Issue.record("expected refreshed owner-bound request to forward")
+            return
+        }
+        #expect(preferredUpstreamIndex == 1)
+    }
+
     @Test func ownerBoundToolRoutesToCachedWindowOwner() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -2437,6 +2501,50 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(preferredUpstreamIndex == 1)
+    }
+
+    @Test func nonOwnerUnionToolRoutesToCatalogOwnerProcess() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target0 = xcodeProcessTarget(processID: 613, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 614, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [toolDescriptor(name: "Xcode27OnlyTool")]),
+                (target1, 1, [toolDescriptor(name: "SharedTool")]),
+            ]
+        )
+
+        let decision = try #require(
+            manager.immediateToolRoutingDecision(
+                for: toolsCallObject(
+                    id: 110,
+                    name: "Xcode27OnlyTool",
+                    arguments: [:]
+                )
+            )
+        )
+
+        guard case .forward(let preferredUpstreamIndex) = decision else {
+            Issue.record("expected union-only tool to forward")
+            return
+        }
+        #expect(preferredUpstreamIndex == 0)
     }
 
     @Test func ownerBoundToolRefreshesWindowsOnCacheMissBeforeRouting() async throws {
