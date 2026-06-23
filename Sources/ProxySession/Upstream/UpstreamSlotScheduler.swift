@@ -306,15 +306,18 @@ package final class UpstreamSlotScheduler: Sendable {
         let dispatch = state.withLockedValue {
             state -> (
                 starts: [(PendingRequest, Int)],
+                unavailable: [PendingRequest],
                 healthEffects: [UpstreamHealthManager.Effect]
             ) in
             var ready: [(PendingRequest, Int)] = []
+            var unavailable: [PendingRequest] = []
             var healthEffects: [UpstreamHealthManager.Effect] = []
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)
                 var chosenPendingIndex: Int?
                 var chosenUpstreamIndex: Int?
+                var unavailablePendingIndex: Int?
 
                 for (pendingIndex, request) in state.pendingRequests.enumerated() {
                     if request.descriptor.isTopLevelClientRequest,
@@ -324,13 +327,19 @@ package final class UpstreamSlotScheduler: Sendable {
                     }
 
                     if request.preferredUpstreamIndices.isEmpty == false {
+                        var preferredCandidateIsOccupied = false
+                        var preferredRecoveryStarted = false
                         for preferredUpstreamIndex in request.preferredUpstreamIndices {
                             guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil
                             else {
+                                preferredCandidateIsOccupied = true
                                 continue
                             }
                             let evaluation = canUseUpstream(preferredUpstreamIndex)
                             healthEffects.append(contentsOf: evaluation.effects)
+                            if Self.effectsStartRecovery(evaluation.effects) {
+                                preferredRecoveryStarted = true
+                            }
                             guard evaluation.isUsable else {
                                 continue
                             }
@@ -340,8 +349,11 @@ package final class UpstreamSlotScheduler: Sendable {
                         }
                         if chosenPendingIndex != nil {
                             break
-                        } else {
+                        } else if preferredCandidateIsOccupied || preferredRecoveryStarted {
                             continue
+                        } else {
+                            unavailablePendingIndex = pendingIndex
+                            break
                         }
                     }
 
@@ -356,6 +368,12 @@ package final class UpstreamSlotScheduler: Sendable {
                     chosenPendingIndex = pendingIndex
                     chosenUpstreamIndex = selectedUpstreamIndex
                     break
+                }
+
+                if let unavailablePendingIndex {
+                    let pendingRequest = state.pendingRequests.remove(at: unavailablePendingIndex)
+                    unavailable.append(pendingRequest)
+                    continue
                 }
 
                 guard let chosenPendingIndex, let chosenUpstreamIndex else {
@@ -376,11 +394,24 @@ package final class UpstreamSlotScheduler: Sendable {
                 ready.append((pendingRequest, upstreamIndex))
             }
 
-            return (ready, healthEffects)
+            return (ready, unavailable, healthEffects)
         }
 
         if dispatch.healthEffects.isEmpty == false {
             applyHealthEffects(dispatch.healthEffects)
+        }
+
+        for request in dispatch.unavailable {
+            logger.debug(
+                "Failing queued preferred request because all preferred upstreams are unavailable",
+                metadata: [
+                    "lease_id": .string(request.leaseID.uuidString),
+                    "label": .string(request.descriptor.label),
+                ]
+            )
+            request.eventLoop.execute {
+                request.failUnavailable()
+            }
         }
 
         for (request, upstreamIndex) in dispatch.starts {
@@ -406,6 +437,15 @@ package final class UpstreamSlotScheduler: Sendable {
                 guard shouldStart else { return }
                 request.start(upstreamIndex)
             }
+        }
+    }
+
+    private static func effectsStartRecovery(_ effects: [UpstreamHealthManager.Effect]) -> Bool {
+        effects.contains { effect in
+            if case .startHealthProbe = effect {
+                return true
+            }
+            return false
         }
     }
 }

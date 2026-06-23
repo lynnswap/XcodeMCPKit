@@ -5479,6 +5479,62 @@ struct RuntimeCoordinatorTests {
         #expect(preferredStartedUpstream.withLockedValue { $0 } == 0)
     }
 
+    @Test func sessionManagerPreferredRequestFailsWhenAllPreferredUpstreamsUnusable()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let uptimeClock = TestUptimeClock(nowUptimeNanoseconds: 20_000_000_000)
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            nowUptimeNanoseconds: { uptimeClock.now() },
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(
+            upstreamIndex: 0,
+            nowUptimeNs: uptimeClock.now()
+        )
+        _ = manager.upstreamHealthManager.markRequestTimedOut(
+            upstreamIndex: 0,
+            nowUptimeNs: uptimeClock.now()
+        )
+        _ = manager.upstreamHealthManager.markRequestTimedOut(
+            upstreamIndex: 0,
+            nowUptimeNs: uptimeClock.now()
+        )
+
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-preferred-unusable",
+            label: "tools/call:BuildProject",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let startedUpstream = NIOLockedValueBox<Int?>(nil)
+        let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: [0]
+        ) { selectedUpstreamIndex in
+            startedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            try await future.get()
+        }
+        #expect(startedUpstream.withLockedValue { $0 } == nil)
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+    }
+
     @Test func sessionManagerRepinsAfterUpstreamExit() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
