@@ -69,6 +69,15 @@ extension RuntimeCoordinator {
         xcodeProcessRoutes.first { $0.target.processID == processID }?.primaryUpstreamIndex
     }
 
+    package func xcodeProcessRouteHasUsableInitializedUpstream(
+        containing upstreamIndex: Int
+    ) -> Bool {
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+            return false
+        }
+        return firstUsableInitializedUpstreamIndex(in: route) != nil
+    }
+
     package func documentationCandidateProcessIDs() -> Set<pid_t>? {
         documentationCandidateProcessOrder().map(Set.init)
     }
@@ -256,18 +265,19 @@ extension RuntimeCoordinator {
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
-        let requests = toolRoutingRequests(in: requestJSON).filter {
+        let requests = toolRoutingRequests(in: requestJSON)
+        let ownerBoundRequests = requests.filter {
             processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
                 || cachedOwnerBoundToolNames().contains($0.toolName)
         }
 
-        var ownerResolution = resolvedOwnerProcessIDs(for: requests)
+        var ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
         if ownerResolution.unresolved.isEmpty == false {
             _ = try? await liveXcodeListWindowsResult(
                 route: .anyHealthy,
                 requestTimeoutOverride: requestTimeoutOverride
             )
-            ownerResolution = resolvedOwnerProcessIDs(for: requests)
+            ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
         }
 
         if ownerResolution.unresolved.isEmpty == false {
@@ -286,7 +296,7 @@ extension RuntimeCoordinator {
         let distinctOwners = Set(ownerResolution.resolved.map(\.processID))
         if distinctOwners.count > 1 {
             return .reject(
-                errors: requests.compactMap { request in
+                errors: ownerBoundRequests.compactMap { request in
                     guard let id = request.id else { return nil }
                     return ToolRoutingError(
                         id: id,
@@ -499,7 +509,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
+    package func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
         xcodeProcessRoutes.first { $0.upstreamIndices.contains(upstreamIndex) }
     }
 
@@ -544,10 +554,10 @@ extension RuntimeCoordinator {
     private func toolRoutingRequest(in object: [String: Any]) -> ToolRoutingRequest? {
         guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
               let params = object["params"] as? [String: Any],
-              let toolName = params["name"] as? String,
-              let arguments = params["arguments"] as? [String: Any] else {
+              let toolName = params["name"] as? String else {
             return nil
         }
+        let arguments = params["arguments"] as? [String: Any] ?? [:]
         return ToolRoutingRequest(
             id: JSONRPC.Message.Inspector.requestID(from: object),
             toolName: toolName,

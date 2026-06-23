@@ -275,10 +275,6 @@ extension RuntimeCoordinator {
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
-        markXcodeProcessRouteUnavailable(
-            upstreamIndex: upstreamIndex,
-            reason: "upstream_exit_\(status)"
-        )
 
         if upstreamIndex == 0 && globalInit.wasInFlight {
             globalInit.timeout?.cancel()
@@ -293,6 +289,12 @@ extension RuntimeCoordinator {
         }
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
+        if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
+            markXcodeProcessRouteUnavailable(
+                upstreamIndex: upstreamIndex,
+                reason: "upstream_exit_\(status)"
+            )
+        }
         upstreamRouter.reset(upstreamIndex: upstreamIndex)
         releaseLeases(
             leaseManager.abandonActiveLeases(
@@ -414,11 +416,13 @@ extension RuntimeCoordinator {
     ) {
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            markXcodeProcessRouteUnavailable(
-                upstreamIndex: upstreamIndex,
-                reason: "upstream_\(reason)"
-            )
             clearUpstreamState(upstreamIndex: upstreamIndex)
+            if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
+                markXcodeProcessRouteUnavailable(
+                    upstreamIndex: upstreamIndex,
+                    reason: "upstream_\(reason)"
+                )
+            }
         case .shuttingDown:
             break
         }

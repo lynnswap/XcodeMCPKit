@@ -489,9 +489,13 @@ extension RuntimeCoordinator {
             )
         }
         debugRecorder.resetUpstream(upstreamIndex)
-        processToolCatalogRegistry.removeCatalog(forUpstreamIndex: upstreamIndex)
-        resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
-        removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
+        if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) {
+            processToolCatalogRegistry.removeUpstreamMapping(forUpstreamIndex: upstreamIndex)
+        } else {
+            processToolCatalogRegistry.removeCatalog(forUpstreamIndex: upstreamIndex)
+            resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
+            removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
+        }
         return true
     }
 

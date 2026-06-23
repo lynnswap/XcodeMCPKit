@@ -182,6 +182,9 @@ extension RuntimeCoordinator {
                     self.processToolCatalogRegistry.record(
                         target: success.target,
                         upstreamIndex: sourceUpstream,
+                        associatedUpstreamIndices: self.xcodeProcessRoutes.first {
+                            $0.target.processID == success.target.processID
+                        }?.upstreamIndices ?? [],
                         rawResult: success.result.rawResult
                     )
                 }

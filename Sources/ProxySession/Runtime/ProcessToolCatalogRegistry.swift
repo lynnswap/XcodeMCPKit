@@ -45,6 +45,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
     package func record(
         target: XcodeProcessTarget,
         upstreamIndex: Int,
+        associatedUpstreamIndices: [Int] = [],
         rawResult: JSONValue
     ) {
         let catalog = Catalog(
@@ -58,6 +59,9 @@ package final class ProcessToolCatalogRegistry: Sendable {
         state.withLockedValue { state in
             state.catalogsByProcessID[target.processID] = catalog
             state.processIDByUpstreamIndex[upstreamIndex] = target.processID
+            for associatedUpstreamIndex in associatedUpstreamIndices {
+                state.processIDByUpstreamIndex[associatedUpstreamIndex] = target.processID
+            }
         }
     }
 
@@ -73,6 +77,12 @@ package final class ProcessToolCatalogRegistry: Sendable {
             guard let processID = state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
             else { return }
             state.catalogsByProcessID.removeValue(forKey: processID)
+        }
+    }
+
+    package func removeUpstreamMapping(forUpstreamIndex upstreamIndex: Int) {
+        _ = state.withLockedValue { state in
+            state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
         }
     }
 
