@@ -1,6 +1,5 @@
 import Foundation
 import ProxyCore
-import XcodeMCPProxy
 
 extension CLI {
     package enum InvocationScanner {
@@ -138,17 +137,17 @@ extension CLI {
                     cursor.advance()
                     continue
                 case "--stdio":
-                    throw XcodeMCPProxyServerCommand.Error.message(
+                    throw CLIError.message(
                         "--stdio is not supported in server mode (use xcode-mcp-proxy)"
                     )
                 case "--url":
-                    throw XcodeMCPProxyServerCommand.Error.message(
+                    throw CLIError.message(
                         "--url is not supported in server mode (use xcode-mcp-proxy)"
                     )
                 case "--xcode-pid":
-                    throw XcodeMCPProxyServerCommand.Error.message(CLIParser.removedXcodePIDMessage)
+                    throw CLIError.message(CLIParser.removedXcodePIDMessage)
                 case "--lazy-init":
-                    throw XcodeMCPProxyServerCommand.Error.message(CLIParser.removedLazyInitMessage)
+                    throw CLIError.message(CLIParser.removedLazyInitMessage)
                 case "--listen":
                     scan.hasListenFlag = true
                 case "--host":
@@ -170,7 +169,7 @@ extension CLI {
                     let value = try cursor.requiredValue(
                         for: arg,
                         error: {
-                            XcodeMCPProxyServerCommand.Error.message("\($0) requires a value")
+                            CLIError.message("\($0) requires a value")
                         }
                     )
                     scan.forwardedArgs.append(value)

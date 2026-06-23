@@ -1,5 +1,6 @@
-import ProxyCore
 import Foundation
+import ProxyCLICommon
+import ProxyCore
 
 extension XcodeMCPProxyInstallCommand {
     package static func scanInvocation(_ args: [String]) -> XcodeMCPProxyInstallCommand.Invocation {

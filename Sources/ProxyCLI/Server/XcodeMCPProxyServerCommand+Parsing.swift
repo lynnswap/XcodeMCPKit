@@ -1,10 +1,16 @@
-import ProxyCore
 import Foundation
+import ProxyCLICommon
+import ProxyCore
 import XcodeMCPProxy
 
 extension XcodeMCPProxyServerCommand {
     package static func parseOptions(args: [String]) throws -> XcodeMCPProxyServerCommand.Options {
-        let scan = try CLI.InvocationScanner.scanServer(args)
+        let scan: CLI.InvocationScanner.ServerScan
+        do {
+            scan = try CLI.InvocationScanner.scanServer(args)
+        } catch let error as CLIError {
+            throw XcodeMCPProxyServerCommand.Error.message(error.description)
+        }
         return XcodeMCPProxyServerCommand.Options(
             forwardedArgs: scan.forwardedArgs,
             showHelp: scan.showHelp,

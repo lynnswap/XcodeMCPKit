@@ -1,7 +1,7 @@
 import Foundation
 import Testing
-import ProxyCLI
-import XcodeMCPProxy
+import ProxyBuildInfo
+import ProxyInstallCLI
 
 @Suite
 struct InstallCommandTests {

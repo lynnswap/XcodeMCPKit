@@ -1,5 +1,7 @@
-import ProxyCore
 import Foundation
+import ProxyBuildInfo
+import ProxyCLICommon
+import ProxyCore
 import XcodeMCPProxy
 
 extension XcodeMCPProxyServerCommand {

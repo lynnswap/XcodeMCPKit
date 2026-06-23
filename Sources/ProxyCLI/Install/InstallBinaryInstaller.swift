@@ -1,5 +1,5 @@
-import ProxyCore
 import Foundation
+import ProxyCore
 
 package enum InstallBinaryInstaller {
     package static func install(

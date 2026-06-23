@@ -2,6 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
+import ProxyBuildInfo
 import ProxyCore
 import ProxySession
 import ProxyHTTPGateway

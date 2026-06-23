@@ -1,8 +1,8 @@
-import ProxyStdioTransport
-import ProxyCore
 import Foundation
 import Logging
-import XcodeMCPProxy
+import ProxyCLICommon
+import ProxyCore
+import ProxyStdioTransport
 
 extension StdioAdapter: CLICommandAdapter {}
 

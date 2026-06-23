@@ -42,9 +42,11 @@ struct ArchitectureTests {
         }
         #expect(violations.isEmpty)
     }
+
 }
 
 private let requiredSourceDirectories = [
+    "Sources/ProxyBuildInfo",
     "Sources/ProxyCore",
     "Sources/ProxyMCP",
     "Sources/ProxySession",
@@ -53,7 +55,10 @@ private let requiredSourceDirectories = [
     "Sources/ProxyHTTPGateway",
     "Sources/ProxyStdioTransport",
     "Sources/XcodeMCPProxy",
-    "Sources/ProxyCLI",
+    "Sources/ProxyCLI/Common",
+    "Sources/ProxyCLI/Adapter",
+    "Sources/ProxyCLI/Server",
+    "Sources/ProxyCLI/Install",
 ]
 
 private struct ForbiddenImportRule {
@@ -65,52 +70,102 @@ private let forbiddenImportRules = [
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCore",
         forbiddenModules: [
+            "ProxyBuildInfo",
             "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
-            "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyMCP",
         forbiddenModules: [
+            "ProxyBuildInfo",
             "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
-            "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxySession",
         forbiddenModules: [
+            "ProxyBuildInfo",
             "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
-            "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
             "AppKit", "ApplicationServices",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyXcodeSupport",
         forbiddenModules: [
+            "ProxyBuildInfo",
             "ProxyMCP", "ProxySession", "ProxyXcodeFeatures", "ProxyHTTPGateway",
-            "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyXcodeFeatures",
-        forbiddenModules: ["ProxySession", "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI"]
+        forbiddenModules: [
+            "ProxyBuildInfo", "ProxySession", "ProxyHTTPGateway", "ProxyStdioTransport",
+            "XcodeMCPProxy", "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyHTTPGateway",
-        forbiddenModules: ["ProxyStdioTransport", "XcodeMCPProxy", "ProxyCLI"]
+        forbiddenModules: [
+            "ProxyBuildInfo", "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
     ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyStdioTransport",
         forbiddenModules: [
-            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
-            "XcodeMCPProxy", "ProxyCLI",
+            "ProxyBuildInfo", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyHTTPGateway", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
         ]
     ),
     ForbiddenImportRule(
-        sourceDirectory: "Sources/ProxyCLI",
+        sourceDirectory: "Sources/ProxyBuildInfo",
+        forbiddenModules: [
+            "ProxyCore", "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/XcodeMCPProxy",
+        forbiddenModules: ["ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI"]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxyCLI/Common",
+        forbiddenModules: [
+            "ProxyBuildInfo", "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxyCLI/Adapter",
         forbiddenModules: [
             "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
-            "ProxyHTTPGateway",
+            "ProxyHTTPGateway", "XcodeMCPProxy", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxyCLI/Server",
+        forbiddenModules: [
+            "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyStdioTransport", "ProxyAdapterCLI", "ProxyInstallCLI",
+        ]
+    ),
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxyCLI/Install",
+        forbiddenModules: [
+            "ProxyMCP", "ProxySession", "ProxyXcodeSupport", "ProxyXcodeFeatures",
+            "ProxyHTTPGateway", "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyAdapterCLI", "ProxyServerCLI",
         ]
     ),
 ]

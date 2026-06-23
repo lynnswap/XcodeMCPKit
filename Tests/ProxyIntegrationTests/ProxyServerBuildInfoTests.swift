@@ -1,4 +1,5 @@
 import ProxyCore
+import ProxyBuildInfo
 import Testing
 
 @testable import XcodeMCPProxy

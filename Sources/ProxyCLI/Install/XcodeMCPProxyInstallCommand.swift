@@ -1,5 +1,6 @@
-import ProxyCore
 import Foundation
+import ProxyCLICommon
+import ProxyCore
 
 package struct XcodeMCPProxyInstallCommand {
     package struct Options {

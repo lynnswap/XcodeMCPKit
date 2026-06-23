@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import ProxyCLI
+import ProxyInstallCLI
 
 @Suite(.serialized)
 struct InstallCommandIntegrationTests {

@@ -3,8 +3,9 @@ import Testing
 
 import ProxyCore
 import ProxyMCP
+import ProxyAdapterCLI
+import ProxyServerCLI
 import ProxyXcodeFeatures
-@testable import ProxyCLI
 @testable import ProxyHTTPGateway
 
 @Suite

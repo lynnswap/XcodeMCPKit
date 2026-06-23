@@ -1,6 +1,7 @@
 import ProxyCore
 import Darwin
 import Foundation
+import ProxyCLICommon
 import XcodeMCPProxy
 
 extension ProxyServer: ProxyServerCommandServer {}
