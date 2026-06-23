@@ -85,9 +85,11 @@ extension RuntimeCoordinator {
             ?? MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
+        let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
         if xcodeProcessRoutes.isEmpty == false {
             return try await loadCanonicalToolsCatalogAcrossProcessRoutes(
                 requestTimeout: effectiveRequestTimeout,
+                deadlineUptimeNs: requestDeadlineUptimeNs,
                 startedAt: startedAt
             )
         }
@@ -103,6 +105,7 @@ extension RuntimeCoordinator {
 
     private func loadCanonicalToolsCatalogAcrossProcessRoutes(
         requestTimeout: TimeAmount?,
+        deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let candidateProcessOrder = documentationCandidateProcessOrder()
@@ -133,6 +136,7 @@ extension RuntimeCoordinator {
                         let result = try await self.loadCanonicalToolsCatalogFromProcessRoute(
                             route,
                             requestTimeout: requestTimeout,
+                            deadlineUptimeNs: deadlineUptimeNs,
                             startedAt: startedAt
                         )
                         return .success(target: route.target, result: result)
@@ -227,15 +231,20 @@ extension RuntimeCoordinator {
     private func loadCanonicalToolsCatalogFromProcessRoute(
         _ route: ProcessToolsCatalogRoute,
         requestTimeout: TimeAmount?,
+        deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
         var lastFailure: (upstreamIndex: Int, error: any Error)?
         for upstreamIndex in route.upstreamIndices {
             let rpcHandle = ControlPlane.RPCHandle()
+            let routeTimeout = timeAmount(until: deadlineUptimeNs) ?? requestTimeout
+            if routeTimeout?.nanoseconds == 0 {
+                throw TimeoutError()
+            }
             do {
                 return try await loadCanonicalToolsCatalogFromRoute(
                     .pinnedUpstream(upstreamIndex),
-                    requestTimeout: requestTimeout,
+                    requestTimeout: routeTimeout,
                     rpcHandle: rpcHandle,
                     startedAt: startedAt,
                     purpose: "tools-\(upstreamIndex)",

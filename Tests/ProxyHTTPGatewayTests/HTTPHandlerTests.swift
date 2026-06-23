@@ -1070,6 +1070,49 @@ struct HTTPHandlerTests {
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
     }
 
+    @Test func httpForwardingReusesDeadlineAfterAsyncToolRouting() async throws {
+        let config = makeConfig(requestTimeout: 0.02)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamResponder: { _, originalID in
+                try makeToolSuccessResponse(id: originalID, text: "{\"ok\":true}")
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setForceAsyncToolRoutingDecision(true)
+        sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: nil))
+        sessionManager.setToolRoutingDelayNanos(60_000_000)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, object) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-deadline",
+                payload: toolsCallPayload(
+                    id: 2002,
+                    name: "BuildProject",
+                    arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let error = try #require(object["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32000)
+            #expect(error["message"] as? String == "upstream timeout")
+            #expect(sessionManager.sentUpstreamCount() == 0)
+            let lease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(lease.state == .timedOut)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
     @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let channel = EmbeddedChannel()

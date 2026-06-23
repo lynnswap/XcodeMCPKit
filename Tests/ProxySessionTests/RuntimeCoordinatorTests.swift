@@ -2254,6 +2254,58 @@ struct RuntimeCoordinatorTests {
         #expect(manager.documentationCandidateProcessOrder() == [target.processID])
     }
 
+    @Test func sessionManagerToolsListSiblingRetryUsesSharedDeadline()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let firstUpstream = TestUpstreamClient()
+        let siblingUpstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80434, xcodeVersion: "27.0")
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [firstUpstream, siblingUpstream],
+            clock: clocks.clock,
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(
+                clock: clocks.timeoutClock
+            ),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-sibling-deadline",
+                requestTimeoutOverride: .milliseconds(100)
+            )
+        }
+
+        _ = try await sentValue(from: firstUpstream, at: 0, timeout: .seconds(2))
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .milliseconds(100)
+        )
+
+        do {
+            _ = try await waitWithTimeout("waiting for shared deadline timeout") {
+                try await task.value
+            }
+            Issue.record("expected tools/list to fail when sibling deadline is exhausted")
+        } catch {
+            #expect(error is TimeoutError)
+        }
+        #expect(await siblingUpstream.sentCount() == 0)
+    }
+
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
         async throws
     {

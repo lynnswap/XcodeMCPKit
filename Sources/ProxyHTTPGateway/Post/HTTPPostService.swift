@@ -423,6 +423,13 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        let forwardingDeadline = Self.timeoutDeadline(
+            for: requestTimeoutOverride
+                ?? Self.topLevelRequestTimeoutOverride(
+                    method: nil,
+                    defaultSeconds: requestTimeoutSeconds
+                )
+        )
         let forwardedRequestIDs = filteredRequest.forwardedResponseIDs
         let localResponseData = filteredRequest.localResponseData
         let descriptor = Self.topLevelRequestDescriptor(
@@ -478,6 +485,30 @@ package final class HTTPPostService: Sendable {
                 cancellationHandle: cancellationHandle
             )
         }
+        @Sendable func remainingForwardingTimeout() -> TimeAmount? {
+            Self.remainingRequestTimeout(until: forwardingDeadline)
+        }
+        @Sendable func makeForwardingTimeoutFuture() -> EventLoopFuture<HTTPPostService.Resolution> {
+            cancellationHandle.markCompleted()
+            self.sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .timedOut,
+                reason: .timedOut
+            )
+            return eventLoop.makeSucceededFuture(
+                Self.makePartialBatchErrorResolution(
+                    localResponseData: localResponseData,
+                    responseIDs: forwardedRequestIDs,
+                    code: -32000,
+                    message: "upstream timeout",
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream,
+                    forceBatchArray: requestIsBatch || filteredRequest.forceBatchArray,
+                    fallbackStatus: .ok,
+                    fallbackBody: ""
+                )
+            )
+        }
         @Sendable func makeRoutingFuture(
             decision: ToolRoutingDecision
         ) -> EventLoopFuture<HTTPPostService.Resolution> {
@@ -487,7 +518,11 @@ package final class HTTPPostService: Sendable {
             func makeForwardingFuture(
                 preferredUpstreamIndices: [Int]?
             ) -> EventLoopFuture<HTTPPostService.Resolution> {
-                self.sessionManager.enqueueOnUpstreamSlot(
+                let forwardingTimeout = remainingForwardingTimeout()
+                if forwardingDeadline != nil, forwardingTimeout == nil {
+                    return makeForwardingTimeoutFuture()
+                }
+                return self.sessionManager.enqueueOnUpstreamSlot(
                     leaseID: leaseID,
                     descriptor: descriptor,
                     on: eventLoop,
@@ -511,7 +546,7 @@ package final class HTTPPostService: Sendable {
                         leaseID: leaseID,
                         upstreamIndex: upstreamIndex,
                         cancellationHandle: cancellationHandle,
-                        requestTimeoutOverride: requestTimeoutOverride
+                        requestTimeoutOverride: forwardingTimeout
                     )
                 }.flatMapError { error in
                     if error is CancellationError {
@@ -585,6 +620,10 @@ package final class HTTPPostService: Sendable {
                 let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
                 let responseIDs = forwardedRequestIDs
                 let forceBatchArray = requestIsBatch || filteredRequest.forceBatchArray
+                let windowsTimeout = remainingForwardingTimeout()
+                if forwardingDeadline != nil, windowsTimeout == nil {
+                    return makeForwardingTimeoutFuture()
+                }
                 let task = Task { [self] in
                     let responseData: Data?
                     if Task.isCancelled {
@@ -593,7 +632,7 @@ package final class HTTPPostService: Sendable {
                         do {
                             let result = try await sessionManager.liveXcodeListWindowsResult(
                                 route: .anyHealthy,
-                                requestTimeoutOverride: requestTimeoutOverride
+                                requestTimeoutOverride: windowsTimeout
                             )
                             let resultData = Self.makeJSONRPCResultResponseData(
                                 ids: responseIDs,
@@ -661,9 +700,16 @@ package final class HTTPPostService: Sendable {
 
         let routingPromise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
         let routingTask = Task { [self] in
+            let routingTimeout = Self.remainingRequestTimeout(until: forwardingDeadline)
+            if forwardingDeadline != nil, routingTimeout == nil {
+                eventLoop.execute {
+                    makeForwardingTimeoutFuture().cascade(to: routingPromise)
+                }
+                return
+            }
             let decision = await sessionManager.toolRoutingDecision(
                 for: forwardedRequestJSON,
-                requestTimeoutOverride: requestTimeoutOverride
+                requestTimeoutOverride: routingTimeout
             )
             eventLoop.execute {
                 makeRoutingFuture(decision: decision).cascade(to: routingPromise)

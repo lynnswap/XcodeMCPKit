@@ -105,6 +105,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var availableUpstreamIndices: [Int?] = []
         var preferredUpstreamIndex: Int?
         var toolRoutingDecision: ToolRoutingDecision?
+        var forceAsyncToolRoutingDecision = false
+        var toolRoutingDelayNanos: UInt64?
         var requeuedLeaseCount = 0
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
@@ -370,11 +372,20 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
         _ = requestTimeoutOverride
-        return immediateToolRoutingDecision(for: requestJSON)
-            ?? .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+        let delayNanos = state.withLockedValue { $0.toolRoutingDelayNanos }
+        if let delayNanos {
+            try? await Task.sleep(nanoseconds: delayNanos)
+        }
+        if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
+            return decision
+        }
+        return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
     }
 
     func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
+        if state.withLockedValue({ $0.forceAsyncToolRoutingDecision }) {
+            return nil
+        }
         if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
             return decision
         }
@@ -890,6 +901,14 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setToolRoutingDecision(_ value: ToolRoutingDecision?) {
         state.withLockedValue { $0.toolRoutingDecision = value }
+    }
+
+    func setForceAsyncToolRoutingDecision(_ value: Bool) {
+        state.withLockedValue { $0.forceAsyncToolRoutingDecision = value }
+    }
+
+    func setToolRoutingDelayNanos(_ value: UInt64?) {
+        state.withLockedValue { $0.toolRoutingDelayNanos = value }
     }
 
     func requestTimeoutNotificationCount() -> Int {
