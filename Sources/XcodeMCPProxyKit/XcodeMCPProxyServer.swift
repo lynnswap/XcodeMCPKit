@@ -135,6 +135,24 @@ public final class XcodeMCPProxyServer {
             self.autoApproveXcodeDialog = autoApproveXcodeDialog
             self.refreshCodeIssuesMode = refreshCodeIssuesMode
         }
+
+        package init(serverProxyConfig proxyConfig: ProxyConfig) {
+            self.init(
+                listenHost: proxyConfig.listenHost,
+                listenPort: proxyConfig.listenPort,
+                upstreamCommand: proxyConfig.upstreamCommand,
+                upstreamArguments: proxyConfig.upstreamArgs,
+                upstreamProcessCount: proxyConfig.upstreamProcessCount,
+                upstreamSessionID: proxyConfig.upstreamSessionID,
+                maxBodyBytes: proxyConfig.maxBodyBytes,
+                requestTimeout: proxyConfig.requestTimeout,
+                configPath: proxyConfig.configPath,
+                discoveryFileURL: proxyConfig.discoveryFileURL,
+                prewarmToolsList: proxyConfig.prewarmToolsList,
+                autoApproveXcodeDialog: proxyConfig.autoApproveXcodeDialog,
+                refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
+            )
+        }
     }
 
     package struct Dependencies: Sendable {
@@ -587,6 +605,17 @@ private extension ProxyConfig {
 
 private extension ProxyConfig.RefreshCodeIssuesMode {
     init(_ mode: XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode) {
+        switch mode {
+        case .proxy:
+            self = .proxy
+        case .upstream:
+            self = .upstream
+        }
+    }
+}
+
+private extension XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode {
+    init(_ mode: ProxyConfig.RefreshCodeIssuesMode) {
         switch mode {
         case .proxy:
             self = .proxy
