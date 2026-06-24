@@ -64,7 +64,7 @@ extension XcodeMCPProxyServerCommand {
     /// never existed as argv flags.
     package static func dryRunCommandLine(
         options: XcodeMCPProxyServerCommand.Options,
-        config: ProxyConfig
+        config: XcodeMCPProxyServer.Configuration
     ) -> String {
         var parts = ["xcode-mcp-proxy-server"] + options.forwardedArgs
         if options.hasConfigFlag == false, let configPath = config.configPath {

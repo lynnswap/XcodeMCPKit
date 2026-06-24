@@ -98,6 +98,56 @@ struct XcodeMCPProxyServerTests {
         )
     }
 
+    @Test func configurationMirrorsHTTPProxyConfigForCLIBoundary() throws {
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("xcode-mcp-proxy-config-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        let configURL = directoryURL.appendingPathComponent("proxy.toml")
+        try """
+        [upstream_handshake]
+        clientName = "XcodeMCPKit"
+
+        [tools]
+        disabled = []
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let discoveryURL = URL(fileURLWithPath: "/tmp/xcode-mcp-proxy-discovery.json")
+        let proxyConfig = ProxyConfig(
+            listenHost: "127.0.0.1",
+            listenPort: 9876,
+            upstreamCommand: "/usr/bin/xcrun",
+            upstreamArgs: ["--sdk", "macosx", "mcpbridge"],
+            upstreamProcessCount: 3,
+            upstreamSessionID: "session-1",
+            maxBodyBytes: 2048,
+            requestTimeout: 12,
+            configPath: configURL.path,
+            discoveryFileURL: discoveryURL,
+            prewarmToolsList: false,
+            autoApproveXcodeDialog: true,
+            refreshCodeIssuesMode: .upstream
+        )
+
+        let config = XcodeMCPProxyServer.Configuration(serverProxyConfig: proxyConfig)
+
+        #expect(config.listenHost == "127.0.0.1")
+        #expect(config.listenPort == 9876)
+        #expect(config.upstreamCommand == "/usr/bin/xcrun")
+        #expect(config.upstreamArguments == ["--sdk", "macosx", "mcpbridge"])
+        #expect(config.upstreamProcessCount == 3)
+        #expect(config.upstreamSessionID == "session-1")
+        #expect(config.maxBodyBytes == 2048)
+        #expect(config.requestTimeout == 12)
+        #expect(config.configPath == configURL.path)
+        #expect(config.discoveryFileURL == discoveryURL)
+        #expect(config.prewarmToolsList == false)
+        #expect(config.autoApproveXcodeDialog == true)
+        #expect(config.refreshCodeIssuesMode == .upstream)
+    }
+
     @Test func startDoesNotLaunchRuntimeLifecycleWhenBindFails() async throws {
         let blockerGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let blocker = try await ServerBootstrap(group: blockerGroup)

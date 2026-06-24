@@ -1,8 +1,8 @@
-import ProxyCore
 import Foundation
 import Testing
 import ProxyCLICommon
 import ProxyServerCLI
+import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct ServerCommandIntegrationTests {
@@ -77,11 +77,11 @@ struct ServerCommandIntegrationTests {
 
 private final class IntegrationRecordingProxyServer: ProxyServerCommandServer {
     private let lock = NSLock()
-    private var config: ProxyConfig?
+    private var config: XcodeMCPProxyServer.Configuration?
     private var started = 0
     private var waited = 0
 
-    func record(config: ProxyConfig) {
+    func record(config: XcodeMCPProxyServer.Configuration) {
         withLock {
             self.config = config
         }
@@ -98,7 +98,7 @@ private final class IntegrationRecordingProxyServer: ProxyServerCommandServer {
         incrementWaitCount()
     }
 
-    func recordedConfig() -> ProxyConfig? {
+    func recordedConfig() -> XcodeMCPProxyServer.Configuration? {
         withLock { config }
     }
 
