@@ -128,13 +128,17 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
         case .slots(let requestedSlotIDs):
             return validUniqueSlotIDs(requestedSlotIDs)
         case .xcodeProcess(let processID):
-            return xcodeProcessBindings.first { binding in
+            guard let binding = xcodeProcessBindings.first(where: { binding in
                 binding.processID == processID
-            }?.slotIDs ?? []
+            }) else {
+                return []
+            }
+            return topologyOrderedSlotIDs(containedIn: binding.slotIDs)
         case .xcodeVersion(let versionKey):
-            return xcodeProcessBindings.flatMap { binding -> [UpstreamSlotID] in
+            let matchingSlotIDs = xcodeProcessBindings.flatMap { binding -> [UpstreamSlotID] in
                 binding.versionKey == versionKey ? binding.slotIDs : []
             }
+            return topologyOrderedSlotIDs(containedIn: matchingSlotIDs)
         }
     }
 
@@ -159,5 +163,12 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
             seenSlotIDs.insert(slotID)
             return true
         }
+    }
+
+    private func topologyOrderedSlotIDs(containedIn candidateSlotIDs: [UpstreamSlotID])
+        -> [UpstreamSlotID]
+    {
+        let candidates = Set(candidateSlotIDs)
+        return slotIDs.filter { candidates.contains($0) }
     }
 }

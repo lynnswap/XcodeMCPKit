@@ -247,16 +247,19 @@ extension RuntimeCoordinatorTests {
             ],
             xcodeProcessBindings: [
                 XcodeProcessBinding(
-                    target: firstSharedVersionTarget,
+                    target: secondSharedVersionTarget,
                     slotIDs: [
-                        UpstreamSlotID(rawValue: 0),
                         UpstreamSlotID(rawValue: 2),
+                        UpstreamSlotID(rawValue: 1),
                     ]
                 ),
                 XcodeProcessBinding(
-                    target: secondSharedVersionTarget,
+                    target: firstSharedVersionTarget,
                     slotIDs: [
-                        UpstreamSlotID(rawValue: 1),
+                        UpstreamSlotID(rawValue: 2),
+                        UpstreamSlotID(rawValue: 99),
+                        UpstreamSlotID(rawValue: 0),
+                        UpstreamSlotID(rawValue: 2),
                     ]
                 ),
                 XcodeProcessBinding(
@@ -293,8 +296,8 @@ extension RuntimeCoordinatorTests {
             firstSharedVersionTarget
         ))) == [
             UpstreamSlotID(rawValue: 0),
-            UpstreamSlotID(rawValue: 2),
             UpstreamSlotID(rawValue: 1),
+            UpstreamSlotID(rawValue: 2),
         ])
     }
 
