@@ -20,6 +20,8 @@ package enum LocalPostHandling {
 }
 
 package struct LocalMCPResponder {
+    private typealias LocalResultOperation = @Sendable () async throws -> JSONValue
+
     private struct EmbeddedTestResolutionError: Error {}
 
     private let sessionManager: any RuntimeLocalMCPResponderPort
@@ -62,11 +64,7 @@ package struct LocalMCPResponder {
             mode: refreshCodeIssuesMode,
             hiddenToolNames: disabledToolNames
         )
-        var buffer = try Self.encodeResultBuffer(
-            id: originalID,
-            result: rewrittenResult
-        )
-        return buffer.readData(length: buffer.readableBytes) ?? Data()
+        return try Self.encodeResultData(id: originalID, result: rewrittenResult)
     }
 
     package func handle(
@@ -144,74 +142,24 @@ package struct LocalMCPResponder {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }
-            if usesSynchronousLocalResolution {
-                do {
-                    let result = try Self.waitForAsyncResult {
-                        try await sessionManager.sharedToolsList(
-                            sessionID: headerSessionID,
-                            requestTimeoutOverride: requestTimeoutOverride
-                        )
-                    }
-                    let rewrittenResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
-                        result,
-                        mode: refreshCodeIssuesMode,
-                        hiddenToolNames: disabledToolNames
-                    )
-                    var buffer = try Self.encodeResultBuffer(
-                        id: originalID,
-                        result: rewrittenResult
-                    )
-                    let data = buffer.readData(length: buffer.readableBytes) ?? Data()
-                    return .immediateResponse(data: data, sessionID: headerSessionID)
-                } catch {
-                    let data = try? Self.encodeErrorData(id: originalID, error: error)
-                    if let data {
-                        return .immediateResponse(data: data, sessionID: headerSessionID)
-                    }
-                    return Self.fallbackLocalError(
-                        id: originalID,
-                        sessionID: headerSessionID
-                    )
-                }
-            }
-            let promise = eventLoop.makePromise(of: ByteBuffer.self)
-            Task {
-                do {
-                    let result = try await sessionManager.sharedToolsList(
-                        sessionID: headerSessionID,
-                        requestTimeoutOverride: requestTimeoutOverride
-                    )
-                    let rewrittenResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
-                        result,
-                        mode: refreshCodeIssuesMode,
-                        hiddenToolNames: disabledToolNames
-                    )
-                    let buffer = try Self.encodeResultBuffer(
-                        id: originalID,
-                        result: rewrittenResult
-                    )
-                    eventLoop.execute {
-                        promise.succeed(buffer)
-                    }
-                } catch {
-                    do {
-                        let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
-                        eventLoop.execute {
-                            promise.succeed(buffer)
-                        }
-                    } catch {
-                        eventLoop.execute {
-                            promise.fail(error)
-                        }
-                    }
-                }
-            }
-            return .pendingResponse(
-                future: promise.futureResult,
+            let sessionManager = self.sessionManager
+            let refreshCodeIssuesMode = self.refreshCodeIssuesMode
+            let hiddenToolNames = disabledToolNames
+            return handleLocalResult(
+                originalID: originalID,
                 sessionID: headerSessionID,
-                errorSessionID: headerSessionID,
-                originalID: originalID
-            )
+                eventLoop: eventLoop
+            ) {
+                let result = try await sessionManager.sharedToolsList(
+                    sessionID: headerSessionID,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+                return RefreshCodeIssues.ToolsListRewriter.rewriteResult(
+                    result,
+                    mode: refreshCodeIssuesMode,
+                    hiddenToolNames: hiddenToolNames
+                )
+            }
         }
 
         if method == "tools/call",
@@ -226,73 +174,75 @@ package struct LocalMCPResponder {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }
-            if usesSynchronousLocalResolution {
-                do {
-                    let result = try Self.waitForAsyncResult {
-                        try await sessionManager.liveXcodeListWindowsResult(
-                            route: .anyHealthy,
-                            requestTimeoutOverride: requestTimeoutOverride
-                        )
-                    }
-                    var buffer = try Self.encodeResultBuffer(
-                        id: originalID,
-                        result: result
-                    )
-                    let data = buffer.readData(length: buffer.readableBytes) ?? Data()
-                    return .immediateResponse(data: data, sessionID: headerSessionID)
-                } catch {
-                    let data = try? Self.encodeErrorData(id: originalID, error: error)
-                    if let data {
-                        return .immediateResponse(data: data, sessionID: headerSessionID)
-                    }
-                    return Self.fallbackLocalError(
-                        id: originalID,
-                        sessionID: headerSessionID
-                    )
-                }
-            }
-            let promise = eventLoop.makePromise(of: ByteBuffer.self)
-            Task {
-                do {
-                    let result = try await sessionManager.liveXcodeListWindowsResult(
-                        route: .anyHealthy,
-                        requestTimeoutOverride: requestTimeoutOverride
-                    )
-                    let buffer = try Self.encodeResultBuffer(
-                        id: originalID,
-                        result: result
-                    )
-                    eventLoop.execute {
-                        promise.succeed(buffer)
-                    }
-                } catch {
-                    do {
-                        let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
-                        eventLoop.execute {
-                            promise.succeed(buffer)
-                        }
-                    } catch {
-                        eventLoop.execute {
-                            promise.fail(error)
-                        }
-                    }
-                }
-            }
-            return .pendingResponse(
-                future: promise.futureResult,
+            let sessionManager = self.sessionManager
+            return handleLocalResult(
+                originalID: originalID,
                 sessionID: headerSessionID,
-                errorSessionID: headerSessionID,
-                originalID: originalID
-            )
+                eventLoop: eventLoop
+            ) {
+                try await sessionManager.liveXcodeListWindowsResult(
+                    route: .anyHealthy,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+            }
         }
 
         return nil
     }
 
-    private static func encodeResultBuffer(
+    private func handleLocalResult(
+        originalID: JSONRPC.ID,
+        sessionID: String,
+        eventLoop: EventLoop,
+        operation: @escaping LocalResultOperation
+    ) -> LocalPostHandling {
+        if usesSynchronousLocalResolution {
+            do {
+                let result = try Self.waitForAsyncResult(operation)
+                let data = try Self.encodeResultData(id: originalID, result: result)
+                return .immediateResponse(data: data, sessionID: sessionID)
+            } catch {
+                let data = try? Self.encodeErrorData(id: originalID, error: error)
+                if let data {
+                    return .immediateResponse(data: data, sessionID: sessionID)
+                }
+                return Self.fallbackLocalError(id: originalID, sessionID: sessionID)
+            }
+        }
+
+        let promise = eventLoop.makePromise(of: ByteBuffer.self)
+        Task {
+            do {
+                let result = try await operation()
+                let buffer = try Self.encodeResultBuffer(id: originalID, result: result)
+                eventLoop.execute {
+                    promise.succeed(buffer)
+                }
+            } catch {
+                do {
+                    let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
+                    eventLoop.execute {
+                        promise.succeed(buffer)
+                    }
+                } catch {
+                    eventLoop.execute {
+                        promise.fail(error)
+                    }
+                }
+            }
+        }
+        return .pendingResponse(
+            future: promise.futureResult,
+            sessionID: sessionID,
+            errorSessionID: sessionID,
+            originalID: originalID
+        )
+    }
+
+    private static func encodeResultData(
         id: JSONRPC.ID,
         result: JSONValue
-    ) throws -> ByteBuffer {
+    ) throws -> Data {
         struct EncodingError: Error {}
         let response: [String: Any] = [
             "jsonrpc": "2.0",
@@ -302,7 +252,14 @@ package struct LocalMCPResponder {
         guard JSONSerialization.isValidJSONObject(response) else {
             throw EncodingError()
         }
-        let data = try JSONSerialization.data(withJSONObject: response, options: [])
+        return try JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private static func encodeResultBuffer(
+        id: JSONRPC.ID,
+        result: JSONValue
+    ) throws -> ByteBuffer {
+        let data = try encodeResultData(id: id, result: result)
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
         buffer.writeBytes(data)
         return buffer
