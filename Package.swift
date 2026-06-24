@@ -284,12 +284,6 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "ProxyArchitectureTests",
-            dependencies: [],
-            path: "Tests/ProxyArchitectureTests",
-            swiftSettings: strictSwiftSettings
-        ),
-        .testTarget(
             name: "ProxySessionTests",
             dependencies: [
                 "XcodeMCPProxy",
