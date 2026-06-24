@@ -450,9 +450,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportReusesPrewarmedUpstreamRouteForSearch()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 740, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -461,16 +458,15 @@ extension RuntimeCoordinatorTests {
             transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
             providerSelectionTimeout: .seconds(1)
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         async let prewarmUpdate = providerManager.startBackgroundDiscovery(
@@ -520,9 +516,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportFallsBackForReusedRouteToolsListFailure()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         await upstream.overloadNextSend()
         let target = xcodeProcessTarget(processID: 741, xcodeVersion: "27.0")
@@ -541,16 +534,15 @@ extension RuntimeCoordinatorTests {
             ),
             providerSelectionTimeout: .seconds(1)
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let discoveryTask = Task {
@@ -573,9 +565,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportFallsBackWhenReusedUpstreamRouteFails()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         await upstream.overloadNextSend()
         let target = xcodeProcessTarget(processID: 742, xcodeVersion: "27.0")
@@ -601,16 +590,15 @@ extension RuntimeCoordinatorTests {
             ),
             providerSelectionTimeout: .seconds(1)
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let firstOutcome = try await providerManager.callDocumentationSearch(
@@ -648,9 +636,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportCachesInstalledAssetFallbackWithoutOwningBorrowedRoute()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 747, xcodeVersion: "26.6")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -667,16 +652,15 @@ extension RuntimeCoordinatorTests {
             providerSelectionTimeout: .seconds(1),
             localSearchProvider: localProvider
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let firstTask = Task {
@@ -727,9 +711,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportKeepsBorrowedRouteAfterInitialAssetFallbackTimeout()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 748, xcodeVersion: "26.6")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -747,16 +728,15 @@ extension RuntimeCoordinatorTests {
             providerSelectionTimeout: .seconds(1),
             localSearchProvider: localProvider
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let timeoutTask = Task {
@@ -809,9 +789,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportUsesInstalledAssetFallbackWhenBorrowedRouteRepairDoesNotRestoreDescriptor()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 749, xcodeVersion: "26.6")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -840,16 +817,15 @@ extension RuntimeCoordinatorTests {
             serviceRepairer: repairer,
             localSearchProvider: localProvider
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let prewarmTask = Task {
@@ -900,9 +876,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportTimesOutQueuedPinnedRouteBeforeDispatch()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 746, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -911,16 +884,16 @@ extension RuntimeCoordinatorTests {
             transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
             providerSelectionTimeout: .seconds(1)
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let eventLoop = fixture.eventLoop
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let activeDescriptor = SessionRequestPipeline.Descriptor(
@@ -979,9 +952,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportClosesFallbackOpenedAfterRouteInvalidation()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         await upstream.overloadNextSend()
         let target = xcodeProcessTarget(processID: 743, xcodeVersion: "27.0")
@@ -1000,16 +970,15 @@ extension RuntimeCoordinatorTests {
             ),
             providerSelectionTimeout: .seconds(1)
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let searchTask = Task {
@@ -1088,9 +1057,6 @@ extension RuntimeCoordinatorTests {
     @Test func runtimeDocumentationTransportCancellationReleasesControlPlaneLease()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 745, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -1099,15 +1065,15 @@ extension RuntimeCoordinatorTests {
             target: target,
             upstreamIndex: 0
         )
-        let manager = RuntimeCoordinator(
+        let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 30),
-            eventLoop: eventLoop,
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             startImmediately: false,
             runtimeBox: runtimeBox
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let toolsListTask = Task {
@@ -1269,20 +1235,16 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func sharedToolsListAdvertisesProxyOwnedDocumentationSearchDescriptor() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0"))
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         manager.setCachedToolsListResult(
             try jsonValue([
@@ -1310,9 +1272,6 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func sharedToolsListDoesNotWaitForStartupDocumentationPrewarm() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let prewarmStarted = TestSignal()
         let prewarmGate = AsyncGate()
@@ -1321,14 +1280,13 @@ extension RuntimeCoordinatorTests {
             prewarmStarted: prewarmStarted,
             prewarmBlocker: prewarmGate
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.setCachedToolsListResult(
             try jsonValue([
                 "tools": [
@@ -1368,21 +1326,17 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func sharedToolsListSurfaceDoesNotDependOnProviderInvalidation() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0"))
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
         manager.setCachedToolsListResult(
             try jsonValue([
                 "tools": [
@@ -1425,18 +1379,14 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func sharedToolsListReplacesStaleDocumentationSearchWhenProviderUnavailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         manager.setCachedToolsListResult(
             try jsonValue([
@@ -1466,22 +1416,18 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func sharedToolsListDoesNotProbeDocumentationProvider() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let toolListGate = AsyncGate()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
             toolListBlocker: toolListGate
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         manager.setCachedToolsListResult(
             try jsonValue([
@@ -1517,9 +1463,6 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationSearchKeepsCanonicalToolsCatalogWhenProviderRecoversAfterInvalidation() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let providerResponse = try makeJSONRPCResponse(
             id: 41,
@@ -1537,13 +1480,12 @@ extension RuntimeCoordinatorTests {
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
             callOutcomes: [.handled(providerResponse, invalidatedProvider: true)]
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         manager.setCachedToolsListResult(
             try jsonValue([
@@ -1574,9 +1516,6 @@ extension RuntimeCoordinatorTests {
     @Test func documentationSearchDoesNotInvalidateWhenSuccessfulAnswerMentionsNotEnabled()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let providerResponse = try makeJSONRPCResponse(
             id: 43,
@@ -1594,13 +1533,12 @@ extension RuntimeCoordinatorTests {
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
             callOutcomes: [.handled(providerResponse, invalidatedProvider: false)]
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         let cachedTools = try jsonValue([
             "tools": [
@@ -1626,21 +1564,17 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func documentationSearchReportsUnavailableWhenNoProviderAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0")),
             callOutcomes: [.unavailable(.noAvailableProvider)]
         )
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             documentationProviderManager: documentationProvider
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         manager.setCachedToolsListResult(
             try jsonValue([
@@ -1673,21 +1607,17 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func startupPrewarmsDocumentationProviderWhenEnabled() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(
             toolListUpdate: .available(documentationDescriptor(version: "27.0"))
         )
-        let manager = RuntimeCoordinator(
+        let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
-            eventLoop: eventLoop,
             upstreams: [upstream],
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
 
         try await waitWithTimeout("waiting for documentation provider startup prewarm") {
             try await documentationProvider.waitForPrewarmCount(1)
@@ -1699,21 +1629,17 @@ extension RuntimeCoordinatorTests {
     }
 
     @Test func startupPollsDocumentationProviderUntilAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
-        let manager = RuntimeCoordinator(
+        let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
-            eventLoop: eventLoop,
             upstreams: [upstream],
             clock: clock,
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
 
         try await waitWithTimeout("waiting for initial documentation provider prewarm") {
             try await documentationProvider.waitForPrewarmCount(1)

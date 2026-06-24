@@ -81,21 +81,16 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func upstreamStderrStillRecordsInDebugSnapshotWhenRateLimited() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) }
             )
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         manager.handleUpstreamStderr("repeated stderr", upstreamIndex: 0)
         manager.handleUpstreamStderr("repeated stderr", upstreamIndex: 0)
@@ -105,34 +100,18 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerQueuesInitializeRequests() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) }
             )
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
 
-        let request1 = makeInitializeRequest(id: 1)
-        let request2 = makeInitializeRequest(id: 2)
-        let future1 = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: request1,
-            on: eventLoop
-        )
-        let future2 = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
-            requestObject: request2,
-            on: eventLoop
-        )
+        let future1 = fixture.registerInitialize(requestID: 1)
+        let future2 = fixture.registerInitialize(requestID: 2)
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         let sent = await upstream.sent()
@@ -166,28 +145,19 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerJoinsEagerProcessInitializeInFlight() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 27001, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
             ]
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
 
         let eagerInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let eagerUpstreamID = try extractUpstreamID(from: eagerInitialize)
-        let future = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1)
         #expect(await upstream.sentCount() == 1)
 
         await upstream.yield(.message(try makeInitializeResponse(id: eagerUpstreamID)))
@@ -199,16 +169,11 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterError()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream0, upstream1],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
@@ -216,13 +181,10 @@ struct RuntimeCoordinatorTests {
             ],
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
-        let future = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1)
         let failedInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let failedUpstreamID = try extractUpstreamID(from: failedInitialize)
         await upstream0.yield(.message(try makeInitializeErrorResponse(id: failedUpstreamID)))
@@ -251,17 +213,12 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRoutesInitializeHandshakeNotificationsFromRetriedPrimaryProcess()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
         let newerTarget = xcodeProcessTarget(processID: 27104, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26604, xcodeVersion: "26.6")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream0, upstream1],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
@@ -272,18 +229,14 @@ struct RuntimeCoordinatorTests {
             ),
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         let sessionID = "session-retried-primary-handshake"
         let session = manager.session(id: sessionID)
         _ = session.router.drainBufferedNotifications()
 
-        let future = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1, sessionID: sessionID)
         let failedInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let failedUpstreamID = try extractUpstreamID(from: failedInitialize)
         await upstream0.yield(.message(try makeInitializeErrorResponse(id: failedUpstreamID)))
@@ -316,28 +269,20 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnSiblingBeforeDroppingProcessAfterError()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 27103, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream0, upstream1],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
             ],
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
-        let future = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1)
         let failedInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let failedUpstreamID = try extractUpstreamID(from: failedInitialize)
         await upstream0.yield(.message(try makeInitializeErrorResponse(id: failedUpstreamID)))
@@ -356,17 +301,12 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterExit()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
         let newerTarget = xcodeProcessTarget(processID: 27101, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26601, xcodeVersion: "26.6")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream0, upstream1],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
@@ -377,13 +317,10 @@ struct RuntimeCoordinatorTests {
             ),
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
-        let future = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1)
         _ = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let exitEventIndex = upstreamEvents.count()
         await upstream0.yield(.exit(1))
@@ -405,16 +342,11 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetriesProcessPrimaryInitializeWhenSendIsUnavailable()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let unavailableUpstream = AlwaysUnavailableUpstreamClient(reason: .startFailed)
         let retryUpstream = TestUpstreamClient()
         let newerTarget = xcodeProcessTarget(processID: 27102, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26602, xcodeVersion: "26.6")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
+        let fixture = RuntimeCoordinatorFixture(
             upstreams: [unavailableUpstream, retryUpstream],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
@@ -422,13 +354,10 @@ struct RuntimeCoordinatorTests {
             ],
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
-        let future = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1)
 
         try await waitForSentCount(unavailableUpstream, count: 1, timeoutSeconds: 2)
         let retriedInitialize = try await sentValue(from: retryUpstream, at: 0, timeout: .seconds(2))
@@ -442,45 +371,25 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerMarksPrimaryUsableBeforeInitializeReturns() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
-        let future = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let upstreamID = try extractUpstreamID(from: sent)
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-
-        _ = try await future.get()
+        _ = try await fixture.initializePrimary(on: upstream)
         #expect(manager.chooseUpstreamIndex() == 0)
     }
 
     @Test func sessionManagerRejectsUnsupportedInitializeProtocolBeforeIssuingSession()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         let sessionID = "session-unsupported-protocol"
-        let future = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1, sessionID: sessionID)
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let upstreamID = try extractUpstreamID(from: sent)
         let response: [String: Any] = [
@@ -509,21 +418,13 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRemovesPendingInitializeSessionOnFailure() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         let sessionID = "session-failed-initialize"
-        let future = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
+        let future = fixture.registerInitialize(requestID: 1, sessionID: sessionID)
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
 
         manager.failInitPending(error: TimeoutError())
@@ -539,26 +440,14 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRecordsServerInitiatedRequestUpstreamForClientResponses()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         let sessionID = "session-server-request"
         let session = manager.session(id: sessionID)
-        let future = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let upstreamID = try extractUpstreamID(from: sent)
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-        _ = try await future.get()
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
 
         let serverRequest: [String: Any] = [
             "jsonrpc": "2.0",
@@ -582,26 +471,15 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerDoesNotTreatServerRequestIDAsPendingResponseID()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let eventLoop = fixture.eventLoop
+        let manager = fixture.manager
 
         let sessionID = "session-server-request-id-collision"
         let session = manager.session(id: sessionID)
-        let initializeFuture = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
-        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
-        _ = try await initializeFuture.get()
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
 
         let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
         let responseFuture = session.router.registerRequest(
@@ -637,26 +515,15 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRoutesServerRequestFromMixedUpstreamBatchThroughTracker()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let eventLoop = fixture.eventLoop
+        let manager = fixture.manager
 
         let sessionID = "session-mixed-upstream-batch"
         let session = manager.session(id: sessionID)
-        let initializeFuture = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
-        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
-        _ = try await initializeFuture.get()
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
 
         let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
         let responseFuture = session.router.registerRequest(
@@ -721,26 +588,15 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerCompletesMalformedMappedUpstreamResponseWithError()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let eventLoop = fixture.eventLoop
+        let manager = fixture.manager
 
         let sessionID = "session-malformed-mapped-response"
         let session = manager.session(id: sessionID)
-        let initializeFuture = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sentInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
-        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
-        _ = try await initializeFuture.get()
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
 
         let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
         let responseFuture = session.router.registerRequest(
@@ -772,26 +628,15 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPreservesServerRequestRouteUntilForwardingSendAccepted()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let eventLoop = fixture.eventLoop
+        let manager = fixture.manager
 
         let sessionID = "session-server-response-retry"
         let session = manager.session(id: sessionID)
-        let initializeFuture = manager.registerInitialize(
-            sessionID: sessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sentInitialize = try await upstream.nextSent(at: 0)
-        let initializeUpstreamID = try extractUpstreamID(from: sentInitialize)
-        await upstream.yield(.message(try makeInitializeResponse(id: initializeUpstreamID)))
-        _ = try await initializeFuture.get()
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
 
         let serverRequest: [String: Any] = [
             "jsonrpc": "2.0",
@@ -904,35 +749,18 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRoutesServerInitiatedRequestToOwningSession() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
 
         let firstSessionID = "session-server-request-a"
         let firstSession = manager.session(id: firstSessionID)
-        let firstFuture = manager.registerInitialize(
-            sessionID: firstSessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let upstreamID = try extractUpstreamID(from: sent)
-        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-        _ = try await firstFuture.get()
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: firstSessionID)
 
         let secondSessionID = "session-server-request-b"
         let secondSession = manager.session(id: secondSessionID)
-        let secondFuture = manager.registerInitialize(
-            sessionID: secondSessionID,
-            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
-            requestObject: makeInitializeRequest(id: 2),
-            on: eventLoop
-        )
+        let secondFuture = fixture.registerInitialize(requestID: 2, sessionID: secondSessionID)
         _ = try await secondFuture.get()
 
         let ownerLeaseID = manager.createRequestLease(

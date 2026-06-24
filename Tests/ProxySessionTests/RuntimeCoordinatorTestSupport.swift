@@ -1833,6 +1833,126 @@ func makeInitializeErrorResponse(id: Int64, message: String = "initialize failed
     return try JSONSerialization.data(withJSONObject: response, options: [])
 }
 
+protocol InitializableTestUpstream: AnyObject, Sendable {
+    func nextSent(at index: Int) async throws -> Data
+    func yield(_ event: Upstream.Event) async
+}
+
+extension TestUpstreamClient: InitializableTestUpstream {}
+extension ToggleableOverloadUpstreamClient: InitializableTestUpstream {}
+extension BlockingInitializedNotificationUpstreamClient: InitializableTestUpstream {}
+
+struct RuntimeCoordinatorFixture {
+    let group: MultiThreadedEventLoopGroup
+    let eventLoop: EventLoop
+    let manager: RuntimeCoordinator
+
+    init(
+        config: ProxyConfig = makeConfig(requestTimeout: 5),
+        upstreams: [any UpstreamSlotControlling],
+        clock: ClockClient = .liveValue,
+        upstreamReadinessGate: UpstreamReadinessGate? = nil,
+        nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
+        scheduleRuntimeTimeout: (
+            @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
+                RuntimeScheduledTimeout
+        )? = nil,
+        xcodeProcessRoutes: [XcodeProcessRoute] = [],
+        documentationProviderManager: (any DocumentationProviderManaging)? = nil,
+        prewarmDocumentationProviderOnStartup: Bool = false,
+        testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
+        startImmediately: Bool = true,
+        runtimeBox: WeakRuntimeCoordinatorBox? = nil
+    ) {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let eventLoop = group.next()
+        self.group = group
+        self.eventLoop = eventLoop
+        self.manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: upstreams,
+            clock: clock,
+            upstreamReadinessGate: upstreamReadinessGate,
+            nowUptimeNanoseconds: nowUptimeNanoseconds,
+            scheduleRuntimeTimeout: scheduleRuntimeTimeout,
+            xcodeProcessRoutes: xcodeProcessRoutes,
+            documentationProviderManager: documentationProviderManager,
+            prewarmDocumentationProviderOnStartup: prewarmDocumentationProviderOnStartup,
+            testHooks: testHooks,
+            startImmediately: startImmediately,
+            runtimeBox: runtimeBox
+        )
+    }
+
+    func shutdownAndWait() {
+        manager.shutdownAndWait()
+        XcodeMCPTestSupport.shutdownAndWait(group)
+    }
+
+    func registerInitialize(
+        requestID: Int,
+        sessionID: String? = nil,
+        requestObject: [String: Any]? = nil
+    ) -> EventLoopFuture<ByteBuffer> {
+        let originalID = JSONRPC.ID(any: NSNumber(value: requestID))!
+        let requestObject = requestObject ?? makeInitializeRequest(id: requestID)
+        if let sessionID {
+            return manager.registerInitialize(
+                sessionID: sessionID,
+                originalID: originalID,
+                requestObject: requestObject,
+                on: eventLoop
+            )
+        }
+        return manager.registerInitialize(
+            originalID: originalID,
+            requestObject: requestObject,
+            on: eventLoop
+        )
+    }
+
+    @discardableResult
+    func completeInitialize<UpstreamClient: InitializableTestUpstream>(
+        on upstream: UpstreamClient,
+        at sentIndex: Int = 0,
+        serverName: String? = nil,
+        timeout: Duration = .seconds(2)
+    ) async throws -> Data {
+        let initializeRequest = try await waitWithTimeout(
+            "waiting for sent message \(sentIndex + 1)",
+            timeout: timeout
+        ) {
+            try await upstream.nextSent(at: sentIndex)
+        }
+        let upstreamID = try extractUpstreamID(from: initializeRequest)
+        await upstream.yield(.message(try makeInitializeResponse(
+            id: upstreamID,
+            serverName: serverName
+        )))
+        return initializeRequest
+    }
+
+    @discardableResult
+    func initializePrimary<UpstreamClient: InitializableTestUpstream>(
+        on upstream: UpstreamClient,
+        requestID: Int = 1,
+        sessionID: String? = nil,
+        sentIndex: Int = 0,
+        serverName: String? = nil,
+        timeout: Duration = .seconds(2)
+    ) async throws -> ByteBuffer {
+        let future = registerInitialize(requestID: requestID, sessionID: sessionID)
+        try await completeInitialize(
+            on: upstream,
+            at: sentIndex,
+            serverName: serverName,
+            timeout: timeout
+        )
+        return try await future.get()
+    }
+}
+
 func extractUpstreamID(from data: Data) throws -> Int64 {
     let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
     return (object?["id"] as? NSNumber)?.int64Value ?? 0
