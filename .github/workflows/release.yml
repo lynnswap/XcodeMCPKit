@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      archive_sha256: ${{ steps.release_digests.outputs.archive_sha256 }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -112,6 +114,13 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --release-dir release
 
+      - name: Record trusted release digest
+        id: release_digests
+        run: |
+          set -euo pipefail
+          archive_sha256="$(shasum -a 256 release/xcode-mcp-proxy-darwin-arm64.tar.gz | awk '{ print $1 }')"
+          echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
+
       - name: Upload release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -195,7 +204,8 @@ jobs:
           scripts/verify-release-assets.sh \
             --version "${RELEASE_VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --release-dir release
+            --release-dir release \
+            --archive-sha256 "${{ needs.build-release.outputs.archive_sha256 }}"
 
       - name: Create draft release
         env:
