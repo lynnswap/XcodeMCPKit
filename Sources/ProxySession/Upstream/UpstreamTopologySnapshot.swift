@@ -55,6 +55,7 @@ package struct XcodeVersionKey: Sendable, Hashable {
 
 package enum UpstreamSelectionScope: Sendable, Hashable {
     case any
+    case slots([UpstreamSlotID])
     case xcodeProcess(XcodeProcessID)
     case xcodeVersion(XcodeVersionKey)
 }
@@ -64,30 +65,25 @@ package struct XcodeProcessBinding: Sendable, Equatable {
     package let versionKey: XcodeVersionKey
     package let target: XcodeProcessTarget
     package let slotIDs: [UpstreamSlotID]
-    package let selectionScope: UpstreamSelectionScope
 
     package init(
         processID: XcodeProcessID,
         versionKey: XcodeVersionKey,
         target: XcodeProcessTarget,
-        slotIDs: [UpstreamSlotID],
-        selectionScope: UpstreamSelectionScope
+        slotIDs: [UpstreamSlotID]
     ) {
         self.processID = processID
         self.versionKey = versionKey
         self.target = target
         self.slotIDs = slotIDs
-        self.selectionScope = selectionScope
     }
 
     package init(target: XcodeProcessTarget, slotIDs: [UpstreamSlotID]) {
-        let processID = XcodeProcessID(target)
         self.init(
-            processID: processID,
+            processID: XcodeProcessID(target),
             versionKey: XcodeVersionKey(target),
             target: target,
-            slotIDs: slotIDs,
-            selectionScope: .xcodeProcess(processID)
+            slotIDs: slotIDs
         )
     }
 }
@@ -125,6 +121,23 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
         }
     }
 
+    package func slotIDs(matching scope: UpstreamSelectionScope) -> [UpstreamSlotID] {
+        switch scope {
+        case .any:
+            return slotIDs
+        case .slots(let requestedSlotIDs):
+            return validUniqueSlotIDs(requestedSlotIDs)
+        case .xcodeProcess(let processID):
+            return xcodeProcessBindings.first { binding in
+                binding.processID == processID
+            }?.slotIDs ?? []
+        case .xcodeVersion(let versionKey):
+            return xcodeProcessBindings.flatMap { binding -> [UpstreamSlotID] in
+                binding.versionKey == versionKey ? binding.slotIDs : []
+            }
+        }
+    }
+
     package func binding(forSlotID slotID: UpstreamSlotID) -> XcodeProcessBinding? {
         xcodeProcessBindings.first { binding in
             binding.slotIDs.contains(slotID)
@@ -133,5 +146,18 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
 
     package func binding(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessBinding? {
         binding(forSlotID: UpstreamSlotID(rawValue: upstreamIndex))
+    }
+
+    private func validUniqueSlotIDs(_ requestedSlotIDs: [UpstreamSlotID]) -> [UpstreamSlotID] {
+        let knownSlotIDs = Set(slotIDs)
+        var seenSlotIDs = Set<UpstreamSlotID>()
+        return requestedSlotIDs.filter { slotID in
+            guard knownSlotIDs.contains(slotID),
+                  seenSlotIDs.contains(slotID) == false else {
+                return false
+            }
+            seenSlotIDs.insert(slotID)
+            return true
+        }
     }
 }

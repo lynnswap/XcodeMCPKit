@@ -220,6 +220,84 @@ extension RuntimeCoordinatorTests {
         #expect(base != differentMCPBridgePath)
     }
 
+    @Test func upstreamTopologyResolvesSelectionScopes() {
+        let sharedDeveloperDir = "/Applications/Xcode.app/Contents/Developer"
+        let sharedMCPBridgePath = "\(sharedDeveloperDir)/usr/bin/mcpbridge"
+        let firstSharedVersionTarget = XcodeProcessTarget(
+            processID: 700,
+            appPath: "/Applications/Xcode.app",
+            developerDir: sharedDeveloperDir,
+            mcpbridgePath: sharedMCPBridgePath,
+            xcodeVersion: "27.0"
+        )
+        let secondSharedVersionTarget = XcodeProcessTarget(
+            processID: 701,
+            appPath: "/Applications/Xcode.app",
+            developerDir: sharedDeveloperDir,
+            mcpbridgePath: sharedMCPBridgePath,
+            xcodeVersion: "27.0"
+        )
+        let otherVersionTarget = xcodeProcessTarget(processID: 702, xcodeVersion: "26.6")
+        let topology = UpstreamTopologySnapshot(
+            slotIDs: [
+                UpstreamSlotID(rawValue: 0),
+                UpstreamSlotID(rawValue: 1),
+                UpstreamSlotID(rawValue: 2),
+                UpstreamSlotID(rawValue: 3),
+            ],
+            xcodeProcessBindings: [
+                XcodeProcessBinding(
+                    target: firstSharedVersionTarget,
+                    slotIDs: [
+                        UpstreamSlotID(rawValue: 0),
+                        UpstreamSlotID(rawValue: 2),
+                    ]
+                ),
+                XcodeProcessBinding(
+                    target: secondSharedVersionTarget,
+                    slotIDs: [
+                        UpstreamSlotID(rawValue: 1),
+                    ]
+                ),
+                XcodeProcessBinding(
+                    target: otherVersionTarget,
+                    slotIDs: [
+                        UpstreamSlotID(rawValue: 3),
+                    ]
+                ),
+            ]
+        )
+
+        #expect(topology.slotIDs(matching: .any) == [
+            UpstreamSlotID(rawValue: 0),
+            UpstreamSlotID(rawValue: 1),
+            UpstreamSlotID(rawValue: 2),
+            UpstreamSlotID(rawValue: 3),
+        ])
+        #expect(topology.slotIDs(matching: .slots([
+            UpstreamSlotID(rawValue: 2),
+            UpstreamSlotID(rawValue: 99),
+            UpstreamSlotID(rawValue: 2),
+            UpstreamSlotID(rawValue: 0),
+        ])) == [
+            UpstreamSlotID(rawValue: 2),
+            UpstreamSlotID(rawValue: 0),
+        ])
+        #expect(topology.slotIDs(
+            matching: .xcodeProcess(XcodeProcessID(rawValue: firstSharedVersionTarget.processID))
+        ) == [
+            UpstreamSlotID(rawValue: 0),
+            UpstreamSlotID(rawValue: 2),
+        ])
+        #expect(topology.slotIDs(matching: .xcodeVersion(XcodeVersionKey(
+            firstSharedVersionTarget
+        ))) == [
+            UpstreamSlotID(rawValue: 0),
+            UpstreamSlotID(rawValue: 2),
+            UpstreamSlotID(rawValue: 1),
+        ])
+    }
+
     @Test func defaultUpstreamPlanBindsEachSlotToSingleXcodeProcess() throws {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
@@ -250,7 +328,6 @@ extension RuntimeCoordinatorTests {
             UpstreamSlotID(rawValue: 0),
             UpstreamSlotID(rawValue: 1),
         ])
-        #expect(binding.selectionScope == .xcodeProcess(XcodeProcessID(rawValue: target.processID)))
         #expect(plan.topology.binding(forUpstreamIndex: 1)?.processID == binding.processID)
         for upstream in plan.upstreams {
             let environment = try upstreamEnvironment(from: upstream)
