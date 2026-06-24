@@ -1,5 +1,4 @@
 import Foundation
-import ProxySessionUpstream
 
 package enum XcodeMCPTransportEvent: Sendable {
     case message(Data)

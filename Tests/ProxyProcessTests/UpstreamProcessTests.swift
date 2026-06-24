@@ -3,7 +3,7 @@ import Testing
 import XcodeMCPTestSupport
 
 @testable import ProxySession
-@testable import ProxySessionUpstream
+@testable import XcodeMCPKit
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct UpstreamProcessTests {

@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import ProxySessionUpstream
+import XcodeMCPKit
 import ProxyCore
 import ProxyMCP
 

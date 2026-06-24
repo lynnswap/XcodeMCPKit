@@ -1,7 +1,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import ProxySessionControlPlane
-import ProxySessionUpstream
+import XcodeMCPKit
 import ProxyCore
 import ProxyMCP
 

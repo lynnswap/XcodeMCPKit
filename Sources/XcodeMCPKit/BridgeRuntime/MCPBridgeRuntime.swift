@@ -1,6 +1,5 @@
 import Foundation
 import ProxyCore
-import ProxySessionUpstream
 
 package enum MCPBridgeRuntime {
     package static func makeUpstreamPlan(

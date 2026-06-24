@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import ProxySessionUpstream
+import XcodeMCPKit
 import ProxyCore
 
 package final class UpstreamSlotScheduler: Sendable {
