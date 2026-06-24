@@ -139,6 +139,13 @@ extension RuntimeCoordinator {
                         deadlineUptimeNs: deadlineUptimeNs
                     )
                 }
+                if Self.xcodeListWindowsIsErrorResult(result) {
+                    throw ControlPlane.Error.upstreamRPC(
+                        code: -32000,
+                        message: Self.xcodeListWindowsMessage(in: result)
+                            ?? "XcodeListWindows returned tool error"
+                    )
+                }
                 return (upstreamIndex, result)
             } catch is CancellationError {
                 throw CancellationError()

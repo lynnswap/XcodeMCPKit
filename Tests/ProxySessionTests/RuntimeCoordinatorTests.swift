@@ -2928,6 +2928,78 @@ struct RuntimeCoordinatorTests {
         ]) == 1)
     }
 
+    @Test func sessionManagerXcodeListWindowsRetriesSiblingAfterToolError()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let firstUpstream = TestUpstreamClient()
+        let siblingUpstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 516, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [firstUpstream, siblingUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let firstRequest = try await sentValue(from: firstUpstream, at: 0, timeout: .seconds(2))
+        #expect(toolCallName(from: firstRequest) == "XcodeListWindows")
+        await firstUpstream.yield(
+            .message(
+                try makeXcodeListWindowsToolErrorResponse(
+                    id: try extractUpstreamID(from: firstRequest),
+                    message: "XcodeListWindows failed"
+                )
+            )
+        )
+
+        let siblingRequest = try await sentValue(from: siblingUpstream, at: 0, timeout: .seconds(2))
+        #expect(toolCallName(from: siblingRequest) == "XcodeListWindows")
+        let message = "* tabIdentifier: tab-tool-error, workspacePath: /Work/T.xcworkspace"
+        await siblingUpstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: siblingRequest),
+                    message: message
+                )
+            )
+        )
+
+        let result = try await task.value
+        guard case .object(let resultObject) = result,
+              case .object(let structuredContent)? = resultObject["structuredContent"],
+              case .string(let resultMessage)? = structuredContent["message"] else {
+            Issue.record("expected XcodeListWindows structuredContent")
+            return
+        }
+        #expect(resultMessage == message)
+        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+        #expect(manager.preferredUpstreamIndex(for: [
+            "method": "tools/call",
+            "params": [
+                "name": "XcodeListNavigatorIssues",
+                "arguments": [
+                    "tabIdentifier": "tab-tool-error",
+                ],
+            ],
+        ]) != nil)
+    }
+
     @Test func sessionManagerCachesDuplicateWorkspaceOwnerByRoutePriority() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
