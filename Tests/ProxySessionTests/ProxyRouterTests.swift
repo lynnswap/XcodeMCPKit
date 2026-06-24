@@ -21,6 +21,7 @@ struct ProxyRouterTests {
         let future = router.registerRequest(idKey: "1", on: eventLoop)
         let response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
         router.handleIncoming(Data(response.utf8))
+        eventLoop.run()
 
         let buffer = try await future.get()
         let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
@@ -70,6 +71,7 @@ struct ProxyRouterTests {
         let future = router.registerBatchPending(on: eventLoop, responseIDKeys: ["1"]).future
         let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
         router.handleIncoming(Data(response.utf8))
+        eventLoop.run()
 
         let buffer = try await future.get()
         let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)

@@ -17,6 +17,10 @@ package final class NotificationHub: Sendable {
         sseHub.add(channel)
     }
 
+    package func waitForSSEClient() async throws {
+        try await sseHub.waitForClient()
+    }
+
     package func removeSse(_ channel: Channel) {
         sseHub.remove(channel)
     }

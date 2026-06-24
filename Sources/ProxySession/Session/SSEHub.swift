@@ -7,10 +7,16 @@ import ProxyCore
 import ProxyMCP
 
 final class SSEHub: Sendable {
+    private struct Waiter: Sendable {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private struct State: Sendable {
         var clients: [ObjectIdentifier: Channel] = [:]
         var clientOrder: [ObjectIdentifier] = []
         var nextClientIndex = 0
+        var waiters: [Waiter] = []
 
         mutating func add(_ channel: Channel) {
             let id = ObjectIdentifier(channel)
@@ -70,8 +76,36 @@ final class SSEHub: Sendable {
     }
 
     func add(_ channel: Channel) {
-        state.withLockedValue { state in
+        let waiters = state.withLockedValue { state -> [Waiter] in
             state.add(channel)
+            let waiters = state.waiters
+            state.waiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.continuation.resume(returning: ())
+        }
+    }
+
+    func waitForClient() async throws {
+        if hasClients {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let shouldResume = state.withLockedValue { state in
+                    guard state.clients.isEmpty else { return true }
+                    state.waiters.append(Waiter(id: waiterID, continuation: continuation))
+                    return false
+                }
+                if shouldResume {
+                    continuation.resume(returning: ())
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter(id: waiterID)
         }
     }
 
@@ -109,5 +143,15 @@ final class SSEHub: Sendable {
                 channel.close(promise: nil)
             }
         }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        let waiter = state.withLockedValue { state -> Waiter? in
+            guard let index = state.waiters.firstIndex(where: { $0.id == id }) else {
+                return nil
+            }
+            return state.waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(throwing: CancellationError())
     }
 }

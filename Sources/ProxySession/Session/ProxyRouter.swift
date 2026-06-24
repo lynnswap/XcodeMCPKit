@@ -12,6 +12,7 @@ package final class ProxyRouter: Sendable {
 
     private struct Pending: Sendable {
         var token: UUID
+        var eventLoop: EventLoop
         var promise: EventLoopPromise<ByteBuffer>
         var timeout: Scheduled<Void>?
         var onTimeout: (@Sendable () -> Void)?
@@ -75,6 +76,7 @@ package final class ProxyRouter: Sendable {
             let existing = state.pendingByID[idKey]
             state.pendingByID[idKey] = Pending(
                 token: token,
+                eventLoop: eventLoop,
                 promise: promise,
                 timeout: timeout,
                 onTimeout: onTimeout,
@@ -85,8 +87,9 @@ package final class ProxyRouter: Sendable {
         // A client reusing an in-flight request id supersedes the older
         // request; fail it explicitly instead of leaking its promise and
         // leaving its timer armed against the new registration.
-        displaced?.timeout?.cancel()
-        displaced?.promise.fail(CancellationError())
+        if let displaced {
+            failOnEventLoop(displaced, error: CancellationError())
+        }
         return PendingRegistration(token: token, future: promise.futureResult)
     }
 
@@ -111,6 +114,7 @@ package final class ProxyRouter: Sendable {
             state.pendingBatches.append(
                 Pending(
                     token: token,
+                    eventLoop: eventLoop,
                     promise: promise,
                     timeout: timeout,
                     onTimeout: onTimeout,
@@ -132,8 +136,9 @@ package final class ProxyRouter: Sendable {
             }
             return nil
         }
-        pending?.timeout?.cancel()
-        pending?.promise.fail(CancellationError())
+        if let pending {
+            failOnEventLoop(pending, error: CancellationError())
+        }
         return pending != nil
     }
 
@@ -226,10 +231,19 @@ package final class ProxyRouter: Sendable {
     }
 
     private func complete(pending: Pending, data: Data) {
-        pending.timeout?.cancel()
-        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
-        buffer.writeBytes(data)
-        pending.promise.succeed(buffer)
+        pending.eventLoop.execute {
+            pending.timeout?.cancel()
+            var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            pending.promise.succeed(buffer)
+        }
+    }
+
+    private func failOnEventLoop(_ pending: Pending, error: Error) {
+        pending.eventLoop.execute {
+            pending.timeout?.cancel()
+            pending.promise.fail(error)
+        }
     }
 
     private func notify(_ data: Data) {
