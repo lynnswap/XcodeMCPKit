@@ -15,6 +15,10 @@ let package = Package(
         .macOS("15.4")
     ],
     products: [
+        .library(
+            name: "XcodeMCPKit",
+            targets: ["XcodeMCPKit"]
+        ),
         .executable(
             name: "xcode-mcp-proxy",
             targets: ["XcodeMCPProxyCLI"]
@@ -269,6 +273,14 @@ let package = Package(
             name: "ProxyBuildInfoPlugin",
             capability: .buildTool(),
             dependencies: ["ProxyBuildInfoTool"]
+        ),
+        .testTarget(
+            name: "XcodeMCPKitTests",
+            dependencies: [
+                "XcodeMCPKit",
+            ],
+            path: "Tests/XcodeMCPKitTests",
+            swiftSettings: strictSwiftSettings
         ),
         .testTarget(
             name: "ProxyContractTests",

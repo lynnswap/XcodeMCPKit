@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-XcodeMCPKitは、Xcode MCPのためのローカルプロキシです。MCPクライアントに安定したendpointを提供し、`mcpbridge`の承認フローを自動化します。
+XcodeMCPKitは、Xcode MCPのためのSwiftライブラリ兼ローカルプロキシです。アプリはSwift APIからローカル`mcpbridge`を直接操作でき、MCPクライアントはproxy経由で安定したendpointと承認フローの自動化を利用できます。
 
 ## 要件
 
@@ -55,6 +55,24 @@ source ~/.zshrc
 ```
 
 </details>
+
+## Swiftから使う
+
+Swift packageまたはXcode targetに`XcodeMCPKit` library productを追加し、top-level clientを作成します。async initializerがローカル`mcpbridge`の起動とMCP initialize handshakeを行い、利用可能なclientを返します。
+
+```swift
+import XcodeMCPKit
+
+let xcode = try await XcodeMCP(config: .init())
+let tools = try await xcode.listTools()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": .string("SwiftData")]
+)
+await xcode.close()
+```
+
+public APIは`MCPJSONValue`、`MCPTool`、`MCPToolResult`、`MCPContent`、`MCPProgress`などのMCP domain valueを公開します。process launch、JSON-RPC framing、session transportはinternal implementation detailです。
 
 ## MCPクライアント設定
 
@@ -170,8 +188,6 @@ Codex/Claude Codeから利用している場合は、移行作業はありませ
   `MCP-Protocol-Version: 2025-06-18`を送り、`POST /mcp`には
   `Accept: application/json, text/event-stream`を付けてください。
   JSON-RPC batch requestは送らないでください。
-- SwiftPM library productに依存している場合:
-  `v0.10.2`に固定するか、executable productに移行してください。
 
 ## Troubleshooting
 
