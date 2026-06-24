@@ -6,6 +6,7 @@ import ProxyMCP
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import ProxySession
+import ProxySessionControlPlane
 
 package final class HTTPPostService: Sendable {
     package struct FilteredToolCallRequest: Sendable {
@@ -422,6 +423,13 @@ package final class HTTPPostService: Sendable {
             )
         }
 
+        let forwardingDeadline = Self.timeoutDeadline(
+            for: requestTimeoutOverride
+                ?? Self.topLevelRequestTimeoutOverride(
+                    method: nil,
+                    defaultSeconds: requestTimeoutSeconds
+                )
+        )
         let forwardedRequestIDs = filteredRequest.forwardedResponseIDs
         let localResponseData = filteredRequest.localResponseData
         let descriptor = Self.topLevelRequestDescriptor(
@@ -477,55 +485,239 @@ package final class HTTPPostService: Sendable {
                 cancellationHandle: cancellationHandle
             )
         }
-        let future = sessionManager.enqueueOnUpstreamSlot(
-            leaseID: leaseID,
-            descriptor: descriptor,
-            on: eventLoop,
-            preferredUpstreamIndex: nil
-        ) { upstreamIndex in
-            cancellationHandle.activate(upstreamIndex: upstreamIndex)
-            self.sessionManager.activateRequestLease(
-                leaseID,
-                requestIDKey: nil,
-                upstreamIndex: upstreamIndex,
-                timeout: nil
-            )
-            return self.makeTopLevelRequestFuture(
-                filteredRequest: filteredRequest,
-                sessionID: sessionID,
-                headerSessionID: headerSessionID,
-                requestIsBatch: requestIsBatch,
-                prefersEventStream: prefersEventStream,
-                eventLoop: eventLoop,
-                session: session,
-                leaseID: leaseID,
-                upstreamIndex: upstreamIndex,
-                cancellationHandle: cancellationHandle,
-                requestTimeoutOverride: requestTimeoutOverride
-            )
-        }.flatMapError { error in
-            if error is CancellationError {
-                return eventLoop.makeFailedFuture(error)
-            }
+        @Sendable func remainingForwardingTimeout() -> TimeAmount? {
+            Self.remainingRequestTimeout(until: forwardingDeadline)
+        }
+        @Sendable func makeForwardingTimeoutFuture() -> EventLoopFuture<HTTPPostService.Resolution> {
             cancellationHandle.markCompleted()
             self.sessionManager.failRequestLease(
                 leaseID,
-                terminalState: .failed,
-                reason: .upstreamOverloaded
+                terminalState: .timedOut,
+                reason: .timedOut
             )
             return eventLoop.makeSucceededFuture(
-                Self.makeUpstreamUnavailableResolution(
+                Self.makePartialBatchErrorResolution(
                     localResponseData: localResponseData,
                     responseIDs: forwardedRequestIDs,
-                    forceBatchArray: filteredRequest.forceBatchArray,
-                    requestIsBatch: requestIsBatch,
+                    code: -32000,
+                    message: "upstream timeout",
                     sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    prefersEventStream: prefersEventStream,
+                    forceBatchArray: requestIsBatch || filteredRequest.forceBatchArray,
+                    fallbackStatus: .ok,
+                    fallbackBody: ""
                 )
             )
         }
+        @Sendable func makeRoutingFuture(
+            decision: ToolRoutingDecision
+        ) -> EventLoopFuture<HTTPPostService.Resolution> {
+            guard cancellationHandle.isCancelled == false else {
+                return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
+            }
+            func makeForwardingFuture(
+                preferredUpstreamIndices: [Int]?
+            ) -> EventLoopFuture<HTTPPostService.Resolution> {
+                let forwardingTimeout = remainingForwardingTimeout()
+                if forwardingDeadline != nil, forwardingTimeout == nil {
+                    return makeForwardingTimeoutFuture()
+                }
+                return self.sessionManager.enqueueOnUpstreamSlot(
+                    leaseID: leaseID,
+                    descriptor: descriptor,
+                    on: eventLoop,
+                    preferredUpstreamIndices: preferredUpstreamIndices
+                ) { upstreamIndex in
+                    cancellationHandle.activate(upstreamIndex: upstreamIndex)
+                    self.sessionManager.activateRequestLease(
+                        leaseID,
+                        requestIDKey: nil,
+                        upstreamIndex: upstreamIndex,
+                        timeout: nil
+                    )
+                    return self.makeTopLevelRequestFuture(
+                        filteredRequest: filteredRequest,
+                        sessionID: sessionID,
+                        headerSessionID: headerSessionID,
+                        requestIsBatch: requestIsBatch,
+                        prefersEventStream: prefersEventStream,
+                        eventLoop: eventLoop,
+                        session: session,
+                        leaseID: leaseID,
+                        upstreamIndex: upstreamIndex,
+                        cancellationHandle: cancellationHandle,
+                        requestTimeoutOverride: forwardingTimeout
+                    )
+                }.flatMapError { error in
+                    if error is CancellationError {
+                        return eventLoop.makeFailedFuture(error)
+                    }
+                    cancellationHandle.markCompleted()
+                    self.sessionManager.failRequestLease(
+                        leaseID,
+                        terminalState: .failed,
+                        reason: .upstreamOverloaded
+                    )
+                    return eventLoop.makeSucceededFuture(
+                        Self.makeUpstreamUnavailableResolution(
+                            localResponseData: localResponseData,
+                            responseIDs: forwardedRequestIDs,
+                            forceBatchArray: filteredRequest.forceBatchArray,
+                            requestIsBatch: requestIsBatch,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream
+                        )
+                    )
+                }
+            }
+            switch decision {
+            case .reject(let errors, let forceBatchArray):
+                let routedErrorIDKeys = Set(errors.map(\.id.key))
+                let unroutedRequestIDs = forwardedRequestIDs.filter {
+                    routedErrorIDKeys.contains($0.key) == false
+                }
+                let errorData = Self.makeToolRoutingErrorResponseData(
+                    errors: errors,
+                    forceBatchArray: forceBatchArray || requestIsBatch
+                )
+                let unroutedErrorData = Self.makeJSONRPCErrorResponseData(
+                    ids: unroutedRequestIDs,
+                    code: -32000,
+                    message: "request not forwarded because tool routing rejected the batch",
+                    forceBatchArray: true
+                )
+                let responseData = Self.mergeBatchResponsePayloads(
+                    [
+                        errorData,
+                        unroutedErrorData,
+                        localResponseData,
+                    ],
+                    forceBatchArray: forceBatchArray || requestIsBatch
+                )
+                cancellationHandle.markCompleted()
+                self.sessionManager.completeRequestLease(leaseID)
+                return eventLoop.makeSucceededFuture(
+                    Self.makeLocalResponseResolution(
+                        responseData: responseData,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream,
+                        emptyStatus: .accepted
+                    )
+                )
+            case .localXcodeListWindows:
+                guard forwardedRequestIDs.isEmpty == false else {
+                    cancellationHandle.markCompleted()
+                    self.sessionManager.completeRequestLease(leaseID)
+                    return eventLoop.makeSucceededFuture(
+                        Self.makeLocalResponseResolution(
+                            responseData: localResponseData,
+                            sessionID: sessionID,
+                            prefersEventStream: prefersEventStream,
+                            emptyStatus: .accepted
+                        )
+                    )
+                }
+                let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+                let responseIDs = forwardedRequestIDs
+                let forceBatchArray = requestIsBatch || filteredRequest.forceBatchArray
+                let windowsTimeout = remainingForwardingTimeout()
+                if forwardingDeadline != nil, windowsTimeout == nil {
+                    return makeForwardingTimeoutFuture()
+                }
+                let task = Task { [self] in
+                    let responseData: Data?
+                    if Task.isCancelled {
+                        responseData = localResponseData
+                    } else {
+                        do {
+                            let result = try await sessionManager.liveXcodeListWindowsResult(
+                                route: .anyHealthy,
+                                requestTimeoutOverride: windowsTimeout
+                            )
+                            let resultData = Self.makeJSONRPCResultResponseData(
+                                ids: responseIDs,
+                                result: result,
+                                forceBatchArray: forceBatchArray
+                            )
+                            responseData = Self.mergeBatchResponsePayloads(
+                                [
+                                    resultData,
+                                    localResponseData,
+                                ],
+                                forceBatchArray: forceBatchArray
+                            )
+                        } catch {
+                            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+                            let errorData = Self.makeJSONRPCErrorResponseData(
+                                ids: responseIDs,
+                                code: mapped.code,
+                                message: mapped.message,
+                                forceBatchArray: forceBatchArray
+                            )
+                            responseData = Self.mergeBatchResponsePayloads(
+                                [
+                                    errorData,
+                                    localResponseData,
+                                ],
+                                forceBatchArray: forceBatchArray
+                            )
+                        }
+                    }
+                    eventLoop.execute {
+                        cancellationHandle.markCompleted()
+                        self.sessionManager.completeRequestLease(leaseID)
+                        promise.succeed(
+                            Self.makeLocalResponseResolution(
+                                responseData: responseData,
+                                sessionID: sessionID,
+                                prefersEventStream: prefersEventStream,
+                                emptyStatus: .accepted
+                            )
+                        )
+                    }
+                }
+                cancellationHandle.bindRefreshTask(task)
+                return promise.futureResult
+            case .forward(let preferredUpstreamIndex):
+                return makeForwardingFuture(
+                    preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] }
+                )
+            case .forwardAny(let preferredUpstreamIndices):
+                return makeForwardingFuture(
+                    preferredUpstreamIndices: preferredUpstreamIndices
+                )
+            }
+        }
+
+        if let immediateDecision = sessionManager.immediateToolRoutingDecision(
+            for: forwardedRequestJSON
+        ) {
+            return HTTPPostService.Operation(
+                future: makeRoutingFuture(decision: immediateDecision),
+                cancellationHandle: cancellationHandle
+            )
+        }
+
+        let routingPromise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+        let routingTask = Task { [self] in
+            let routingTimeout = Self.remainingRequestTimeout(until: forwardingDeadline)
+            if forwardingDeadline != nil, routingTimeout == nil {
+                eventLoop.execute {
+                    makeForwardingTimeoutFuture().cascade(to: routingPromise)
+                }
+                return
+            }
+            let decision = await sessionManager.toolRoutingDecision(
+                for: forwardedRequestJSON,
+                requestTimeoutOverride: routingTimeout
+            )
+            eventLoop.execute {
+                makeRoutingFuture(decision: decision).cascade(to: routingPromise)
+            }
+        }
+        cancellationHandle.bindRefreshTask(routingTask)
         return HTTPPostService.Operation(
-            future: future,
+            future: routingPromise.futureResult,
             cancellationHandle: cancellationHandle
         )
     }

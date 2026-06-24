@@ -195,7 +195,8 @@ extension HTTPPostService {
         }
 
         let hasLocalToolRoutes =
-            toolsListRequests.isEmpty == false || documentationRequests.isEmpty == false
+            toolsListRequests.isEmpty == false
+                || documentationRequests.isEmpty == false
 
         // Untouched requests forward with their original bytes. A blocked
         // notification produces no response object but must still be dropped.

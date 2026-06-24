@@ -27,7 +27,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     }
 
     package func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -57,11 +57,24 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
             return try await fallback.toolsList(route: route, timeout: timeout)
         }
         let deadline = Deadline.fromNow(timeout, clock: clock)
-        guard let runtime = runtimeBox.value else { throw CancellationError() }
-        return try await runtime.documentationProviderToolsList(
-            route: route,
-            requestTimeout: try remainingTimeoutOrThrow(until: deadline)
-        )
+        do {
+            guard let runtime = runtimeBox.value else { throw CancellationError() }
+            return try await runtime.documentationProviderToolsList(
+                route: route,
+                requestTimeout: try remainingTimeoutOrThrow(until: deadline)
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let fallbackRoute = try await openFallbackRoute(
+                for: route,
+                timeout: try remainingTimeoutOrThrow(until: deadline)
+            )
+            return try await fallback.toolsList(
+                route: fallbackRoute,
+                timeout: try remainingTimeoutOrThrow(until: deadline)
+            )
+        }
     }
 
     package func callDocumentationSearch(
@@ -230,7 +243,7 @@ package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationPr
     package init() {}
 
     package func openRoute(
-        for _: DocumentationProviderTarget,
+        for _: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -255,11 +268,16 @@ package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationPr
 
 extension RuntimeCoordinator {
     package func documentationProviderRoute(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) -> DocumentationProviderRoute? {
-        documentationProviderRoutes.first { route in
-            route.target.processID == target.processID
+        guard let upstreamIndex = documentationUpstreamIndex(for: target) else {
+            return nil
         }
+        return DocumentationProviderRoute(
+            id: "upstream-\(upstreamIndex)-pid-\(target.processID)",
+            target: target,
+            upstreamIndex: upstreamIndex
+        )
     }
 
     package func documentationProviderToolsList(

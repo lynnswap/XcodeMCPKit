@@ -44,4 +44,31 @@ struct ToolCatalogStartupLogFormatterTests {
             - XcodeRead
         """)
     }
+
+    @Test func summaryGroupsAvailableToolsUnderProcessWhenKnown() throws {
+        let result = try #require(JSONValue(any: [
+            "tools": [
+                ["name": "XcodeRead"],
+                ["name": "DocumentationSearch"],
+            ],
+        ]))
+
+        let summary = ToolCatalogStartupLogFormatter.summary(
+            from: result,
+            process: ToolCatalogStartupLogFormatter.Process(
+                appPath: "/Applications/Xcode_27.app",
+                processID: 75132
+            )
+        )
+
+        #expect(summary == """
+        Tools
+          - /Applications/Xcode_27.app (PID: 75132)
+            DocumentationSearch: available
+            Count: 2
+            Available:
+              - DocumentationSearch
+              - XcodeRead
+        """)
+    }
 }

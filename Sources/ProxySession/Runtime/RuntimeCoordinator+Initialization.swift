@@ -7,18 +7,22 @@ import ProxyMCP
 
 extension RuntimeCoordinator {
     func startEagerInitializePrimary(applyBackoff: Bool = false) {
+        guard let upstreamIndex = primaryInitializeUpstreamIndex() else {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
         runWhenUpstreamReady(
             reason: "primary_initialize",
             applyBackoff: applyBackoff
-        ) { [weak self] in
+        ) { [weak self, upstreamIndex] in
             guard let self else { return }
-            self.startPrimaryUpstreamSlot()
-            self.startEagerInitializePrimaryWhenReady()
+            self.startUpstreamSlot(upstreamIndex)
+            self.startEagerInitializePrimaryWhenReady(upstreamIndex: upstreamIndex)
         }
     }
 
-    private func startEagerInitializePrimaryWhenReady() {
-        let decision = initializeManager.beginEagerInitializePrimary()
+    private func startEagerInitializePrimaryWhenReady(upstreamIndex: Int) {
+        let decision = initializeManager.beginEagerInitializePrimary(upstreamIndex: upstreamIndex)
         let shouldSend = decision.shouldSendRequest
         let shouldScheduleTimeout = decision.shouldScheduleTimeout
         if shouldScheduleTimeout {
@@ -44,25 +48,138 @@ extension RuntimeCoordinator {
                 self.clearPrimaryInitializeReadinessWaiter(token)
                 guard !token.isCancelled else { return }
             }
-            self.startPrimaryUpstreamSlot()
+            guard let upstreamIndex = self.initializeManager.pendingPrimaryInitializeUpstreamIndex()
+            else {
+                return
+            }
+            self.startUpstreamSlot(upstreamIndex)
             self.sendPrimaryInitializeRequestIfStillPending()
         }
     }
 
     private func sendPrimaryInitializeRequestIfStillPending() {
-        let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: 0)
-        guard initializeManager.beginPrimaryInitializeSend(upstreamID: upstreamID) else {
-            upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
+        guard let upstreamIndex = initializeManager.pendingPrimaryInitializeUpstreamIndex() else {
             return
         }
-        markUpstreamInitInFlight(upstreamIndex: 0, upstreamID: upstreamID)
+        let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
+        guard initializeManager.beginPrimaryInitializeSend(
+            upstreamIndex: upstreamIndex,
+            upstreamID: upstreamID
+        ) else {
+            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            return
+        }
+        markUpstreamInitInFlight(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
-            sendUpstream(data, upstreamIndex: 0, ensureRunning: true)
+            sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: true)
         } else {
             failInitPending(error: TimeoutError())
         }
+    }
+
+    func primaryInitializeUpstreamIndex(excluding excludedUpstreamIndices: Set<Int> = []) -> Int? {
+        guard xcodeProcessRoutes.isEmpty == false else {
+            return excludedUpstreamIndices.contains(0) ? nil : 0
+        }
+
+        let unavailable = unavailableXcodeProcessIDs()
+        for route in xcodeProcessRoutes {
+            guard unavailable.contains(route.target.processID) == false else {
+                continue
+            }
+            if let upstreamIndex = primaryInitializeCandidate(
+                in: route,
+                excluding: excludedUpstreamIndices
+            ) {
+                return upstreamIndex
+            }
+        }
+        return nil
+    }
+
+    func currentPrimaryInitializeUpstreamIndex() -> Int {
+        initializeManager.activePrimaryInitializeUpstreamIndex()
+            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? primaryInitializeUpstreamIndex()
+            ?? 0
+    }
+
+    func isCurrentPrimaryInitializeUpstream(_ upstreamIndex: Int) -> Bool {
+        currentPrimaryInitializeUpstreamIndex() == upstreamIndex
+    }
+
+    private func primaryInitializeCandidate(
+        in route: XcodeProcessRoute,
+        excluding excludedUpstreamIndices: Set<Int>
+    ) -> Int? {
+        let states = upstreamHealthManager.statesSnapshot()
+        return route.upstreamIndices.first { upstreamIndex in
+            guard excludedUpstreamIndices.contains(upstreamIndex) == false,
+                  upstreamIndex >= 0,
+                  upstreamIndex < states.count else {
+                return false
+            }
+            let state = states[upstreamIndex]
+            guard state.initInFlight == false,
+                  state.isInitialized == false else {
+                return false
+            }
+            switch state.healthState {
+            case .healthy, .degraded:
+                return true
+            case .quarantined:
+                return false
+            }
+        }
+    }
+
+    private func primaryInitializeRetryUpstreamIndex(failedUpstreamIndex: Int) -> Int? {
+        let excludedUpstreamIndices: Set<Int> = [failedUpstreamIndex]
+        if let failedRoute = xcodeProcessRoute(forUpstreamIndex: failedUpstreamIndex),
+           let siblingUpstreamIndex = primaryInitializeCandidate(
+               in: failedRoute,
+               excluding: excludedUpstreamIndices
+           )
+        {
+            return siblingUpstreamIndex
+        }
+        return primaryInitializeUpstreamIndex(excluding: excludedUpstreamIndices)
+    }
+
+    func retryPrimaryInitializeOnAlternativeUpstream(
+        failedUpstreamIndex: Int,
+        failedUpstreamID: Int64?,
+        reason: String
+    ) -> Bool {
+        guard xcodeProcessRoutes.isEmpty == false else {
+            return false
+        }
+        guard let retryUpstreamIndex = primaryInitializeRetryUpstreamIndex(
+            failedUpstreamIndex: failedUpstreamIndex
+        ) else {
+            markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
+            return false
+        }
+        let failedProcessID = xcodeProcessRoute(forUpstreamIndex: failedUpstreamIndex)?.target.processID
+        let retryProcessID = xcodeProcessRoute(forUpstreamIndex: retryUpstreamIndex)?.target.processID
+        if failedProcessID == retryProcessID {
+            markXcodeProcessRouteAvailable(upstreamIndex: retryUpstreamIndex)
+        } else {
+            markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
+        }
+        if let failedUpstreamID {
+            upstreamRouter.remove(upstreamIndex: failedUpstreamIndex, upstreamID: failedUpstreamID)
+        }
+        clearUpstreamInitInFlight(upstreamIndex: failedUpstreamIndex)
+        initializeManager.reopenPrimaryInitializeForRetry()
+        guard initializeManager.preparePrimaryInitializeRetry(upstreamIndex: retryUpstreamIndex)
+        else {
+            return false
+        }
+        startPrimaryInitializeRequestWhenReady(applyBackoff: true)
+        return true
     }
 
     func handleInitializeResponse(_ object: [String: Any], upstreamIndex: Int, upstreamID: Int64) {
@@ -72,9 +189,33 @@ extension RuntimeCoordinator {
         ) else {
             return
         }
+        let isPrimaryInitialize = initializeManager.primaryInitializeMatches(
+            upstreamIndex: upstreamIndex,
+            upstreamID: upstreamID
+        )
+        let handlesPrimaryInitialize = isPrimaryInitialize
+            || (
+                xcodeProcessRoutes.isEmpty
+                    && isCurrentPrimaryInitializeUpstream(upstreamIndex)
+                    && initializeManager.activePrimaryInitializeUpstreamIndex() == nil
+            )
 
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {
-            if upstreamIndex == 0 {
+            if handlesPrimaryInitialize {
+                let didRetry = retryPrimaryInitializeOnAlternativeUpstream(
+                    failedUpstreamIndex: upstreamIndex,
+                    failedUpstreamID: upstreamID,
+                    reason: "primary_initialize_failed"
+                )
+                if didRetry {
+                    return
+                }
+                if isPrimaryInitialize == false {
+                    clearUpstreamState(
+                        upstreamIndex: upstreamIndex,
+                        expectedUpstreamID: upstreamID
+                    )
+                }
                 if let errorObject = object["error"] as? [String: Any], !errorObject.isEmpty {
                     completeInitPendingWithError(errorObject)
                 } else {
@@ -94,7 +235,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        if upstreamIndex != 0 {
+        if handlesPrimaryInitialize == false {
             if let canonicalInitialize = canonicalBrokerState.initializeResult(),
                 !initializeResultsEquivalent(canonicalInitialize, result)
             {
@@ -150,7 +291,7 @@ extension RuntimeCoordinator {
             self.upstreamSlotScheduler.wake()
             if update.shouldWarmSecondary {
                 self.initializeManager.markSecondaryWarmupStarted()
-                self.warmUpSecondaryUpstreams()
+                self.warmUpSecondaryUpstreams(excluding: upstreamIndex)
             }
             self.refreshToolsListIfNeeded()
             self.completePendingInitializes(
@@ -166,8 +307,8 @@ extension RuntimeCoordinator {
             ) else {
                 return
             }
-            if upstreamIndex == 0,
-                self.hasUsableInitializedSecondaryUpstreams(),
+            if self.isCurrentPrimaryInitializeUpstream(upstreamIndex),
+                self.hasUsableInitializedSecondaryUpstreams(excluding: upstreamIndex),
                 let completion = self.initializeManager.finishPrimaryInitializeUsingCachedResult()
             {
                 self.completePendingInitializes(
@@ -180,7 +321,8 @@ extension RuntimeCoordinator {
                 self.eventLoop.execute { [weak self] in
                     self?.handleInitializedNotificationSendOverload(
                         upstreamIndex: upstreamIndex,
-                        expectedUpstreamID: upstreamID
+                        expectedUpstreamID: upstreamID,
+                        treatsAsPrimary: true
                     )
                 }
                 return
@@ -188,7 +330,8 @@ extension RuntimeCoordinator {
             self.initializeManager.reopenPrimaryInitializeForRetry()
             self.handleInitializedNotificationSendOverload(
                 upstreamIndex: upstreamIndex,
-                expectedUpstreamID: upstreamID
+                expectedUpstreamID: upstreamID,
+                treatsAsPrimary: true
             )
         }
     }
@@ -268,7 +411,25 @@ extension RuntimeCoordinator {
                 "supportedProtocolVersions": [MCP.ProtocolVersion.current],
             ],
         ]
-        if upstreamIndex == 0 {
+        let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
+        let handlesPrimaryInitialize = activePrimaryUpstreamIndex == upstreamIndex
+            || (
+                xcodeProcessRoutes.isEmpty
+                    && isCurrentPrimaryInitializeUpstream(upstreamIndex)
+                    && activePrimaryUpstreamIndex == nil
+            )
+        if handlesPrimaryInitialize {
+            let didRetry = retryPrimaryInitializeOnAlternativeUpstream(
+                failedUpstreamIndex: upstreamIndex,
+                failedUpstreamID: nil,
+                reason: "unsupported_initialize_protocol"
+            )
+            if didRetry {
+                return
+            }
+            if activePrimaryUpstreamIndex != upstreamIndex {
+                clearUpstreamState(upstreamIndex: upstreamIndex)
+            }
             completeInitPendingWithError(errorObject)
         } else {
             noteIncompatibleUpstream(
@@ -303,10 +464,12 @@ extension RuntimeCoordinator {
         guard let result else { return }
         cancelPrimaryInitializeReadinessWaiter()
         result.timeout?.cancel()
-        if let upstreamID = result.upstreamID {
-            upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
+        if let upstreamIndex = result.upstreamIndex {
+            if let upstreamID = result.upstreamID {
+                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            }
+            clearUpstreamInitInFlight(upstreamIndex: upstreamIndex)
         }
-        clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
             removePendingInitializeSessionIfCurrent(item)
             if let buffer = encodeInitializeErrorResponse(
@@ -386,14 +549,20 @@ extension RuntimeCoordinator {
         }
     }
 
-    func handleInitializedNotificationSendOverload(upstreamIndex: Int, expectedUpstreamID: Int64) {
+    func handleInitializedNotificationSendOverload(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64,
+        treatsAsPrimary: Bool = false
+    ) {
         guard clearUpstreamState(
             upstreamIndex: upstreamIndex,
             expectedUpstreamID: expectedUpstreamID
         ) else {
             return
         }
-        let hasHealthySecondary = upstreamIndex == 0 && hasUsableInitializedSecondaryUpstreams()
+        let handlesPrimaryInitialize = treatsAsPrimary || isCurrentPrimaryInitializeUpstream(upstreamIndex)
+        let hasHealthySecondary = handlesPrimaryInitialize
+            && hasUsableInitializedSecondaryUpstreams(excluding: upstreamIndex)
         if canonicalBrokerState.toolsSourceUpstream() == upstreamIndex && !hasHealthySecondary {
             invalidateControlPlane(
                 reason: "initialized_notification_overload_\(upstreamIndex)",
@@ -401,13 +570,13 @@ extension RuntimeCoordinator {
                 clearToolsCatalog: true
             )
         }
-        if upstreamIndex == 0 {
-            if hasUsableInitializedSecondaryUpstreams() {
+        if handlesPrimaryInitialize {
+            if hasHealthySecondary {
                 initializeManager.setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
             } else {
-                resetSecondaryUpstreamsForPrimaryRetry()
-                startPrimaryEagerRetry()
+                resetSecondaryUpstreamsForPrimaryRetry(excluding: upstreamIndex)
+                startPrimaryEagerRetry(failedPrimaryUpstreamIndex: upstreamIndex)
             }
         } else {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
@@ -435,10 +604,12 @@ extension RuntimeCoordinator {
         guard let result else { return }
         cancelPrimaryInitializeReadinessWaiter()
         result.timeout?.cancel()
-        if let upstreamID = result.upstreamID {
-            upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
+        if let upstreamIndex = result.upstreamIndex {
+            if let upstreamID = result.upstreamID {
+                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            }
+            clearUpstreamInitInFlight(upstreamIndex: upstreamIndex)
         }
-        clearUpstreamInitInFlight(upstreamIndex: 0)
         for item in result.pending {
             removePendingInitializeSessionIfCurrent(item)
             item.eventLoop.execute {
@@ -452,7 +623,7 @@ extension RuntimeCoordinator {
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
-    private func removePendingInitializeSessionIfCurrent(
+    func removePendingInitializeSessionIfCurrent(
         _ item: InitializeManager.PendingInitialize
     ) {
         guard sessionRegistry.sessionStillMatchesPendingInitialize(
@@ -489,6 +660,23 @@ extension RuntimeCoordinator {
             )
         }
         debugRecorder.resetUpstream(upstreamIndex)
+        if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+           let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
+        {
+            processToolCatalogRegistry.removeUpstreamMapping(
+                forUpstreamIndex: upstreamIndex,
+                replacementUpstreamIndex: replacementUpstreamIndex
+            )
+            resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
+        } else {
+            let removedProcessID = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.target.processID
+            processToolCatalogRegistry.removeCatalog(forUpstreamIndex: upstreamIndex)
+            resyncProcessToolsCatalogSurfaceAfterRemoving(
+                upstreamIndex: upstreamIndex,
+                processID: removedProcessID
+            )
+            removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
+        }
         return true
     }
 
@@ -501,6 +689,7 @@ extension RuntimeCoordinator {
             return false
         }
         result.timeout?.cancel()
+        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
         noteUpstreamInitializationSucceeded()
         return true
     }
@@ -510,25 +699,30 @@ extension RuntimeCoordinator {
             return
         }
         result.timeout?.cancel()
+        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
         noteUpstreamInitializationSucceeded()
     }
 
-    func warmUpSecondaryUpstreams() {
+    func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
         guard upstreams.count > 1 else { return }
-        for upstreamIndex in 1..<upstreams.count {
+        let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
+        for upstreamIndex in upstreams.indices where upstreamIndex != resolvedPrimaryUpstreamIndex {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }
 
-    func resetSecondaryUpstreamsForPrimaryRetry() {
+    func resetSecondaryUpstreamsForPrimaryRetry(excluding primaryUpstreamIndex: Int? = nil) {
         guard upstreams.count > 1 else { return }
-        for upstreamIndex in 1..<upstreams.count {
+        let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
+        for upstreamIndex in upstreams.indices where upstreamIndex != resolvedPrimaryUpstreamIndex {
             clearUpstreamState(upstreamIndex: upstreamIndex)
         }
     }
 
-    func startPrimaryEagerRetry() {
-        clearUpstreamState(upstreamIndex: 0)
+    func startPrimaryEagerRetry(failedPrimaryUpstreamIndex: Int? = nil) {
+        clearUpstreamState(
+            upstreamIndex: failedPrimaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
+        )
         initializeManager.resetWarmSecondaryForRetry()
         invalidateControlPlane(
             reason: "primary_eager_retry",
@@ -538,8 +732,10 @@ extension RuntimeCoordinator {
         startEagerInitializePrimary(applyBackoff: true)
     }
 
-    func hasUsableInitializedSecondaryUpstreams() -> Bool {
-        upstreamHealthManager.statesSnapshot().dropFirst().contains { upstream in
+    func hasUsableInitializedSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) -> Bool {
+        let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
+        return upstreamHealthManager.statesSnapshot().enumerated().contains { upstreamIndex, upstream in
+            guard upstreamIndex != resolvedPrimaryUpstreamIndex else { return false }
             guard upstream.isInitialized else { return false }
             switch upstream.healthState {
             case .healthy, .degraded:

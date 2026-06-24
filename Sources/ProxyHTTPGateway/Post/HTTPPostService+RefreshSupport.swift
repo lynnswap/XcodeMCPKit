@@ -66,6 +66,26 @@ extension HTTPPostService {
             requestIDs: requestIDs
         )
         let allowsLeaseRetry = Self.isRetryScopedRefreshLeaseRequest(parsedRequestJSON)
+        let preferredUpstreamIndices: [Int]?
+        switch await sessionManager.toolRoutingDecision(
+            for: parsedRequestJSON,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
+        case .forward(let resolvedUpstreamIndex):
+            preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+        case .forwardAny(let resolvedUpstreamIndices):
+            preferredUpstreamIndices = resolvedUpstreamIndices
+        case .localXcodeListWindows:
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
+        case .reject:
+            return .upstreamUnavailable(
+                responseIDs: requestIDs,
+                isBatch: requestIsBatch
+            )
+        }
 
         do {
             let session = sessionManager.session(id: sessionID)
@@ -73,7 +93,7 @@ extension HTTPPostService {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
-                preferredUpstreamIndex: nil
+                preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedUpstreamIndex in
                 cancellationHandle?.activate(upstreamIndex: selectedUpstreamIndex)
 

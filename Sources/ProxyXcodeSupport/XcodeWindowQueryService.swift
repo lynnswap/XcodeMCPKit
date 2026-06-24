@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import ProxyCore
 
 package struct XcodeWindowQueryService {
     package typealias ToolCaller =
@@ -59,43 +60,12 @@ package struct XcodeWindowQueryService {
     }
 
     package func parseXcodeListWindowsMessage(_ message: String) -> [XcodeWindowInfo] {
-        message
-            .split(separator: "\n")
-            .compactMap { line -> XcodeWindowInfo? in
-                var rawLine = String(line)
-                if rawLine.hasSuffix("\r") {
-                    rawLine.removeLast()
-                }
-                rawLine.removeLeadingWhitespace()
-                let prefix = "* tabIdentifier: "
-                guard rawLine.hasPrefix(prefix) else { return nil }
-                let delimiter = ", workspacePath: "
-                let searchStart = rawLine.index(rawLine.startIndex, offsetBy: prefix.count)
-                guard let delimiterRange = rawLine.range(
-                    of: delimiter,
-                    options: [],
-                    range: searchStart..<rawLine.endIndex
-                ) else {
-                    return nil
-                }
-                let tabIdentifier = String(rawLine[searchStart..<delimiterRange.lowerBound])
-                let workspacePath = String(rawLine[delimiterRange.upperBound...])
-                guard tabIdentifier.isEmpty == false, workspacePath.isEmpty == false else {
-                    return nil
-                }
-                return XcodeWindowInfo(
-                    tabIdentifier: tabIdentifier,
-                    workspacePath: workspacePath
+        XcodeListWindowsMessageParser.parse(message)
+            .map { entry in
+                XcodeWindowInfo(
+                    tabIdentifier: entry.tabIdentifier,
+                    workspacePath: entry.workspacePath
                 )
             }
-    }
-}
-
-private extension String {
-    mutating func removeLeadingWhitespace() {
-        let trimmedStart = drop { $0 == " " || $0 == "\t" }
-        if trimmedStart.startIndex != startIndex {
-            self = String(trimmedStart)
-        }
     }
 }

@@ -79,6 +79,68 @@ func documentationDescriptorDescription(in result: JSONValue) -> String? {
     return description
 }
 
+func toolDescriptor(
+    name: String,
+    description: String? = nil,
+    inputProperties: [String: Any] = [:],
+    required: [String] = [],
+    outputSchema: [String: Any]? = nil
+) -> [String: Any] {
+    var descriptor: [String: Any] = [
+        "name": name,
+    ]
+    if let description {
+        descriptor["description"] = description
+    }
+    if inputProperties.isEmpty == false || required.isEmpty == false {
+        var inputSchema: [String: Any] = [
+            "type": "object",
+        ]
+        if inputProperties.isEmpty == false {
+            inputSchema["properties"] = inputProperties
+        }
+        if required.isEmpty == false {
+            inputSchema["required"] = required
+        }
+        descriptor["inputSchema"] = inputSchema
+    }
+    if let outputSchema {
+        descriptor["outputSchema"] = outputSchema
+    }
+    return descriptor
+}
+
+func ownerBoundToolDescriptor(name: String) -> [String: Any] {
+    toolDescriptor(
+        name: name,
+        inputProperties: [
+            "tabIdentifier": [
+                "type": "string",
+            ],
+            "workspacePath": [
+                "type": "string",
+            ],
+        ]
+    )
+}
+
+func toolDescription(in result: JSONValue, name expectedName: String) -> String? {
+    guard case .object(let object) = result,
+          case .array(let tools)? = object["tools"] else {
+        return nil
+    }
+    for tool in tools {
+        guard case .object(let toolObject) = tool,
+              case .string(let name)? = toolObject["name"],
+              name == expectedName,
+              case .string(let description)? = toolObject["description"] else {
+            continue
+        }
+        return description
+    }
+    return nil
+}
+
 private struct TestDocumentationAssetInfoPlist: Encodable {
     let properties: TestDocumentationAssetProperties
 
@@ -148,6 +210,46 @@ func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
     )
 }
 
+func toolsCallObject(
+    id: Int64?,
+    name: String,
+    arguments: [String: Any]
+) -> [String: Any] {
+    var request: [String: Any] = [
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": [
+            "name": name,
+            "arguments": arguments,
+        ],
+    ]
+    if let id {
+        request["id"] = id
+    }
+    return request
+}
+
+func seedProcessToolCatalogs(
+    on manager: RuntimeCoordinator,
+    entries: [(target: XcodeProcessTarget, upstreamIndex: Int, tools: [[String: Any]])]
+) throws {
+    for entry in entries {
+        let result = try jsonValue([
+            "tools": entry.tools,
+        ])
+        manager.processToolCatalogRegistry.record(
+            target: entry.target,
+            upstreamIndex: entry.upstreamIndex,
+            rawResult: result
+        )
+    }
+    if let union = manager.processToolCatalogRegistry.unionToolsListResult(),
+       let sourceUpstream = manager.processToolCatalogRegistry.representativeSourceUpstream()
+    {
+        manager.setCachedToolsListResult(union, sourceUpstream: sourceUpstream)
+    }
+}
+
 func makeJSONRPCResponse(id: Int64, result: [String: Any]) throws -> Data {
     try JSONSerialization.data(
         withJSONObject: [
@@ -192,8 +294,8 @@ func jsonRPCErrorMessage(in responseData: Data) throws -> String? {
     return error["message"] as? String
 }
 
-func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarget {
-    DocumentationProviderTarget(
+func xcodeProcessTarget(processID: pid_t) -> XcodeProcessTarget {
+    XcodeProcessTarget(
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
@@ -202,11 +304,11 @@ func documentationProviderTarget(processID: pid_t) -> DocumentationProviderTarge
     )
 }
 
-func documentationProviderTarget(
+func xcodeProcessTarget(
     processID: pid_t,
     xcodeVersion: String
-) -> DocumentationProviderTarget {
-    DocumentationProviderTarget(
+) -> XcodeProcessTarget {
+    XcodeProcessTarget(
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
@@ -215,24 +317,39 @@ func documentationProviderTarget(
     )
 }
 
-struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
-    let targets: [DocumentationProviderTarget]
+func xcodeProcessRoute(
+    target: XcodeProcessTarget,
+    upstreamIndices: [Int] = [0]
+) -> XcodeProcessRoute {
+    XcodeProcessRoute(target: target, upstreamIndices: upstreamIndices)
+}
 
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
+    let targets: [XcodeProcessTarget]
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
+        targets
+    }
+}
+
+struct PriorityOrderedStubXcodeTargetDiscovery: PriorityOrderedXcodeTargetDiscovering {
+    let targets: [XcodeProcessTarget]
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         targets
     }
 }
 
 final class CountingXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
-    private let targets: [DocumentationProviderTarget]
+    private let targets: [XcodeProcessTarget]
     private var callCountValue = 0
 
-    init(targets: [DocumentationProviderTarget]) {
+    init(targets: [XcodeProcessTarget]) {
         self.targets = targets
     }
 
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         lock.lock()
         callCountValue += 1
         lock.unlock()
@@ -264,7 +381,7 @@ actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouti
     }
 
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -336,7 +453,7 @@ actor BlockingFallbackDocumentationProviderTransport: DocumentationProviderRouti
 
 struct UnavailableDocumentationProviderTransport: DocumentationProviderRouting {
     func openRoute(
-        for _: DocumentationProviderTarget,
+        for _: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -375,7 +492,7 @@ actor StubDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairin
     }
 
     func repairDocumentationSearch(
-        for target: DocumentationProviderTarget
+        for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         repairedProcessIDs.append(target.processID)
         if let gate {
@@ -429,14 +546,14 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
         self.timeoutOnceAfterSuccessfulCallCount = timeoutOnceAfterSuccessfulCallCount
     }
 
-    func descriptor(for target: DocumentationProviderTarget) async -> JSONValue? {
+    func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
         descriptorPIDs.append(target.processID)
         return descriptorValue
     }
 
     func callDocumentationSearch(
         requestData: Data,
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         timeout _: TimeAmount?
     ) async throws -> Data {
         callPIDs.append(target.processID)
@@ -520,7 +637,7 @@ actor TransientUnavailableDescriptorTransport: DocumentationProviderRouting {
     private let toolsListCountValues = RecordedValues<Int>()
 
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -574,7 +691,7 @@ actor ReusedRouteRepairTransport: DocumentationProviderRouting {
     private var closedRouteIDs: [String] = []
 
     func openRoute(
-        for target: DocumentationProviderTarget,
+        for target: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
@@ -649,15 +766,15 @@ actor ReusedRouteRepairTransport: DocumentationProviderRouting {
 
 final class SequencedXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
-    private var remainingSequences: [[DocumentationProviderTarget]]
-    private var lastSequence: [DocumentationProviderTarget]
+    private var remainingSequences: [[XcodeProcessTarget]]
+    private var lastSequence: [XcodeProcessTarget]
 
-    init(_ sequences: [[DocumentationProviderTarget]]) {
+    init(_ sequences: [[XcodeProcessTarget]]) {
         self.remainingSequences = sequences
         self.lastSequence = sequences.last ?? []
     }
 
-    func runningXcodeTargets() -> [DocumentationProviderTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         lock.lock()
         defer { lock.unlock() }
         guard remainingSequences.isEmpty == false else {
@@ -716,6 +833,12 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         let continuation: CheckedContinuation<Void, Error>
     }
 
+    private struct StopCountWaiter {
+        let id: UUID
+        let count: Int
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
     private var startAttemptProcessIDs: [pid_t] = []
     private var startedProcessIDs: [pid_t] = []
@@ -724,6 +847,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private var requestCountsByPID: [pid_t: [String: Int]] = [:]
     private var documentationQueriesByPID: [pid_t: [String]] = [:]
     private var requestCountWaiters: [RequestCountWaiter] = []
+    private var stopCountWaiters: [StopCountWaiter] = []
     private let startGate: OperationGate<pid_t>?
 
     init(
@@ -734,7 +858,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         self.startGate = startGate
     }
 
-    func startSession(for target: DocumentationProviderTarget) async throws -> any UpstreamSession {
+    func startSession(for target: XcodeProcessTarget) async throws -> any UpstreamSession {
         startAttemptProcessIDs.append(target.processID)
         if let startGate {
             try await startGate.wait(for: target.processID)
@@ -767,6 +891,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
 
     func recordStop(for processID: pid_t) {
         stoppedProcessIDs.append(processID)
+        resumeStopCountWaiters()
     }
 
     func recordInitializeParams(_ params: JSONValue, for processID: pid_t) {
@@ -823,6 +948,33 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         }
     }
 
+    func waitForStopCount(_ count: Int) async throws {
+        if stoppedProcessIDs.count >= count {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if stoppedProcessIDs.count >= count {
+                    continuation.resume(returning: ())
+                    return
+                }
+                stopCountWaiters.append(
+                    StopCountWaiter(
+                        id: waiterID,
+                        count: count,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelStopCountWaiter(id: waiterID)
+            }
+        }
+    }
+
     private func resumeRequestCountWaiters() {
         var remaining: [RequestCountWaiter] = []
         for waiter in requestCountWaiters {
@@ -835,11 +987,31 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         requestCountWaiters = remaining
     }
 
+    private func resumeStopCountWaiters() {
+        var remaining: [StopCountWaiter] = []
+        for waiter in stopCountWaiters {
+            if stoppedProcessIDs.count >= waiter.count {
+                waiter.continuation.resume(returning: ())
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        stopCountWaiters = remaining
+    }
+
     private func cancelRequestCountWaiter(id: UUID) {
         guard let index = requestCountWaiters.firstIndex(where: { $0.id == id }) else {
             return
         }
         let waiter = requestCountWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelStopCountWaiter(id: UUID) {
+        guard let index = stopCountWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = stopCountWaiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
     }
 }
@@ -1139,6 +1311,10 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     func lastCallTimeout() -> TimeAmount? {
         callTimeouts.last ?? nil
     }
+
+    func setToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {
+        self.update = update
+    }
 }
 
 func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {
@@ -1243,6 +1419,45 @@ actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
 
     func sent() async -> [Data] {
         await sentMessages.snapshot()
+    }
+
+    func sentCount() async -> Int {
+        await sentMessages.count()
+    }
+
+    func sentValue(at index: Int) async -> Data? {
+        await sentMessages.value(at: index)
+    }
+
+    func nextSent(at index: Int) async throws -> Data {
+        try await sentMessages.nextValue(at: index)
+    }
+}
+
+actor AlwaysUnavailableUpstreamClient: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let sentMessages = RecordedValues<Data>()
+    private let reason: Upstream.UnavailableReason
+
+    init(reason: Upstream.UnavailableReason = .startFailed) {
+        self.reason = reason
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        await sentMessages.append(data)
+        return .unavailable(reason)
     }
 
     func sentCount() async -> Int {
@@ -1606,6 +1821,18 @@ func makeInitializeResponse(id: Int64, serverName: String?) throws -> Data {
     return try JSONSerialization.data(withJSONObject: response, options: [])
 }
 
+func makeInitializeErrorResponse(id: Int64, message: String = "initialize failed") throws -> Data {
+    let response: [String: Any] = [
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": [
+            "code": -32000,
+            "message": message,
+        ],
+    ]
+    return try JSONSerialization.data(withJSONObject: response, options: [])
+}
+
 func extractUpstreamID(from data: Data) throws -> Int64 {
     let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
     return (object?["id"] as? NSNumber)?.int64Value ?? 0
@@ -1639,6 +1866,24 @@ func waitForSentCount(
 
 func waitForSentCount(
     _ upstream: ToggleableOverloadUpstreamClient,
+    count: Int,
+    timeoutSeconds: UInt64
+) async throws {
+    do {
+        _ = try await waitWithTimeout(
+            "waiting for sent message \(count)",
+            timeout: .seconds(Int64(timeoutSeconds))
+        ) {
+            try await upstream.nextSent(at: count - 1)
+        }
+    } catch {
+        let actual = await upstream.sentCount()
+        throw WaitForSentCountError.timeout(expected: count, actual: actual)
+    }
+}
+
+func waitForSentCount(
+    _ upstream: AlwaysUnavailableUpstreamClient,
     count: Int,
     timeoutSeconds: UInt64
 ) async throws {
@@ -1761,6 +2006,14 @@ func methodName(from data: Data) -> String? {
     return object["method"] as? String
 }
 
+func toolCallName(from data: Data) -> String? {
+    guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+          let params = object["params"] as? [String: Any] else {
+        return nil
+    }
+    return params["name"] as? String
+}
+
 func makeToolListRequest(id: Int64) throws -> Data {
     try JSONSerialization.data(
         withJSONObject: [
@@ -1778,6 +2031,53 @@ func makeToolListResponse(id: Int64) throws -> Data {
             "jsonrpc": "2.0",
             "id": id,
             "result": [:],
+        ],
+        options: []
+    )
+}
+
+func makeXcodeListWindowsResponse(id: Int64, message: String) throws -> Data {
+    let encodedMessage = String(
+        decoding: try JSONSerialization.data(
+            withJSONObject: ["message": message],
+            options: [.sortedKeys]
+        ),
+        as: UTF8.self
+    )
+    return try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": encodedMessage,
+                    ],
+                ],
+                "structuredContent": [
+                    "message": message,
+                ],
+            ],
+        ],
+        options: []
+    )
+}
+
+func makeXcodeListWindowsToolErrorResponse(id: Int64, message: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": message,
+                    ],
+                ],
+                "isError": true,
+            ],
         ],
         options: []
     )

@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import NIOConcurrencyHelpers
 import ProxySessionControlPlane
@@ -32,6 +33,10 @@ private enum EventLoopFutureWaitResult<Output: Sendable>: Sendable {
     case timedOut
 }
 
+private func compareDocumentationVersion(_ lhs: String, _ rhs: String) -> ComparisonResult {
+    lhs.compare(rhs, options: [.numeric])
+}
+
 /// The one place that decides which JSON-RPC error a control-plane or
 /// upstream-acquisition failure surfaces as.
 extension ControlPlane {
@@ -60,6 +65,16 @@ extension ControlPlane {
 }
 
 extension RuntimeCoordinator {
+    private struct ProcessToolsCatalogRoute: Sendable {
+        let target: XcodeProcessTarget
+        let upstreamIndices: [Int]
+    }
+
+    private enum ProcessToolsCatalogOutcome: Sendable {
+        case success(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)
+        case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
+    }
+
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle
@@ -70,18 +85,212 @@ extension RuntimeCoordinator {
             ?? MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
             )
+        let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
+        if xcodeProcessRoutes.isEmpty == false {
+            return try await loadCanonicalToolsCatalogAcrossProcessRoutes(
+                requestTimeout: effectiveRequestTimeout,
+                deadlineUptimeNs: requestDeadlineUptimeNs,
+                startedAt: startedAt
+            )
+        }
+        return try await loadCanonicalToolsCatalogFromRoute(
+            .anyHealthy,
+            requestTimeout: effectiveRequestTimeout,
+            rpcHandle: rpcHandle,
+            startedAt: startedAt,
+            purpose: "tools",
+            failureRouteMetadata: nil
+        )
+    }
+
+    private func loadCanonicalToolsCatalogAcrossProcessRoutes(
+        requestTimeout: TimeAmount?,
+        deadlineUptimeNs: UInt64?,
+        startedAt: UInt64
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        let candidateProcessOrder = documentationCandidateProcessOrder()
+        let processRoutes =
+            candidateProcessOrder.map { order in
+                order.compactMap { processID in
+                    xcodeProcessRoutes.first { $0.target.processID == processID }
+                }
+            } ?? xcodeProcessRoutes
+        let routes = processRoutes.compactMap { route -> ProcessToolsCatalogRoute? in
+            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            guard upstreamIndices.isEmpty == false else {
+                return nil
+            }
+            return ProcessToolsCatalogRoute(target: route.target, upstreamIndices: upstreamIndices)
+        }
+        guard routes.isEmpty == false else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+
+        return try await withThrowingTaskGroup(
+            of: ProcessToolsCatalogOutcome.self,
+            returning: CanonicalToolsCatalogLoadResult.self
+        ) { group in
+            for route in routes {
+                group.addTask {
+                    do {
+                        let result = try await self.loadCanonicalToolsCatalogFromProcessRoute(
+                            route,
+                            requestTimeout: requestTimeout,
+                            deadlineUptimeNs: deadlineUptimeNs,
+                            startedAt: startedAt
+                        )
+                        return .success(target: route.target, result: result)
+                    } catch is CancellationError {
+                        return .failure(
+                            target: route.target,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
+                            error: CancellationError()
+                        )
+                    } catch {
+                        return .failure(
+                            target: route.target,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
+                            error: error
+                        )
+                    }
+                }
+            }
+
+            var successes: [(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)] = []
+            var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
+            while let outcome = try await group.next() {
+                switch outcome {
+                case .success(let target, let result):
+                    successes.append((target: target, result: result))
+                case .failure(let target, let upstreamIndex, let error):
+                    if error is CancellationError {
+                        throw CancellationError()
+                    }
+                    failures.append((target, upstreamIndex, error))
+                }
+            }
+
+            if successes.isEmpty == false {
+                for failure in failures {
+                    self.processToolCatalogRegistry.removeCatalog(
+                        forProcessID: failure.target.processID
+                    )
+                }
+                for success in successes {
+                    guard let sourceUpstream = success.result.sourceUpstream else {
+                        continue
+                    }
+                    self.processToolCatalogRegistry.record(
+                        target: success.target,
+                        upstreamIndex: sourceUpstream,
+                        associatedUpstreamIndices: self.xcodeProcessRoutes.first {
+                            $0.target.processID == success.target.processID
+                        }?.upstreamIndices ?? [],
+                        rawResult: success.result.rawResult
+                    )
+                }
+                let unionResult = self.processToolCatalogRegistry.unionToolsListResult()
+                    ?? successes[0].result.rawResult
+                let successfulProcessIDs = Set(successes.map { $0.target.processID })
+                let configuredProcessIDs = self.catalogEligibleConfiguredProcessIDs()
+                let hasCompleteProcessCatalog =
+                    configuredProcessIDs.isEmpty == false
+                    && successfulProcessIDs == configuredProcessIDs
+                let sourceUpstream: Int?
+                if hasCompleteProcessCatalog {
+                    sourceUpstream = successes.sorted {
+                        compareDocumentationVersion(
+                            $0.target.xcodeVersion,
+                            $1.target.xcodeVersion
+                        ) == .orderedDescending
+                    }.first?.result.sourceUpstream
+                } else {
+                    sourceUpstream = nil
+                }
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: unionResult,
+                    sourceUpstream: sourceUpstream,
+                    durationMilliseconds: self.elapsedMilliseconds(
+                        sinceUptimeNanoseconds: startedAt
+                    )
+                )
+            }
+
+            let lastFailure = failures.last
+            if let lastFailure {
+                throw ControlPlane.RequestError(
+                    route: .pinnedUpstream(lastFailure.upstreamIndex),
+                    upstreamIndex: lastFailure.upstreamIndex,
+                    underlying: lastFailure.error
+                )
+            }
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+    }
+
+    private func loadCanonicalToolsCatalogFromProcessRoute(
+        _ route: ProcessToolsCatalogRoute,
+        requestTimeout: TimeAmount?,
+        deadlineUptimeNs: UInt64?,
+        startedAt: UInt64
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        var lastFailure: (upstreamIndex: Int, error: any Error)?
+        for upstreamIndex in route.upstreamIndices {
+            let rpcHandle = ControlPlane.RPCHandle()
+            let routeTimeout = timeAmount(until: deadlineUptimeNs) ?? requestTimeout
+            if routeTimeout?.nanoseconds == 0 {
+                throw TimeoutError()
+            }
+            do {
+                return try await loadCanonicalToolsCatalogFromRoute(
+                    .pinnedUpstream(upstreamIndex),
+                    requestTimeout: routeTimeout,
+                    rpcHandle: rpcHandle,
+                    startedAt: startedAt,
+                    purpose: "tools-\(upstreamIndex)",
+                    failureRouteMetadata: [
+                        "pid": .string("\(route.target.processID)"),
+                        "app_path": .string(route.target.appPath),
+                        "xcode_version": .string(route.target.xcodeVersion),
+                        "upstream": .string("\(upstreamIndex)"),
+                    ]
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastFailure = (upstreamIndex, error)
+            }
+        }
+        if let lastFailure {
+            throw ControlPlane.RequestError(
+                route: .pinnedUpstream(lastFailure.upstreamIndex),
+                upstreamIndex: lastFailure.upstreamIndex,
+                underlying: lastFailure.error
+            )
+        }
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    private func loadCanonicalToolsCatalogFromRoute(
+        _ route: ControlPlane.Route,
+        requestTimeout: TimeAmount?,
+        rpcHandle: ControlPlane.RPCHandle,
+        startedAt: UInt64,
+        purpose: String,
+        failureRouteMetadata: Logger.Metadata?
+    ) async throws -> CanonicalToolsCatalogLoadResult {
         let nowUptimeNs = nowUptimeNanoseconds()
         do {
             let response = try await performControlPlaneRPC(
-                route: .anyHealthy,
-                purpose: "tools",
+                route: route,
+                purpose: purpose,
                 label: "tools/list",
                 requestObject: [
                     "jsonrpc": "2.0",
                     "id": "__control-plane-tools-\(UUID().uuidString)",
                     "method": "tools/list",
                 ],
-                requestTimeout: effectiveRequestTimeout,
+                requestTimeout: requestTimeout,
                 rpcHandle: rpcHandle
             )
             let result = try extractJSONRPCResult(from: response.responseData)
@@ -113,8 +322,29 @@ extension RuntimeCoordinator {
                     reason: controlPlaneFailureReason(for: error.underlying)
                 )
             }
+            logProcessToolsCatalogFailureIfNeeded(
+                error: error.underlying,
+                metadata: failureRouteMetadata
+            )
             throw error.underlying
+        } catch {
+            logProcessToolsCatalogFailureIfNeeded(
+                error: error,
+                metadata: failureRouteMetadata
+            )
+            throw error
         }
+    }
+
+    private func logProcessToolsCatalogFailureIfNeeded(
+        error: any Error,
+        metadata: Logger.Metadata?
+    ) {
+        guard var metadata else {
+            return
+        }
+        metadata["error"] = .string(String(describing: error))
+        logger.debug("Process tools/list route failed", metadata: metadata)
     }
 
     func loadLiveXcodeListWindows(

@@ -346,6 +346,87 @@ struct ToolSurfaceTests {
         #expect(name == "DocumentationSearch")
     }
 
+    @Test func toolSurfaceNormalizesUsingSourceProcessCatalog() throws {
+        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        sessionManager.setCachedToolsListResult(
+            try #require(
+                JSONValue(any: [
+                    "tools": [
+                        [
+                            "name": "NewStructuredTool",
+                        ],
+                    ],
+                ])
+            ),
+            sourceUpstream: 0
+        )
+        sessionManager.setCachedToolsListResult(
+            try #require(
+                JSONValue(any: [
+                    "tools": [
+                        [
+                            "name": "NewStructuredTool",
+                            "outputSchema": [
+                                "type": "object",
+                            ],
+                        ],
+                    ],
+                ])
+            ),
+            upstreamIndex: 1
+        )
+        let surface = ToolSurface(
+            config: makeToolSurfaceConfig(),
+            sessionManager: sessionManager
+        )
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"answer\":\"source\"}",
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+
+        let withoutSource = surface.rewriteForwardedResponse(
+            method: "tools/call",
+            toolName: "NewStructuredTool",
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            upstreamData: upstreamData
+        )
+        let withoutSourcePayload = try #require(
+            JSONSerialization.jsonObject(with: withoutSource.responseData, options: [])
+                as? [String: Any]
+        )
+        let withoutSourceResult = try #require(withoutSourcePayload["result"] as? [String: Any])
+        #expect(withoutSourceResult["structuredContent"] == nil)
+
+        let withSource = surface.rewriteForwardedResponse(
+            method: "tools/call",
+            toolName: "NewStructuredTool",
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            upstreamIndex: 1,
+            upstreamData: upstreamData
+        )
+        let withSourcePayload = try #require(
+            JSONSerialization.jsonObject(with: withSource.responseData, options: [])
+                as? [String: Any]
+        )
+        let withSourceResult = try #require(withSourcePayload["result"] as? [String: Any])
+        let structuredContent = try #require(
+            withSourceResult["structuredContent"] as? [String: Any]
+        )
+        #expect(structuredContent["answer"] as? String == "source")
+    }
+
     @Test func toolSurfaceTreatsOnlySyntheticOverloadErrorAsBackpressure() throws {
         let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
         let surface = ToolSurface(
@@ -395,6 +476,7 @@ private func makeToolSurfaceConfig() -> ProxyConfig {
 private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeCoordinating {
     private let config: ProxyConfig
     private var cachedToolsList: JSONValue?
+    private var cachedToolsListsByUpstream: [Int: JSONValue] = [:]
 
     init(config: ProxyConfig) {
         self.config = config
@@ -407,7 +489,13 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     func shutdown() async {}
     func isInitialized() -> Bool { true }
     func cachedToolsListResult() -> JSONValue? { cachedToolsList }
+    func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
+        cachedToolsListsByUpstream[upstreamIndex] ?? cachedToolsList
+    }
     func setCachedToolsListResult(_ result: JSONValue, sourceUpstream _: Int) { cachedToolsList = result }
+    func setCachedToolsListResult(_ result: JSONValue, upstreamIndex: Int) {
+        cachedToolsListsByUpstream[upstreamIndex] = result
+    }
 
     func registerInitialize(
         sessionID: String,

@@ -406,6 +406,16 @@ extension HTTPPostService {
         id: JSONRPC.ID,
         toolName: String
     ) -> [String: Any] {
+        makeToolResultErrorResponseObject(
+            id: id,
+            message: "tool '\(toolName)' is disabled by proxy config"
+        )
+    }
+
+    package static func makeToolResultErrorResponseObject(
+        id: JSONRPC.ID,
+        message: String
+    ) -> [String: Any] {
         [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,
@@ -413,7 +423,7 @@ extension HTTPPostService {
                 "content": [
                     [
                         "type": "text",
-                        "text": "tool '\(toolName)' is disabled by proxy config",
+                        "text": message,
                     ]
                 ],
                 "isError": true,
@@ -465,6 +475,35 @@ extension HTTPPostService {
         return try? JSONSerialization.data(withJSONObject: payload, options: [])
     }
 
+    package static func makeJSONRPCResultResponseObject(
+        id: JSONRPC.ID,
+        result: JSONValue
+    ) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id.value.foundationObject,
+            "result": result.foundationObject,
+        ]
+    }
+
+    package static func makeJSONRPCResultResponseData(
+        ids: [JSONRPC.ID],
+        result: JSONValue,
+        forceBatchArray: Bool
+    ) -> Data? {
+        let objects = ids.map {
+            makeJSONRPCResultResponseObject(id: $0, result: result)
+        }
+        guard !objects.isEmpty else {
+            return nil
+        }
+        let payload: Any = (forceBatchArray || objects.count > 1) ? objects : objects[0]
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            return nil
+        }
+        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
     package static func makeToolResponseData(
         from responseObjects: [[String: Any]],
         forceBatchArray: Bool
@@ -479,6 +518,21 @@ extension HTTPPostService {
             return nil
         }
         return try? JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
+    package static func makeToolRoutingErrorResponseData(
+        errors: [ToolRoutingError],
+        forceBatchArray: Bool
+    ) -> Data? {
+        makeToolResponseData(
+            from: errors.map { error in
+                makeToolResultErrorResponseObject(
+                    id: error.id,
+                    message: error.message
+                )
+            },
+            forceBatchArray: forceBatchArray
+        )
     }
 
     package static func responseObjects(from responseData: Data) -> [[String: Any]] {

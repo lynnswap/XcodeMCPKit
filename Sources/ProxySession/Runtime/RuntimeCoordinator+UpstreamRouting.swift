@@ -276,19 +276,21 @@ extension RuntimeCoordinator {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
 
-        if upstreamIndex == 0 && globalInit.wasInFlight {
-            globalInit.timeout?.cancel()
+        let exitedActivePrimaryInitialize =
+            globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
+        if exitedActivePrimaryInitialize {
             if let upstreamID = globalInit.primaryInitUpstreamID {
-                upstreamRouter.remove(upstreamIndex: 0, upstreamID: upstreamID)
-            }
-            for item in globalInit.pending {
-                item.eventLoop.execute {
-                    item.promise.fail(TimeoutError())
-                }
+                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
             }
         }
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
+        if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
+            markXcodeProcessRouteUnavailable(
+                upstreamIndex: upstreamIndex,
+                reason: "upstream_exit_\(status)"
+            )
+        }
         upstreamRouter.reset(upstreamIndex: upstreamIndex)
         releaseLeases(
             leaseManager.abandonActiveLeases(
@@ -296,6 +298,24 @@ extension RuntimeCoordinator {
                 reason: .upstreamExit
             )
         )
+
+        if exitedActivePrimaryInitialize {
+            if retryPrimaryInitializeOnAlternativeUpstream(
+                failedUpstreamIndex: upstreamIndex,
+                failedUpstreamID: nil,
+                reason: "primary_upstream_exit_\(status)"
+            ) {
+                return
+            }
+            globalInit.timeout?.cancel()
+            _ = initializeManager.completePrimaryInitializeFailure()
+            for item in globalInit.pending {
+                removePendingInitializeSessionIfCurrent(item)
+                item.eventLoop.execute {
+                    item.promise.fail(TimeoutError())
+                }
+            }
+        }
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
@@ -315,15 +335,18 @@ extension RuntimeCoordinator {
             )
         }
 
-        if upstreamIndex == 0 {
+        let primaryUpstreamIndex = globalInit.primaryInitUpstreamIndex
+            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? 0
+        if upstreamIndex == primaryUpstreamIndex {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
                 startEagerInitializePrimary(applyBackoff: true)
             } else {
-                startUpstreamWarmInitialize(upstreamIndex: 0, applyBackoff: true)
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             }
         } else if globalInit.hadGlobalInit {
             if shouldResetGlobalInit {
-                let primaryInitInFlight = upstreamHealthManager.primaryInitInFlight()
+                let primaryInitInFlight = initializeManager.snapshot().initInFlight
                 if primaryInitInFlight {
                     initializeManager
                         .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
@@ -387,7 +410,7 @@ extension RuntimeCoordinator {
                     code: -32002,
                     message: "upstream overloaded"
                 )
-            case .unavailable:
+            case .unavailable(let reason):
                 // The exit/quarantine machinery owns health for a dead slot;
                 // a send into it must not be misdiagnosed as overload.
                 self.failPendingSend(
@@ -396,7 +419,29 @@ extension RuntimeCoordinator {
                     code: -32001,
                     message: "upstream unavailable"
                 )
+                self.handleUnavailableUpstreamSend(
+                    upstreamIndex: upstreamIndex,
+                    reason: reason
+                )
             }
+        }
+    }
+
+    private func handleUnavailableUpstreamSend(
+        upstreamIndex: Int,
+        reason: Upstream.UnavailableReason
+    ) {
+        switch reason {
+        case .terminated, .notStarted, .startFailed:
+            clearUpstreamState(upstreamIndex: upstreamIndex)
+            if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
+                markXcodeProcessRouteUnavailable(
+                    upstreamIndex: upstreamIndex,
+                    reason: "upstream_\(reason)"
+                )
+            }
+        case .shuttingDown:
+            break
         }
     }
 
@@ -522,6 +567,16 @@ extension RuntimeCoordinator {
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
+            processToolCatalogs: processToolCatalogRegistry.debugSnapshots(
+                exposedCatalog: brokerSnapshot.toolsCatalogRaw,
+                canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
+                tabOwnerCountsByProcessID: ownerCountsByProcessID(
+                    tabOwnerProcessIDs.withLockedValue { $0 }
+                ),
+                workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
+                    workspaceOwnerProcessIDs.withLockedValue { $0 }
+                )
+            ),
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,
@@ -536,6 +591,12 @@ extension RuntimeCoordinator {
         descriptor: SessionRequestPipeline.Descriptor
     ) -> LeaseManager.ID {
         leaseManager.createLease(descriptor: descriptor)
+    }
+
+    private func ownerCountsByProcessID(_ owners: [String: pid_t]) -> [pid_t: Int] {
+        owners.values.reduce(into: [:]) { counts, processID in
+            counts[processID, default: 0] += 1
+        }
     }
 
     package func activateRequestLease(
@@ -856,7 +917,7 @@ extension RuntimeCoordinator {
         var routedSessionIDs = Set<String>()
         var pendingInitializeTargets: [SessionContext] = []
 
-        if upstreamIndex == 0 {
+        if isCurrentPrimaryInitializeUpstream(upstreamIndex) {
             for pending in initializeManager.pendingInitializes() {
                 guard sessionStillMatchesPendingInitialize(
                     sessionID: pending.sessionID,
@@ -1007,9 +1068,8 @@ extension RuntimeCoordinator {
             nowUptimeNs: nowUptimeNs
         )
         transition?.cancelledInitTimeout?.cancel()
-        if upstreamIndex == 0, initSnapshot.initInFlight {
-            failInitPending(error: TimeoutError())
-        }
+        let violatedActivePrimaryInitialize =
+            initSnapshot.activePrimaryUpstreamIndex == upstreamIndex && initSnapshot.initInFlight
         upstreamRouter.reset(upstreamIndex: upstreamIndex)
         releaseLeases(
             leaseManager.abandonActiveLeases(
@@ -1028,7 +1088,8 @@ extension RuntimeCoordinator {
                 ]
             )
         }
-        let clearInitialize = upstreamIndex == 0 && initSnapshot.hasInitResult == false
+        let clearInitialize = violatedActivePrimaryInitialize
+            && initSnapshot.hasInitResult == false
         let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
         if clearInitialize || clearToolsCatalog {
             invalidateControlPlane(
@@ -1038,7 +1099,21 @@ extension RuntimeCoordinator {
             )
         }
 
-        if upstreamIndex == 0 {
+        if violatedActivePrimaryInitialize {
+            if retryPrimaryInitializeOnAlternativeUpstream(
+                failedUpstreamIndex: upstreamIndex,
+                failedUpstreamID: nil,
+                reason: "primary_protocol_violation"
+            ) {
+                return
+            }
+            failInitPending(error: TimeoutError())
+        }
+
+        let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex
+            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? 0
+        if upstreamIndex == primaryUpstreamIndex {
             if initSnapshot.hasInitResult {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             } else {

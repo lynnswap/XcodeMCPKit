@@ -39,101 +39,18 @@ package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 }
 
 package struct RuntimeCoordinatorTestHooks: Sendable {
-    package var documentationPrewarmWaitStarted: (@Sendable () -> Void)?
     package var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
 
     package init(
-        documentationPrewarmWaitStarted: (@Sendable () -> Void)? = nil,
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil
     ) {
-        self.documentationPrewarmWaitStarted = documentationPrewarmWaitStarted
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
-    }
-}
-
-private final class DocumentationToolListUpdateWaiter: @unchecked Sendable {
-    struct Result: Sendable {
-        let update: DocumentationProvider.ToolListUpdate
-        let timedOut: Bool
-    }
-
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Result, Never>?
-    private var tasks: [Task<Void, Never>] = []
-    private var resolved = false
-
-    func wait(
-        for task: Task<DocumentationProvider.ToolListUpdate, Never>,
-        timeout: TimeAmount,
-        clock: ClockClient
-    ) async -> Result {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                setContinuation(continuation)
-                addTask(Task {
-                    let update = await task.value
-                    self.resume(Result(update: update, timedOut: false))
-                })
-                addTask(Task {
-                    await clock.sleep(.nanoseconds(timeout.nanoseconds))
-                    guard Task.isCancelled == false else {
-                        return
-                    }
-                    self.resume(Result(update: .unavailable, timedOut: true))
-                })
-            }
-        } onCancel: {
-            resume(Result(update: .unavailable, timedOut: true))
-        }
-    }
-
-    private func setContinuation(
-        _ continuation: CheckedContinuation<Result, Never>
-    ) {
-        lock.lock()
-        if resolved {
-            lock.unlock()
-            continuation.resume(returning: Result(update: .unavailable, timedOut: true))
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-    }
-
-    private func addTask(_ task: Task<Void, Never>) {
-        lock.lock()
-        if resolved {
-            lock.unlock()
-            task.cancel()
-            return
-        }
-        tasks.append(task)
-        lock.unlock()
-    }
-
-    private func resume(_ result: Result) {
-        lock.lock()
-        guard resolved == false else {
-            lock.unlock()
-            return
-        }
-        resolved = true
-        let continuation = continuation
-        self.continuation = nil
-        let tasks = tasks
-        self.tasks.removeAll()
-        lock.unlock()
-
-        for task in tasks {
-            task.cancel()
-        }
-        continuation?.resume(returning: result)
     }
 }
 
@@ -163,6 +80,7 @@ package protocol RuntimeCoordinating: Sendable {
     func shutdown() async
     func isInitialized() -> Bool
     func cachedToolsListResult() -> JSONValue?
+    func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
     func registerInitialize(
         sessionID: String,
@@ -183,12 +101,26 @@ package protocol RuntimeCoordinating: Sendable {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationSearchOutcome
     func hasDocumentationSearchService() -> Bool
+    func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision
+    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision?
     func chooseUpstreamIndex() -> Int?
+    func preferredUpstreamIndex(for requestJSON: Any) -> Int?
+    func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output>
+    func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int]?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
     func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64
@@ -245,6 +177,29 @@ extension RuntimeCoordinating {
         false
     }
 
+    package func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
+        cachedToolsListResult()
+    }
+
+    package func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride _: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+    }
+
+    package func immediateToolRoutingDecision(for _: Any) -> ToolRoutingDecision? {
+        nil
+    }
+
+    package func preferredUpstreamIndex(for _: Any) -> Int? {
+        nil
+    }
+
+    package func primaryUpstreamIndex(forXcodeProcessID _: pid_t) -> Int? {
+        nil
+    }
+
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
@@ -273,6 +228,22 @@ extension RuntimeCoordinating {
         )
     }
 
+    package func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int]?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
+        enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndex: preferredUpstreamIndices?.first,
+            starter: starter
+        )
+    }
+
     func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
@@ -287,6 +258,7 @@ extension RuntimeCoordinating {
 
 package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     static let redactedDebugText = "<redacted>"
+    package static let documentationProviderDiscoveryPollInterval: Duration = .seconds(2)
 
     struct TestSnapshot: Sendable {
         struct Upstream: Sendable {
@@ -326,6 +298,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     package let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     package let canonicalBrokerState: CanonicalBrokerState
     package let controlPlaneDebugMirror = ControlPlane.DebugMirror()
+    package let processToolCatalogRegistry = ProcessToolCatalogRegistry()
 
     package let upstreamHealthManager: UpstreamHealthManager
     package let upstreamSlotScheduler: UpstreamSlotScheduler
@@ -338,7 +311,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             RuntimeScheduledTimeout
     package let controlPlaneCoordinator: ControlPlaneCoordinator
     package let documentationProviderManager: (any DocumentationProviderManaging)?
-    package let documentationProviderRoutes: [DocumentationProviderRoute]
+    package let xcodeProcessRoutes: [XcodeProcessRoute]
+    package let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
+    package let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
+    package let unavailableXcodeProcessRoutes =
+        NIOLockedValueBox<[pid_t: UInt64]>([:])
     package let prewarmDocumentationProviderOnStartup: Bool
     package let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -354,18 +331,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let count = max(1, min(config.upstreamProcessCount, 10))
+        let xcodeProcessRoutingEnabled = XcrunArguments.isDefaultMCPBridgeInvocation(
+            config: config
+        )
         let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
             config: config
         )
-        let documentationTargets =
-            documentationServiceEnabled
+        let xcodeTargets =
+            xcodeProcessRoutingEnabled
             ? xcodeTargetDiscovery?.runningXcodeTargets() ?? []
             : []
         let upstreamPlan = Self.makeDefaultUpstreamPlan(
             config: config,
             sharedSessionID: config.upstreamSessionID,
             count: count,
-            documentationTargets: documentationTargets
+            xcodeTargets: xcodeTargets
         )
         let clock = ClockClient.liveValue
         let runtimeBox = WeakRuntimeCoordinatorBox()
@@ -384,7 +364,10 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? xcodeTargetDiscovery.flatMap { discovery in
                 Self.makeDefaultDocumentationProviderManager(
                     config: config,
-                    discovery: discovery,
+                    discovery: RuntimeDocumentationTargetDiscovery(
+                        base: discovery,
+                        runtimeBox: runtimeBox
+                    ),
                     transport: documentationTransport
                 )
             }
@@ -395,7 +378,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             upstreams: upstreamPlan.upstreams,
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
-            documentationProviderRoutes: upstreamPlan.documentationRoutes,
+            xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
             startImmediately: startImmediately,
@@ -411,17 +394,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         guard documentationProviderServiceIsConfigured(config: config) else {
             return nil
         }
-        let environment = ProcessInfo.processInfo.environment
-        let pinnedProcessID = environment["MCP_XCODE_PID"].flatMap(pid_t.init)
         return DocumentationProviderManager(
             discovery: discovery,
             transport: transport,
-            pinnedProcessID: pinnedProcessID,
             initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
             ),
             serviceRepairer: LiveDocumentationSearchServiceRepairer(),
-            localSearchProvider: LiveDocumentationAssetSearchProvider()
+            localSearchProvider: LiveDocumentationAssetSearchProvider(),
+            preferLocalSearchProvider: true
         )
     }
 
@@ -443,7 +424,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
                 RuntimeScheduledTimeout
         )? = nil,
-        documentationProviderRoutes: [DocumentationProviderRoute] = [],
+        xcodeProcessRoutes: [XcodeProcessRoute] = [],
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
@@ -483,7 +464,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
-        self.documentationProviderRoutes = documentationProviderRoutes
+        self.xcodeProcessRoutes = xcodeProcessRoutes
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         self.testHooks = testHooks
         let resolvedReadinessGate =
@@ -657,12 +638,15 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
+        unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
+        clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
             clearInitialize: true,
             clearToolsCatalog: true
         )
         canonicalBrokerState.reset()
+        processToolCatalogRegistry.reset()
     }
 
     package func shutdown() async {
@@ -688,6 +672,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
 
         canonicalBrokerState.reset()
+        processToolCatalogRegistry.reset()
         await controlPlaneCoordinator.invalidate(
             reason: "shutdown",
             clearInitialize: true,
@@ -724,12 +709,61 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         canonicalBrokerState.toolsCatalogRaw()
     }
 
+    package func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
+        processToolCatalogRegistry.toolsListResult(forUpstreamIndex: upstreamIndex)
+            ?? canonicalBrokerState.toolsCatalogRaw()
+    }
+
     package func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int) {
         guard isValidToolsListResult(result) else { return }
         canonicalBrokerState.syncCanonicalToolsCatalog(
             result,
             sourceUpstream: sourceUpstream
         )
+    }
+
+    package func resyncProcessToolsCatalogSurfaceAfterRemoving(
+        upstreamIndex removedUpstreamIndex: Int,
+        processID removedProcessID: pid_t? = nil
+    ) {
+        guard xcodeProcessRoutes.isEmpty == false,
+              canonicalBrokerState.toolsCatalogRaw() != nil else {
+            return
+        }
+        if let unionResult = processToolCatalogRegistry.unionToolsListResult(),
+           let sourceUpstream = processToolCatalogRegistry.representativeSourceUpstream(),
+           processToolCatalogRegistryHasCompleteConfiguredCatalog()
+        {
+            canonicalBrokerState.syncCanonicalToolsCatalog(
+                unionResult,
+                sourceUpstream: sourceUpstream
+            )
+            return
+        }
+        if processToolCatalogRegistry.unionToolsListResult() != nil {
+            canonicalBrokerState.clearToolsCatalog()
+            return
+        }
+        guard let sourceUpstream = canonicalBrokerState.toolsSourceUpstream() else {
+            return
+        }
+        if sourceUpstream == removedUpstreamIndex {
+            canonicalBrokerState.clearToolsCatalog()
+            return
+        }
+        if let removedProcessID,
+           xcodeProcessRoute(forUpstreamIndex: sourceUpstream)?.target.processID == removedProcessID
+        {
+            canonicalBrokerState.clearToolsCatalog()
+        }
+    }
+
+    package func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {
+        let configuredProcessIDs = catalogEligibleConfiguredProcessIDs()
+        guard configuredProcessIDs.isEmpty == false else {
+            return false
+        }
+        return processToolCatalogRegistry.processIDsWithCatalog() == configuredProcessIDs
     }
 
     package func refreshToolsListIfNeeded() {
@@ -776,6 +810,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
             self?.recordDocumentationToolListUpdate(update)
             guard !Task.isCancelled else { return .unavailable }
+            self?.scheduleDocumentationProviderDiscoveryPollIfNeeded(after: update)
             logger.debug("Documentation provider prewarm completed")
             return update
         }
@@ -785,6 +820,21 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return previous
         }
         previous?.cancel()
+    }
+
+    private func scheduleDocumentationProviderDiscoveryPollIfNeeded(
+        after update: DocumentationProvider.ToolListUpdate
+    ) {
+        guard documentationProviderManager != nil else { return }
+        guard case .available = update else {
+            addRuntimeTask { [weak self] in
+                guard let self else { return }
+                await self.clock.sleep(Self.documentationProviderDiscoveryPollInterval)
+                guard !Task.isCancelled else { return }
+                self.prewarmDocumentationProvider()
+            }
+            return
+        }
     }
 
     package func chooseUpstreamIndex() -> Int? {
@@ -839,6 +889,22 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         preferredUpstreamIndex: Int? = nil,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
+        enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] },
+            starter: starter
+        )
+    }
+
+    package func enqueueOnUpstreamSlot<Output: Sendable>(
+        leaseID: LeaseManager.ID,
+        descriptor: SessionRequestPipeline.Descriptor,
+        on eventLoop: EventLoop,
+        preferredUpstreamIndices: [Int]?,
+        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+    ) -> EventLoopFuture<Output> {
         let hasHealthyUpstream = upstreamHealthManager.initializedHealthyishCount() > 0
         var recoveryInFlight = upstreamHealthManager.anyRecoveryInFlight()
         if hasHealthyUpstream == false, recoveryInFlight == false,
@@ -856,7 +922,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             leaseID: leaseID,
             descriptor: descriptor,
             on: eventLoop,
-            preferredUpstreamIndex: preferredUpstreamIndex,
+            preferredUpstreamIndices: preferredUpstreamIndices ?? [],
             starter: { upstreamIndex in
                 starter(upstreamIndex).cascade(to: promise)
             },
@@ -902,10 +968,17 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) -> EventLoopFuture<ByteBuffer> {
         _ = session(id: sessionID)
         let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
+        let primaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
+            ?? primaryInitializeUpstreamIndex()
+        guard primaryUpstreamIndex != nil || initializeManager.isInitialized() else {
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
+        }
+
         let decision = initializeManager.registerInitialize(
             sessionID: sessionID,
             sessionGeneration: sessionGeneration,
             originalID: originalID,
+            primaryUpstreamIndex: primaryUpstreamIndex ?? 0,
             on: eventLoop
         )
         let cachedResult = decision.cachedResult
@@ -1019,11 +1092,22 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 defaultSeconds: config.requestTimeout
             )
         let deadline = timeoutDeadline(for: timeout)
-        return try await awaitControlPlaneOperation {
-            try await self.controlPlaneCoordinator.listWindows(
-                route: route,
+        switch route {
+        case .anyHealthy where xcodeProcessRoutes.isEmpty == false:
+            return try await liveXcodeListWindowsAcrossProcessRoutes(
                 deadlineUptimeNs: deadline
             )
+        default:
+            let result = try await awaitControlPlaneOperation {
+                try await self.controlPlaneCoordinator.listWindows(
+                    route: route,
+                    deadlineUptimeNs: deadline
+                )
+            }
+            if case .pinnedUpstream(let upstreamIndex) = route {
+                recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
+            }
+            return result
         }
     }
 
@@ -1076,133 +1160,67 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return
         }
 
-        logger.info("\(ToolCatalogStartupLogFormatter.summary(from: result))")
+        let summary = ToolCatalogStartupLogFormatter.summary(
+            from: result,
+            process: toolCatalogSourceProcess(),
+            exposurePolicy: xcodeProcessRoutes.isEmpty
+                ? nil
+                : "union_latest_xcode_descriptor_runtime_guard"
+        )
+        logger.info("\(summary)")
+    }
+
+    private func toolCatalogSourceProcess() -> ToolCatalogStartupLogFormatter.Process? {
+        guard let upstreamIndex = canonicalBrokerState.toolsSourceUpstream(),
+              let route = xcodeProcessRoutes.first(where: {
+                  $0.upstreamIndices.contains(upstreamIndex)
+              })
+        else {
+            return nil
+        }
+        return ToolCatalogStartupLogFormatter.Process(
+            appPath: route.target.appPath,
+            processID: route.target.processID
+        )
     }
 
     private func toolsListResultWithDocumentationOverlay(
         baseResult: JSONValue,
-        requestTimeout: TimeAmount?,
+        requestTimeout _: TimeAmount?,
         metadata: Logger.Metadata
     ) async -> JSONValue {
-        guard let documentationProviderManager else {
+        guard documentationProviderManager != nil else {
             return baseResult
         }
-        let update = await documentationToolListUpdateForPublicToolsList(
-            manager: documentationProviderManager,
-            requestTimeout: requestTimeout
-        )
-        return toolsListResultApplyingDocumentationUpdate(
-            update,
-            to: baseResult,
+        return toolsListResultExposingProxyOwnedDocumentationSearch(
+            baseResult: baseResult,
             metadata: metadata
         )
     }
 
     private func startupPrewarmToolsListResultWithDocumentationOverlay(
         baseResult: JSONValue,
-        requestTimeout: TimeAmount?,
+        requestTimeout _: TimeAmount?,
         metadata: Logger.Metadata
     ) async -> JSONValue {
-        guard let documentationProviderManager else {
+        guard documentationProviderManager != nil else {
             return baseResult
         }
-        let update: DocumentationProvider.ToolListUpdate
-        if let prewarmResult = await consumeDocumentationPrewarmTaskUpdate(
-            requestTimeout: requestTimeout
-        ) {
-            update = prewarmResult.update
-        } else {
-            update = await documentationProviderManager.startBackgroundDiscovery(
-                requestTimeout: requestTimeout
-            )
-        }
-        return toolsListResultApplyingDocumentationUpdate(
-            update,
-            to: baseResult,
+        return toolsListResultExposingProxyOwnedDocumentationSearch(
+            baseResult: baseResult,
             metadata: metadata
         )
     }
 
-    private func toolsListResultApplyingDocumentationUpdate(
-        _ update: DocumentationProvider.ToolListUpdate,
-        to baseResult: JSONValue,
+    private func toolsListResultExposingProxyOwnedDocumentationSearch(
+        baseResult: JSONValue,
         metadata: Logger.Metadata
     ) -> JSONValue {
-        recordDocumentationToolListUpdate(update)
-        var logMetadata = metadata
-        logMetadata["update"] = .string(update.debugLabel)
         logger.debug(
-            "Applied documentation provider tools/list overlay",
-            metadata: logMetadata
+            "Applied proxy-owned DocumentationSearch tools/list overlay",
+            metadata: metadata
         )
-        return DocumentationProvider.ToolCatalog.applying(update, to: baseResult)
-    }
-
-    private func documentationToolListUpdateForPublicToolsList(
-        manager: any DocumentationProviderManaging,
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationProvider.ToolListUpdate {
-        if let prewarmResult = await consumeDocumentationPrewarmTaskUpdate(
-            requestTimeout: requestTimeout
-        ) {
-            let prewarmUpdate = prewarmResult.update
-            if case .available = prewarmUpdate {
-                return prewarmUpdate
-            }
-            if prewarmResult.timedOut {
-                return .unavailable
-            }
-        }
-        return await documentationToolListUpdate(
-            manager: manager,
-            requestTimeout: requestTimeout
-        )
-    }
-
-    private func consumeDocumentationPrewarmTaskUpdate(
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationToolListUpdateWaiter.Result? {
-        guard let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue({ $0 }) else {
-            return nil
-        }
-        let result = await documentationToolListUpdate(
-            fromPrewarmTask: documentationPrewarmTask,
-            requestTimeout: requestTimeout
-        )
-        if result.timedOut == false {
-            documentationPrewarmTaskBox.withLockedValue { $0 = nil }
-        }
-        return result
-    }
-
-    private func documentationToolListUpdate(
-        fromPrewarmTask task: Task<DocumentationProvider.ToolListUpdate, Never>,
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationToolListUpdateWaiter.Result {
-        guard requestTimeout?.nanoseconds != 0 else {
-            return DocumentationToolListUpdateWaiter.Result(update: .unavailable, timedOut: true)
-        }
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return DocumentationToolListUpdateWaiter.Result(
-                update: await task.value,
-                timedOut: false
-            )
-        }
-        testHooks.documentationPrewarmWaitStarted?()
-        let result = await DocumentationToolListUpdateWaiter().wait(
-            for: task,
-            timeout: requestTimeout,
-            clock: clock
-        )
-        if result.timedOut {
-            logger.debug(
-                "documentation provider prewarm did not finish before tools/list timeout",
-                metadata: [
-                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
-                ]
-            )
-        }
-        return result
+        return DocumentationProvider.ToolCatalog.exposingProxyOwnedSearch(in: baseResult)
     }
 
     private func recordDocumentationToolListUpdate(_ update: DocumentationProvider.ToolListUpdate) {
@@ -1224,45 +1242,6 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             "Documentation provider invalidated",
             metadata: ["reason": .string(reason)]
         )
-    }
-
-    private func documentationToolListUpdate(
-        manager: any DocumentationProviderManaging,
-        requestTimeout: TimeAmount?
-    ) async -> DocumentationProvider.ToolListUpdate {
-        guard requestTimeout?.nanoseconds != 0 else {
-            return .unavailable
-        }
-        guard let requestTimeout, requestTimeout.nanoseconds > 0 else {
-            return await manager.toolListUpdate(requestTimeout: requestTimeout)
-        }
-        do {
-            return try await withThrowingTaskGroup(of: DocumentationProvider.ToolListUpdate.self) {
-                group in
-                group.addTask {
-                    await manager.toolListUpdate(requestTimeout: requestTimeout)
-                }
-                let clock = self.clock
-                group.addTask {
-                    await clock.sleep(.nanoseconds(requestTimeout.nanoseconds))
-                    throw TimeoutError()
-                }
-                guard let update = try await group.next() else {
-                    throw TimeoutError()
-                }
-                group.cancelAll()
-                return update
-            }
-        } catch {
-            logger.debug(
-                "documentation provider tools/list update failed",
-                metadata: [
-                    "error": .string(String(describing: error)),
-                    "timeout_ns": .string("\(requestTimeout.nanoseconds)"),
-                ]
-            )
-            return .unavailable
-        }
     }
 
     func encodeJSONRPCResultBuffer(

@@ -7,14 +7,14 @@ import ProxyMCP
 extension RuntimeCoordinator {
     package struct DefaultUpstreamPlan: Sendable {
         package let upstreams: [ManagedUpstreamSlot]
-        package let documentationRoutes: [DocumentationProviderRoute]
+        package let xcodeProcessRoutes: [XcodeProcessRoute]
 
         package init(
             upstreams: [ManagedUpstreamSlot],
-            documentationRoutes: [DocumentationProviderRoute]
+            xcodeProcessRoutes: [XcodeProcessRoute] = []
         ) {
             self.upstreams = upstreams
-            self.documentationRoutes = documentationRoutes
+            self.xcodeProcessRoutes = xcodeProcessRoutes
         }
     }
 
@@ -27,7 +27,7 @@ extension RuntimeCoordinator {
             config: config,
             sharedSessionID: sharedSessionID,
             count: count,
-            documentationTargets: []
+            xcodeTargets: []
         ).upstreams
     }
 
@@ -35,60 +35,63 @@ extension RuntimeCoordinator {
         config: ProxyConfig,
         sharedSessionID: String?,
         count: Int,
-        documentationTargets: [DocumentationProviderTarget]
+        xcodeTargets: [XcodeProcessTarget]
     ) -> DefaultUpstreamPlan {
-        let orderedDocumentationTargets = orderedDocumentationTargets(
-            documentationTargets,
-            pinnedProcessID: ProcessInfo.processInfo.environment["MCP_XCODE_PID"]
-                .flatMap(pid_t.init)
-        )
-        let canReuseDefaultUpstreamForDocumentation =
-            orderedDocumentationTargets.isEmpty == false
-            && config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
+        let orderedXcodeTargets = orderedXcodeTargets(xcodeTargets)
+        let canUseProcessBoundXcodeUpstreams =
+            orderedXcodeTargets.isEmpty == false
             && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
-        let reusableDocumentationTarget: DocumentationProviderTarget?
-        if canReuseDefaultUpstreamForDocumentation,
-            ProcessInfo.processInfo.environment["MCP_XCODE_PID"].flatMap(pid_t.init) != nil
-                || orderedDocumentationTargets.count == 1
-        {
-            reusableDocumentationTarget = orderedDocumentationTargets.first
-        } else {
-            reusableDocumentationTarget = nil
-        }
         var upstreams: [ManagedUpstreamSlot] = []
-        var documentationRoutes: [DocumentationProviderRoute] = []
+        var xcodeProcessRoutes: [XcodeProcessRoute] = []
         let upstreamCount = max(1, count)
-        upstreams.reserveCapacity(upstreamCount)
-        documentationRoutes.reserveCapacity(reusableDocumentationTarget == nil ? 0 : 1)
-        for _ in 0..<upstreamCount {
-            let upstreamConfig = makeDefaultUpstreamConfig(
-                config: config,
-                sharedSessionID: sharedSessionID,
-                documentationTarget: nil
-            )
-            upstreams.append(
-                ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
-            )
-        }
-        if let reusableDocumentationTarget {
-            documentationRoutes.append(
-                DocumentationProviderRoute(
-                    id: "upstream-0-pid-\(reusableDocumentationTarget.processID)",
-                    target: reusableDocumentationTarget,
-                    upstreamIndex: 0
+
+        if canUseProcessBoundXcodeUpstreams {
+            upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
+            xcodeProcessRoutes.reserveCapacity(orderedXcodeTargets.count)
+
+            for target in orderedXcodeTargets {
+                var upstreamIndices: [Int] = []
+                upstreamIndices.reserveCapacity(upstreamCount)
+                for _ in 0..<upstreamCount {
+                    let upstreamIndex = upstreams.count
+                    let upstreamConfig = makeDefaultUpstreamConfig(
+                        config: config,
+                        sharedSessionID: sharedSessionID,
+                        xcodeTarget: target
+                    )
+                    upstreams.append(
+                        ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
+                    )
+                    upstreamIndices.append(upstreamIndex)
+                }
+
+                let route = XcodeProcessRoute(target: target, upstreamIndices: upstreamIndices)
+                xcodeProcessRoutes.append(route)
+            }
+        } else {
+            upstreams.reserveCapacity(upstreamCount)
+            for _ in 0..<upstreamCount {
+                let upstreamConfig = makeDefaultUpstreamConfig(
+                    config: config,
+                    sharedSessionID: sharedSessionID,
+                    xcodeTarget: nil
                 )
-            )
+                upstreams.append(
+                    ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
+                )
+            }
         }
+
         return DefaultUpstreamPlan(
             upstreams: upstreams,
-            documentationRoutes: documentationRoutes
+            xcodeProcessRoutes: xcodeProcessRoutes
         )
     }
 
     private static func makeDefaultUpstreamConfig(
         config: ProxyConfig,
         sharedSessionID: String?,
-        documentationTarget: DocumentationProviderTarget?
+        xcodeTarget: XcodeProcessTarget?
     ) -> UpstreamProcess.Config {
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "XCODE_PID")
@@ -99,10 +102,10 @@ extension RuntimeCoordinator {
         }
         let command: String
         let args: [String]
-        if let documentationTarget {
-            environment["MCP_XCODE_PID"] = String(documentationTarget.processID)
-            environment["DEVELOPER_DIR"] = documentationTarget.developerDir
-            command = documentationTarget.mcpbridgePath
+        if let xcodeTarget {
+            environment["MCP_XCODE_PID"] = String(xcodeTarget.processID)
+            environment["DEVELOPER_DIR"] = xcodeTarget.developerDir
+            command = xcodeTarget.mcpbridgePath
             args = []
         } else {
             command = config.upstreamCommand
@@ -126,17 +129,10 @@ extension RuntimeCoordinator {
         return max(minimum, multiplied.partialValue)
     }
 
-    private static func orderedDocumentationTargets(
-        _ targets: [DocumentationProviderTarget],
-        pinnedProcessID: pid_t?
-    ) -> [DocumentationProviderTarget] {
-        let filtered: [DocumentationProviderTarget]
-        if let pinnedProcessID {
-            filtered = targets.filter { $0.processID == pinnedProcessID }
-        } else {
-            filtered = targets
-        }
-        return filtered.sorted { lhs, rhs in
+    private static func orderedXcodeTargets(
+        _ targets: [XcodeProcessTarget]
+    ) -> [XcodeProcessTarget] {
+        targets.sorted { lhs, rhs in
             let versionComparison = compareDocumentationVersion(
                 lhs.xcodeVersion,
                 rhs.xcodeVersion

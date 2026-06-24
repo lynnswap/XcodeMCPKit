@@ -103,6 +103,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentRequests: [SentRequest] = []
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
+        var preferredUpstreamIndex: Int?
+        var toolRoutingDecision: ToolRoutingDecision?
+        var forceAsyncToolRoutingDecision = false
+        var toolRoutingDelayNanos: UInt64?
         var requeuedLeaseCount = 0
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
@@ -356,6 +360,36 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             return state.availableUpstreamIndex
         }
+    }
+
+    func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
+        _ = requestJSON
+        return state.withLockedValue { $0.preferredUpstreamIndex }
+    }
+
+    func toolRoutingDecision(
+        for requestJSON: Any,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        _ = requestTimeoutOverride
+        let delayNanos = state.withLockedValue { $0.toolRoutingDelayNanos }
+        if let delayNanos {
+            try? await Task.sleep(nanoseconds: delayNanos)
+        }
+        if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
+            return decision
+        }
+        return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
+    }
+
+    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
+        if state.withLockedValue({ $0.forceAsyncToolRoutingDecision }) {
+            return nil
+        }
+        if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
+            return decision
+        }
+        return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
     }
 
     func enqueueOnUpstreamSlot<Output: Sendable>(
@@ -859,6 +893,22 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setAvailableUpstreamIndices(_ values: [Int?]) {
         state.withLockedValue { $0.availableUpstreamIndices = values }
+    }
+
+    func setPreferredUpstreamIndex(_ value: Int?) {
+        state.withLockedValue { $0.preferredUpstreamIndex = value }
+    }
+
+    func setToolRoutingDecision(_ value: ToolRoutingDecision?) {
+        state.withLockedValue { $0.toolRoutingDecision = value }
+    }
+
+    func setForceAsyncToolRoutingDecision(_ value: Bool) {
+        state.withLockedValue { $0.forceAsyncToolRoutingDecision = value }
+    }
+
+    func setToolRoutingDelayNanos(_ value: UInt64?) {
+        state.withLockedValue { $0.toolRoutingDelayNanos = value }
     }
 
     func requestTimeoutNotificationCount() -> Int {

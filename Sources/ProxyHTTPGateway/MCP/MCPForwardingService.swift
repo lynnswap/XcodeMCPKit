@@ -152,6 +152,7 @@ package struct MCPForwardingService: Sendable {
                 responseOriginalIDsByKey: started.transform.responseOriginalIDsByKey,
                 normalizationToolsListResponseIDKey: started.transform.normalizationToolsListResponseIDKey,
                 cacheableToolsListResponseIDKey: started.transform.cacheableToolsListResponseIDKey,
+                upstreamIndex: started.upstreamIndex,
                 upstreamData: data
             )
             let responseData = rewritten.responseData
@@ -226,6 +227,48 @@ package struct MCPForwardingService: Sendable {
         guard let parsedRequestJSONValue = JSONValue(any: requestObject) else {
             return .unavailable
         }
+        if upstreamIndexOverride == nil,
+            name == "XcodeListWindows"
+        {
+            do {
+                let result = try await sessionManager.liveXcodeListWindowsResult(
+                    route: .anyHealthy,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+                guard let resultObject = result.foundationObject as? [String: Any] else {
+                    return .unavailable
+                }
+                if let isError = resultObject["isError"] as? Bool,
+                    isError
+                {
+                    return .unavailable
+                }
+                return .success(resultObject)
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .unavailable
+            }
+        }
+
+        let preferredUpstreamIndices: [Int]?
+        if let upstreamIndexOverride {
+            preferredUpstreamIndices = [upstreamIndexOverride]
+        } else {
+            switch await sessionManager.toolRoutingDecision(
+                for: requestObject,
+                requestTimeoutOverride: requestTimeoutOverride
+            ) {
+            case .forward(let resolvedUpstreamIndex):
+                preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+            case .forwardAny(let resolvedUpstreamIndices):
+                preferredUpstreamIndices = resolvedUpstreamIndices
+            case .localXcodeListWindows:
+                return .unavailable
+            case .reject:
+                return .unavailable
+            }
+        }
 
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
@@ -248,7 +291,7 @@ package struct MCPForwardingService: Sendable {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
-                preferredUpstreamIndex: upstreamIndexOverride
+                preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedUpstreamIndex in
                 internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
                 self.sessionManager.activateRequestLease(

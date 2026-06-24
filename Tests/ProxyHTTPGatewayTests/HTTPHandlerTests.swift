@@ -1070,6 +1070,49 @@ struct HTTPHandlerTests {
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
     }
 
+    @Test func httpForwardingReusesDeadlineAfterAsyncToolRouting() async throws {
+        let config = makeConfig(requestTimeout: 0.02)
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamResponder: { _, originalID in
+                try makeToolSuccessResponse(id: originalID, text: "{\"ok\":true}")
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setForceAsyncToolRoutingDecision(true)
+        sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: nil))
+        sessionManager.setToolRoutingDelayNanos(60_000_000)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, object) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-deadline",
+                payload: toolsCallPayload(
+                    id: 2002,
+                    name: "BuildProject",
+                    arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let error = try #require(object["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32000)
+            #expect(error["message"] as? String == "upstream timeout")
+            #expect(sessionManager.sentUpstreamCount() == 0)
+            let lease = try #require(sessionManager.leaseDebugSnapshots().first)
+            #expect(lease.state == .timedOut)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
     @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let channel = EmbeddedChannel()
@@ -1281,6 +1324,222 @@ struct HTTPHandlerTests {
         #expect((error?["code"] as? NSNumber)?.intValue == -32700)
         #expect((error?["message"] as? String) == "invalid json")
         #expect(sessionManager.chooseUpstreamIndexCallCount() == chooseCountBeforeMalformedRequest)
+    }
+
+    @Test func httpToolRoutingRejectReturnsToolResultErrorWithoutForwarding() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 3301)))
+        sessionManager.setToolRoutingDecision(
+            .reject(
+                errors: [
+                    ToolRoutingError(
+                        id: requestID,
+                        message: "unable to resolve Xcode window owner for tool 'BuildProject'"
+                    ),
+                ],
+                forceBatchArray: false
+            )
+        )
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-reject",
+                payload: toolsCallPayload(
+                    id: 3301,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "missing-tab"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = try #require(body["result"] as? [String: Any])
+            #expect(result["isError"] as? Bool == true)
+            let content = try #require(result["content"] as? [[String: Any]])
+            #expect((content.first?["text"] as? String)?.contains("unable to resolve") == true)
+            #expect(sessionManager.sentMethods().isEmpty)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func httpToolRoutingRejectReturnsErrorsForNonToolBatchItems() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        let toolRequestID = try #require(JSONRPC.ID(any: NSNumber(value: 3301)))
+        let resourceRequestID = try #require(JSONRPC.ID(any: NSNumber(value: 3302)))
+        sessionManager.setToolRoutingDecision(
+            .reject(
+                errors: [
+                    ToolRoutingError(
+                        id: toolRequestID,
+                        message: "unable to resolve Xcode window owner for one or more tools"
+                    ),
+                ],
+                forceBatchArray: true
+            )
+        )
+        let service = HTTPPostService(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let payload: [[String: Any]] = [
+                toolsCallPayload(
+                    id: 3301,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "missing-tab"]
+                ),
+                [
+                    "jsonrpc": "2.0",
+                    "id": 3302,
+                    "method": "resources/list",
+                ],
+            ]
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.makeForwardingOperation(
+                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                    bodyData: bodyData,
+                    localResponseData: nil,
+                    forwardedResponseIDs: [toolRequestID, resourceRequestID],
+                    forceBatchArray: true
+                ),
+                sessionID: "session-routing-reject-batch",
+                headerSessionID: "session-routing-reject-batch",
+                requestIsBatch: true,
+                prefersEventStream: false,
+                eventLoop: group.next(),
+                requestTimeoutOverride: nil,
+                parentCancellationHandle: nil
+            )
+
+            let resolution = try await operation.future.get()
+            let responseData: Data
+            switch resolution {
+            case .responseData(let data, _, _):
+                responseData = data
+            default:
+                Issue.record("expected response data, got \(resolution)")
+                return
+            }
+            let objects = try #require(
+                JSONSerialization.jsonObject(with: responseData, options: []) as? [[String: Any]]
+            )
+            #expect(
+                objects.compactMap { ($0["id"] as? NSNumber)?.intValue }.sorted()
+                    == [3301, 3302]
+            )
+            let toolResponse = try #require(
+                objects.first { ($0["id"] as? NSNumber)?.intValue == 3301 }
+            )
+            let toolResult = try #require(toolResponse["result"] as? [String: Any])
+            #expect(toolResult["isError"] as? Bool == true)
+
+            let resourceResponse = try #require(
+                objects.first { ($0["id"] as? NSNumber)?.intValue == 3302 }
+            )
+            let resourceError = try #require(resourceResponse["error"] as? [String: Any])
+            #expect((resourceError["code"] as? NSNumber)?.intValue == -32000)
+            #expect(
+                (resourceError["message"] as? String)?
+                    .contains("tool routing rejected the batch") == true
+            )
+            #expect(sessionManager.sentMethods().isEmpty)
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        try await group.shutdownGracefully()
+    }
+
+    @Test func httpToolRoutingLocalXcodeListWindowsReturnsAggregatedResult() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { method, toolName, originalID in
+                #expect(method == "tools/call")
+                #expect(toolName == "XcodeListWindows")
+                return .immediate(
+                    try makeToolSuccessResponse(
+                        id: originalID,
+                        text: "* tabIdentifier: tab-http, workspacePath: /Work/HTTP.xcworkspace"
+                    )
+                )
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([1])
+        sessionManager.setToolRoutingDecision(.localXcodeListWindows)
+        let service = HTTPPostService(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 3303)))
+            let payload = toolsCallPayload(
+                id: 3303,
+                name: "XcodeListWindows",
+                arguments: [:]
+            )
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.makeForwardingOperation(
+                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                    bodyData: bodyData,
+                    localResponseData: nil,
+                    forwardedResponseIDs: [requestID],
+                    forceBatchArray: false
+                ),
+                sessionID: "session-routing-local-windows",
+                headerSessionID: "session-routing-local-windows",
+                requestIsBatch: false,
+                prefersEventStream: false,
+                eventLoop: group.next(),
+                requestTimeoutOverride: nil,
+                parentCancellationHandle: nil
+            )
+
+            let resolution = try await operation.future.get()
+            let responseData: Data
+            switch resolution {
+            case .responseData(let data, _, _):
+                responseData = data
+            default:
+                Issue.record("expected response data, got \(resolution)")
+                return
+            }
+            let object = try #require(
+                JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any]
+            )
+            #expect((object["id"] as? NSNumber)?.intValue == 3303)
+            let result = try #require(object["result"] as? [String: Any])
+            let content = try #require(result["content"] as? [[String: Any]])
+            #expect((content.first?["text"] as? String)?.contains("tab-http") == true)
+            #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
+            #expect(sessionManager.assignedUpstreamIDCount() == 0)
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        try await group.shutdownGracefully()
     }
 
     @Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {

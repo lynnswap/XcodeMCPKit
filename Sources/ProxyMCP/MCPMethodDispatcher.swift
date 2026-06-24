@@ -9,6 +9,7 @@ extension MCP {
             "resources/templates/list",
         ]
         private static let initializeFallbackTimeoutSeconds: TimeInterval = 60
+        private static let controlPlaneFallbackTimeoutSeconds: TimeInterval = 10
 
         package static func timeoutForInitialize(defaultSeconds: TimeInterval) -> TimeAmount? {
             let effectiveDefault = defaultSeconds > 0 ? defaultSeconds : initializeFallbackTimeoutSeconds
@@ -34,10 +35,13 @@ extension MCP {
         package static func timeoutForControlPlane(
             defaultSeconds: TimeInterval
         ) -> TimeAmount? {
-            if defaultSeconds > 0 {
-                return makeRequestTimeout(defaultSeconds)
-            }
-            return .seconds(60)
+            let effectiveDefault = defaultSeconds > 0
+                ? defaultSeconds
+                : controlPlaneFallbackTimeoutSeconds
+            return timeout(
+                defaultSeconds: effectiveDefault,
+                capSeconds: controlPlaneFallbackTimeoutSeconds
+            )
         }
 
         private static func timeout(
