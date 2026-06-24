@@ -2542,24 +2542,37 @@ extension HTTPHandlerTests {
     @Test func httpRefreshCodeIssuesCompletesLeaseWhenRetryBudgetExpires() async throws {
         var config = makeConfig(requestTimeout: 0.5)
         config.refreshCodeIssuesMode = .upstream
+        let workflowUptimeClock = TestUptimeClock()
+        let workflowClock = ClockClient(
+            now: {
+                Date(
+                    timeIntervalSince1970:
+                        Double(workflowUptimeClock.now()) / 1_000_000_000
+                )
+            },
+            uptimeNanoseconds: workflowUptimeClock.now,
+            sleep: { _ in },
+            sleepForTimeInterval: { _ in }
+        )
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamPlanResponder: { method, originalID in
                 #expect(method == "tools/call")
-                return .delayed(
+                workflowUptimeClock.advance(by: .milliseconds(350))
+                return .immediate(
                     try makeToolErrorResponse(
                         id: originalID,
                         text:
                             "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)"
-                    ),
-                    delayNanos: 350_000_000
+                    )
                 )
             }
         )
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesClock: workflowClock
         )
 
         do {

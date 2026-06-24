@@ -43,6 +43,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
         refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil,
+        refreshCodeIssuesClock: ClockClient = .liveValue,
         usesSynchronousLocalResolution: Bool = false
     ) {
         let refreshCoordinator =
@@ -65,6 +66,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             refreshCodeIssuesCoordinator: refreshCoordinator,
             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
             refreshCodeIssuesDebugState: refreshDebugState,
+            refreshCodeIssuesClock: refreshCodeIssuesClock,
             usesSynchronousLocalResolution: usesSynchronousLocalResolution,
             logger: ProxyLogging.make("http")
         )

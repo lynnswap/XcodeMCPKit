@@ -48,6 +48,7 @@ package final class HTTPPostService: Sendable {
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,
+        refreshCodeIssuesClock: ClockClient = .liveValue,
         usesSynchronousLocalResolution: Bool = false,
         logger: Logger = ProxyLogging.make("http")
     ) {
@@ -72,6 +73,7 @@ package final class HTTPPostService: Sendable {
             coordinator: refreshCodeIssuesCoordinator,
             targetResolver: refreshCodeIssuesTargetResolver,
             debugState: refreshCodeIssuesDebugState,
+            clock: refreshCodeIssuesClock,
             logger: ProxyLogging.make("http.refresh")
         )
         self.logger = logger

@@ -1103,7 +1103,8 @@ struct TestHTTPHandlerServer {
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver()
+        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
+        refreshCodeIssuesClock: ClockClient = .liveValue
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
@@ -1124,7 +1125,8 @@ struct TestHTTPHandlerServer {
                             sessionManager: sessionManager,
                             refreshCodeIssuesCoordinator: refreshCoordinator,
                             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-                            refreshCodeIssuesDebugState: refreshDebugState
+                            refreshCodeIssuesDebugState: refreshDebugState,
+                            refreshCodeIssuesClock: refreshCodeIssuesClock
                         )
                     )
                 }
