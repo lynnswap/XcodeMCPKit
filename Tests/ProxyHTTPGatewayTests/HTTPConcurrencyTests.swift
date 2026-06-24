@@ -496,6 +496,12 @@ struct HTTPConcurrencyTests {
             }
 
             try await upstream.waitForRefreshStartCount(1)
+            try await waitWithTimeout(
+                "waiting for concurrent refresh requests to enter the debug queue",
+                timeout: .seconds(2)
+            ) {
+                try await server.refreshDebugState.waitForActiveRequestCount(3)
+            }
             #expect(server.refreshDebugState.snapshot().queue.activeRequestCount == 3)
             #expect(await upstream.didEmitConcurrentRefreshError() == false)
             await upstream.releaseRefreshResponses()
