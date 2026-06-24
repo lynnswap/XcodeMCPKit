@@ -1288,20 +1288,18 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         ]
         let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let payloadText = String(decoding: payloadData, as: UTF8.self)
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": requestID.value.foundationObject,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": payloadText,
-                    ],
-                ],
-                "isError": false,
-            ],
-        ]
-        return try JSONSerialization.data(withJSONObject: response, options: [])
+        return try JSONRPC.Wire.resultResponseData(
+            id: requestID,
+            result: .object([
+                "content": .array([
+                    .object([
+                        "type": .string("text"),
+                        "text": .string(payloadText),
+                    ])
+                ]),
+                "isError": .bool(false),
+            ])
+        )
     }
 }
 
@@ -1375,10 +1373,9 @@ package actor DocumentationProviderConnection {
     }
 
     package func sendNotification(_ object: [String: Any]) async throws {
-        guard JSONSerialization.isValidJSONObject(object) else {
+        guard let data = try? JSONRPC.Wire.data(from: object) else {
             throw ControlPlane.Error.invalidResponse("invalid notification")
         }
-        let data = try JSONSerialization.data(withJSONObject: object, options: [])
         let result = await session.send(data)
         guard result == .accepted else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
@@ -1397,11 +1394,13 @@ package actor DocumentationProviderConnection {
         let upstreamID = nextID
         let upstreamIDKey = String(upstreamID)
         nextID += 1
-        object["id"] = upstreamID
-        guard JSONSerialization.isValidJSONObject(object) else {
+        object = JSONRPC.Wire.objectByReplacingID(
+            in: object,
+            with: JSONRPC.ID(any: NSNumber(value: upstreamID))!
+        )
+        guard let upstreamData = try? JSONRPC.Wire.data(from: object) else {
             throw ControlPlane.Error.invalidResponse("invalid DocumentationSearch request")
         }
-        let upstreamData = try JSONSerialization.data(withJSONObject: object, options: [])
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -1465,7 +1464,7 @@ package actor DocumentationProviderConnection {
 
     private func handleMessage(_ data: Data) {
         guard
-            var object = try? JSONSerialization.jsonObject(with: data, options: [])
+            let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],
             let responseID = JSONRPC.Message.Inspector.responseID(from: object),
             let pending = pendingResponses.removeValue(forKey: responseID.key)
@@ -1474,10 +1473,10 @@ package actor DocumentationProviderConnection {
         }
 
         pending.timeoutTask?.cancel()
-        object["id"] = pending.originalID.value.foundationObject
-        guard JSONSerialization.isValidJSONObject(object),
-            let rewrittenData = try? JSONSerialization.data(withJSONObject: object, options: [])
-        else {
+        guard let rewrittenData = try? JSONRPC.Wire.dataByReplacingID(
+            in: object,
+            with: pending.originalID
+        ) else {
             pending.continuation.resume(
                 throwing: ControlPlane.Error.invalidResponse("invalid DocumentationSearch response")
             )
@@ -1535,10 +1534,9 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
             let serverVersion = DocumentationProviderManager.serverVersion(
                 fromInitializeResponse: initialize
             ) ?? ""
-            try await connection.sendNotification([
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-            ])
+            try await connection.sendNotification(
+                JSONRPC.Wire.notificationObject(method: "notifications/initialized")
+            )
             connections[routeID] = connection
             return DocumentationProviderRoute(
                 id: routeID,
@@ -1622,25 +1620,21 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
     private static func makeInitializeRequestData(
         initializeParams: [String: JSONValue]
     ) throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: [
-                "jsonrpc": "2.0",
-                "id": "initialize",
-                "method": "initialize",
-                "params": initializeParams.mapValues(\.foundationObject),
-            ],
-            options: []
+        try JSONRPC.Wire.data(
+            from: JSONRPC.Wire.requestObject(
+                id: "initialize",
+                method: "initialize",
+                params: .object(initializeParams)
+            )
         )
     }
 
     private static func makeToolsListRequestData() throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: [
-                "jsonrpc": "2.0",
-                "id": "tools-list",
-                "method": "tools/list",
-            ],
-            options: []
+        try JSONRPC.Wire.data(
+            from: JSONRPC.Wire.requestObject(
+                id: "tools-list",
+                method: "tools/list"
+            )
         )
     }
 }

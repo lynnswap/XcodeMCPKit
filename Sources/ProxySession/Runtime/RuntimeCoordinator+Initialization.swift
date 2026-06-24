@@ -73,7 +73,7 @@ extension RuntimeCoordinator {
         markUpstreamInitInFlight(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
         let request = makeInternalInitializeRequest(id: upstreamID)
-        if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
+        if let data = try? JSONRPC.Wire.data(from: request) {
             sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: true)
         } else {
             failInitPending(error: TimeoutError())
@@ -369,14 +369,7 @@ extension RuntimeCoordinator {
     }
 
     func encodeInitializeResponse(originalID: JSONRPC.ID, result: JSONValue) -> ByteBuffer? {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": originalID.value.foundationObject,
-            "result": result.foundationObject,
-        ]
-        guard JSONSerialization.isValidJSONObject(response),
-            let data = try? JSONSerialization.data(withJSONObject: response, options: [])
-        else {
+        guard let data = try? JSONRPC.Wire.resultResponseData(id: originalID, result: result) else {
             return nil
         }
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
@@ -445,13 +438,15 @@ extension RuntimeCoordinator {
     func encodeInitializeErrorResponse(originalID: JSONRPC.ID, errorObject: [String: Any])
         -> ByteBuffer?
     {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": originalID.value.foundationObject,
-            "error": errorObject,
-        ]
-        guard JSONSerialization.isValidJSONObject(response),
-            let data = try? JSONSerialization.data(withJSONObject: response, options: [])
+        guard let error = JSONRPC.Wire.errorPayload(
+            inResponseObject: ["error": errorObject]
+        ),
+            let data = try? JSONRPC.Wire.errorResponseData(
+                id: originalID,
+                code: error.code,
+                message: error.message,
+                data: error.data
+            )
         else {
             return nil
         }
@@ -512,11 +507,8 @@ extension RuntimeCoordinator {
             return
         }
 
-        let notification: [String: Any] = [
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: notification, options: []) else {
+        let notification = JSONRPC.Wire.notificationObject(method: "notifications/initialized")
+        guard let data = try? JSONRPC.Wire.data(from: notification) else {
             guard upstreamHealthManager.initializeAttemptMatches(
                 upstreamIndex: upstreamIndex,
                 expectedUpstreamID: expectedUpstreamID
@@ -747,15 +739,14 @@ extension RuntimeCoordinator {
         }
     }
     func makeInternalInitializeRequest(id: Int64) -> [String: Any] {
-        let mergedParams = InitializeHandshakeJSON.resolved(
-            initializeParamsOverride: initializeParamsOverride
-        ).mapValues(\.foundationObject)
-
-        return [
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "initialize",
-            "params": mergedParams,
-        ]
+        JSONRPC.Wire.requestObject(
+            id: id,
+            method: "initialize",
+            params: .object(
+                InitializeHandshakeJSON.resolved(
+                    initializeParamsOverride: initializeParamsOverride
+                )
+            )
+        )
     }
 }

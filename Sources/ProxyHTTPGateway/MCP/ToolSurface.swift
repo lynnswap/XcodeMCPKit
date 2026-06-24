@@ -210,11 +210,10 @@ package struct ToolSurface: Sendable {
         let result: [String: Any] = method == "resources/list"
             ? ["resources": [Any]()]
             : ["resourceTemplates": [Any]()]
-        return [
-            "jsonrpc": "2.0",
-            "id": originalID.value.foundationObject,
-            "result": result,
-        ]
+        return JSONRPC.Wire.resultResponseObject(
+            id: originalID,
+            result: JSONValue(any: result) ?? .object([:])
+        )
     }
 
     private func isNonStandardUnsupportedResourcesResult(_ result: Any, method: String) -> Bool {

@@ -285,11 +285,10 @@ extension RuntimeCoordinator {
                 route: route,
                 purpose: purpose,
                 label: "tools/list",
-                requestObject: [
-                    "jsonrpc": "2.0",
-                    "id": "__control-plane-tools-\(UUID().uuidString)",
-                    "method": "tools/list",
-                ],
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "__control-plane-tools-\(UUID().uuidString)",
+                    method: "tools/list"
+                ),
                 requestTimeout: requestTimeout,
                 rpcHandle: rpcHandle
             )
@@ -362,15 +361,14 @@ extension RuntimeCoordinator {
                 route: route,
                 purpose: "windows",
                 label: "tools/call:XcodeListWindows",
-                requestObject: [
-                    "jsonrpc": "2.0",
-                    "id": "__control-plane-windows-\(UUID().uuidString)",
-                    "method": "tools/call",
-                    "params": [
-                        "name": "XcodeListWindows",
-                        "arguments": [:],
-                    ],
-                ],
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "__control-plane-windows-\(UUID().uuidString)",
+                    method: "tools/call",
+                    params: .object([
+                        "name": .string("XcodeListWindows"),
+                        "arguments": .object([:]),
+                    ])
+                ),
                 requestTimeout: effectiveRequestTimeout,
                 rpcHandle: rpcHandle
             )
@@ -525,11 +523,7 @@ extension RuntimeCoordinator {
                 }
                 var upstreamObject = requestTemplate.mapValues(\.foundationObject)
                 upstreamObject["id"] = upstreamID
-                guard JSONSerialization.isValidJSONObject(upstreamObject),
-                    let requestData = try? JSONSerialization.data(
-                        withJSONObject: upstreamObject,
-                        options: []
-                    )
+                guard let requestData = try? JSONRPC.Wire.data(from: upstreamObject)
                 else {
                     self.failRequestLease(
                         leaseID,
@@ -668,50 +662,47 @@ extension RuntimeCoordinator {
 
     func extractJSONRPCResult(from responseData: Data) throws -> JSONValue {
         let object = try extractJSONRPCResponseObject(from: responseData)
-        if let errorObject = object["error"] as? [String: Any] {
+        if let error = JSONRPC.Wire.errorPayload(inResponseObject: object) {
             throw ControlPlane.Error.upstreamRPC(
-                code: (errorObject["code"] as? NSNumber)?.intValue ?? -32000,
-                message: errorObject["message"] as? String ?? "upstream error"
+                code: error.code,
+                message: error.message
             )
         }
-        guard let resultAny = object["result"],
-            let result = JSONValue(any: resultAny)
-        else {
+        guard let result = JSONRPC.Wire.resultValue(inResponseObject: object) else {
             throw ControlPlane.Error.invalidResponse("missing result")
         }
         return result
     }
 
     func extractJSONRPCResponseObject(from responseData: Data) throws -> [String: Any] {
-        guard
-            let responseObject = try JSONSerialization.jsonObject(
-                with: responseData,
-                options: []
-            ) as? [String: Any]
-        else {
+        do {
+            return try JSONRPC.Wire.object(fromData: responseData)
+        } catch JSONRPC.Wire.DecodingFailure.messageWasNotObject {
             throw ControlPlane.Error.invalidResponse("response was not an object")
+        } catch {
+            throw error
         }
-        return responseObject
     }
 
     func responseDataByReplacingJSONRPCID(
         in responseObject: [String: Any],
         with responseID: JSONRPC.ID
     ) throws -> Data {
-        var rewritten = responseObject
-        rewritten["id"] = responseID.value.foundationObject
-        guard JSONSerialization.isValidJSONObject(rewritten) else {
+        do {
+            return try JSONRPC.Wire.dataByReplacingID(in: responseObject, with: responseID)
+        } catch JSONRPC.Wire.EncodingFailure.invalidJSONObject {
             throw ControlPlane.Error.invalidResponse("invalid rewritten response")
+        } catch {
+            throw error
         }
-        return try JSONSerialization.data(withJSONObject: rewritten, options: [])
     }
 
     func extractJSONRPCErrorMessage(from responseObject: [String: Any]) -> String? {
-        (responseObject["error"] as? [String: Any])?["message"] as? String
+        JSONRPC.Wire.errorPayload(inResponseObject: responseObject)?.message
     }
 
     func extractJSONRPCErrorCode(from responseObject: [String: Any]) -> Int? {
-        ((responseObject["error"] as? [String: Any])?["code"] as? NSNumber)?.intValue
+        JSONRPC.Wire.errorPayload(inResponseObject: responseObject)?.code
     }
 
     func responseIsProxyUpstreamFailure(_ responseObject: [String: Any]) -> Bool {

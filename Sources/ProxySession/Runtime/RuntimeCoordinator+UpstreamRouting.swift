@@ -40,16 +40,11 @@ extension RuntimeCoordinator {
             else {
                 return data
             }
-            var rewritten = object
             let clientID = session.serverRequestTracker.record(
                 upstreamID: upstreamID,
                 upstreamIndex: upstreamIndex
             )
-            rewritten["id"] = clientID.value.foundationObject
-            guard JSONSerialization.isValidJSONObject(rewritten) else {
-                return nil
-            }
-            return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+            return try? JSONRPC.Wire.dataByReplacingID(in: object, with: clientID)
         }
     }
 
@@ -209,18 +204,13 @@ extension RuntimeCoordinator {
         originalID: JSONRPC.ID
     ) -> [String: Any] {
         if case .malformed = JSONRPC.Message.Inspector.kind(of: object) {
-            return [
-                "jsonrpc": "2.0",
-                "id": originalID.value.foundationObject,
-                "error": [
-                    "code": -32000,
-                    "message": "invalid upstream response",
-                ],
-            ]
+            return JSONRPC.Wire.errorResponseObject(
+                id: originalID,
+                code: -32000,
+                message: "invalid upstream response"
+            )
         }
-        var rewritten = object
-        rewritten["id"] = originalID.value.foundationObject
-        return rewritten
+        return JSONRPC.Wire.objectByReplacingID(in: object, with: originalID)
     }
 
     private func routeClientResponses(
@@ -249,9 +239,7 @@ extension RuntimeCoordinator {
             return false
         }
         let payload: Any = objects.count == 1 ? objects[0] : objects
-        guard JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload, options: [])
-        else {
+        guard let data = try? JSONRPC.Wire.data(from: payload) else {
             return false
         }
         recordTraffic(
@@ -540,12 +528,7 @@ extension RuntimeCoordinator {
         _ responseObject: [String: Any],
         id: JSONRPC.ID
     ) -> Data? {
-        var rewritten = responseObject
-        rewritten["id"] = id.value.foundationObject
-        guard JSONSerialization.isValidJSONObject(rewritten) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+        try? JSONRPC.Wire.dataByReplacingID(in: responseObject, with: id)
     }
 
     package func debugSnapshot() -> ProxyDebug.Snapshot {
@@ -719,19 +702,12 @@ extension RuntimeCoordinator {
             return
         }
 
-        let overloadError: [String: Any] = [
-            "code": code,
-            "message": message,
-        ]
+        let overloadError = JSONRPC.Wire.ErrorPayload(code: code, message: message)
 
         let responseAny: Any? = {
             if let object = any as? [String: Any] {
                 guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return nil }
-                return [
-                    "jsonrpc": "2.0",
-                    "id": id.value.foundationObject,
-                    "error": overloadError,
-                ]
+                return JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
             }
             if let array = any as? [Any] {
                 let objects = array.compactMap { item -> [String: Any]? in
@@ -740,11 +716,7 @@ extension RuntimeCoordinator {
                     else {
                         return nil
                     }
-                    return [
-                        "jsonrpc": "2.0",
-                        "id": id.value.foundationObject,
-                        "error": overloadError,
-                    ]
+                    return JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
                 }
                 if objects.isEmpty {
                     return nil
@@ -755,8 +727,7 @@ extension RuntimeCoordinator {
         }()
 
         guard let responseAny,
-            JSONSerialization.isValidJSONObject(responseAny),
-            let data = try? JSONSerialization.data(withJSONObject: responseAny, options: [])
+            let data = try? JSONRPC.Wire.data(from: responseAny)
         else {
             return
         }
@@ -842,9 +813,7 @@ extension RuntimeCoordinator {
     }
 
     private func serverInitiatedPayload(from object: [String: Any]) -> ServerInitiatedPayload? {
-        guard JSONSerialization.isValidJSONObject(object),
-            let encoded = try? JSONSerialization.data(withJSONObject: object, options: [])
-        else {
+        guard let encoded = try? JSONRPC.Wire.data(from: object) else {
             return nil
         }
         let kind = JSONRPC.Message.Inspector.kind(of: object)
@@ -894,9 +863,7 @@ extension RuntimeCoordinator {
             return
         }
         let payload: Any = items.count == 1 ? items[0] : items
-        guard JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload, options: [])
-        else {
+        guard let data = try? JSONRPC.Wire.data(from: payload) else {
             return
         }
         routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)

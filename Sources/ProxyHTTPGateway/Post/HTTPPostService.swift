@@ -728,9 +728,7 @@ package final class HTTPPostService: Sendable {
         responseID: JSONRPC.ID,
         eventLoop: EventLoop
     ) -> HTTPPostService.Operation {
-        guard JSONSerialization.isValidJSONObject(responseObject),
-            let responseData = try? JSONSerialization.data(withJSONObject: responseObject, options: [])
-        else {
+        guard let responseData = try? JSONRPC.Wire.data(from: responseObject) else {
             return HTTPPostService.Operation(
                 future: eventLoop.makeSucceededFuture(
                     .plain(

@@ -36,8 +36,7 @@ package struct ToolCallNormalizer: Sendable {
                 toolsCatalogOverride: toolsCatalogOverride
                     ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
             ),
-                JSONSerialization.isValidJSONObject(rewritten),
-                let rewrittenData = try? JSONSerialization.data(withJSONObject: rewritten, options: [])
+                let rewrittenData = try? JSONRPC.Wire.data(from: rewritten)
             else {
                 return upstreamData
             }
@@ -68,8 +67,7 @@ package struct ToolCallNormalizer: Sendable {
         }
 
         guard rewroteAny,
-            JSONSerialization.isValidJSONObject(rewrittenArray),
-            let rewrittenData = try? JSONSerialization.data(withJSONObject: rewrittenArray, options: [])
+            let rewrittenData = try? JSONRPC.Wire.data(from: rewrittenArray)
         else {
             return upstreamData
         }
