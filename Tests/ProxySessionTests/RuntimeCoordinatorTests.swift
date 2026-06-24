@@ -248,6 +248,71 @@ struct RuntimeCoordinatorTests {
         ])
     }
 
+    @Test func sessionManagerRoutesInitializeHandshakeNotificationsFromRetriedPrimaryProcess()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
+        let newerTarget = xcodeProcessTarget(processID: 27104, xcodeVersion: "27.0")
+        let olderTarget = xcodeProcessTarget(processID: 26604, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-retried-primary-handshake"
+        let session = manager.session(id: sessionID)
+        _ = session.router.drainBufferedNotifications()
+
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let failedInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let failedUpstreamID = try extractUpstreamID(from: failedInitialize)
+        await upstream0.yield(.message(try makeInitializeErrorResponse(id: failedUpstreamID)))
+
+        let retriedInitialize = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
+        let notification = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "method": "notifications/test",
+                "params": ["value": 27104],
+            ],
+            options: []
+        )
+        let notificationEventIndex = upstreamEvents.count()
+        await upstream1.yield(.message(notification))
+
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: notificationEventIndex,
+            description: "waiting for retried-primary initialize notification"
+        )
+        let received = session.router.drainBufferedNotifications()
+        #expect(received == [notification])
+
+        await upstream1.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+        _ = try await future.get()
+    }
+
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnSiblingBeforeDroppingProcessAfterError()
         async throws
     {

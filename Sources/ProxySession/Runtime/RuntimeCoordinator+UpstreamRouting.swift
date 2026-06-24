@@ -335,11 +335,14 @@ extension RuntimeCoordinator {
             )
         }
 
-        if upstreamIndex == 0 {
+        let primaryUpstreamIndex = globalInit.primaryInitUpstreamIndex
+            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? 0
+        if upstreamIndex == primaryUpstreamIndex {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
                 startEagerInitializePrimary(applyBackoff: true)
             } else {
-                startUpstreamWarmInitialize(upstreamIndex: 0, applyBackoff: true)
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             }
         } else if globalInit.hadGlobalInit {
             if shouldResetGlobalInit {
@@ -914,7 +917,7 @@ extension RuntimeCoordinator {
         var routedSessionIDs = Set<String>()
         var pendingInitializeTargets: [SessionContext] = []
 
-        if upstreamIndex == 0 {
+        if isCurrentPrimaryInitializeUpstream(upstreamIndex) {
             for pending in initializeManager.pendingInitializes() {
                 guard sessionStillMatchesPendingInitialize(
                     sessionID: pending.sessionID,
@@ -1107,7 +1110,10 @@ extension RuntimeCoordinator {
             failInitPending(error: TimeoutError())
         }
 
-        if upstreamIndex == 0 {
+        let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex
+            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? 0
+        if upstreamIndex == primaryUpstreamIndex {
             if initSnapshot.hasInitResult {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             } else {

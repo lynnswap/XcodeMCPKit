@@ -227,7 +227,7 @@ extension RuntimeCoordinator {
         guard shouldClear else { return }
         upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
-        if upstreamIndex == 0 {
+        if isCurrentPrimaryInitializeUpstream(upstreamIndex) {
             let shouldRetryEagerInit = initializeManager.consumeWarmInitRecoveryIntent(
                 policy: .onlyWithoutCachedInitialize
             )
