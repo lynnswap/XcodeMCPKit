@@ -968,7 +968,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) -> EventLoopFuture<ByteBuffer> {
         _ = session(id: sessionID)
         let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
-        let primaryUpstreamIndex = primaryInitializeUpstreamIndex()
+        let primaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
+            ?? primaryInitializeUpstreamIndex()
         guard primaryUpstreamIndex != nil || initializeManager.isInitialized() else {
             return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }

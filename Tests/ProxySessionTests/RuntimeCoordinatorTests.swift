@@ -165,6 +165,37 @@ struct RuntimeCoordinatorTests {
         #expect(id2 == 2)
     }
 
+    @Test func sessionManagerJoinsEagerProcessInitializeInFlight() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 27001, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ]
+        )
+        defer { manager.shutdownAndWait() }
+
+        let eagerInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let eagerUpstreamID = try extractUpstreamID(from: eagerInitialize)
+        let future = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        #expect(await upstream.sentCount() == 1)
+
+        await upstream.yield(.message(try makeInitializeResponse(id: eagerUpstreamID)))
+
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil)
+    }
+
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterError()
         async throws
     {
