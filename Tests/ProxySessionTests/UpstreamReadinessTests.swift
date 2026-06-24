@@ -11,6 +11,22 @@ import XcodeMCPTestSupport
 @testable import ProxySession
 
 extension RuntimeCoordinatorTests {
+    @discardableResult
+    private func waitForReadinessPollSleep(
+        _ sleepRecorder: ControlledReadinessSleep,
+        at index: Int,
+        timeout: Duration = .seconds(2)
+    ) async throws -> UInt64 {
+        let sleep = try await waitWithTimeout(
+            "waiting for readiness poll sleep",
+            timeout: timeout
+        ) {
+            try await sleepRecorder.nextSleep(at: index)
+        }
+        #expect(sleep == 1_000_000)
+        return sleep
+    }
+
     @Test func xcodeReadinessRequiresRunningXcodeProcess() {
         #expect(XcodeReadinessProbe.isReady(xcodeProcessIDs: [1234]))
         #expect(XcodeReadinessProbe.isReady(xcodeProcessIDs: []) == false)
@@ -57,21 +73,27 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            )
         )
         defer { manager.shutdownAndWait() }
 
         _ = try await readiness.nextCheck(at: 0)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         #expect(await upstream.startCount() == 0)
         #expect(await upstream.sentCount() == 0)
 
         await readiness.setReady(true)
-        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        await sleepRecorder.resumeNext()
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: sent) == "initialize")
         #expect(await upstream.startCount() > 0)
@@ -84,16 +106,24 @@ extension RuntimeCoordinatorTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            )
         )
         defer { manager.shutdownAndWait() }
 
+        _ = try await readiness.nextCheck(at: 0)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         let sent = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         #expect(methodName(from: sent) == "initialize")
         #expect(await upstream0.startCount() > 0)
@@ -126,6 +156,7 @@ extension RuntimeCoordinatorTests {
         _ = try await waitWithTimeout("waiting for Xcode launch attempt", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 0)
         }
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         #expect(await upstream.startCount() == 0)
         #expect(await upstream.sentCount() == 0)
 
@@ -161,16 +192,12 @@ extension RuntimeCoordinatorTests {
         _ = try await waitWithTimeout("waiting for first Xcode launch attempt", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 0)
         }
-        _ = try await waitWithTimeout(
-            "waiting for readiness poll after failed launch",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 0)
-        }
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         await sleepRecorder.resumeNext()
         _ = try await waitWithTimeout("waiting for retried Xcode launch attempt", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 1)
         }
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 1)
         #expect(await upstream.startCount() == 0)
 
         await readiness.setReady(true)
@@ -206,6 +233,7 @@ extension RuntimeCoordinatorTests {
         _ = try await waitWithTimeout("waiting for first Xcode launch attempt", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 0)
         }
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         await sleepRecorder.resumeNext()
         _ = try await waitWithTimeout("waiting for retried Xcode launch attempt", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 1)
@@ -214,6 +242,7 @@ extension RuntimeCoordinatorTests {
 
         await availability.setAvailable(true)
         await readiness.setReady(true)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 1)
         await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         #expect(await upstream.startCount() > 0)
@@ -247,17 +276,13 @@ extension RuntimeCoordinatorTests {
         #expect(await launchRecorder.launchCount() == 0)
         #expect(await upstream.startCount() == 0)
 
-        _ = try await waitWithTimeout(
-            "waiting for readiness poll sleep",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 0)
-        }
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         await availability.setAvailable(false)
         await sleepRecorder.resumeNext()
         _ = try await waitWithTimeout("waiting for Xcode launch after quit", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 0)
         }
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 1)
         #expect(await upstream.startCount() == 0)
 
         await availability.setAvailable(true)
@@ -273,12 +298,17 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -288,9 +318,11 @@ extension RuntimeCoordinatorTests {
             on: eventLoop
         )
         _ = try await readiness.nextCheck(at: 0)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         #expect(await upstream.sentCount() == 0)
 
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: sent) == "initialize")
         let upstreamID = try extractUpstreamID(from: sent)
@@ -315,16 +347,22 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            )
         )
         defer { manager.shutdownAndWait() }
 
         _ = try await readiness.nextCheck(at: 0)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         #expect(await upstream.sentCount() == 0)
 
         manager.debugReset()
@@ -346,16 +384,24 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
         let clock = TestClock()
         let config = makeConfig(requestTimeout: 0.05)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            ),
             scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: clock)
         )
         defer { manager.shutdownAndWait() }
+
+        _ = try await readiness.nextCheck(at: 0)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
 
         let future = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
@@ -382,6 +428,7 @@ extension RuntimeCoordinatorTests {
         #expect(await upstream.sentCount() == 0)
 
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         #expect(await upstream.sentCount() == 1)
         #expect(await upstream.startCount() == 2)
@@ -395,12 +442,17 @@ extension RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: true)
+        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness)
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -412,9 +464,11 @@ extension RuntimeCoordinatorTests {
         await readiness.setReady(false)
         await upstream.yield(.exit(1))
         _ = try await readiness.nextCheck(at: 1)
+        _ = try await waitForReadinessPollSleep(sleepRecorder, at: 0)
         #expect(await upstream.sentCount() == 2)
 
         await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
     }
 

@@ -146,7 +146,7 @@ xcode-mcp-proxy --help
 |------|------|
 | `LISTEN` | listen address。例:`127.0.0.1:8765`。 |
 | `HOST` / `PORT` | `LISTEN`未指定時のlisten host / port。 |
-| `MCP_XCODE_PID` | upstream `mcpbridge`へそのまま渡します。proxy自身は解釈しません。 |
+| `MCP_XCODE_PID` | process-bound upstream `mcpbridge` child ではproxyが設定します。process-bound Xcode routingが有効でない場合だけ、継承された値をそのまま渡します。 |
 | `MCP_XCODE_SESSION_ID` | 明示的に指定するupstream Xcode MCP session ID。 |
 | `MCP_XCODE_CONFIG` | TOML config path。`--config`が優先されます。 |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy`または`upstream`。 |

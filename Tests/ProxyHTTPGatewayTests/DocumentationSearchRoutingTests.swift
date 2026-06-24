@@ -728,7 +728,6 @@ extension HTTPHandlerTests {
                 documentationRequests.withLockedValue { requests in
                     requests.append(query)
                 }
-                try await Task.sleep(for: .milliseconds(200))
                 let originalIDValue = try #require(object["id"])
                 let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(

@@ -40,6 +40,7 @@ package final class HTTPPostService: Sendable {
     package let forwardingService: MCPForwardingService
     package let refreshWorkflow: RefreshCodeIssues.Workflow
     package let requestTimeoutSeconds: TimeInterval
+    package let deadlineClock: ClockClient
     package let logger: Logger
 
     package init(
@@ -48,10 +49,13 @@ package final class HTTPPostService: Sendable {
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,
+        refreshCodeIssuesClock: ClockClient = .liveValue,
+        deadlineClock: ClockClient = .liveValue,
         usesSynchronousLocalResolution: Bool = false,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.requestTimeoutSeconds = config.requestTimeout
+        self.deadlineClock = deadlineClock
         self.sessionManager = sessionManager
         self.disabledToolNames = config.disabledToolNames
         self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
@@ -72,6 +76,7 @@ package final class HTTPPostService: Sendable {
             coordinator: refreshCodeIssuesCoordinator,
             targetResolver: refreshCodeIssuesTargetResolver,
             debugState: refreshCodeIssuesDebugState,
+            clock: refreshCodeIssuesClock,
             logger: ProxyLogging.make("http.refresh")
         )
         self.logger = logger
@@ -350,7 +355,7 @@ package final class HTTPPostService: Sendable {
         deadline: Date?,
         cancellationHandle: HTTPPostService.CancellationHandle
     ) -> EventLoopFuture<HTTPPostService.Resolution> {
-        let forwardingTimeout = Self.remainingRequestTimeout(until: deadline)
+        let forwardingTimeout = remainingRequestTimeout(until: deadline)
         if deadline != nil,
             forwardingTimeout == nil,
             request.bodyData != nil
@@ -423,7 +428,7 @@ package final class HTTPPostService: Sendable {
             )
         }
 
-        let forwardingDeadline = Self.timeoutDeadline(
+        let forwardingDeadline = timeoutDeadline(
             for: requestTimeoutOverride
                 ?? Self.topLevelRequestTimeoutOverride(
                     method: nil,
@@ -486,7 +491,7 @@ package final class HTTPPostService: Sendable {
             )
         }
         @Sendable func remainingForwardingTimeout() -> TimeAmount? {
-            Self.remainingRequestTimeout(until: forwardingDeadline)
+            remainingRequestTimeout(until: forwardingDeadline)
         }
         @Sendable func makeForwardingTimeoutFuture() -> EventLoopFuture<HTTPPostService.Resolution> {
             cancellationHandle.markCompleted()
@@ -700,7 +705,7 @@ package final class HTTPPostService: Sendable {
 
         let routingPromise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
         let routingTask = Task { [self] in
-            let routingTimeout = Self.remainingRequestTimeout(until: forwardingDeadline)
+            let routingTimeout = remainingRequestTimeout(until: forwardingDeadline)
             if forwardingDeadline != nil, routingTimeout == nil {
                 eventLoop.execute {
                     makeForwardingTimeoutFuture().cascade(to: routingPromise)

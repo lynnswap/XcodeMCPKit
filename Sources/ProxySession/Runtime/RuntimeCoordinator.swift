@@ -3,7 +3,6 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import ProxyCore
@@ -43,15 +42,18 @@ package struct RuntimeCoordinatorTestHooks: Sendable {
     package var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
+    package var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
 
     package init(
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
-        toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil
+        toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
+        upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil
     ) {
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
+        self.upstreamInitialized = upstreamInitialized
     }
 }
 
@@ -423,6 +425,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             runtimeBox: runtimeBox,
             fallback: SessionBackedDocumentationProviderTransport(
                 sessionFactory: LiveDocumentationProviderSessionFactory(
+                    config: config,
                     baseEnvironment: ProcessInfo.processInfo.environment
                 ),
                 clock: clock

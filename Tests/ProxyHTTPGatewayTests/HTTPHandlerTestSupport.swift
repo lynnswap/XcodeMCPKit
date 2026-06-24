@@ -45,22 +45,14 @@ private func prepareHTTPTestSession(url: URL, sessionID: String) {
 
 struct UpstreamResponsePlan {
     let data: Data
-    let delayNanos: UInt64?
     let deliverManually: Bool
 
     static func immediate(_ data: Data) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, delayNanos: nil, deliverManually: false)
-    }
-
-    static func delayed(
-        _ data: Data,
-        delayNanos: UInt64
-    ) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, delayNanos: delayNanos, deliverManually: false)
+        UpstreamResponsePlan(data: data, deliverManually: false)
     }
 
     static func manual(_ data: Data) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, delayNanos: nil, deliverManually: true)
+        UpstreamResponsePlan(data: data, deliverManually: true)
     }
 }
 
@@ -106,12 +98,15 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var preferredUpstreamIndex: Int?
         var toolRoutingDecision: ToolRoutingDecision?
         var forceAsyncToolRoutingDecision = false
-        var toolRoutingDelayNanos: UInt64?
+        var toolRoutingStarted: TestSignal?
+        var toolRoutingGate: AsyncGate?
         var requeuedLeaseCount = 0
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
 
     private let state = NIOLockedValueBox(State())
+    private let sentUpstreamCountRecords = LockedRecordedValues<Int>()
+    private let pendingResponseCountRecords = LockedRecordedValues<Int>()
     private let config: ProxyConfig
     private let upstreamRequestResponder:
         (@Sendable (_ method: String, _ toolName: String?, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?
@@ -372,9 +367,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
         _ = requestTimeoutOverride
-        let delayNanos = state.withLockedValue { $0.toolRoutingDelayNanos }
-        if let delayNanos {
-            try? await Task.sleep(nanoseconds: delayNanos)
+        let synchronization = state.withLockedValue {
+            ($0.toolRoutingStarted, $0.toolRoutingGate)
+        }
+        synchronization.0?.signal()
+        if let gate = synchronization.1 {
+            try? await gate.wait()
         }
         if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
             return decision
@@ -450,10 +448,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {
         _ = ensureRunning
-        state.withLockedValue { state in
+        let sentCount = state.withLockedValue { state in
             state.upstreamSendCount += 1
             state.sentUpstreamPayloads.append(data)
+            return state.upstreamSendCount
         }
+        sentUpstreamCountRecords.append(sentCount)
 
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return
@@ -490,14 +490,16 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             return eventLoop.makeSucceededFuture(.invalidResponse)
         }
 
-        let sendResult = state.withLockedValue { state -> Upstream.SendResult in
+        let sendUpdate = state.withLockedValue { state -> (Int, Upstream.SendResult) in
             state.upstreamSendCount += 1
             state.sentUpstreamPayloads.append(data)
             if state.serverRequestResponseSendResults.isEmpty {
-                return .accepted
+                return (state.upstreamSendCount, .accepted)
             }
-            return state.serverRequestResponseSendResults.removeFirst()
+            return (state.upstreamSendCount, state.serverRequestResponseSendResults.removeFirst())
         }
+        sentUpstreamCountRecords.append(sendUpdate.0)
+        let sendResult = sendUpdate.1
         switch sendResult {
         case .accepted:
             _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
@@ -546,19 +548,16 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             session.router.handleIncoming(responsePlan.data)
         }
         if responsePlan.deliverManually {
-            state.withLockedValue { state in
+            let pendingCount = state.withLockedValue { state in
                 state.pendingResponses.append(
                     State.PendingResponse(
                         sessionID: mapping.sessionID,
                         data: responsePlan.data
                     )
                 )
+                return state.pendingResponses.count
             }
-        } else if let delayNanos = responsePlan.delayNanos {
-            Task {
-                try? await Task.sleep(nanoseconds: delayNanos)
-                deliverResponse()
-            }
+            pendingResponseCountRecords.append(pendingCount)
         } else {
             deliverResponse()
         }
@@ -602,7 +601,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
                 toolName: toolName,
                 originalID: mapping.originalID
             )
-            guard planned.deliverManually == false, planned.delayNanos == nil,
+            guard planned.deliverManually == false,
                 let responseObject = try? JSONSerialization.jsonObject(
                     with: planned.data,
                     options: []
@@ -676,9 +675,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             toolName: toolName,
             originalID: originalID
         )
-        if let delayNanos = plan.delayNanos {
-            try await Task.sleep(nanoseconds: delayNanos)
-        }
         guard plan.deliverManually == false else {
             throw ControlPlane.Error.invalidResponse("timeout")
         }
@@ -907,8 +903,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.forceAsyncToolRoutingDecision = value }
     }
 
-    func setToolRoutingDelayNanos(_ value: UInt64?) {
-        state.withLockedValue { $0.toolRoutingDelayNanos = value }
+    func setToolRoutingGate(started: TestSignal?, gate: AsyncGate?) {
+        state.withLockedValue {
+            $0.toolRoutingStarted = started
+            $0.toolRoutingGate = gate
+        }
     }
 
     func requestTimeoutNotificationCount() -> Int {
@@ -927,16 +926,62 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.pendingResponses.count }
     }
 
+    func waitForSentUpstreamCount(
+        _ expectedCount: Int,
+        timeout: Duration = .seconds(2)
+    ) async throws {
+        try await waitWithTimeout(
+            "waiting for sent upstream count \(expectedCount)",
+            timeout: timeout
+        ) {
+            var nextIndex = self.sentUpstreamCountRecords.count()
+            if self.sentUpstreamCount() >= expectedCount {
+                return
+            }
+            while true {
+                let observed = try await self.sentUpstreamCountRecords.nextValue(at: nextIndex)
+                if observed >= expectedCount {
+                    return
+                }
+                nextIndex += 1
+            }
+        }
+    }
+
+    func waitForPendingResponseCount(
+        _ expectedCount: Int,
+        timeout: Duration = .seconds(2)
+    ) async throws {
+        try await waitWithTimeout(
+            "waiting for pending response count \(expectedCount)",
+            timeout: timeout
+        ) {
+            var nextIndex = self.pendingResponseCountRecords.count()
+            if self.pendingResponseCount() == expectedCount {
+                return
+            }
+            while true {
+                let observed = try await self.pendingResponseCountRecords.nextValue(at: nextIndex)
+                if observed == expectedCount {
+                    return
+                }
+                nextIndex += 1
+            }
+        }
+    }
+
     func setInitialized(_ value: Bool) {
         state.withLockedValue { $0.initialized = value }
     }
 
     func deliverNextPendingResponse() {
-        let pending = state.withLockedValue { state -> State.PendingResponse? in
+        let update = state.withLockedValue { state -> (State.PendingResponse, Int)? in
             guard state.pendingResponses.isEmpty == false else { return nil }
-            return state.pendingResponses.removeFirst()
+            let pending = state.pendingResponses.removeFirst()
+            return (pending, state.pendingResponses.count)
         }
-        guard let pending else { return }
+        guard let (pending, pendingCount) = update else { return }
+        pendingResponseCountRecords.append(pendingCount)
         let session = session(id: pending.sessionID)
         session.router.handleIncoming(pending.data)
     }
@@ -962,6 +1007,29 @@ func makeHTTPTemporaryWorkspaceRoot() -> String {
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url.path
+}
+
+final class ManualDateClock: @unchecked Sendable {
+    private let nowBox: NIOLockedValueBox<Date>
+
+    init(now: Date = Date(timeIntervalSince1970: 0)) {
+        self.nowBox = NIOLockedValueBox(now)
+    }
+
+    var client: ClockClient {
+        ClockClient(
+            now: { self.nowBox.withLockedValue { $0 } },
+            uptimeNanoseconds: { 0 },
+            sleep: { _ in },
+            sleepForTimeInterval: { _ in }
+        )
+    }
+
+    func advance(by interval: TimeInterval) {
+        nowBox.withLockedValue { date in
+            date = date.addingTimeInterval(interval)
+        }
+    }
 }
 
 func waitForHTTPTestSemaphore(
@@ -1002,6 +1070,8 @@ func addHTTPHandler(
 func collectResponse(from channel: EmbeddedChannel) throws -> (
     head: HTTPResponseHead, body: String
 ) {
+    channel.embeddedEventLoop.run()
+
     var responseHead: HTTPResponseHead?
     var bodyBuffer = channel.allocator.buffer(capacity: 0)
 
@@ -1103,7 +1173,8 @@ struct TestHTTPHandlerServer {
         config: ProxyConfig,
         sessionManager: any RuntimeCoordinating,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver()
+        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
+        refreshCodeIssuesClock: ClockClient = .liveValue
     ) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
@@ -1124,7 +1195,8 @@ struct TestHTTPHandlerServer {
                             sessionManager: sessionManager,
                             refreshCodeIssuesCoordinator: refreshCoordinator,
                             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
-                            refreshCodeIssuesDebugState: refreshDebugState
+                            refreshCodeIssuesDebugState: refreshDebugState,
+                            refreshCodeIssuesClock: refreshCodeIssuesClock
                         )
                     )
                 }

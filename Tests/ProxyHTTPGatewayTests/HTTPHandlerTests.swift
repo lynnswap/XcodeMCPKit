@@ -1081,36 +1081,56 @@ struct HTTPHandlerTests {
         sessionManager.setInitialized(true)
         sessionManager.setForceAsyncToolRoutingDecision(true)
         sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: nil))
-        sessionManager.setToolRoutingDelayNanos(60_000_000)
-        let server = try TestHTTPHandlerServer.start(
+        let routingStarted = TestSignal()
+        let routingGate = AsyncGate()
+        sessionManager.setToolRoutingGate(started: routingStarted, gate: routingGate)
+        let clock = ManualDateClock()
+        let service = HTTPPostService(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            ),
+            deadlineClock: clock.client
         )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
         do {
-            let (response, object) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-routing-deadline",
-                payload: toolsCallPayload(
-                    id: 2002,
-                    name: "BuildProject",
-                    arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
-                )
+            let payload = toolsCallPayload(
+                id: 2002,
+                name: "BuildProject",
+                arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+            )
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.handle(
+                bodyData: bodyData,
+                headerSessionID: "session-routing-deadline",
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: group.next()
             )
 
-            #expect(response.statusCode == 200)
-            let error = try #require(object["error"] as? [String: Any])
-            #expect((error["code"] as? NSNumber)?.intValue == -32000)
-            #expect(error["message"] as? String == "upstream timeout")
+            try await routingStarted.wait(description: "waiting for async routing")
+            clock.advance(by: 1)
+            await routingGate.signal()
+
+            switch try await operation.future.get() {
+            case .mcpError(_, _, let code, let message, _, _, _):
+                #expect(code == -32000)
+                #expect(message == "upstream timeout")
+            default:
+                Issue.record("expected upstream timeout error")
+            }
             #expect(sessionManager.sentUpstreamCount() == 0)
             let lease = try #require(sessionManager.leaseDebugSnapshots().first)
             #expect(lease.state == .timedOut)
         } catch {
-            try? await server.shutdown()
+            await shutdown(group)
             throw error
         }
 
-        try await server.shutdown()
+        await shutdown(group)
     }
 
     @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {

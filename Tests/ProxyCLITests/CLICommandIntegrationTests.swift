@@ -57,11 +57,19 @@ struct CLICommandIntegrationTests {
         ]
         let result = try await CLICommandHarness.run(
             responseMode: .json,
-            delayedResponseMethod: "tools/list",
-            delayedResponseMilliseconds: 1_000,
+            gatedResponseMethods: ["tools/list"],
             getSSEEvents: [startupNotification],
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should finish after stdin closes"
+            timeoutDescription: "CLI command should finish after stdin closes",
+            whileRunning: { server in
+                _ = try await waitWithTimeout(
+                    "waiting for SSE GET before releasing tools/list"
+                ) {
+                    try await server.recorder.nextRequest { $0.httpMethod == "GET" }
+                }
+                let responseGate = try #require(server.responseGate)
+                responseGate.release("tools/list")
+            }
         )
 
         #expect(result.exitCode == 0)
@@ -79,9 +87,15 @@ struct CLICommandIntegrationTests {
         let slowCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
         let result = try await CLICommandHarness.run(
             responseMode: .json,
-            delayedResponseMethod: "tools/call",
+            gatedResponseMethods: ["tools/call"],
             stdinLines: [initializeRequest, slowCall, concurrentToolsListRequest],
-            timeoutDescription: "CLI command should finish after delayed concurrent request completes"
+            timeoutDescription: "CLI command should finish after gated concurrent request completes",
+            whileRunning: { server in
+                let responseGate = try #require(server.responseGate)
+                try await responseGate.waitUntilPending(for: "tools/call")
+                try await responseGate.waitUntilSent(for: "tools/list")
+                responseGate.release("tools/call")
+            }
         )
 
         #expect(result.exitCode == 0)
@@ -95,12 +109,27 @@ struct CLICommandIntegrationTests {
     }
 
     @Test func cliCommandBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {
+        let shutdownClocks = makeStdioAdapterShutdownClocks()
         let result = try await CLICommandHarness.run(
             responseMode: .json,
             hangsDELETE: true,
             stdinLines: [initializeRequest],
             proxyArguments: ["--request-timeout", "0"],
-            timeoutDescription: "CLI command should not hang waiting for best-effort DELETE"
+            timeoutDescription: "CLI command should not hang waiting for best-effort DELETE",
+            adapterShutdownPolicy: shutdownClocks.policy,
+            closeInputBeforeRunning: false,
+            whileRunning: { server in
+                _ = try await waitWithTimeout("waiting for SSE GET before closing stdin") {
+                    try await server.recorder.nextRequest { $0.httpMethod == "GET" }
+                }
+            },
+            afterInputClosed: { server in
+                _ = try await waitWithTimeout("waiting for hanging DELETE") {
+                    try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
+                }
+                await shutdownClocks.timeoutClock.sleep(untilSuspendedBy: 1)
+                advanceStdioAdapterShutdownClocks(shutdownClocks, by: .milliseconds(250))
+            }
         )
 
         #expect(result.exitCode == 0)
@@ -134,6 +163,7 @@ struct CLICommandIntegrationTests {
     }
 
     @Test func cliCommandSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
+        let shutdownClocks = makeStdioAdapterShutdownClocks()
         let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
         let result = try await CLICommandHarness.run(
             responseMode: .json,
@@ -141,7 +171,18 @@ struct CLICommandIntegrationTests {
             stdinLines: [initializeRequest, longRunningCall],
             proxyArguments: ["--request-timeout", "0"],
             timeoutDescription: "CLI command should delete the session after timed-out drain",
-            timeout: .seconds(6)
+            timeout: .seconds(6),
+            adapterShutdownPolicy: shutdownClocks.policy,
+            whileRunning: { server in
+                _ = try await waitWithTimeout("waiting for long-running tools/call") {
+                    try await server.recorder.nextRequest { $0.bodyMethod == "tools/call" }
+                }
+                await shutdownClocks.timeoutClock.sleep(untilSuspendedBy: 1)
+                advanceStdioAdapterShutdownClocks(shutdownClocks, by: .seconds(1))
+                _ = try await waitWithTimeout("waiting for DELETE after drain timeout") {
+                    try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
+                }
+            }
         )
 
         #expect(result.exitCode == 0)
@@ -218,6 +259,40 @@ private let initializeRequest =
 private let toolsListRequest = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
 private let concurrentToolsListRequest = #"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#
 
+private struct ControlledStdioAdapterShutdownClocks: Sendable {
+    let policy: StdioAdapterShutdownPolicy
+    let timeoutClock: TestClock
+    let uptimeClock: TestUptimeClock
+}
+
+private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownClocks {
+    let timeoutClock = TestClock()
+    let uptimeClock = TestUptimeClock()
+    let clock = ClockClient(
+        now: {
+            Date(timeIntervalSince1970: Double(uptimeClock.now()) / 1_000_000_000)
+        },
+        uptimeNanoseconds: uptimeClock.now,
+        sleep: { duration in
+            try? await timeoutClock.sleep(for: duration)
+        },
+        sleepForTimeInterval: { _ in }
+    )
+    return ControlledStdioAdapterShutdownClocks(
+        policy: StdioAdapterShutdownPolicy(clock: clock),
+        timeoutClock: timeoutClock,
+        uptimeClock: uptimeClock
+    )
+}
+
+private func advanceStdioAdapterShutdownClocks(
+    _ clocks: ControlledStdioAdapterShutdownClocks,
+    by duration: Duration
+) {
+    clocks.uptimeClock.advance(by: duration)
+    clocks.timeoutClock.advance(by: duration)
+}
+
 private struct CLICommandRunResult {
     let exitCode: Int32
     let stderr: [String]
@@ -246,8 +321,7 @@ private struct CLICommandRunResult {
 private struct CLICommandHarness {
     static func run(
         responseMode: StubMCPHTTPResponseMode,
-        delayedResponseMethod: String? = nil,
-        delayedResponseMilliseconds: Int = 250,
+        gatedResponseMethods: Set<String> = [],
         hangingResponseMethod: String? = nil,
         initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
         hangsDELETE: Bool = false,
@@ -257,12 +331,15 @@ private struct CLICommandHarness {
         proxyArguments: [String] = [],
         timeoutDescription: String,
         timeout: Duration = .seconds(5),
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        adapterShutdownPolicy: StdioAdapterShutdownPolicy = .live,
+        closeInputBeforeRunning: Bool = true,
+        whileRunning: ((StubMCPHTTPServer) async throws -> Void)? = nil,
+        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)? = nil
     ) async throws -> CLICommandRunResult {
         let server = try StubMCPHTTPServer.start(
             responseMode: responseMode,
-            delayedResponseMethod: delayedResponseMethod,
-            delayedResponseMilliseconds: delayedResponseMilliseconds,
+            gatedResponseMethods: gatedResponseMethods,
             hangingResponseMethod: hangingResponseMethod,
             initializeProtocolVersion: initializeProtocolVersion,
             hangsDELETE: hangsDELETE,
@@ -277,7 +354,11 @@ private struct CLICommandHarness {
                 proxyArguments: proxyArguments,
                 timeoutDescription: timeoutDescription,
                 timeout: timeout,
-                environment: environment
+                environment: environment,
+                adapterShutdownPolicy: adapterShutdownPolicy,
+                closeInputBeforeRunning: closeInputBeforeRunning,
+                whileRunning: whileRunning,
+                afterInputClosed: afterInputClosed
             )
             try await server.shutdown()
             return result
@@ -293,7 +374,11 @@ private struct CLICommandHarness {
         proxyArguments: [String],
         timeoutDescription: String,
         timeout: Duration,
-        environment: [String: String]
+        environment: [String: String],
+        adapterShutdownPolicy: StdioAdapterShutdownPolicy,
+        closeInputBeforeRunning: Bool,
+        whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
+        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
     ) async throws -> CLICommandRunResult {
         let errors = CapturedLines()
         let inputPipe = Pipe()
@@ -313,7 +398,8 @@ private struct CLICommandHarness {
                         upstreamURL: upstreamURL,
                         requestTimeout: requestTimeout,
                         input: input,
-                        output: output
+                        output: output,
+                        shutdownPolicy: adapterShutdownPolicy
                     )
                 },
                 input: inputPipe.fileHandleForReading,
@@ -322,21 +408,39 @@ private struct CLICommandHarness {
         )
 
         inputPipe.fileHandleForWriting.write(stdinData(for: stdinLines))
-        inputPipe.fileHandleForWriting.closeFile()
+        var inputClosed = false
+        func closeInput() {
+            guard !inputClosed else { return }
+            inputPipe.fileHandleForWriting.closeFile()
+            inputClosed = true
+        }
+        if closeInputBeforeRunning {
+            closeInput()
+        }
+
+        let serverURL = server.url
+        let commandTask = Task {
+            await command.run(
+                args: [
+                    "xcode-mcp-proxy",
+                    "--url",
+                    serverURL.absoluteString,
+                ] + proxyArguments,
+                environment: environment
+            )
+        }
 
         do {
+            try await whileRunning?(server)
+            if !closeInputBeforeRunning {
+                closeInput()
+            }
+            try await afterInputClosed?(server)
             let exitCode = try await waitWithTimeout(
                 timeoutDescription,
                 timeout: timeout
             ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                    ] + proxyArguments,
-                    environment: environment
-                )
+                await commandTask.value
             }
             outputPipe.fileHandleForWriting.closeFile()
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
@@ -347,6 +451,8 @@ private struct CLICommandHarness {
                 requests: server.recorder.snapshot()
             )
         } catch {
+            closeInput()
+            commandTask.cancel()
             outputPipe.fileHandleForWriting.closeFile()
             throw error
         }
@@ -381,11 +487,11 @@ private struct StubMCPHTTPServer {
     let url: URL
     let childChannelTracker: HTTPTestServerChannelTracker
     let recorder: StubMCPHTTPRecorder
+    let responseGate: StubMCPHTTPResponseGate?
 
     static func start(
         responseMode: StubMCPHTTPResponseMode,
-        delayedResponseMethod: String? = nil,
-        delayedResponseMilliseconds: Int = 250,
+        gatedResponseMethods: Set<String> = [],
         hangingResponseMethod: String? = nil,
         initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
         hangsDELETE: Bool = false,
@@ -399,6 +505,7 @@ private struct StubMCPHTTPServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
         let recorder = StubMCPHTTPRecorder()
+        let responseGate = StubMCPHTTPResponseGate(gatedMethods: gatedResponseMethods)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 32)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -407,9 +514,8 @@ private struct StubMCPHTTPServer {
                     channel.pipeline.addHandler(
                         StubMCPHTTPHandler(
                             recorder: recorder,
+                            responseGate: responseGate,
                             responseMode: responseMode,
-                            delayedResponseMethod: delayedResponseMethod,
-                            delayedResponseMilliseconds: delayedResponseMilliseconds,
                             hangingResponseMethod: hangingResponseMethod,
                             initializeProtocolVersion: initializeProtocolVersion,
                             hangsDELETE: hangsDELETE,
@@ -431,7 +537,8 @@ private struct StubMCPHTTPServer {
             channel: channel,
             url: URL(string: "http://127.0.0.1:\(port)/mcp")!,
             childChannelTracker: childChannelTracker,
-            recorder: recorder
+            recorder: recorder,
+            responseGate: responseGate
         )
     }
 
@@ -458,17 +565,222 @@ private struct StubMCPHTTPRequest: Sendable {
     let contentType: String?
 }
 
-private final class StubMCPHTTPRecorder: @unchecked Sendable {
-    private let requests = NIOLockedValueBox<[StubMCPHTTPRequest]>([])
+private final class StubRecordedValues<Value: Sendable>: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let startingAt: Int
+        let predicate: @Sendable (Value) -> Bool
+        let continuation: CheckedContinuation<Value, Error>
+    }
 
-    func append(_ request: StubMCPHTTPRequest) {
-        requests.withLockedValue { requests in
-            requests.append(request)
+    private struct State {
+        var values: [Value] = []
+        var waiters: [Waiter] = []
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    func append(_ value: Value) {
+        let resumptions = state.withLockedValue { state -> [(Waiter, Value)] in
+            state.values.append(value)
+
+            var remaining: [Waiter] = []
+            var resumptions: [(Waiter, Value)] = []
+            for waiter in state.waiters {
+                if let match = Self.firstValue(
+                    in: state.values,
+                    startingAt: waiter.startingAt,
+                    matching: waiter.predicate
+                ) {
+                    resumptions.append((waiter, match))
+                } else {
+                    remaining.append(waiter)
+                }
+            }
+            state.waiters = remaining
+            return resumptions
+        }
+
+        for (waiter, value) in resumptions {
+            waiter.continuation.resume(returning: value)
         }
     }
 
+    func snapshot() -> [Value] {
+        state.withLockedValue { $0.values }
+    }
+
+    func nextValue(
+        startingAt startIndex: Int = 0,
+        matching predicate: @escaping @Sendable (Value) -> Bool
+    ) async throws -> Value {
+        let waiterID = UUID()
+        if let existing = state.withLockedValue({ state in
+            Self.firstValue(
+                in: state.values,
+                startingAt: startIndex,
+                matching: predicate
+            )
+        }) {
+            return existing
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let existing = state.withLockedValue { state -> Value? in
+                    if let existing = Self.firstValue(
+                        in: state.values,
+                        startingAt: startIndex,
+                        matching: predicate
+                    ) {
+                        return existing
+                    }
+                    state.waiters.append(
+                        Waiter(
+                            id: waiterID,
+                            startingAt: startIndex,
+                            predicate: predicate,
+                            continuation: continuation
+                        )
+                    )
+                    return nil
+                }
+                if let existing {
+                    continuation.resume(returning: existing)
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter(id: waiterID)
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        let waiter = state.withLockedValue { state -> Waiter? in
+            guard let index = state.waiters.firstIndex(where: { $0.id == id }) else {
+                return nil
+            }
+            return state.waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(throwing: CancellationError())
+    }
+
+    private static func firstValue(
+        in values: [Value],
+        startingAt startIndex: Int,
+        matching predicate: @Sendable (Value) -> Bool
+    ) -> Value? {
+        guard startIndex < values.count else {
+            return nil
+        }
+        for index in startIndex..<values.count where predicate(values[index]) {
+            return values[index]
+        }
+        return nil
+    }
+}
+
+private final class StubMCPHTTPRecorder: @unchecked Sendable {
+    private let requests = StubRecordedValues<StubMCPHTTPRequest>()
+
+    func append(_ request: StubMCPHTTPRequest) {
+        requests.append(request)
+    }
+
     func snapshot() -> [StubMCPHTTPRequest] {
-        requests.withLockedValue { $0 }
+        requests.snapshot()
+    }
+
+    func nextRequest(
+        startingAt startIndex: Int = 0,
+        matching predicate: @escaping @Sendable (StubMCPHTTPRequest) -> Bool
+    ) async throws -> StubMCPHTTPRequest {
+        try await requests.nextValue(startingAt: startIndex, matching: predicate)
+    }
+}
+
+private final class StubMCPHTTPResponseGate: @unchecked Sendable {
+    private struct State {
+        let gatedMethods: Set<String>
+        var pendingResponsesByMethod: [String: [@Sendable () -> Void]] = [:]
+        var releaseCreditsByMethod: [String: Int] = [:]
+    }
+
+    private let state: NIOLockedValueBox<State>
+    private let pendingMethods = StubRecordedValues<String>()
+    private let sentMethods = StubRecordedValues<String>()
+
+    init(gatedMethods: Set<String>) {
+        self.state = NIOLockedValueBox(State(gatedMethods: gatedMethods))
+    }
+
+    func holdIfNeeded(method: String?, send: @escaping @Sendable () -> Void) -> Bool {
+        guard let method else { return false }
+        var sendNow = false
+        let didHold = state.withLockedValue { state -> Bool in
+            guard state.gatedMethods.contains(method) else {
+                return false
+            }
+            if let credits = state.releaseCreditsByMethod[method], credits > 0 {
+                if credits == 1 {
+                    state.releaseCreditsByMethod.removeValue(forKey: method)
+                } else {
+                    state.releaseCreditsByMethod[method] = credits - 1
+                }
+                sendNow = true
+            } else {
+                state.pendingResponsesByMethod[method, default: []].append(send)
+            }
+            return true
+        }
+
+        guard didHold else { return false }
+        if sendNow {
+            send()
+        } else {
+            pendingMethods.append(method)
+        }
+        return true
+    }
+
+    func release(_ method: String, count: Int = 1) {
+        guard count > 0 else { return }
+        let sends = state.withLockedValue { state -> [@Sendable () -> Void] in
+            var remainingCount = count
+            var sends: [@Sendable () -> Void] = []
+            while remainingCount > 0 {
+                guard var pending = state.pendingResponsesByMethod[method],
+                      pending.isEmpty == false else
+                {
+                    state.releaseCreditsByMethod[method, default: 0] += remainingCount
+                    break
+                }
+                sends.append(pending.removeFirst())
+                if pending.isEmpty {
+                    state.pendingResponsesByMethod.removeValue(forKey: method)
+                } else {
+                    state.pendingResponsesByMethod[method] = pending
+                }
+                remainingCount -= 1
+            }
+            return sends
+        }
+
+        for send in sends {
+            send()
+        }
+    }
+
+    func recordSent(method: String?) {
+        guard let method else { return }
+        sentMethods.append(method)
+    }
+
+    func waitUntilPending(for method: String) async throws {
+        _ = try await pendingMethods.nextValue { $0 == method }
+    }
+
+    func waitUntilSent(for method: String) async throws {
+        _ = try await sentMethods.nextValue { $0 == method }
     }
 }
 
@@ -477,9 +789,8 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
     typealias OutboundOut = HTTPServerResponsePart
 
     private let recorder: StubMCPHTTPRecorder
+    private let responseGate: StubMCPHTTPResponseGate?
     private let responseMode: StubMCPHTTPResponseMode
-    private let delayedResponseMethod: String?
-    private let delayedResponseMilliseconds: Int
     private let hangingResponseMethod: String?
     private let initializeProtocolVersion: String?
     private let hangsDELETE: Bool
@@ -490,9 +801,8 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
 
     init(
         recorder: StubMCPHTTPRecorder,
+        responseGate: StubMCPHTTPResponseGate?,
         responseMode: StubMCPHTTPResponseMode,
-        delayedResponseMethod: String?,
-        delayedResponseMilliseconds: Int,
         hangingResponseMethod: String?,
         initializeProtocolVersion: String?,
         hangsDELETE: Bool,
@@ -500,9 +810,8 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         getSSEEventData: [Data]
     ) {
         self.recorder = recorder
+        self.responseGate = responseGate
         self.responseMode = responseMode
-        self.delayedResponseMethod = delayedResponseMethod
-        self.delayedResponseMilliseconds = delayedResponseMilliseconds
         self.hangingResponseMethod = hangingResponseMethod
         self.initializeProtocolVersion = initializeProtocolVersion
         self.hangsDELETE = hangsDELETE
@@ -627,21 +936,17 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
                 status: .ok,
                 headers: headers
             )
-            if requestObject?["method"] as? String == delayedResponseMethod {
-                let sendableContext = SendableChannelHandlerContext(value: context)
-                context.eventLoop.scheduleTask(in: .milliseconds(Int64(delayedResponseMilliseconds))) {
-                    self.sendPOSTResponse(
-                        context: sendableContext.value,
-                        responseHead: responseHead,
-                        responseBody: responseBody
-                    )
-                }
+            let method = requestObject?["method"] as? String
+            let sendResponse = makePOSTResponseSender(
+                context: context,
+                responseHead: responseHead,
+                responseBody: responseBody,
+                method: method
+            )
+            if responseGate?.holdIfNeeded(method: method, send: sendResponse) == true {
+                return
             } else {
-                sendPOSTResponse(
-                    context: context,
-                    responseHead: responseHead,
-                    responseBody: responseBody
-                )
+                sendResponse()
             }
         case .DELETE:
             if hangsDELETE {
@@ -657,16 +962,48 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         }
     }
 
+    private func makePOSTResponseSender(
+        context: ChannelHandlerContext,
+        responseHead: HTTPResponseHead,
+        responseBody: Data,
+        method: String?
+    ) -> @Sendable () -> Void {
+        let sendableContext = SendableChannelHandlerContext(value: context)
+        return { [weak self] in
+            guard let self else { return }
+            let context = sendableContext.value
+            if context.eventLoop.inEventLoop {
+                self.sendPOSTResponse(
+                    context: context,
+                    responseHead: responseHead,
+                    responseBody: responseBody,
+                    method: method
+                )
+            } else {
+                context.eventLoop.execute {
+                    self.sendPOSTResponse(
+                        context: sendableContext.value,
+                        responseHead: responseHead,
+                        responseBody: responseBody,
+                        method: method
+                    )
+                }
+            }
+        }
+    }
+
     private func sendPOSTResponse(
         context: ChannelHandlerContext,
         responseHead: HTTPResponseHead,
-        responseBody: Data
+        responseBody: Data,
+        method: String?
     ) {
         var buffer = context.channel.allocator.buffer(capacity: responseBody.count)
         buffer.writeBytes(responseBody)
         context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        responseGate?.recordSent(method: method)
     }
 
     private static func sseResponseData(events: [Data]) -> Data {

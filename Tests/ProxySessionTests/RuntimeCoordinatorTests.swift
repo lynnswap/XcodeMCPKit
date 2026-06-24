@@ -6,7 +6,6 @@ import NIOEmbedded
 import Testing
 import ProxyCore
 import ProxyMCP
-import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import XcodeMCPTestSupport
@@ -172,6 +171,7 @@ struct RuntimeCoordinatorTests {
     {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
         let fixture = RuntimeCoordinatorFixture(
@@ -180,6 +180,11 @@ struct RuntimeCoordinatorTests {
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
             ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { upstreamIndex in
+                    initializedUpstreams.append(upstreamIndex)
+                }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -203,12 +208,19 @@ struct RuntimeCoordinatorTests {
         let recoveryUpstreamID = try extractUpstreamID(from: recoveryInitialize)
         await upstream0.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
         _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
-        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
-        #expect(manager.documentationCandidateProcessOrder() == [
+        let expectedCandidateProcessOrder = [
             newerTarget.processID,
             olderTarget.processID,
-        ])
+        ]
+        let recoveredUpstreamIndex = try await waitWithTimeout(
+            "waiting for recovered primary upstream initialization"
+        ) {
+            try await initializedUpstreams.nextValue(at: 1)
+        }
+        #expect(recoveredUpstreamIndex == 0)
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
+        #expect(manager.documentationCandidateProcessOrder() == expectedCandidateProcessOrder)
     }
 
     @Test func sessionManagerRoutesInitializeHandshakeNotificationsFromRetriedPrimaryProcess()
@@ -3118,16 +3130,23 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
+        let firstUpstream0StartIndex = await upstream0.sentCount()
+        let firstUpstream1StartIndex = await upstream1.sentCount()
         let firstTask = Task {
             try await manager.liveXcodeListWindowsResult(
                 route: .anyHealthy,
                 requestTimeoutOverride: .seconds(2)
             )
         }
-        let firstRequest = try await upstream0.nextSent {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        let firstRequest = try await waitWithTimeout(
+            "waiting for first window fanout request on upstream0",
+            timeout: .seconds(2)
+        ) {
+            try await upstream0.nextSent(startingAt: firstUpstream0StartIndex) {
+                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+            }
         }
-        #expect(await upstream1.sentCount() == 0)
+        #expect(await upstream1.sentCount() == firstUpstream1StartIndex)
         await upstream0.yield(
             .message(
                 try makeXcodeListWindowsResponse(
@@ -3136,20 +3155,38 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        _ = try await firstTask.value
+        _ = try await waitWithTimeout(
+            "waiting for first window fanout result",
+            timeout: .seconds(2)
+        ) {
+            try await firstTask.value
+        }
+        #expect(await upstream1.sentCount() == firstUpstream1StartIndex)
 
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        let secondUpstream0StartIndex = await upstream0.sentCount()
+        let secondUpstream1StartIndex = await upstream1.sentCount()
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
                 route: .anyHealthy,
                 requestTimeoutOverride: .seconds(2)
             )
         }
-        let secondRequest0 = try await upstream0.nextSent {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        let secondRequest0 = try await waitWithTimeout(
+            "waiting for second window fanout request on upstream0",
+            timeout: .seconds(2)
+        ) {
+            try await upstream0.nextSent(startingAt: secondUpstream0StartIndex) {
+                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+            }
         }
-        let secondRequest1 = try await upstream1.nextSent {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        let secondRequest1 = try await waitWithTimeout(
+            "waiting for second window fanout request on upstream1",
+            timeout: .seconds(2)
+        ) {
+            try await upstream1.nextSent(startingAt: secondUpstream1StartIndex) {
+                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+            }
         }
         await upstream0.yield(
             .message(
@@ -3167,7 +3204,12 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        _ = try await secondTask.value
+        _ = try await waitWithTimeout(
+            "waiting for second window fanout result",
+            timeout: .seconds(2)
+        ) {
+            try await secondTask.value
+        }
     }
 
     @Test func mergedXcodeListWindowsPreservesToolErrors() throws {
@@ -6015,33 +6057,8 @@ struct RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
 
-        let initFuture = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        try await spinUntilSentCount(
-            upstream0,
-            count: 1,
-            description: "waiting for primary initialize request"
-        )
-        let init0 = try #require(await upstream0.sentValue(at: 0))
-        let init0ID = try extractUpstreamID(from: init0)
-        await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
-        _ = try await initFuture.get()
-        try await spinUntilSentCount(
-            upstream0,
-            count: 2,
-            description: "waiting for primary initialized notification"
-        )
-
-        try await spinUntilSentCount(
-            upstream1,
-            count: 1,
-            description: "waiting for secondary warm initialize request"
-        )
-        let warmInitialize = try #require(await upstream1.sentValue(at: 0))
-        let warmInitID = try extractUpstreamID(from: warmInitialize)
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
 
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
@@ -6067,18 +6084,13 @@ struct RuntimeCoordinatorTests {
         }
         _ = activeFuture
 
-        await upstream1.yield(.message(try makeInitializeResponse(id: warmInitID)))
-        try await spinUntilSentCount(
-            upstream1,
-            count: 2,
-            description: "waiting for secondary initialized notification"
-        )
-        let initializedNotification = try #require(await upstream1.sentValue(at: 1))
-        #expect(methodName(from: initializedNotification) == "notifications/initialized")
-
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        guard case .quarantined = manager.testStateSnapshot().upstreams[1].healthState else {
+            Issue.record("expected upstream1 to be quarantined before queueing request")
+            return
+        }
 
         let queuedRequestData = try JSONSerialization.data(
             withJSONObject: [
@@ -6115,12 +6127,13 @@ struct RuntimeCoordinatorTests {
 
         try await spinUntilSentCount(
             upstream1,
-            count: 3,
+            count: 1,
             description: "waiting for recovery probe request"
         )
-        let probeRequest = try #require(await upstream1.sentValue(at: 2))
+        let probeRequest = try #require(await upstream1.sentValue(at: 0))
         #expect(methodName(from: probeRequest) == "tools/list")
         let probeID = try extractUpstreamID(from: probeRequest)
+        #expect(probeID != 99)
         let probeResponse: [String: Any] = [
             "jsonrpc": "2.0",
             "id": NSNumber(value: probeID),
@@ -6135,10 +6148,10 @@ struct RuntimeCoordinatorTests {
         _ = try await queuedFuture.get()
         try await spinUntilSentCount(
             upstream1,
-            count: 4,
+            count: 2,
             description: "waiting for queued request dispatch after probe recovery"
         )
-        let queuedRequest = try #require(await upstream1.sentValue(at: 3))
+        let queuedRequest = try #require(await upstream1.sentValue(at: 1))
         #expect(methodName(from: queuedRequest) == "tools/list")
         #expect(try extractUpstreamID(from: queuedRequest) == 99)
 

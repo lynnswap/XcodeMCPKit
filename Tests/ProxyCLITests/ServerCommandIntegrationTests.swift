@@ -87,11 +87,11 @@ private final class IntegrationRecordingProxyServer: ProxyServerCommandServer {
         }
     }
 
-    func startAndWriteDiscovery() throws -> (host: String, port: Int) {
+    func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint {
         withLock {
             started += 1
         }
-        return ("127.0.0.1", 8766)
+        return XcodeMCPProxyServer.Endpoint(host: "127.0.0.1", port: 8766)
     }
 
     func wait() async throws {

@@ -395,26 +395,26 @@ package protocol DocumentationProviderSessionMaking: Sendable {
 }
 
 package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
+    private let config: ProxyConfig
     private let baseEnvironment: [String: String]
 
-    package init(baseEnvironment: [String: String] = ProcessInfo.processInfo.environment) {
+    package init(
+        config: ProxyConfig,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        self.config = config
         self.baseEnvironment = baseEnvironment
     }
 
     package func startSession(for target: XcodeProcessTarget) async throws
         -> any UpstreamSession
     {
-        var environment = baseEnvironment
-        environment.removeValue(forKey: "XCODE_PID")
-        environment["MCP_XCODE_PID"] = String(target.processID)
-        environment["DEVELOPER_DIR"] = target.developerDir
-        let config = UpstreamProcess.Config(
-            command: target.mcpbridgePath,
-            args: [],
-            environment: environment,
-            maxQueuedWriteBytes: 4 * 1_048_576
+        try await MCPBridgeRuntime.startProcessBoundSession(
+            config: config,
+            sharedSessionID: config.upstreamSessionID,
+            xcodeTarget: target,
+            baseEnvironment: baseEnvironment
         )
-        return try await UpstreamProcess(config: config).startSession()
     }
 }
 

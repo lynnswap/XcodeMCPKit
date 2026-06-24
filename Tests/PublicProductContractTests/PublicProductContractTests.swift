@@ -162,9 +162,11 @@ func compileOnlyClientDomainSurface() {
     ]
 
     let config = XcodeMCP.Configuration(
-        command: "/usr/bin/xcrun",
-        arguments: ["mcpbridge"],
-        environment: ["PUBLIC_CONTRACT": "1"],
+        bridge: .custom(
+            command: "/usr/bin/xcrun",
+            arguments: ["mcpbridge"],
+            environment: ["PUBLIC_CONTRACT": "1"]
+        ),
         clientName: "PublicContractClient",
         clientVersion: "1.0",
         capabilities: [
@@ -172,8 +174,7 @@ func compileOnlyClientDomainSurface() {
                 "enabled": true,
             ]
         ],
-        requestTimeout: .seconds(1),
-        maxQueuedWriteBytes: 65_536
+        requestTimeout: .seconds(1)
     )
 
     let tool = MCPTool(
@@ -263,19 +264,21 @@ import XcodeMCPProxyKit
 
 func compileOnlyProxyConfigurationSurface() {
     let config = XcodeMCPProxyServer.Configuration(
-        listenHost: "127.0.0.1",
-        listenPort: 0,
-        upstreamCommand: "/usr/bin/xcrun",
-        upstreamArguments: ["mcpbridge"],
-        upstreamProcessCount: 1,
-        upstreamSessionID: "session-1",
-        maxBodyBytes: 1_048_576,
-        requestTimeout: 120,
-        configPath: "/tmp/xcode-mcp-config.toml",
-        discoveryFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json"),
-        prewarmToolsList: false,
-        autoApproveXcodeDialog: false,
-        refreshCodeIssuesMode: .proxy
+        bind: .init(host: "127.0.0.1", port: 0),
+        upstream: .custom(
+            command: "/usr/bin/xcrun",
+            arguments: ["mcpbridge"],
+            processesPerXcode: 1,
+            sessionID: "session-1"
+        ),
+        limits: .init(maxBodyBytes: 1_048_576, requestTimeout: 120),
+        configurationFilePath: "/tmp/xcode-mcp-config.toml",
+        discovery: .init(fileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
+        approval: .manual,
+        features: .init(
+            prewarmToolsList: false,
+            refreshCodeIssuesMode: .proxy
+        )
     )
 
     let upstreamMode = XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode.upstream
@@ -291,5 +294,6 @@ func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws 
     try await server.shutdown()
 
     _ = (address.host, address.port, discoveryAddress.host, discoveryAddress.port)
+    _ = (address.url, discoveryAddress.url)
 }
 """

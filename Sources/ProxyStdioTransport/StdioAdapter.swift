@@ -3,6 +3,27 @@ import Logging
 import ProxyCore
 import ProxyMCP
 
+package struct StdioAdapterShutdownPolicy: Sendable {
+    package let requestDrainTimeout: Duration
+    package let requestDrainPollInterval: Duration
+    package let deleteSessionGrace: Duration
+    package let clock: ClockClient
+
+    package init(
+        requestDrainTimeout: Duration = .seconds(1),
+        requestDrainPollInterval: Duration = .milliseconds(10),
+        deleteSessionGrace: Duration = .milliseconds(250),
+        clock: ClockClient = .liveValue
+    ) {
+        self.requestDrainTimeout = requestDrainTimeout
+        self.requestDrainPollInterval = requestDrainPollInterval
+        self.deleteSessionGrace = deleteSessionGrace
+        self.clock = clock
+    }
+
+    package static let live = Self()
+}
+
 public actor StdioAdapter {
     private struct RequestEnvelope {
         let method: String?
@@ -29,6 +50,7 @@ public actor StdioAdapter {
     private let outputWriter: StdioWriter
     private let logger: Logger
     private let session: URLSession
+    private let shutdownPolicy: StdioAdapterShutdownPolicy
     private var sessionID: String?
     private var negotiatedProtocolVersion: String?
     private var framer = StdioFramer()
@@ -45,11 +67,28 @@ public actor StdioAdapter {
         input: FileHandle = .standardInput,
         output: FileHandle = .standardOutput
     ) {
+        self.init(
+            upstreamURL: upstreamURL,
+            requestTimeout: requestTimeout,
+            input: input,
+            output: output,
+            shutdownPolicy: .live
+        )
+    }
+
+    package init(
+        upstreamURL: URL,
+        requestTimeout: TimeInterval,
+        input: FileHandle,
+        output: FileHandle,
+        shutdownPolicy: StdioAdapterShutdownPolicy
+    ) {
         self.upstreamURL = upstreamURL
         self.requestTimeout = requestTimeout
         self.inputHandle = input
         self.logger = ProxyLogging.make("stdio.adapter")
         self.outputWriter = StdioWriter(handle: output, logger: logger)
+        self.shutdownPolicy = shutdownPolicy
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
         self.session = URLSession(configuration: configuration)
@@ -347,10 +386,9 @@ public actor StdioAdapter {
 
         // Allow in-flight requests to finish normally on clean EOF, but cap how long shutdown waits
         // before canceling the session to avoid hanging indefinitely on stalled requests.
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(1))
-        while !requestTasks.isEmpty, clock.now < deadline {
-            try? await clock.sleep(until: clock.now.advanced(by: .milliseconds(10)))
+        let deadline = requestDrainDeadline()
+        while !requestTasks.isEmpty, requestDrainDeadlineHasTimeRemaining(deadline) {
+            await shutdownPolicy.clock.sleep(requestDrainPollDuration(until: deadline))
         }
 
         guard !requestTasks.isEmpty else { return }
@@ -391,12 +429,48 @@ public actor StdioAdapter {
             group.addTask {
                 _ = try? await urlSession.data(for: deleteRequest)
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 250_000_000)
+            group.addTask { [shutdownPolicy] in
+                await shutdownPolicy.clock.sleep(shutdownPolicy.deleteSessionGrace)
             }
             _ = await group.next()
             group.cancelAll()
         }
+    }
+
+    private func requestDrainDeadline() -> UInt64? {
+        let timeoutNanoseconds = Self.nanoseconds(in: shutdownPolicy.requestDrainTimeout)
+        guard timeoutNanoseconds > 0 else { return nil }
+        let now = shutdownPolicy.clock.uptimeNanoseconds()
+        let clamped = min(timeoutNanoseconds, UInt64.max &- now)
+        return now &+ clamped
+    }
+
+    private func requestDrainDeadlineHasTimeRemaining(_ deadline: UInt64?) -> Bool {
+        guard let deadline else { return false }
+        return shutdownPolicy.clock.uptimeNanoseconds() < deadline
+    }
+
+    private func requestDrainPollDuration(until deadline: UInt64?) -> Duration {
+        guard let deadline else { return .zero }
+        let now = shutdownPolicy.clock.uptimeNanoseconds()
+        guard deadline > now else { return .zero }
+        let pollNanoseconds = max(1, Self.nanoseconds(in: shutdownPolicy.requestDrainPollInterval))
+        let remainingNanoseconds = deadline &- now
+        let sleepNanoseconds = min(pollNanoseconds, remainingNanoseconds, UInt64(Int64.max))
+        return .nanoseconds(Int64(sleepNanoseconds))
+    }
+
+    private static func nanoseconds(in duration: Duration) -> UInt64 {
+        let components = duration.components
+        let seconds = max(0, components.seconds)
+        let attoseconds = max(0, components.attoseconds)
+        let secondsComponent = UInt64(seconds).multipliedReportingOverflow(by: 1_000_000_000)
+        if secondsComponent.overflow {
+            return UInt64.max
+        }
+        let nanosecondsComponent = UInt64(attoseconds / 1_000_000_000)
+        let total = secondsComponent.partialValue.addingReportingOverflow(nanosecondsComponent)
+        return total.overflow ? UInt64.max : total.partialValue
     }
 
     private func stopLocked(cancelReadTask: Bool) {

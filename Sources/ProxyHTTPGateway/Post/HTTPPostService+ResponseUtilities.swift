@@ -32,15 +32,29 @@ extension HTTPPostService {
         }
     }
 
-    package static func timeoutDeadline(for timeout: TimeAmount?) -> Date? {
-        guard let timeout else { return nil }
-        let seconds = Double(timeout.nanoseconds) / 1_000_000_000
-        return Date().addingTimeInterval(seconds)
+    package func timeoutDeadline(for timeout: TimeAmount?) -> Date? {
+        Self.timeoutDeadline(for: timeout, now: deadlineClock.now())
     }
 
-    package static func remainingRequestTimeout(until deadline: Date?) -> TimeAmount? {
+    package func remainingRequestTimeout(until deadline: Date?) -> TimeAmount? {
+        Self.remainingRequestTimeout(until: deadline, now: deadlineClock.now())
+    }
+
+    package static func timeoutDeadline(
+        for timeout: TimeAmount?,
+        now: Date = Date()
+    ) -> Date? {
+        guard let timeout else { return nil }
+        let seconds = Double(timeout.nanoseconds) / 1_000_000_000
+        return now.addingTimeInterval(seconds)
+    }
+
+    package static func remainingRequestTimeout(
+        until deadline: Date?,
+        now: Date = Date()
+    ) -> TimeAmount? {
         guard let deadline else { return nil }
-        let remainingSeconds = deadline.timeIntervalSinceNow
+        let remainingSeconds = deadline.timeIntervalSince(now)
         guard remainingSeconds > 0 else { return nil }
         let remainingNanoseconds = Int64((remainingSeconds * 1_000_000_000).rounded(.up))
         return .nanoseconds(remainingNanoseconds)

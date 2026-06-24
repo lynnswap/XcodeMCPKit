@@ -70,12 +70,41 @@ package enum MCPBridgeRuntime {
         XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
     }
 
+    package static func makeProcessBoundSessionFactory(
+        config: ProxyConfig,
+        sharedSessionID: String?,
+        xcodeTarget: XcodeProcessTarget,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> any UpstreamSessionFactory {
+        UpstreamProcess(config: makeDefaultUpstreamConfig(
+            config: config,
+            sharedSessionID: sharedSessionID,
+            xcodeTarget: xcodeTarget,
+            baseEnvironment: baseEnvironment
+        ))
+    }
+
+    package static func startProcessBoundSession(
+        config: ProxyConfig,
+        sharedSessionID: String?,
+        xcodeTarget: XcodeProcessTarget,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) async throws -> any UpstreamSession {
+        try await makeProcessBoundSessionFactory(
+            config: config,
+            sharedSessionID: sharedSessionID,
+            xcodeTarget: xcodeTarget,
+            baseEnvironment: baseEnvironment
+        ).startSession()
+    }
+
     private static func makeDefaultUpstreamConfig(
         config: ProxyConfig,
         sharedSessionID: String?,
-        xcodeTarget: XcodeProcessTarget?
+        xcodeTarget: XcodeProcessTarget?,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> UpstreamProcess.Config {
-        var environment = ProcessInfo.processInfo.environment
+        var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
         if let sharedSessionID, !sharedSessionID.isEmpty {
             environment["MCP_XCODE_SESSION_ID"] = sharedSessionID
