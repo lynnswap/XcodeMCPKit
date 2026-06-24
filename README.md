@@ -2,8 +2,9 @@
 
 [日本語](README.ja.md)
 
-XcodeMCPKit is a local proxy for Xcode MCP. It gives your MCP clients one stable
-endpoint and automates the `mcpbridge` approval flow.
+XcodeMCPKit is a Swift library and local proxy for Xcode MCP. Apps can use the
+Swift API to operate a local `mcpbridge` process directly, while MCP clients can
+use the proxy for one stable endpoint and automated approval flow.
 
 ## Requirements
 
@@ -56,6 +57,28 @@ source ~/.zshrc
 ```
 
 </details>
+
+## Use From Swift
+
+Add the `XcodeMCPKit` library product to your Swift package or Xcode target, then
+create a top-level client. The async initializer launches local `mcpbridge`,
+performs the MCP initialize handshake, and returns a ready client.
+
+```swift
+import XcodeMCPKit
+
+let xcode = try await XcodeMCP(config: .init())
+let tools = try await xcode.listTools()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": .string("SwiftData")]
+)
+await xcode.close()
+```
+
+The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
+`MCPToolResult`, `MCPContent`, and `MCPProgress`. Process launch, JSON-RPC
+framing, and session transport are internal implementation details.
 
 ## Set Up Your MCP Client
 
@@ -172,8 +195,6 @@ Only the following cases need changes:
   `MCP-Protocol-Version: 2025-06-18`. Include
   `Accept: application/json, text/event-stream` on `POST /mcp`, and do not send
   JSON-RPC batch requests.
-- SwiftPM library users:
-  pin to `v0.10.2` or migrate to the executable products.
 
 ## Troubleshooting
 
