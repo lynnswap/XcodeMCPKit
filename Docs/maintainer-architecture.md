@@ -42,7 +42,8 @@
 - `ProxyCLI` depends on `XcodeMCPProxy` only.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
-the default suite includes `ProxyArchitectureTests`.
+the default suite includes public product compile contract tests and proxy
+contract tests that exercise package and product boundaries.
 
 ## Protocol Boundaries
 

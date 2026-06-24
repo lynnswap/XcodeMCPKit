@@ -9,7 +9,7 @@ import ProxyXcodeFeatures
 @testable import ProxyHTTPGateway
 
 @Suite
-struct ExternalContractTests {
+struct InternalProxyContractTests {
     @Test func mcpProtocolVersionCurrentRemainsStable() {
         #expect(MCP.ProtocolVersion.current == "2025-06-18")
     }

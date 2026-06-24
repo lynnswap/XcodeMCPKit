@@ -290,6 +290,12 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
+            name: "PublicProductContractTests",
+            dependencies: [],
+            path: "Tests/PublicProductContractTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
             name: "ProxyContractTests",
             dependencies: [
                 "XcodeMCPProxyKit",
