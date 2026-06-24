@@ -343,6 +343,56 @@ extension RuntimeCoordinatorTests {
         }
     }
 
+    @Test func processBoundSessionFactoryShapesBridgeEnvironment() throws {
+        let target = xcodeProcessTarget(processID: 715, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.maxBodyBytes = 2_000_000
+        config.upstreamSessionID = "shared-docs-session"
+
+        let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
+            config: config,
+            sharedSessionID: config.upstreamSessionID,
+            xcodeTarget: target,
+            baseEnvironment: [
+                "KEEP": "value",
+                "XCODE_PID": "legacy",
+                "MCP_XCODE_PID": "inherited-pid",
+                "MCP_XCODE_SESSION_ID": "inherited-session",
+            ]
+        )
+
+        let environment = try upstreamEnvironment(from: factory)
+        #expect(try upstreamCommand(from: factory) == target.mcpbridgePath)
+        #expect(try upstreamArgs(from: factory).isEmpty)
+        #expect(environment["KEEP"] == "value")
+        #expect(environment["XCODE_PID"] == nil)
+        #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
+        #expect(environment["DEVELOPER_DIR"] == target.developerDir)
+        #expect(environment["MCP_XCODE_SESSION_ID"] == "shared-docs-session")
+        #expect(try upstreamMaxQueuedWriteBytes(from: factory) == 8_000_000)
+    }
+
+    @Test func processBoundSessionFactoryRemovesInheritedSessionIDWithoutSharedSession()
+        throws
+    {
+        let target = xcodeProcessTarget(processID: 716, xcodeVersion: "27.0")
+        let config = makeConfig(requestTimeout: 5)
+
+        let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
+            config: config,
+            sharedSessionID: config.upstreamSessionID,
+            xcodeTarget: target,
+            baseEnvironment: [
+                "MCP_XCODE_SESSION_ID": "inherited-session",
+            ]
+        )
+
+        let environment = try upstreamEnvironment(from: factory)
+        #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
+        #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
+        #expect(environment["DEVELOPER_DIR"] == target.developerDir)
+    }
+
     @Test func defaultUpstreamPlanScalesWithXcodeProcessCount()
         throws
     {

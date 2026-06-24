@@ -1333,6 +1333,15 @@ func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: Str
 
 func upstreamEnvironment(from upstream: ManagedUpstreamSlot) throws -> [String: String] {
     let configMirror = try upstreamConfigMirror(from: upstream)
+    return try upstreamEnvironment(fromConfigMirror: configMirror)
+}
+
+func upstreamEnvironment(from factory: any UpstreamSessionFactory) throws -> [String: String] {
+    let configMirror = try upstreamConfigMirror(from: factory)
+    return try upstreamEnvironment(fromConfigMirror: configMirror)
+}
+
+private func upstreamEnvironment(fromConfigMirror configMirror: Mirror) throws -> [String: String] {
     return try #require(
         configMirror.children.first(where: { $0.label == "environment" })?.value
             as? [String: String],
@@ -1342,6 +1351,15 @@ func upstreamEnvironment(from upstream: ManagedUpstreamSlot) throws -> [String: 
 
 func upstreamCommand(from upstream: ManagedUpstreamSlot) throws -> String {
     let configMirror = try upstreamConfigMirror(from: upstream)
+    return try upstreamCommand(fromConfigMirror: configMirror)
+}
+
+func upstreamCommand(from factory: any UpstreamSessionFactory) throws -> String {
+    let configMirror = try upstreamConfigMirror(from: factory)
+    return try upstreamCommand(fromConfigMirror: configMirror)
+}
+
+private func upstreamCommand(fromConfigMirror configMirror: Mirror) throws -> String {
     return try #require(
         configMirror.children.first(where: { $0.label == "command" })?.value as? String,
         "UpstreamProcess.Config should include command for tests"
@@ -1350,9 +1368,26 @@ func upstreamCommand(from upstream: ManagedUpstreamSlot) throws -> String {
 
 func upstreamArgs(from upstream: ManagedUpstreamSlot) throws -> [String] {
     let configMirror = try upstreamConfigMirror(from: upstream)
+    return try upstreamArgs(fromConfigMirror: configMirror)
+}
+
+func upstreamArgs(from factory: any UpstreamSessionFactory) throws -> [String] {
+    let configMirror = try upstreamConfigMirror(from: factory)
+    return try upstreamArgs(fromConfigMirror: configMirror)
+}
+
+private func upstreamArgs(fromConfigMirror configMirror: Mirror) throws -> [String] {
     return try #require(
         configMirror.children.first(where: { $0.label == "args" })?.value as? [String],
         "UpstreamProcess.Config should include args for tests"
+    )
+}
+
+func upstreamMaxQueuedWriteBytes(from factory: any UpstreamSessionFactory) throws -> Int {
+    let configMirror = try upstreamConfigMirror(from: factory)
+    return try #require(
+        configMirror.children.first(where: { $0.label == "maxQueuedWriteBytes" })?.value as? Int,
+        "UpstreamProcess.Config should include maxQueuedWriteBytes for tests"
     )
 }
 
@@ -1362,6 +1397,15 @@ private func upstreamConfigMirror(from upstream: ManagedUpstreamSlot) throws -> 
         upstreamMirror.children.first(where: { $0.label == "factory" })?.value,
         "ManagedUpstreamSlot should expose a stored factory for tests"
     )
+    let factoryMirror = Mirror(reflecting: factory)
+    let config = try #require(
+        factoryMirror.children.first(where: { $0.label == "config" })?.value,
+        "UpstreamProcess factory should expose a stored config for tests"
+    )
+    return Mirror(reflecting: config)
+}
+
+private func upstreamConfigMirror(from factory: any UpstreamSessionFactory) throws -> Mirror {
     let factoryMirror = Mirror(reflecting: factory)
     let config = try #require(
         factoryMirror.children.first(where: { $0.label == "config" })?.value,

@@ -423,6 +423,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             runtimeBox: runtimeBox,
             fallback: SessionBackedDocumentationProviderTransport(
                 sessionFactory: LiveDocumentationProviderSessionFactory(
+                    config: config,
                     baseEnvironment: ProcessInfo.processInfo.environment
                 ),
                 clock: clock
