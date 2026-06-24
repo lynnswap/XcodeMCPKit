@@ -401,15 +401,27 @@ extension RuntimeCoordinator {
         }
 
         var ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
-        if ownerResolution.unresolved.isEmpty == false {
-            _ = try? await liveXcodeListWindowsResult(
-                route: .anyHealthy,
-                requestTimeoutOverride: requestTimeoutOverride
+        var inferredOwnerProcessID =
+            inferredUnambiguousOwnerProcessID(
+                for: requests,
+                unresolvedOwnerBoundRequests: ownerResolution.unresolved
             )
-            ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+        if ownerResolution.unresolved.isEmpty == false {
+            if inferredOwnerProcessID == nil {
+                _ = try? await liveXcodeListWindowsResult(
+                    route: .anyHealthy,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+                ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+                inferredOwnerProcessID =
+                    inferredUnambiguousOwnerProcessID(
+                        for: requests,
+                        unresolvedOwnerBoundRequests: ownerResolution.unresolved
+                    )
+            }
         }
 
-        if ownerResolution.unresolved.isEmpty == false {
+        if ownerResolution.unresolved.isEmpty == false, inferredOwnerProcessID == nil {
             return .reject(
                 errors: toolRoutingErrors(
                     for: requests,
@@ -419,7 +431,10 @@ extension RuntimeCoordinator {
             )
         }
 
-        let distinctOwners = Set(ownerResolution.resolved.map(\.processID))
+        var distinctOwners = Set(ownerResolution.resolved.map(\.processID))
+        if let inferredOwnerProcessID {
+            distinctOwners.insert(inferredOwnerProcessID)
+        }
         if distinctOwners.count > 1 {
             return .reject(
                 errors: requests.compactMap { request in
@@ -480,6 +495,46 @@ extension RuntimeCoordinator {
         }
 
         return .forwardAny(preferredUpstreamIndices: ownerUpstreamIndices)
+    }
+
+    private func inferredUnambiguousOwnerProcessID(
+        for requests: [ToolRoutingRequest],
+        unresolvedOwnerBoundRequests: [ToolRoutingRequest]
+    ) -> pid_t? {
+        guard unresolvedOwnerBoundRequests.isEmpty == false,
+              unresolvedOwnerBoundRequests.allSatisfy({ hasNoOwnerHint($0) }) else {
+            return nil
+        }
+        let usableRoutes = xcodeProcessRoutes.filter {
+            usableInitializedUpstreamIndices(in: $0).isEmpty == false
+                && unavailableXcodeProcessIDs().contains($0.target.processID) == false
+        }
+        if usableRoutes.count == 1 {
+            return usableRoutes[0].target.processID
+        }
+
+        let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
+            let processIDs = processToolCatalogRegistry.processIDsHavingTool(toolName)
+            return processIDs.isEmpty ? nil : processIDs
+        }
+        guard processIDSets.isEmpty == false else {
+            return nil
+        }
+        let candidateProcessIDs = processIDSets.dropFirst().reduce(processIDSets[0]) {
+            $0.intersection($1)
+        }
+        let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
+        let usableCandidates = candidateProcessIDs.intersection(usableProcessIDs)
+        guard usableCandidates.count == 1 else {
+            return nil
+        }
+        return usableCandidates.first
+    }
+
+    private func hasNoOwnerHint(_ request: ToolRoutingRequest) -> Bool {
+        let hasTabIdentifier = request.tabIdentifier?.isEmpty == false
+        let hasWorkspacePath = request.workspacePath?.isEmpty == false
+        return !hasTabIdentifier && !hasWorkspacePath
     }
 
     private func toolRoutingErrors(
