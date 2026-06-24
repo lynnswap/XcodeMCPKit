@@ -3,8 +3,19 @@ import NIO
 import NIOHTTP1
 import ProxySession
 
-extension ProxyServer {
-    public func start() throws -> Channel {
+extension XcodeMCPProxyServer {
+    /// Starts the proxy server without writing discovery information.
+    ///
+    /// Prefer ``startAndWriteDiscovery()`` when local clients or adapters need
+    /// to discover the HTTP endpoint automatically.
+    ///
+    /// - Returns: The resolved listening address.
+    public func start() throws -> (host: String, port: Int) {
+        let channel = try startListening()
+        return resolvedListenAddress(for: channel)
+    }
+
+    package func startListening() throws -> NIO.Channel {
         try config.validateModernProtocolConfiguration()
         let preparedRuntime = try prepareRuntimeForStart()
         let sessionManager = preparedRuntime.sessionManager

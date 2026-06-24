@@ -1,11 +1,34 @@
 import Foundation
 
+/// A tool advertised by the running Xcode MCP server.
+///
+/// Tool availability and schemas are dynamic. Use ``name`` with
+/// ``XcodeMCP/callTool(_:arguments:onProgress:)`` and inspect ``inputSchema``
+/// or ``raw`` when building arguments for a tool.
 public struct MCPTool: Codable, Equatable, Sendable {
+    /// The server-defined tool name.
     public var name: String
+
+    /// The server-provided human-readable description, when available.
     public var description: String?
+
+    /// The server-provided JSON schema for tool arguments, when available.
     public var inputSchema: MCPJSONValue?
+
+    /// The complete raw MCP tool object.
+    ///
+    /// This preserves dynamic fields and future MCP extensions that are not
+    /// modeled as first-class properties.
     public var raw: MCPJSONValue
 
+    /// Creates a tool value.
+    ///
+    /// - Parameters:
+    ///   - name: Server-defined tool name.
+    ///   - description: Optional human-readable description.
+    ///   - inputSchema: Optional JSON schema for tool arguments.
+    ///   - raw: Complete raw MCP tool object. When omitted, a minimal object is
+    ///     synthesized from `name`.
     public init(
         name: String,
         description: String? = nil,
@@ -20,31 +43,55 @@ public struct MCPTool: Codable, Equatable, Sendable {
         ])
     }
 
+    /// Decodes a tool from its raw MCP JSON object.
     public init(from decoder: Decoder) throws {
         let value = try MCPJSONValue(from: decoder)
         self = try MCPTool(json: value)
     }
 
+    /// Encodes the tool as an MCP JSON object, preserving raw fields where
+    /// possible.
     public func encode(to encoder: Encoder) throws {
         try MCPJSONValue.object(toolObject()).encode(to: encoder)
     }
 }
 
+/// A content item returned by an MCP tool call.
+///
+/// Known MCP content shapes are projected into typed cases. Unknown or
+/// malformed content is preserved as ``raw(_:)`` so clients can still inspect
+/// the original server response.
 public enum MCPContent: Codable, Equatable, Sendable {
+    /// Text content.
+    ///
+    /// The associated `raw` value contains the original MCP content object.
     case text(String, raw: MCPJSONValue)
+
+    /// Base64-encoded image content.
+    ///
+    /// The associated `raw` value contains the original MCP content object.
     case image(data: String, mimeType: String?, raw: MCPJSONValue)
+
+    /// Embedded resource content.
+    ///
+    /// The associated `raw` value contains the original MCP content object.
     case resource(uri: String?, text: String?, mimeType: String?, raw: MCPJSONValue)
+
+    /// Content that is not recognized by this package.
     case raw(MCPJSONValue)
 
+    /// Decodes a content item from raw MCP JSON.
     public init(from decoder: Decoder) throws {
         let value = try MCPJSONValue(from: decoder)
         self = try MCPContent(json: value)
     }
 
+    /// Encodes the original MCP content JSON.
     public func encode(to encoder: Encoder) throws {
         try rawValue.encode(to: encoder)
     }
 
+    /// The original MCP content JSON.
     public var rawValue: MCPJSONValue {
         switch self {
         case .text(_, let raw),
@@ -56,12 +103,40 @@ public enum MCPContent: Codable, Equatable, Sendable {
     }
 }
 
+/// The final result returned by an MCP `tools/call` request.
+///
+/// `XcodeMCP` returns only this final result from
+/// ``XcodeMCP/callTool(_:arguments:onProgress:)``. Progress notifications are
+/// delivered through the call's callback and are not stored here.
 public struct MCPToolResult: Codable, Equatable, Sendable {
+    /// Content items returned by the tool.
     public var content: [MCPContent]
+
+    /// Optional structured content returned by the tool.
+    ///
+    /// This value is raw MCP JSON because each tool may define its own shape.
     public var structuredContent: MCPJSONValue?
+
+    /// Whether the tool reported an error result.
+    ///
+    /// This is the MCP `isError` flag from the final tool response, not a Swift
+    /// transport error. Transport, timeout, and protocol failures are thrown.
     public var isError: Bool
+
+    /// The complete raw MCP tool result object.
+    ///
+    /// This preserves dynamic fields and future MCP extensions that are not
+    /// modeled as first-class properties.
     public var raw: MCPJSONValue
 
+    /// Creates a tool result value.
+    ///
+    /// - Parameters:
+    ///   - content: Content items returned by the tool.
+    ///   - structuredContent: Optional structured content returned by the tool.
+    ///   - isError: Whether the tool reported an error result.
+    ///   - raw: Complete raw MCP result object. When omitted, a minimal object
+    ///     is synthesized from the modeled properties.
     public init(
         content: [MCPContent],
         structuredContent: MCPJSONValue? = nil,
@@ -77,23 +152,53 @@ public struct MCPToolResult: Codable, Equatable, Sendable {
         ])
     }
 
+    /// Decodes a tool result from its raw MCP JSON object.
     public init(from decoder: Decoder) throws {
         let value = try MCPJSONValue(from: decoder)
         self = try MCPToolResult(json: value)
     }
 
+    /// Encodes the result as an MCP JSON object, preserving raw fields where
+    /// possible.
     public func encode(to encoder: Encoder) throws {
         try MCPJSONValue.object(resultObject()).encode(to: encoder)
     }
 }
 
+/// A progress notification associated with a tool call.
+///
+/// Progress values are delivered only through the `onProgress` callback passed
+/// to ``XcodeMCP/callTool(_:arguments:onProgress:)``. They are not exposed as a
+/// public stream and are not included in ``MCPToolResult``.
 public struct MCPProgress: Codable, Equatable, Sendable {
+    /// Token that associates the notification with a specific tool call.
     public var progressToken: String
+
+    /// Current progress value, when provided by the server.
     public var progress: Double?
+
+    /// Total progress value, when provided by the server.
     public var total: Double?
+
+    /// Optional server-provided progress message.
     public var message: String?
+
+    /// The complete raw MCP progress notification payload.
+    ///
+    /// This preserves dynamic fields and future MCP extensions that are not
+    /// modeled as first-class properties.
     public var raw: MCPJSONValue
 
+    /// Creates a progress notification value.
+    ///
+    /// - Parameters:
+    ///   - progressToken: Token that associates the notification with a tool
+    ///     call.
+    ///   - progress: Optional current progress value.
+    ///   - total: Optional total progress value.
+    ///   - message: Optional progress message.
+    ///   - raw: Complete raw MCP progress payload. When omitted, a minimal
+    ///     object is synthesized from `progressToken`.
     public init(
         progressToken: String,
         progress: Double? = nil,
@@ -110,6 +215,7 @@ public struct MCPProgress: Codable, Equatable, Sendable {
         ])
     }
 
+    /// Decodes a progress notification from raw MCP JSON.
     public init(from decoder: Decoder) throws {
         let value = try MCPJSONValue(from: decoder)
         guard let progress = MCPProgress(json: value) else {
@@ -118,6 +224,8 @@ public struct MCPProgress: Codable, Equatable, Sendable {
         self = progress
     }
 
+    /// Encodes the progress notification as MCP JSON, preserving raw fields
+    /// where possible.
     public func encode(to encoder: Encoder) throws {
         try MCPJSONValue.object(progressObject()).encode(to: encoder)
     }

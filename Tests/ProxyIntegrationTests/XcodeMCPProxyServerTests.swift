@@ -9,7 +9,7 @@ import XcodeMCPTestSupport
 
 @testable import XcodeMCPProxyKit
 
-struct ProxyServerTests {
+struct XcodeMCPProxyServerTests {
     @Test func firstXcrunToolSelectionTreatsLogAsFlagWithoutValue() {
         let selection = XcrunArguments.firstToolSelection(
             from: ["--sdk", "macosx", "--log", "mcpbridge", "--some-flag"]
@@ -29,7 +29,7 @@ struct ProxyServerTests {
             requestTimeout: 300
         )
 
-        let candidates = ProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
+        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
 
         #expect(candidates.contains("/usr/bin/xcrun"))
     }
@@ -47,7 +47,7 @@ struct ProxyServerTests {
             requestTimeout: 300
         )
 
-        let candidates = ProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
+        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
 
         #expect(candidates.contains(fixture.wrapperPath))
         #expect(candidates.contains(fixture.toolPath))
@@ -66,7 +66,7 @@ struct ProxyServerTests {
             requestTimeout: 300
         )
 
-        let candidates = ProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
+        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
 
         #expect(candidates.contains(fixture.wrapperPath))
         #expect(candidates.contains(fixture.toolPath))
@@ -117,8 +117,8 @@ struct ProxyServerTests {
             requestTimeout: 300,
             autoApproveXcodeDialog: true
         )
-        let server = ProxyServer(
-            config: config,
+        let server = XcodeMCPProxyServer(
+            proxyConfig: config,
             dependencies: .init(
                 makeAutoApprover: { autoApprover },
                 makeRuntimeCoordinator: { config, eventLoop in
