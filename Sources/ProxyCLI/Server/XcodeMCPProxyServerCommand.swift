@@ -62,7 +62,7 @@ package struct XcodeMCPProxyServerCommand {
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
         package var stderr: (String) -> Void
-        package var makeServer: (ProxyConfig) -> any ProxyServerCommandServer
+        package var makeServer: (XcodeMCPProxyServer.Configuration) -> any ProxyServerCommandServer
         package var isAddressAlreadyInUse: (Swift.Error) -> Bool
         package var existingProxyServerClient: ExistingProxyServerClient
 
@@ -70,7 +70,7 @@ package struct XcodeMCPProxyServerCommand {
             bootstrapLogging: @escaping ([String: String]) -> Void,
             stdout: @escaping (String) -> Void,
             stderr: @escaping (String) -> Void,
-            makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
+            makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any ProxyServerCommandServer,
             isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
             existingProxyServerClient: ExistingProxyServerClient = .liveValue
         ) {
@@ -87,7 +87,7 @@ package struct XcodeMCPProxyServerCommand {
             stdout: @escaping (String) -> Void,
             stderr: @escaping (String) -> Void,
             terminateExistingServer: @escaping @Sendable (String, Int) -> Bool,
-            makeServer: @escaping (ProxyConfig) -> any ProxyServerCommandServer,
+            makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any ProxyServerCommandServer,
             isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
             detectExistingProxyServerPIDs: @escaping @Sendable (String, Int) -> [Int]
         ) {
@@ -112,7 +112,7 @@ package struct XcodeMCPProxyServerCommand {
                 stdout: { print($0) },
                 stderr: { FileHandle.writeLine($0, to: .standardError) },
                 makeServer: { config in
-                    XcodeMCPProxyServer(proxyConfig: config, dependencies: .live(config: config))
+                    XcodeMCPProxyServer(config: config)
                 },
                 isAddressAlreadyInUse: XcodeMCPProxyServerCommand.isAddressAlreadyInUse,
                 existingProxyServerClient: .liveValue

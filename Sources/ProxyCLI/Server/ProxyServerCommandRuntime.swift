@@ -31,37 +31,38 @@ extension XcodeMCPProxyServerCommand {
             try XcodeMCPProxyServerCommand.applyDefaults(from: environment, to: &options)
 
             let proxyArgs = ["xcode-mcp-proxy"] + options.forwardedArgs
-            let config = try CLIParser.parse(args: proxyArgs, environment: environment)
-            try config.validateModernProtocolConfiguration()
+            let proxyConfig = try CLIParser.parse(args: proxyArgs, environment: environment)
+            try proxyConfig.validateModernProtocolConfiguration()
+            let serverConfig = XcodeMCPProxyServer.Configuration(serverProxyConfig: proxyConfig)
 
             let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])
             if isDryRun {
                 dependencies.stdout(
-                    XcodeMCPProxyServerCommand.dryRunCommandLine(options: options, config: config)
+                    XcodeMCPProxyServerCommand.dryRunCommandLine(options: options, config: serverConfig)
                 )
                 return 0
             }
-            if options.forceRestart, config.listenPort > 0 {
+            if options.forceRestart, serverConfig.listenPort > 0 {
                 _ = dependencies.existingProxyServerClient.terminateExistingServer(
-                    config.listenHost,
-                    config.listenPort,
+                    serverConfig.listenHost,
+                    serverConfig.listenPort,
                     dependencies.stderr
                 )
             }
 
             do {
-                let server = dependencies.makeServer(config)
+                let server = dependencies.makeServer(serverConfig)
                 _ = try server.startAndWriteDiscovery()
                 try await server.wait()
                 return 0
             } catch {
-                if config.listenPort > 0, dependencies.isAddressAlreadyInUse(error) {
+                if serverConfig.listenPort > 0, dependencies.isAddressAlreadyInUse(error) {
                     let message = XcodeMCPProxyServerCommand.portInUseMessage(
-                        host: config.listenHost,
-                        port: config.listenPort,
+                        host: serverConfig.listenHost,
+                        port: serverConfig.listenPort,
                         pids: dependencies.existingProxyServerClient.detectExistingProxyServerPIDs(
-                            config.listenHost,
-                            config.listenPort
+                            serverConfig.listenHost,
+                            serverConfig.listenPort
                         )
                     )
                     dependencies.stderr(message)

@@ -4,6 +4,7 @@ import Testing
 import ProxyBuildInfo
 import ProxyCLICommon
 import ProxyServerCLI
+import XcodeMCPProxyKit
 
 @Suite
 struct ServerCommandTests {
@@ -603,10 +604,10 @@ struct ServerCommandTests {
 
 private final class RecordingProxyServer: ProxyServerCommandServer {
     private let state = LockedBox(
-        (config: Optional<ProxyConfig>.none, startCount: 0, waitCount: 0)
+        (config: Optional<XcodeMCPProxyServer.Configuration>.none, startCount: 0, waitCount: 0)
     )
 
-    func record(config: ProxyConfig) {
+    func record(config: XcodeMCPProxyServer.Configuration) {
         state.withValue { value in
             value.config = config
         }
@@ -625,7 +626,7 @@ private final class RecordingProxyServer: ProxyServerCommandServer {
         }
     }
 
-    func recordedConfig() -> ProxyConfig? {
+    func recordedConfig() -> XcodeMCPProxyServer.Configuration? {
         state.snapshot().config
     }
 
