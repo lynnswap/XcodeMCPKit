@@ -94,33 +94,24 @@ struct PublicProductContractTests {
     }
 
     private func runSwiftBuild(packageURL: URL, logURL: URL) throws -> CommandResult {
-        try runSwiftCommand(
-            [
-                "build",
-                "--package-path",
-                packageURL.path,
-                "--target",
-                "XcodeMCPKitClient",
-                "--target",
-                "XcodeMCPProxyKitClient",
-                "-Xswiftc",
-                "-strict-concurrency=minimal",
-            ],
-            logURL: logURL
-        )
-    }
-
-    private func runSwiftCommand(
-        _ arguments: [String],
-        logURL: URL
-    ) throws -> CommandResult {
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let output = try FileHandle(forWritingTo: logURL)
         defer { try? output.close() }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["swift"] + arguments
+        process.arguments = [
+            "swift",
+            "build",
+            "--package-path",
+            packageURL.path,
+            "--target",
+            "XcodeMCPKitClient",
+            "--target",
+            "XcodeMCPProxyKitClient",
+            "-Xswiftc",
+            "-strict-concurrency=minimal",
+        ]
         process.standardOutput = output
         process.standardError = output
 
@@ -132,7 +123,6 @@ struct PublicProductContractTests {
             output: (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
         )
     }
-
 }
 
 private struct CommandResult {
