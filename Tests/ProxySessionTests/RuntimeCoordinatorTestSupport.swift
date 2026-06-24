@@ -1693,10 +1693,23 @@ actor AvailabilityFlag {
 }
 
 actor ControlledReadinessSleep {
+    private struct SleepContinuation {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private struct SleepObservationWaiter {
+        let id: UUID
+        let index: Int
+        let continuation: CheckedContinuation<UInt64, Error>
+    }
+
     private var sleeps: [UInt64] = []
-    private var sleepContinuations: [CheckedContinuation<Void, Never>] = []
+    private var sleepContinuations: [SleepContinuation] = []
+    private var cancelledSleepIDs: Set<UUID> = []
     private var releaseCredits = 0
-    private var waiters: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
+    private var waiters: [SleepObservationWaiter] = []
+    private var cancelledWaiterIDs: Set<UUID> = []
 
     func sleep(nanoseconds: UInt64) async {
         sleeps.append(nanoseconds)
@@ -1705,17 +1718,55 @@ actor ControlledReadinessSleep {
             releaseCredits -= 1
             return
         }
-        await withCheckedContinuation { continuation in
-            sleepContinuations.append(continuation)
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard cancelledSleepIDs.remove(id) == nil, Task.isCancelled == false else {
+                    continuation.resume()
+                    return
+                }
+                sleepContinuations.append(
+                    SleepContinuation(id: id, continuation: continuation)
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelSleep(id: id) }
         }
+        cancelledSleepIDs.remove(id)
     }
 
     func nextSleep(at index: Int) async throws -> UInt64 {
         if index < sleeps.count {
             return sleeps[index]
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append((index, continuation))
+        let id = UUID()
+        do {
+            let sleep = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    if index < sleeps.count {
+                        continuation.resume(returning: sleeps[index])
+                        return
+                    }
+                    guard cancelledWaiterIDs.remove(id) == nil, Task.isCancelled == false else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    waiters.append(
+                        SleepObservationWaiter(
+                            id: id,
+                            index: index,
+                            continuation: continuation
+                        )
+                    )
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(id: id) }
+            }
+            cancelledWaiterIDs.remove(id)
+            return sleep
+        } catch {
+            cancelledWaiterIDs.remove(id)
+            throw error
         }
     }
 
@@ -1724,11 +1775,11 @@ actor ControlledReadinessSleep {
             releaseCredits += 1
             return
         }
-        sleepContinuations.removeFirst().resume()
+        sleepContinuations.removeFirst().continuation.resume()
     }
 
     private func resumeReadyWaiters() {
-        var remaining: [(index: Int, continuation: CheckedContinuation<UInt64, Error>)] = []
+        var remaining: [SleepObservationWaiter] = []
         for waiter in waiters {
             if waiter.index < sleeps.count {
                 waiter.continuation.resume(returning: sleeps[waiter.index])
@@ -1737,6 +1788,22 @@ actor ControlledReadinessSleep {
             }
         }
         waiters = remaining
+    }
+
+    private func cancelSleep(id: UUID) {
+        guard let index = sleepContinuations.firstIndex(where: { $0.id == id }) else {
+            cancelledSleepIDs.insert(id)
+            return
+        }
+        sleepContinuations.remove(at: index).continuation.resume()
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            cancelledWaiterIDs.insert(id)
+            return
+        }
+        waiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 }
 
@@ -1806,13 +1873,13 @@ func makeTestReadinessGate(
             DispatchTime.now().uptimeNanoseconds
         },
         sleepNanoseconds: { nanoseconds in
-            if let sleepRecorder, recordPollSleeps || nanoseconds >= 1_000_000_000 {
-                await sleepRecorder.sleep(nanoseconds: nanoseconds)
-            } else {
-                // Readiness polling models OS process availability. Tests that
-                // need to assert a poll point pass sleepRecorder instead.
-                try? await Task.sleep(nanoseconds: nanoseconds)
+            guard let sleepRecorder else {
+                preconditionFailure("Readiness tests must control sleep explicitly")
             }
+            guard recordPollSleeps || nanoseconds >= 1_000_000_000 else {
+                preconditionFailure("Readiness poll sleeps must be recorded explicitly")
+            }
+            await sleepRecorder.sleep(nanoseconds: nanoseconds)
         },
         isAvailable: isAvailable,
         launchIfUnavailable: launchIfUnavailable,
