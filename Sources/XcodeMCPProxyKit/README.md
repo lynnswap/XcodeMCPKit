@@ -81,11 +81,12 @@ when `configPath` is set.
 
 ## Lifecycle
 
-`start()` binds HTTP channels and starts the proxy runtime.
-`startAndWriteDiscovery()` additionally writes the endpoint discovery file and
-logs a startup summary. `wait()` suspends until the listening channels close.
-`shutdown()` stops permission automation, closes listening and accepted
-channels, shuts down the runtime, and terminates the event loop group.
+`start()` binds HTTP channels, starts the proxy runtime, and returns the
+resolved listening address. `startAndWriteDiscovery()` does the same startup
+work, then writes the endpoint discovery file and logs a startup summary.
+`wait()` suspends until the listening channels close. `shutdown()` stops
+permission automation, closes listening and accepted channels, shuts down the
+runtime, and terminates the event loop group.
 
 Use one `XcodeMCPProxyServer` per proxy server instance. Create a new instance
 after shutdown instead of restarting the same object.

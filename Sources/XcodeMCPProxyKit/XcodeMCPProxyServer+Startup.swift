@@ -8,7 +8,14 @@ extension XcodeMCPProxyServer {
     ///
     /// Prefer ``startAndWriteDiscovery()`` when local clients or adapters need
     /// to discover the HTTP endpoint automatically.
-    public func start() throws -> Channel {
+    ///
+    /// - Returns: The resolved listening address.
+    public func start() throws -> (host: String, port: Int) {
+        let channel = try startListening()
+        return resolvedListenAddress(for: channel)
+    }
+
+    package func startListening() throws -> NIO.Channel {
         try config.validateModernProtocolConfiguration()
         let preparedRuntime = try prepareRuntimeForStart()
         let sessionManager = preparedRuntime.sessionManager

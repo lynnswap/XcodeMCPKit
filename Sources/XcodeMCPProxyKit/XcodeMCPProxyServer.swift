@@ -15,6 +15,7 @@ import ProxyXcodeSupport
 /// `xcode-mcp-proxy-server` executable. Construct it with ``Configuration``,
 /// call ``startAndWriteDiscovery()`` or ``start()``, then keep the process
 /// alive with ``wait()`` until your application decides to call ``shutdown()``.
+/// Both start methods return the resolved listening address.
 ///
 /// The server exposes the proxy lifecycle. CLI parsing, STDIO adapter behavior,
 /// and internal session routing are intentionally handled outside this public
@@ -244,7 +245,7 @@ public final class XcodeMCPProxyServer {
     /// by ``Configuration/discoveryFileURL``, logs a startup summary, and returns
     /// the resolved listening address.
     public func startAndWriteDiscovery() throws -> (host: String, port: Int) {
-        let channel = try start()
+        let channel = try startListening()
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
         writeDiscovery(resolvedHost: host, port: port)
@@ -328,7 +329,7 @@ public final class XcodeMCPProxyServer {
         }
     }
 
-    private func resolvedListenAddress(for channel: Channel) -> (String, Int) {
+    package func resolvedListenAddress(for channel: Channel) -> (String, Int) {
         if let address = channel.localAddress {
             let host = address.ipAddress ?? config.listenHost
             let port = address.port ?? config.listenPort
