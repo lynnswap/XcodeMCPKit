@@ -51,14 +51,8 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex
         )
 
-        let request: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": upstreamID,
-            "method": "tools/list",
-        ]
-        guard JSONSerialization.isValidJSONObject(request),
-            let requestData = try? JSONSerialization.data(withJSONObject: request, options: [])
-        else {
+        let request = JSONRPC.Wire.requestObject(id: upstreamID, method: "tools/list")
+        guard let requestData = try? JSONRPC.Wire.data(from: request) else {
             finishHealthProbe(
                 upstreamIndex: upstreamIndex,
                 probeGeneration: probeGeneration,
@@ -197,7 +191,7 @@ extension RuntimeCoordinator {
         scheduleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
 
         let request = makeInternalInitializeRequest(id: upstreamID)
-        if let data = try? JSONSerialization.data(withJSONObject: request, options: []) {
+        if let data = try? JSONRPC.Wire.data(from: request) {
             sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: true)
         } else {
             clearUpstreamState(upstreamIndex: upstreamIndex)

@@ -1321,15 +1321,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         id: JSONRPC.ID,
         result: JSONValue
     ) throws -> ByteBuffer {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
-            "result": result.foundationObject,
-        ]
-        guard JSONSerialization.isValidJSONObject(response) else {
-            throw TimeoutError()
-        }
-        let data = try JSONSerialization.data(withJSONObject: response, options: [])
+        let data = try JSONRPC.Wire.resultResponseData(id: id, result: result)
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
         buffer.writeBytes(data)
         return buffer
@@ -1340,18 +1332,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         error: Error
     ) throws -> ByteBuffer {
         let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
-            "error": [
-                "code": mapped.code,
-                "message": mapped.message,
-            ],
-        ]
-        guard JSONSerialization.isValidJSONObject(response) else {
-            throw TimeoutError()
-        }
-        let data = try JSONSerialization.data(withJSONObject: response, options: [])
+        let data = try JSONRPC.Wire.errorResponseData(
+            id: id,
+            code: mapped.code,
+            message: mapped.message
+        )
         var buffer = ByteBufferAllocator().buffer(capacity: data.count)
         buffer.writeBytes(data)
         return buffer

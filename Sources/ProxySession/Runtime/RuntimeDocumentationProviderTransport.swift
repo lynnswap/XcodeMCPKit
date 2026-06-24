@@ -226,16 +226,11 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     }
 
     private static func responseIsProxyUpstreamFailure(_ data: Data) -> Bool {
-        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
-            as? [String: Any],
-            let error = object["error"] as? [String: Any],
-            let code = (error["code"] as? NSNumber)?.intValue,
-            let message = error["message"] as? String
-        else {
+        guard let error = JSONRPC.Wire.errorPayload(fromResponseData: data) else {
             return false
         }
-        return (code == -32001 && message == "upstream unavailable")
-            || (code == -32002 && message == "upstream overloaded")
+        return (error.code == -32001 && error.message == "upstream unavailable")
+            || (error.code == -32002 && error.message == "upstream overloaded")
     }
 }
 
@@ -293,11 +288,10 @@ extension RuntimeCoordinator {
                 route: .pinnedUpstream(upstreamIndex),
                 purpose: "documentation-tools",
                 label: "tools/list:DocumentationProvider",
-                requestObject: [
-                    "jsonrpc": "2.0",
-                    "id": "__documentation-tools-\(UUID().uuidString)",
-                    "method": "tools/list",
-                ],
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "__documentation-tools-\(UUID().uuidString)",
+                    method: "tools/list"
+                ),
                 requestTimeout: requestTimeout,
                 rpcHandle: rpcHandle
             )
@@ -322,7 +316,10 @@ extension RuntimeCoordinator {
         else {
             throw ControlPlane.Error.invalidResponse("missing DocumentationSearch request id")
         }
-        requestObject["id"] = "__documentation-search-\(UUID().uuidString)"
+        requestObject = JSONRPC.Wire.objectByReplacingID(
+            in: requestObject,
+            with: JSONRPC.ID(any: "__documentation-search-\(UUID().uuidString)")!
+        )
         let rpcHandle = ControlPlane.RPCHandle()
         do {
             let response = try await performControlPlaneRPC(

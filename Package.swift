@@ -98,6 +98,7 @@ let package = Package(
             name: "XcodeMCPKit",
             dependencies: [
                 "ProxyCore",
+                "ProxyMCP",
                 "ProxySessionUpstream",
             ],
             path: "Sources/XcodeMCPKit",

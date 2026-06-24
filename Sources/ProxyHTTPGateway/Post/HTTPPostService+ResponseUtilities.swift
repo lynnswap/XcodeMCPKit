@@ -248,12 +248,8 @@ extension HTTPPostService {
 
         let mergedObjects =
             localResponseObjects
-            + responseIDs.map { makeJSONRPCErrorResponseObject(id: $0, code: code, message: message) }
-        guard JSONSerialization.isValidJSONObject(mergedObjects),
-            let responseData = try? JSONSerialization.data(
-                withJSONObject: mergedObjects,
-                options: []
-            )
+            + responseIDs.map { JSONRPC.Wire.errorResponseObject(id: $0, code: code, message: message) }
+        guard let responseData = try? JSONRPC.Wire.data(from: mergedObjects)
         else {
             if responseIDs.isEmpty {
                 return .plain(
@@ -315,8 +311,7 @@ extension HTTPPostService {
             return responseData
         }
 
-        return (try? JSONSerialization.data(withJSONObject: mergedObjects, options: []))
-            ?? responseData
+        return (try? JSONRPC.Wire.data(from: mergedObjects)) ?? responseData
     }
 
     package static func mergeLocalToolResponseData(
@@ -370,10 +365,7 @@ extension HTTPPostService {
             return nil
         }
         let payload: Any = (forceBatchArray || objects.count > 1) ? objects : objects[0]
-        guard JSONSerialization.isValidJSONObject(payload) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+        return try? JSONRPC.Wire.data(from: payload)
     }
 
     package static func responseDataForBatchResolution(
@@ -430,19 +422,18 @@ extension HTTPPostService {
         id: JSONRPC.ID,
         message: String
     ) -> [String: Any] {
-        [
-            "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": message,
-                    ]
-                ],
-                "isError": true,
-            ],
-        ]
+        JSONRPC.Wire.resultResponseObject(
+            id: id,
+            result: .object([
+                "content": .array([
+                    .object([
+                        "type": .string("text"),
+                        "text": .string(message),
+                    ])
+                ]),
+                "isError": .bool(true),
+            ])
+        )
     }
 
     package static func makeJSONRPCErrorResponseObject(
@@ -450,11 +441,7 @@ extension HTTPPostService {
         code: Int,
         message: String
     ) -> [String: Any] {
-        makeJSONRPCErrorResponseObject(
-            id: id.value.foundationObject,
-            code: code,
-            message: message
-        )
+        JSONRPC.Wire.errorResponseObject(id: id, code: code, message: message)
     }
 
     package static func makeJSONRPCErrorResponseObject(
@@ -462,14 +449,10 @@ extension HTTPPostService {
         code: Int,
         message: String
     ) -> [String: Any] {
-        [
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": [
-                "code": code,
-                "message": message,
-            ],
-        ]
+        JSONRPC.Wire.errorResponseObject(
+            idValue: JSONValue(any: id),
+            error: .init(code: code, message: message)
+        )
     }
 
     package static func makeJSONRPCErrorResponseData(
@@ -478,26 +461,20 @@ extension HTTPPostService {
         message: String,
         forceBatchArray: Bool
     ) -> Data? {
-        let objects = ids.map { makeJSONRPCErrorResponseObject(id: $0, code: code, message: message) }
-        guard !objects.isEmpty else {
-            return nil
-        }
-        let payload: Any = (forceBatchArray || objects.count > 1) ? objects : objects[0]
-        guard JSONSerialization.isValidJSONObject(payload) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+        try? JSONRPC.Wire.errorResponseData(
+            ids: ids,
+            code: code,
+            message: message,
+            forceBatchArray: forceBatchArray,
+            includeNullIDWhenEmpty: false
+        )
     }
 
     package static func makeJSONRPCResultResponseObject(
         id: JSONRPC.ID,
         result: JSONValue
     ) -> [String: Any] {
-        [
-            "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
-            "result": result.foundationObject,
-        ]
+        JSONRPC.Wire.resultResponseObject(id: id, result: result)
     }
 
     package static func makeJSONRPCResultResponseData(
@@ -505,17 +482,11 @@ extension HTTPPostService {
         result: JSONValue,
         forceBatchArray: Bool
     ) -> Data? {
-        let objects = ids.map {
-            makeJSONRPCResultResponseObject(id: $0, result: result)
-        }
-        guard !objects.isEmpty else {
-            return nil
-        }
-        let payload: Any = (forceBatchArray || objects.count > 1) ? objects : objects[0]
-        guard JSONSerialization.isValidJSONObject(payload) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+        try? JSONRPC.Wire.resultResponseData(
+            ids: ids,
+            result: result,
+            forceBatchArray: forceBatchArray
+        )
     }
 
     package static func makeToolResponseData(
@@ -525,13 +496,10 @@ extension HTTPPostService {
         guard responseObjects.isEmpty == false else {
             return nil
         }
-        let payload: Any = (forceBatchArray || responseObjects.count > 1)
-            ? responseObjects
-            : responseObjects[0]
-        guard JSONSerialization.isValidJSONObject(payload) else {
-            return nil
-        }
-        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+        return try? JSONRPC.Wire.responsePayloadData(
+            objects: responseObjects,
+            forceBatchArray: forceBatchArray
+        )
     }
 
     package static func makeToolRoutingErrorResponseData(

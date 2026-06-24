@@ -100,12 +100,10 @@ extension HTTPPostService {
         guard let payload = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return data
         }
-        guard payload is [Any] == false,
-            JSONSerialization.isValidJSONObject([payload])
-        else {
+        guard payload is [Any] == false else {
             return data
         }
-        return (try? JSONSerialization.data(withJSONObject: [payload], options: [])) ?? data
+        return (try? JSONRPC.Wire.data(from: [payload])) ?? data
     }
 
     private static func isJSONRPCErrorResponse(_ data: Data) -> Bool {
@@ -308,7 +306,7 @@ extension HTTPPostService {
             forwardedPayload = forwardedObjects[0]
         }
         let forwardedBodyData = forwardedPayload.flatMap {
-            try? JSONSerialization.data(withJSONObject: $0, options: [])
+            try? JSONRPC.Wire.data(from: $0)
         }
         let forwardedResponseIDs = forwardedPayload.map {
             Self.extractResponseIDs(from: $0)
@@ -441,8 +439,7 @@ extension HTTPPostService {
             guard let originalID = JSONRPC.Message.Inspector.requestID(from: request) else {
                 continue
             }
-            guard JSONSerialization.isValidJSONObject(request),
-                  let requestData = try? JSONSerialization.data(withJSONObject: request, options: []) else {
+            guard let requestData = try? JSONRPC.Wire.data(from: request) else {
                 responseObjects.append(
                     Self.makeJSONRPCErrorResponseObject(
                         id: originalID,
@@ -551,7 +548,7 @@ extension HTTPPostService {
         if let object = requestJSON as? [String: Any],
             let refreshRequest = RefreshCodeIssues.Request(requestObject: object),
             Self.extractResponseIDs(from: object).isEmpty == false,
-            let bodyData = try? JSONSerialization.data(withJSONObject: object, options: [])
+            let bodyData = try? JSONRPC.Wire.data(from: object)
         {
             return HTTPPostService.RefreshRouting(
                 refreshRoutes: [
@@ -595,7 +592,7 @@ extension HTTPPostService {
                 continue
             }
             let payload: Any = requests.count == 1 ? requests : object
-            guard let bodyData = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            guard let bodyData = try? JSONRPC.Wire.data(from: payload) else {
                 return nil
             }
             refreshRoutes.append(
@@ -622,7 +619,7 @@ extension HTTPPostService {
             return remainingRequestObjects
         }()
         let remainingBodyData = remainingPayload.flatMap {
-            try? JSONSerialization.data(withJSONObject: $0, options: [])
+            try? JSONRPC.Wire.data(from: $0)
         }
         let remainingLocalResponseData = Self.makeToolResponseData(
             from: remainingInvalidResponseObjects,

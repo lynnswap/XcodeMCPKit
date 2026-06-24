@@ -209,18 +209,20 @@ package struct MCPForwardingService: Sendable {
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
     ) async -> RefreshCodeIssues.Workflow.InternalToolResult {
-        let requestObject: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": "__internal-\(UUID().uuidString)",
-            "method": "tools/call",
-            "params": [
-                "name": name,
-                "arguments": arguments,
-            ],
-        ]
+        guard let argumentValue = JSONValue(any: arguments) else {
+            return .unavailable
+        }
+        let requestObject = JSONRPC.Wire.requestObject(
+            id: "__internal-\(UUID().uuidString)",
+            method: "tools/call",
+            params: .object([
+                "name": .string(name),
+                "arguments": argumentValue,
+            ])
+        )
         let internalRequestID = JSONRPC.ID(any: requestObject["id"]!)!
 
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: requestObject, options: [])
+        guard let bodyData = try? JSONRPC.Wire.data(from: requestObject)
         else {
             return .unavailable
         }
