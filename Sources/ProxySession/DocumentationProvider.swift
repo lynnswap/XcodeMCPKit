@@ -198,11 +198,15 @@ package protocol DocumentationProviderRouting: Sendable {
         timeout: TimeAmount?
     ) async throws -> Data
     func close(route: DocumentationProviderRoute) async
+    func closeForShutdown(route: DocumentationProviderRoute) async
     func shutdown() async
 }
 
 extension DocumentationProviderRouting {
     package func close(route _: DocumentationProviderRoute) async {}
+    package func closeForShutdown(route: DocumentationProviderRoute) async {
+        await close(route: route)
+    }
     package func shutdown() async {}
 }
 
@@ -1317,6 +1321,7 @@ package actor DocumentationProviderConnection {
     private let clock: ClockClient
     private let tasks = AsyncTaskSupervisor()
     private var eventTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
     private var pendingResponses: [String: DocumentationPendingResponse] = [:]
     private var nextID: Int64 = 1
 
@@ -1342,16 +1347,31 @@ package actor DocumentationProviderConnection {
         }
     }
 
-    package func stop() async {
+    package func stopDetachingSession() -> Task<Void, Never> {
+        ensureStopTask()
+    }
+
+    package func stopAwaitingSession() async {
+        await ensureStopTask().value
+    }
+
+    private func ensureStopTask() -> Task<Void, Never> {
+        if let existing = stopTask {
+            return existing
+        }
         let eventTask = self.eventTask
         eventTask?.cancel()
         self.eventTask = nil
-        _ = tasks.beginShutdown()
+        let taskDrain = tasks.beginShutdown()
         failAll(CancellationError())
         let session = self.session
-        Task {
+        let stopTask = Task {
             await session.stop()
+            await eventTask?.value
+            await taskDrain.wait()
         }
+        self.stopTask = stopTask
+        return stopTask
     }
 
     package func sendNotification(_ object: [String: Any]) async throws {
@@ -1488,6 +1508,7 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
     private let sessionFactory: any DocumentationProviderSessionMaking
     private let clock: ClockClient
     private var connections: [String: DocumentationProviderConnection] = [:]
+    private var backgroundSessionStops: [UUID: Task<Void, Never>] = [:]
 
     package init(
         sessionFactory: any DocumentationProviderSessionMaking,
@@ -1526,7 +1547,8 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
                 serverVersion: serverVersion
             )
         } catch {
-            await connection.stop()
+            let stopTask = await connection.stopDetachingSession()
+            trackBackgroundSessionStop(stopTask)
             throw error
         }
     }
@@ -1560,15 +1582,41 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         guard let connection = connections.removeValue(forKey: route.id) else {
             return
         }
-        await connection.stop()
+        let stopTask = await connection.stopDetachingSession()
+        trackBackgroundSessionStop(stopTask)
+    }
+
+    package func closeForShutdown(route: DocumentationProviderRoute) async {
+        guard let connection = connections.removeValue(forKey: route.id) else {
+            return
+        }
+        await connection.stopAwaitingSession()
     }
 
     package func shutdown() async {
         let connections = self.connections
         self.connections.removeAll()
+        let backgroundSessionStops = self.backgroundSessionStops
+        self.backgroundSessionStops.removeAll()
         for connection in connections.values {
-            await connection.stop()
+            await connection.stopAwaitingSession()
         }
+        for stopTask in backgroundSessionStops.values {
+            await stopTask.value
+        }
+    }
+
+    private func trackBackgroundSessionStop(_ stopTask: Task<Void, Never>) {
+        let id = UUID()
+        backgroundSessionStops[id] = stopTask
+        Task { [weak self] in
+            await stopTask.value
+            await self?.finishBackgroundSessionStop(id)
+        }
+    }
+
+    private func finishBackgroundSessionStop(_ id: UUID) {
+        backgroundSessionStops.removeValue(forKey: id)
     }
 
     private static func makeInitializeRequestData(
@@ -2153,7 +2201,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard previous.profile.id != profile.id else {
             return false
         }
-        await closeTransportRouteIfPresent(previous.profile)
+        await closeTransportRouteIfPresent(previous.profile, awaitTermination: isShutdown)
         return true
     }
 
@@ -2351,7 +2399,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    package func invalidate(reason _: String) async {
+    package func invalidate(reason: String) async {
+        await invalidate(reason: reason, awaitRouteTermination: false)
+    }
+
+    private func invalidate(reason _: String, awaitRouteTermination: Bool) async {
         let preparations = providerPreparations
         providerPreparations.removeAll()
         for preparation in preparations.values {
@@ -2363,10 +2415,16 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         activeProvider = nil
         permanentlyUnusableProcessIDs.removeAll()
         for profile in prepared.values where profile.id != provider?.profile.id {
-            await closeTransportRouteIfPresent(profile)
+            await closeTransportRouteIfPresent(
+                profile,
+                awaitTermination: awaitRouteTermination
+            )
         }
         if let provider {
-            await closeTransportRouteIfPresent(provider.profile)
+            await closeTransportRouteIfPresent(
+                provider.profile,
+                awaitTermination: awaitRouteTermination
+            )
         }
     }
 
@@ -2378,14 +2436,21 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         guard activeProvider?.profile.id != profile.id else {
             return
         }
-        await closeTransportRouteIfPresent(profile)
+        await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
     }
 
-    private func closeTransportRouteIfPresent(_ profile: CandidateProfile) async {
+    private func closeTransportRouteIfPresent(
+        _ profile: CandidateProfile,
+        awaitTermination: Bool = false
+    ) async {
         guard let route = profile.route else {
             return
         }
-        await transport.close(route: route)
+        if awaitTermination {
+            await transport.closeForShutdown(route: route)
+        } else {
+            await transport.close(route: route)
+        }
     }
 
     private func cacheInstalledDocumentationAssetReplacement(
@@ -2405,7 +2470,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
 
     package func shutdown() async {
         isShutdown = true
-        await invalidate(reason: "shutdown")
+        await invalidate(reason: "shutdown", awaitRouteTermination: true)
         await transport.shutdown()
     }
 
@@ -2505,7 +2570,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         providerPreparations.removeValue(forKey: target.processID)
         if isShutdown {
-            await closeTransportRouteIfPresent(profile)
+            await closeTransportRouteIfPresent(profile, awaitTermination: true)
             throw CancellationError()
         }
         return try await cachePreparedProvider(
@@ -2651,7 +2716,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         if let activeProvider, activeProvider.profile.id == provider.profile.id {
             self.activeProvider = nil
         }
-        await closeTransportRouteIfPresent(provider.profile)
+        await closeTransportRouteIfPresent(provider.profile, awaitTermination: isShutdown)
     }
 
     private func orderedTargets(
@@ -2716,7 +2781,11 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 throw TimeoutError()
             }
         } catch {
-            await transport.close(route: route)
+            if isShutdown {
+                await transport.closeForShutdown(route: route)
+            } else {
+                await transport.close(route: route)
+            }
             throw error
         }
         return CandidateProfile(
@@ -2883,7 +2952,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                 requestTimeout: remainingTimeout(until: deadline)
             )
             if replacement.route?.id != profile.route?.id {
-                await closeTransportRouteIfPresent(profile)
+                await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
             }
             let updated = await profileByRefreshingDescriptor(
                 replacement,
@@ -2957,7 +3026,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         var updated = profile
         updated.backend = .installedDocumentationAsset(descriptor: descriptor)
         updated.descriptorLookupCompleted = true
-        await closeTransportRouteIfPresent(profile)
+        await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
         return updated
     }
 
@@ -2968,7 +3037,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         var updated = profile
         updated.backend = .installedDocumentationAsset(descriptor: fallback.descriptor)
         updated.descriptorLookupCompleted = true
-        await closeTransportRouteIfPresent(profile)
+        await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
         return updated
     }
 

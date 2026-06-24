@@ -5135,6 +5135,11 @@ struct RuntimeCoordinatorTests {
         )
         await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(100))
+        try await waitWithTimeout("waiting for eager initialize timeout") {
+            while manager.testStateSnapshot().initInFlight {
+                await Task.yield()
+            }
+        }
 
         _ = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 1))!,

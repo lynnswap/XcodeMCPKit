@@ -62,6 +62,59 @@ extension RuntimeCoordinatorTests {
         await stopGate.signal()
     }
 
+    @Test func sessionBackedDocumentationProviderShutdownWaitsForDetachedSessionStopDrain()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 120, xcodeVersion: "27.0")
+        let stopStarted = TestSignal()
+        let stopGate = AsyncGate()
+        let session = BlockingStopDocumentationSession(
+            serverVersion: "27.0",
+            stopStarted: stopStarted,
+            stopGate: stopGate
+        )
+        let transport = SessionBackedDocumentationProviderTransport(
+            sessionFactory: FixedDocumentationSessionFactory(session: session)
+        )
+        let route = try await transport.openRoute(
+            for: target,
+            requestTimeout: .seconds(1),
+            initializeParams: [:]
+        )
+        let closeTask = Task {
+            await transport.close(route: route)
+        }
+        try await stopStarted.wait(description: "waiting for detached provider session stop")
+        try await waitWithTimeout(
+            "documentation provider close should detach session stop",
+            timeout: .milliseconds(200)
+        ) {
+            await closeTask.value
+        }
+
+        let shutdownFinished = TestSignal()
+        let shutdownTask = Task {
+            await transport.shutdown()
+            shutdownFinished.signal()
+        }
+        var shutdownReturnedBeforeStopDrain = false
+        do {
+            try await shutdownFinished.wait(
+                timeout: .milliseconds(100),
+                description: "shutdown should wait for detached provider session stop drain"
+            )
+            shutdownReturnedBeforeStopDrain = true
+        } catch is AsyncTestTimeoutError {
+            shutdownReturnedBeforeStopDrain = false
+        }
+
+        #expect(shutdownReturnedBeforeStopDrain == false)
+        #expect(await session.stopCount() == 1)
+        await stopGate.signal()
+        try await shutdownFinished.wait(description: "waiting for provider shutdown")
+        await shutdownTask.value
+    }
+
     @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
         var config = makeConfig(requestTimeout: 5)
         let transport = UnavailableDocumentationProviderTransport()
