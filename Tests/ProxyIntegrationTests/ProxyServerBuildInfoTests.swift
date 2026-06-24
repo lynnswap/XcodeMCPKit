@@ -2,7 +2,7 @@ import ProxyCore
 import ProxyBuildInfo
 import Testing
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct ProxyServerBuildInfoTests {

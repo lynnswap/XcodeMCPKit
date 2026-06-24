@@ -1,6 +1,6 @@
 import ProxyCLICommon
 import ProxyCore
-import XcodeMCPProxy
+import XcodeMCPProxyKit
 
 extension XcodeMCPProxyServerCommand {
     package static func hostMatches(requestedHost: String, actualHost: String) -> Bool {

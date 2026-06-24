@@ -1,7 +1,7 @@
 import Foundation
 import ProxyCLICommon
 import ProxyCore
-import XcodeMCPProxy
+import XcodeMCPProxyKit
 
 extension XcodeMCPProxyServerCommand {
     package static func parseOptions(args: [String]) throws -> XcodeMCPProxyServerCommand.Options {

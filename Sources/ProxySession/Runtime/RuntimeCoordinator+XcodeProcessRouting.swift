@@ -3,6 +3,7 @@ import Logging
 import NIOCore
 import ProxyCore
 import ProxyMCP
+import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 

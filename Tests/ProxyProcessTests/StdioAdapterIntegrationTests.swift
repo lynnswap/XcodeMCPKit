@@ -3,7 +3,7 @@ import Foundation
 import NIO
 import NIOHTTP1
 import Testing
-import XcodeMCPProxy
+import XcodeMCPProxyKit
 import XcodeMCPTestSupport
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
