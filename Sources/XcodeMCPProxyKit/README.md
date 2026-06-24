@@ -25,8 +25,8 @@ router.
 
 ## Quickstart
 
-Depend on the `XcodeMCPProxyKit` and `ProxyCore` targets, then construct the
-server directly:
+Depend on the `XcodeMCPProxyKit` and `ProxyCore` library products, then
+construct the server directly:
 
 ```swift
 import ProxyCore
