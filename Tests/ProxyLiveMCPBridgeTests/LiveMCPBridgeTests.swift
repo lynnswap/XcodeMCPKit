@@ -4,7 +4,7 @@ import NIO
 import ProxyCore
 import Testing
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyKit
 @testable import ProxyXcodeSupport
 
 @Suite(.serialized, .enabled(if: LiveMCPBridgeTestEnvironment.isEnabled))

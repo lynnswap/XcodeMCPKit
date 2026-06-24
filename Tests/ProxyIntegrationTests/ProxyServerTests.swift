@@ -7,7 +7,7 @@ import ProxySessionUpstream
 import Testing
 import XcodeMCPTestSupport
 
-@testable import XcodeMCPProxy
+@testable import XcodeMCPProxyKit
 
 struct ProxyServerTests {
     @Test func firstXcrunToolSelectionTreatsLogAsFlagWithoutValue() {

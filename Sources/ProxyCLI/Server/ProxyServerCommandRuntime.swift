@@ -2,7 +2,7 @@ import Foundation
 import ProxyBuildInfo
 import ProxyCLICommon
 import ProxyCore
-import XcodeMCPProxy
+import XcodeMCPProxyKit
 
 extension XcodeMCPProxyServerCommand {
     package struct Runtime {

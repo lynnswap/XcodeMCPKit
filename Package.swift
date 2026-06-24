@@ -87,6 +87,15 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "XcodeMCPKit",
+            dependencies: [
+                "ProxyCore",
+                "ProxySessionUpstream",
+            ],
+            path: "Sources/XcodeMCPKit",
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "ProxySessionControlPlane",
             dependencies: [
                 "ProxyCore",
@@ -103,6 +112,7 @@ let package = Package(
             dependencies: [
                 "ProxyCore",
                 "ProxyMCP",
+                "XcodeMCPKit",
                 "ProxySessionControlPlane",
                 "ProxySessionUpstream",
                 .product(name: "Logging", package: "swift-log"),
@@ -165,7 +175,7 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPProxy",
+            name: "XcodeMCPProxyKit",
             dependencies: [
                 "ProxyBuildInfo",
                 "ProxyCore",
@@ -208,7 +218,7 @@ let package = Package(
                 "ProxyBuildInfo",
                 "ProxyCLICommon",
                 "ProxyCore",
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
             ],
             path: "Sources/ProxyCLI/Server",
             swiftSettings: strictSwiftSettings
@@ -263,7 +273,7 @@ let package = Package(
         .testTarget(
             name: "ProxyContractTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxyMCP",
                 "ProxySession",
@@ -286,9 +296,10 @@ let package = Package(
         .testTarget(
             name: "ProxySessionTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxyMCP",
+                "XcodeMCPKit",
                 "ProxySession",
                 "ProxySessionControlPlane",
                 "ProxySessionUpstream",
@@ -308,7 +319,7 @@ let package = Package(
         .testTarget(
             name: "ProxyProcessTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxySession",
                 "ProxySessionUpstream",
                 "XcodeMCPTestSupport",
@@ -321,7 +332,7 @@ let package = Package(
         .testTarget(
             name: "ProxyStressTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxySession",
                 "ProxySessionUpstream",
@@ -336,7 +347,7 @@ let package = Package(
         .testTarget(
             name: "ProxyHTTPGatewayTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxyMCP",
                 "ProxySession",
@@ -358,7 +369,7 @@ let package = Package(
         .testTarget(
             name: "ProxyCLITests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxyMCP",
                 "ProxySession",
@@ -391,7 +402,7 @@ let package = Package(
         .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyBuildInfo",
                 "ProxyCore",
                 "ProxyMCP",
@@ -414,7 +425,7 @@ let package = Package(
         .testTarget(
             name: "ProxyLiveMCPBridgeTests",
             dependencies: [
-                "XcodeMCPProxy",
+                "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxySessionUpstream",
                 "ProxyXcodeSupport",

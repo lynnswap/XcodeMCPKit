@@ -6,6 +6,7 @@ import NIOEmbedded
 import Testing
 import ProxyCore
 import ProxyMCP
+import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import XcodeMCPTestSupport
@@ -307,7 +308,7 @@ extension RuntimeCoordinatorTests {
         config.upstreamSessionID = "shared-docs-session"
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
-            RuntimeCoordinator.makeDefaultUpstreamPlan(
+            MCPBridgeRuntime.makeUpstreamPlan(
                 config: config,
                 sharedSessionID: config.upstreamSessionID,
                 count: 2,
@@ -350,7 +351,7 @@ extension RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 5)
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
-            RuntimeCoordinator.makeDefaultUpstreamPlan(
+            MCPBridgeRuntime.makeUpstreamPlan(
                 config: config,
                 sharedSessionID: config.upstreamSessionID,
                 count: 1,
@@ -383,7 +384,7 @@ extension RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 5)
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": "\(pinned.processID)"]) {
-            RuntimeCoordinator.makeDefaultUpstreamPlan(
+            MCPBridgeRuntime.makeUpstreamPlan(
                 config: config,
                 sharedSessionID: config.upstreamSessionID,
                 count: 2,

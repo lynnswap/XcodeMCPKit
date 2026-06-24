@@ -6,6 +6,7 @@ import NIOEmbedded
 import Testing
 import ProxyCore
 import ProxyMCP
+import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import XcodeMCPTestSupport
@@ -1320,11 +1321,12 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
 func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {
     var config = makeConfig(requestTimeout: 5)
     config.upstreamSessionID = sharedSessionID
-    let upstreams = RuntimeCoordinator.makeDefaultUpstreams(
+    let upstreams = MCPBridgeRuntime.makeUpstreamPlan(
         config: config,
         sharedSessionID: sharedSessionID,
-        count: 1
-    )
+        count: 1,
+        xcodeTargets: []
+    ).upstreams
     let upstream = try #require(upstreams.first)
     return try upstreamEnvironment(from: upstream)
 }

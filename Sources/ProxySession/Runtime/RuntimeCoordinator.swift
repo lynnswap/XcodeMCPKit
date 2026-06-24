@@ -3,6 +3,7 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
+import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import ProxyCore
@@ -400,7 +401,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let count = max(1, min(config.upstreamProcessCount, 10))
-        let xcodeProcessRoutingEnabled = XcrunArguments.isDefaultMCPBridgeInvocation(
+        let xcodeProcessRoutingEnabled = MCPBridgeRuntime.supportsProcessBoundRouting(
             config: config
         )
         let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
@@ -410,7 +411,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             xcodeProcessRoutingEnabled
             ? xcodeTargetDiscovery?.runningXcodeTargets() ?? []
             : []
-        let upstreamPlan = Self.makeDefaultUpstreamPlan(
+        let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(
             config: config,
             sharedSessionID: config.upstreamSessionID,
             count: count,
@@ -479,7 +480,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyConfig
     ) -> Bool {
         config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
-            && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
+            && MCPBridgeRuntime.supportsProcessBoundRouting(config: config)
     }
 
     package init(
