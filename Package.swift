@@ -48,8 +48,15 @@ let package = Package(
             ]
         ),
         .target(
+            name: "ProxyMCPContract",
+            dependencies: [],
+            path: "Sources/ProxyMCPContract",
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "ProxyCore",
             dependencies: [
+                "ProxyMCPContract",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),

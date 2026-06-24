@@ -47,6 +47,7 @@ struct ArchitectureTests {
 
 private let requiredSourceDirectories = [
     "Sources/ProxyBuildInfo",
+    "Sources/ProxyMCPContract",
     "Sources/ProxyCore",
     "Sources/ProxyMCP",
     "Sources/ProxySessionControlPlane",
@@ -69,6 +70,16 @@ private struct ForbiddenImportRule {
 }
 
 private let forbiddenImportRules = [
+    ForbiddenImportRule(
+        sourceDirectory: "Sources/ProxyMCPContract",
+        forbiddenModules: [
+            "ProxyBuildInfo", "ProxyCore",
+            "ProxyMCP", "ProxySessionControlPlane", "ProxySessionUpstream", "ProxySession",
+            "ProxyXcodeSupport", "ProxyXcodeFeatures", "ProxyHTTPGateway",
+            "ProxyStdioTransport", "XcodeMCPProxy",
+            "ProxyCLICommon", "ProxyAdapterCLI", "ProxyServerCLI", "ProxyInstallCLI",
+        ]
+    ),
     ForbiddenImportRule(
         sourceDirectory: "Sources/ProxyCore",
         forbiddenModules: [
