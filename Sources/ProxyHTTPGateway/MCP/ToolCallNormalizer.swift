@@ -7,9 +7,9 @@ package struct ToolCallNormalizer: Sendable {
         "DocumentationSearch"
     ]
 
-    private let sessionManager: any RuntimeCoordinating
+    private let sessionManager: any RuntimeToolsCatalogPort
 
-    package init(sessionManager: any RuntimeCoordinating) {
+    package init(sessionManager: any RuntimeToolsCatalogPort) {
         self.sessionManager = sessionManager
     }
 

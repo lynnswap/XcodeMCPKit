@@ -16,7 +16,7 @@ package struct ToolSurface: Sendable {
 
     package init(
         config: ProxyConfig,
-        sessionManager: any RuntimeCoordinating
+        sessionManager: any RuntimeToolsCatalogPort
     ) {
         self.refreshCodeIssuesMode = config.refreshCodeIssuesMode
         self.callNormalizer = ToolCallNormalizer(sessionManager: sessionManager)
