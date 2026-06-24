@@ -164,7 +164,7 @@ extension RuntimeCoordinator {
                     successes.append((target: target, result: result))
                 case .failure(let target, let upstreamIndex, let error):
                     if error is CancellationError {
-                        continue
+                        throw CancellationError()
                     }
                     failures.append((target, upstreamIndex, error))
                 }

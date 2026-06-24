@@ -2306,6 +2306,49 @@ struct RuntimeCoordinatorTests {
         #expect(await siblingUpstream.sentCount() == 0)
     }
 
+    @Test func sessionManagerProcessToolsListPropagatesCancellation() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 80435, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 80436, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-cancel",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        _ = try await upstream0.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        _ = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+    }
+
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
         async throws
     {
