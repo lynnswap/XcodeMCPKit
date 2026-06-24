@@ -1089,6 +1089,9 @@ extension RuntimeCoordinatorTests {
         ])
         #expect(await factory.documentationQueries(for: workspaceOwner.processID).isEmpty)
         #expect(await factory.documentationQueries(for: documentationProvider.processID) == ["UIView"])
+        try await waitWithTimeout("waiting for skipped documentation provider stop") {
+            try await factory.waitForStopCount(1)
+        }
         #expect(await factory.stoppedPIDs() == [workspaceOwner.processID])
     }
 
@@ -1958,6 +1961,9 @@ extension RuntimeCoordinatorTests {
         #expect(documentationDescriptorDescription(in: result) == "docs-asset-fallback")
         #expect(await repairer.repairedPIDs() == [target.processID])
         #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        try await waitWithTimeout("waiting for unrepaired documentation provider stops") {
+            try await factory.waitForStopCount(2)
+        }
         #expect(await factory.stoppedPIDs() == [target.processID, target.processID])
         #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
 
@@ -2094,6 +2100,9 @@ extension RuntimeCoordinatorTests {
         }
         #expect(await repairer.repairedPIDs() == [target.processID])
         #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        try await waitWithTimeout("waiting for rejected documentation provider stop") {
+            try await factory.waitForStopCount(1)
+        }
         #expect(await factory.stoppedPIDs() == [target.processID])
         #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
@@ -2358,6 +2367,9 @@ extension RuntimeCoordinatorTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
         #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI", "UIKit"])
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 2)
+        try await waitWithTimeout("waiting for invalidated documentation provider stop") {
+            try await factory.waitForStopCount(1)
+        }
         #expect(await factory.stoppedPIDs() == [target.processID])
     }
 
@@ -2415,6 +2427,9 @@ extension RuntimeCoordinatorTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI"])
         #expect(await factory.documentationQueries(for: newer.processID) == ["SwiftUI"])
         #expect(await factory.documentationQueries(for: older.processID) == ["SwiftUI"])
+        try await waitWithTimeout("waiting for failed newest documentation provider stop") {
+            try await factory.waitForStopCount(1)
+        }
         #expect(await factory.stoppedPIDs() == [newer.processID])
     }
 

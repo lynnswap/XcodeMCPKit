@@ -833,6 +833,12 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         let continuation: CheckedContinuation<Void, Error>
     }
 
+    private struct StopCountWaiter {
+        let id: UUID
+        let count: Int
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private var plansByPID: [pid_t: [ScriptedDocumentationSessionPlan]]
     private var startAttemptProcessIDs: [pid_t] = []
     private var startedProcessIDs: [pid_t] = []
@@ -841,6 +847,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private var requestCountsByPID: [pid_t: [String: Int]] = [:]
     private var documentationQueriesByPID: [pid_t: [String]] = [:]
     private var requestCountWaiters: [RequestCountWaiter] = []
+    private var stopCountWaiters: [StopCountWaiter] = []
     private let startGate: OperationGate<pid_t>?
 
     init(
@@ -884,6 +891,7 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
 
     func recordStop(for processID: pid_t) {
         stoppedProcessIDs.append(processID)
+        resumeStopCountWaiters()
     }
 
     func recordInitializeParams(_ params: JSONValue, for processID: pid_t) {
@@ -940,6 +948,33 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         }
     }
 
+    func waitForStopCount(_ count: Int) async throws {
+        if stoppedProcessIDs.count >= count {
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if stoppedProcessIDs.count >= count {
+                    continuation.resume(returning: ())
+                    return
+                }
+                stopCountWaiters.append(
+                    StopCountWaiter(
+                        id: waiterID,
+                        count: count,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelStopCountWaiter(id: waiterID)
+            }
+        }
+    }
+
     private func resumeRequestCountWaiters() {
         var remaining: [RequestCountWaiter] = []
         for waiter in requestCountWaiters {
@@ -952,11 +987,31 @@ actor ScriptedDocumentationSessionFactory: DocumentationProviderSessionMaking {
         requestCountWaiters = remaining
     }
 
+    private func resumeStopCountWaiters() {
+        var remaining: [StopCountWaiter] = []
+        for waiter in stopCountWaiters {
+            if stoppedProcessIDs.count >= waiter.count {
+                waiter.continuation.resume(returning: ())
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        stopCountWaiters = remaining
+    }
+
     private func cancelRequestCountWaiter(id: UUID) {
         guard let index = requestCountWaiters.firstIndex(where: { $0.id == id }) else {
             return
         }
         let waiter = requestCountWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelStopCountWaiter(id: UUID) {
+        guard let index = stopCountWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = stopCountWaiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
     }
 }
