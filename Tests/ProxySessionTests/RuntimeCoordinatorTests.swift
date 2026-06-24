@@ -4794,7 +4794,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func controlPlaneTimeoutStaysShortForSlowDiscoveryWork() throws {
         let disabledDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 0)
-        #expect(disabledDefault == nil)
+        #expect(disabledDefault?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
 
         let longDefault = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: 300)
         #expect(longDefault?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
