@@ -10,6 +10,16 @@ import ProxyXcodeFeatures
 
 @Suite
 struct ExternalContractTests {
+    @Test func mcpProtocolVersionCurrentRemainsStable() {
+        #expect(MCP.ProtocolVersion.current == "2025-06-18")
+    }
+
+    @Test func mcpProtocolVersionSupportRemainsCurrentOnly() {
+        #expect(MCP.ProtocolVersion.isSupported(MCP.ProtocolVersion.current))
+        #expect(MCP.ProtocolVersion.isSupported("2024-11-05") == false)
+        #expect(MCP.ProtocolVersion.isSupported("unknown") == false)
+    }
+
     @Test func cliAdapterUsageRemainsStable() {
         let usage = XcodeMCPProxyCLICommand.usage(
             discoveryFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-contract/endpoint.json")
