@@ -1,27 +1,27 @@
 import Foundation
 
-public struct ProxyConfig: Sendable {
-    public enum Transport: String, CaseIterable, Sendable {
+package struct ProxyConfig: Sendable {
+    package enum Transport: String, CaseIterable, Sendable {
         case http
         case stdio
     }
 
-    public enum StdioUpstreamSource: String, Sendable {
+    package enum StdioUpstreamSource: String, Sendable {
         case explicit
         case environment
         case discovery
         case fallback
     }
 
-    public enum RefreshCodeIssuesMode: String, Sendable {
+    package enum RefreshCodeIssuesMode: String, Sendable {
         case proxy
         case upstream
     }
 
-    public enum ValidationError: Error, CustomStringConvertible {
+    package enum ValidationError: Error, CustomStringConvertible {
         case unsupportedProtocolVersion(String)
 
-        public var description: String {
+        package var description: String {
             switch self {
             case .unsupportedProtocolVersion(let protocolVersion):
                 return "upstream_handshake.protocolVersion must be \(MCP.ProtocolVersion.current); \(protocolVersion) is not supported"
@@ -31,26 +31,26 @@ public struct ProxyConfig: Sendable {
 
     package enum File {}
 
-    public var listenHost: String
-    public var listenPort: Int
-    public var upstreamCommand: String
-    public var upstreamArgs: [String]
-    public var upstreamProcessCount: Int
-    public var upstreamSessionID: String?
-    public var maxBodyBytes: Int
-    public var requestTimeout: TimeInterval
-    public var configPath: String?
-    public var transport: ProxyConfig.Transport
-    public var stdioUpstreamURL: URL?
-    public var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
-    public var discoveryFileURL: URL?
-    public var prewarmToolsList: Bool
-    public var autoApproveXcodeDialog: Bool
-    public var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
-    public var disabledToolNames: Set<String>
+    package var listenHost: String
+    package var listenPort: Int
+    package var upstreamCommand: String
+    package var upstreamArgs: [String]
+    package var upstreamProcessCount: Int
+    package var upstreamSessionID: String?
+    package var maxBodyBytes: Int
+    package var requestTimeout: TimeInterval
+    package var configPath: String?
+    package var transport: ProxyConfig.Transport
+    package var stdioUpstreamURL: URL?
+    package var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
+    package var discoveryFileURL: URL?
+    package var prewarmToolsList: Bool
+    package var autoApproveXcodeDialog: Bool
+    package var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
+    package var disabledToolNames: Set<String>
     package var initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
 
-    public init(
+    package init(
         listenHost: String,
         listenPort: Int,
         upstreamCommand: String,
@@ -94,7 +94,7 @@ public struct ProxyConfig: Sendable {
     /// Reads the TOML file config (disabled tools, initialize-params
     /// override) from `configPath` and stores the decoded values. This is
     /// the only place the file is read; consumers use the stored values.
-    public mutating func loadFileConfig() {
+    package mutating func loadFileConfig() {
         loadFileConfig(preserveDisabledToolNames: false)
     }
 
@@ -112,7 +112,7 @@ public struct ProxyConfig: Sendable {
         )
     }
 
-    public func validateModernProtocolConfiguration() throws {
+    package func validateModernProtocolConfiguration() throws {
         guard let protocolVersion = initializeParamsOverride?.protocolVersion else {
             return
         }
@@ -122,10 +122,10 @@ public struct ProxyConfig: Sendable {
     }
 }
 
-public enum CLIError: Error, CustomStringConvertible {
+package enum CLIError: Error, CustomStringConvertible {
     case message(String)
 
-    public var description: String {
+    package var description: String {
         switch self {
         case .message(let text):
             return text
@@ -133,17 +133,17 @@ public enum CLIError: Error, CustomStringConvertible {
     }
 }
 
-public struct CLIParser {
+package struct CLIParser {
     private static let defaultStdioUpstream = "http://localhost:8765/mcp"
     private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
     private static let refreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
-    public static let configPathEnv = "MCP_XCODE_CONFIG"
-    public static let removedLazyInitMessage =
+    package static let configPathEnv = "MCP_XCODE_CONFIG"
+    package static let removedLazyInitMessage =
         "The proxy always uses eager initialization; --lazy-init has been removed."
-    public static let removedXcodePIDMessage =
+    package static let removedXcodePIDMessage =
         "Xcode PID support has been removed; --xcode-pid is no longer supported."
 
-    public static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
+    package static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         return try parse(
             args: args,
             environment: environment,
