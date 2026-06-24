@@ -2333,8 +2333,8 @@ struct RuntimeCoordinatorTests {
         }
         #expect(toolNames(in: result) == ["XcodeRead"])
         #expect(await badUpstream.sentCount() == 0)
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["XcodeRead"])
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
     @Test func sessionManagerToolsListRetriesSiblingBeforeDroppingProcessCatalog()
@@ -2527,7 +2527,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
-    @Test func sessionManagerToolsListClearsPartialCanonicalCatalogWhenProcessRouteUnavailable()
+    @Test func sessionManagerToolsListResyncsRemainingCatalogWhenProcessRouteUnavailable()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2562,12 +2562,12 @@ struct RuntimeCoordinatorTests {
             reason: "test_process_route_unavailable"
         )
 
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["GoodOnlyTool"])
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
                 == [goodTarget.processID]
         )
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
     }
 
     @Test func sessionManagerToolsListDoesNotFallbackWhenAllProcessRoutesUnavailable()

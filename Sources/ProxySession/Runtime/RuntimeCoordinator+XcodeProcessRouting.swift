@@ -187,6 +187,13 @@ extension RuntimeCoordinator {
         return Set(xcodeProcessRoutes.map(\.target.processID))
     }
 
+    package func catalogEligibleConfiguredProcessIDs() -> Set<pid_t> {
+        let unavailable = unavailableXcodeProcessIDs()
+        return Set(xcodeProcessRoutes.compactMap { route in
+            unavailable.contains(route.target.processID) ? nil : route.target.processID
+        })
+    }
+
     package func documentationCandidateProcessOrder() -> [pid_t]? {
         guard xcodeProcessRoutes.isEmpty == false else {
             return nil

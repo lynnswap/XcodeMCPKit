@@ -759,7 +759,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     package func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {
-        let configuredProcessIDs = Set(xcodeProcessRoutes.map(\.target.processID))
+        let configuredProcessIDs = catalogEligibleConfiguredProcessIDs()
         guard configuredProcessIDs.isEmpty == false else {
             return false
         }
