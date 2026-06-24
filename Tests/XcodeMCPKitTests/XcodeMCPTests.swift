@@ -12,7 +12,10 @@ struct XcodeMCPTests {
                 environment: [:],
                 clientName: "UnitTestClient",
                 clientVersion: "1.2.3",
-                capabilities: ["roots": .object([:])]
+                capabilities: [
+                    "roots": .object([:]),
+                    "experimental": .object(["x-test": .bool(true)]),
+                ]
             ),
             transport: transport
         )
@@ -30,7 +33,7 @@ struct XcodeMCPTests {
             "version": .string("1.2.3"),
         ]))
         #expect(initializeParams["capabilities"] == .object([
-            "roots": .object([:])
+            "experimental": .object(["x-test": .bool(true)])
         ]))
     }
 
@@ -96,6 +99,7 @@ struct XcodeMCPTests {
             "DocumentationSearch",
             arguments: ["query": .string("Observation")]
         ) { progress in
+            _ = try? await xcode.listTools()
             await recorder.append(progress)
         }
 

@@ -227,10 +227,18 @@ private extension XcodeMCP {
                     "name": .string(config.clientName),
                     "version": .string(config.clientVersion),
                 ]),
-                "capabilities": .object(config.capabilities),
+                "capabilities": .object(initializeCapabilities()),
             ])
         )
         try await notify("notifications/initialized")
+    }
+
+    func initializeCapabilities() -> [String: MCPJSONValue] {
+        var capabilities = config.capabilities
+        capabilities.removeValue(forKey: "roots")
+        capabilities.removeValue(forKey: "sampling")
+        capabilities.removeValue(forKey: "elicitation")
+        return capabilities
     }
 
     func withRequestTimeout<T: Sendable>(
@@ -295,7 +303,9 @@ private extension XcodeMCP {
                let progress = MCPProgress(json: params),
                let handler = progressHandlers[progress.progressToken]
             {
-                await handler(progress)
+                Task {
+                    await handler(progress)
+                }
             }
         } catch {
             pendingRequests.failAll(error: error)
