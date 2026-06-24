@@ -19,6 +19,15 @@ public struct MCPTool: Codable, Equatable, Sendable {
             "name": .string(name)
         ])
     }
+
+    public init(from decoder: Decoder) throws {
+        let value = try MCPJSONValue(from: decoder)
+        self = try MCPTool(json: value)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try MCPJSONValue.object(toolObject()).encode(to: encoder)
+    }
 }
 
 public enum MCPContent: Codable, Equatable, Sendable {
@@ -67,6 +76,15 @@ public struct MCPToolResult: Codable, Equatable, Sendable {
             "isError": .bool(isError),
         ])
     }
+
+    public init(from decoder: Decoder) throws {
+        let value = try MCPJSONValue(from: decoder)
+        self = try MCPToolResult(json: value)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try MCPJSONValue.object(resultObject()).encode(to: encoder)
+    }
 }
 
 public struct MCPProgress: Codable, Equatable, Sendable {
@@ -90,6 +108,18 @@ public struct MCPProgress: Codable, Equatable, Sendable {
         self.raw = raw ?? .object([
             "progressToken": .string(progressToken)
         ])
+    }
+
+    public init(from decoder: Decoder) throws {
+        let value = try MCPJSONValue(from: decoder)
+        guard let progress = MCPProgress(json: value) else {
+            throw XcodeMCPError.invalidResponse("progress notification is missing progressToken")
+        }
+        self = progress
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try MCPJSONValue.object(progressObject()).encode(to: encoder)
     }
 }
 
@@ -188,5 +218,60 @@ extension MCPProgress {
             message: object["message"]?.stringValue,
             raw: value
         )
+    }
+}
+
+private extension MCPTool {
+    func toolObject() -> [String: MCPJSONValue] {
+        var object = raw.objectValue ?? [:]
+        object["name"] = .string(name)
+        if let description {
+            object["description"] = .string(description)
+        } else {
+            object.removeValue(forKey: "description")
+        }
+        if let inputSchema {
+            object["inputSchema"] = inputSchema
+        } else {
+            object.removeValue(forKey: "inputSchema")
+        }
+        return object
+    }
+}
+
+private extension MCPToolResult {
+    func resultObject() -> [String: MCPJSONValue] {
+        var object = raw.objectValue ?? [:]
+        object["content"] = .array(content.map(\.rawValue))
+        if let structuredContent {
+            object["structuredContent"] = structuredContent
+        } else {
+            object.removeValue(forKey: "structuredContent")
+        }
+        object["isError"] = .bool(isError)
+        return object
+    }
+}
+
+private extension MCPProgress {
+    func progressObject() -> [String: MCPJSONValue] {
+        var object = raw.objectValue ?? [:]
+        object["progressToken"] = .string(progressToken)
+        if let progress {
+            object["progress"] = .double(progress)
+        } else {
+            object.removeValue(forKey: "progress")
+        }
+        if let total {
+            object["total"] = .double(total)
+        } else {
+            object.removeValue(forKey: "total")
+        }
+        if let message {
+            object["message"] = .string(message)
+        } else {
+            object.removeValue(forKey: "message")
+        }
+        return object
     }
 }

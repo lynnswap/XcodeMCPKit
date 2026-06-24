@@ -140,6 +140,64 @@ struct XcodeMCPTests {
         let tools = try await xcode.listTools()
         #expect(tools.first?.name == "DocumentationSearch")
     }
+
+    @Test func domainTypesCodeToProtocolShapeWithoutRawWrapper() throws {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        let tool = try decoder.decode(
+            MCPTool.self,
+            from: Data(
+                #"""
+                {
+                  "name": "DynamicTool",
+                  "description": "A dynamic tool",
+                  "inputSchema": { "type": "object", "x-extra": true },
+                  "x-tool": "kept"
+                }
+                """#.utf8
+            )
+        )
+        #expect(tool.inputSchema?.objectValue?["x-extra"] == .bool(true))
+        let encodedTool = try jsonObject(encoder.encode(tool))
+        #expect(encodedTool["raw"] == nil)
+        #expect(encodedTool["x-tool"] == .string("kept"))
+
+        let result = try decoder.decode(
+            MCPToolResult.self,
+            from: Data(
+                #"""
+                {
+                  "content": [{ "type": "text", "text": "done", "x-content": "kept" }],
+                  "structuredContent": { "ok": true },
+                  "isError": false,
+                  "x-result": "kept"
+                }
+                """#.utf8
+            )
+        )
+        let encodedResult = try jsonObject(encoder.encode(result))
+        #expect(encodedResult["raw"] == nil)
+        #expect(encodedResult["x-result"] == .string("kept"))
+
+        let progress = try decoder.decode(
+            MCPProgress.self,
+            from: Data(
+                #"""
+                {
+                  "progressToken": "token",
+                  "progress": 0.25,
+                  "total": 1,
+                  "message": "working",
+                  "x-progress": "kept"
+                }
+                """#.utf8
+            )
+        )
+        let encodedProgress = try jsonObject(encoder.encode(progress))
+        #expect(encodedProgress["raw"] == nil)
+        #expect(encodedProgress["x-progress"] == .string("kept"))
+    }
 }
 
 private struct SentMessage: Sendable, Equatable {
@@ -338,4 +396,14 @@ private func waitForUnsupportedServerResponse(
         try await Task.sleep(for: .milliseconds(50))
     }
     throw XcodeMCPError.invalidResponse("unsupported server request response was not sent")
+}
+
+private func jsonObject(_ data: Data) throws -> [String: MCPJSONValue] {
+    let raw = try JSONSerialization.jsonObject(with: data)
+    guard let value = MCPJSONValue(foundationObject: raw),
+          let object = value.objectValue
+    else {
+        throw XcodeMCPError.invalidResponse("encoded JSON is not an object")
+    }
+    return object
 }
