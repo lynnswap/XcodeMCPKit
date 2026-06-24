@@ -97,6 +97,7 @@ let package = Package(
                 "ProxySessionUpstream",
             ],
             path: "Sources/XcodeMCPKit",
+            exclude: ["README.md"],
             swiftSettings: strictSwiftSettings
         ),
         .target(
@@ -194,6 +195,7 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
+            exclude: ["README.md"],
             swiftSettings: strictSwiftSettings
         ),
         .target(

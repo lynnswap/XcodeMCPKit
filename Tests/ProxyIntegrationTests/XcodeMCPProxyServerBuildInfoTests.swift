@@ -5,7 +5,7 @@ import Testing
 @testable import XcodeMCPProxyKit
 
 @Suite
-struct ProxyServerBuildInfoTests {
+struct XcodeMCPProxyServerBuildInfoTests {
     @Test func proxyServerStartupSummaryUsesReadableSections() throws {
         let config = ProxyConfig(
             listenHost: "localhost",
@@ -25,7 +25,7 @@ struct ProxyServerBuildInfoTests {
             xcodeVersion: "26.0"
         )
 
-        let summary = ProxyServer.startupSummary(
+        let summary = XcodeMCPProxyServer.startupSummary(
             displayHost: "localhost",
             port: 8765,
             config: config,

@@ -4,7 +4,7 @@ import Foundation
 import ProxyCLICommon
 import XcodeMCPProxyKit
 
-extension ProxyServer: ProxyServerCommandServer {}
+extension XcodeMCPProxyServer: ProxyServerCommandServer {}
 
 package struct XcodeMCPProxyServerCommand {
     package struct Options {
@@ -111,7 +111,7 @@ package struct XcodeMCPProxyServerCommand {
                 bootstrapLogging: ProxyLogging.bootstrap,
                 stdout: { print($0) },
                 stderr: { FileHandle.writeLine($0, to: .standardError) },
-                makeServer: { ProxyServer(config: $0) },
+                makeServer: { XcodeMCPProxyServer(config: $0) },
                 isAddressAlreadyInUse: XcodeMCPProxyServerCommand.isAddressAlreadyInUse,
                 existingProxyServerClient: .liveValue
             )

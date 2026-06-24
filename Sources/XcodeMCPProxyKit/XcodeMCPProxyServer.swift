@@ -9,7 +9,17 @@ import ProxyHTTPGateway
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 
-public final class ProxyServer {
+/// Embeddable Streamable HTTP proxy server for Xcode MCP.
+///
+/// `XcodeMCPProxyServer` is the library boundary used by the
+/// `xcode-mcp-proxy-server` executable. Construct it with a ``ProxyConfig``,
+/// call ``startAndWriteDiscovery()`` or ``start()``, then keep the process alive
+/// with ``wait()`` until your application decides to call ``shutdown()``.
+///
+/// The server exposes the proxy lifecycle. CLI parsing, STDIO adapter behavior,
+/// and internal session routing are intentionally handled outside this public
+/// type.
+public final class XcodeMCPProxyServer {
     package struct Dependencies: Sendable {
         package var discoveryClient: DiscoveryClient
         package var executableLookupClient: ExecutableLookupClient
@@ -47,7 +57,7 @@ public final class ProxyServer {
                     LiveXcodeTargetDiscovery().runningXcodeTargets()
                 },
                 makeAutoApprover: {
-                    let additionalCandidates = ProxyServer.additionalPermissionDialogExecutableCandidates(
+                    let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
                         config: config,
                         executableLookupClient: executableLookupClient
                     )
@@ -59,7 +69,7 @@ public final class ProxyServer {
                                 )
                             },
                             assistantNameCandidates: {
-                                Set(ProxyServer.permissionDialogAssistantNameCandidates(config: config))
+                                Set(XcodeMCPProxyServer.permissionDialogAssistantNameCandidates(config: config))
                             }
                         )
                     )
@@ -91,6 +101,10 @@ public final class ProxyServer {
     package var sessionManager: (any RuntimeCoordinating)?
     package var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
 
+    /// Creates a proxy server with live runtime dependencies.
+    ///
+    /// - Parameter config: HTTP, upstream bridge, discovery, and lifecycle
+    ///   settings from `ProxyCore`.
     public convenience init(config: ProxyConfig) {
         self.init(config: config, dependencies: .live(config: config))
     }
@@ -106,6 +120,12 @@ public final class ProxyServer {
         )
     }
 
+    /// Starts the server and writes endpoint discovery information.
+    ///
+    /// This is the usual entry point for embedded users. It binds HTTP
+    /// channels, starts the proxy runtime, writes the discovery file configured
+    /// by `ProxyConfig.discoveryFileURL`, logs a startup summary, and returns
+    /// the resolved listening address.
     public func startAndWriteDiscovery() throws -> (host: String, port: Int) {
         let channel = try start()
         let (host, port) = resolvedListenAddress(for: channel)
@@ -121,10 +141,20 @@ public final class ProxyServer {
         return (host, port)
     }
 
+    /// Waits until the listening HTTP channels close.
+    ///
+    /// Call this after starting the server to keep an async task suspended for
+    /// the server lifetime. Calling ``shutdown()`` closes the channels and lets
+    /// this method return.
     public func wait() async throws {
         try await waitForHTTP()
     }
 
+    /// Shuts down the proxy server and its runtime resources.
+    ///
+    /// Shutdown stops permission automation, closes listening and accepted
+    /// channels, shuts down the runtime coordinator, and terminates the event
+    /// loop group.
     public func shutdown() async throws {
         let shutdownContext = beginShutdown()
         shutdownContext.autoApprover?.stop()
