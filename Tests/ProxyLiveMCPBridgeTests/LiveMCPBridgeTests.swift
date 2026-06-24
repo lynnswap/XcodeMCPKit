@@ -129,7 +129,7 @@ struct LiveMCPBridgeTests {
         dependencies.discoveryClient = .live(
             defaultFileURL: { discoveryFile }
         )
-        let server = XcodeMCPProxyServer(config: config, dependencies: dependencies)
+        let server = XcodeMCPProxyServer(proxyConfig: config, dependencies: dependencies)
         let urlSession = URLSession(configuration: .ephemeral)
         defer {
             urlSession.invalidateAndCancel()

@@ -111,7 +111,9 @@ package struct XcodeMCPProxyServerCommand {
                 bootstrapLogging: ProxyLogging.bootstrap,
                 stdout: { print($0) },
                 stderr: { FileHandle.writeLine($0, to: .standardError) },
-                makeServer: { XcodeMCPProxyServer(config: $0) },
+                makeServer: { config in
+                    XcodeMCPProxyServer(proxyConfig: config, dependencies: .live(config: config))
+                },
                 isAddressAlreadyInUse: XcodeMCPProxyServerCommand.isAddressAlreadyInUse,
                 existingProxyServerClient: .liveValue
             )

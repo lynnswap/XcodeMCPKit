@@ -15,9 +15,10 @@ This target owns:
 - HTTP channel setup and request handling integration
 - startup, discovery writing, waiting, and shutdown entry points
 
-Configuration lives in `ProxyCore.ProxyConfig`. Lower-level session routing,
-upstream process management, Xcode support, and MCP HTTP behavior stay in their
-own internal targets behind this kit boundary.
+External embedders configure the server through
+`XcodeMCPProxyServer.Configuration`. Lower-level session routing, upstream
+process management, Xcode support, and MCP HTTP behavior stay in their own
+internal targets behind this kit boundary.
 
 This target intentionally does not expose the executable CLI parser, the STDIO
 adapter, per-tool typed wrappers, or direct access to the internal session
@@ -25,18 +26,17 @@ router.
 
 ## Quickstart
 
-Depend on the `XcodeMCPProxyKit` and `ProxyCore` library products, then
-construct the server directly:
+Depend on the `XcodeMCPProxyKit` library product, then construct the server
+directly:
 
 ```swift
-import ProxyCore
 import XcodeMCPProxyKit
 
-let config = ProxyConfig(
+let config = XcodeMCPProxyServer.Configuration(
     listenHost: "localhost",
     listenPort: 8765,
     upstreamCommand: "xcrun",
-    upstreamArgs: ["mcpbridge"],
+    upstreamArguments: ["mcpbridge"],
     upstreamProcessCount: 1,
     maxBodyBytes: 1_048_576,
     requestTimeout: 300,
@@ -63,10 +63,11 @@ look up the running HTTP endpoint.
 
 ## Configuration
 
-Use `ProxyConfig` from `ProxyCore` to configure the server:
+Use `XcodeMCPProxyServer.Configuration` to configure the server:
 
 - `listenHost` and `listenPort` choose the HTTP bind address.
-- `upstreamCommand` and `upstreamArgs` choose the upstream MCP bridge process.
+- `upstreamCommand` and `upstreamArguments` choose the upstream MCP bridge
+  process.
 - `upstreamProcessCount` controls the number of upstream bridge processes.
 - `requestTimeout` and `maxBodyBytes` bound request handling.
 - `discoveryFileURL` overrides the endpoint discovery file.
@@ -75,7 +76,7 @@ Use `ProxyConfig` from `ProxyCore` to configure the server:
 - `refreshCodeIssuesMode` selects proxy diagnostics or upstream forwarding for
   `XcodeRefreshCodeIssuesInFile`.
 
-`ProxyConfig` can also load TOML-backed initialize overrides and disabled tools
+The server can also load TOML-backed initialize overrides and disabled tools
 when `configPath` is set.
 
 ## Lifecycle

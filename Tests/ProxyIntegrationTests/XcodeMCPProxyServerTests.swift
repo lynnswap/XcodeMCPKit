@@ -118,7 +118,7 @@ struct XcodeMCPProxyServerTests {
             autoApproveXcodeDialog: true
         )
         let server = XcodeMCPProxyServer(
-            config: config,
+            proxyConfig: config,
             dependencies: .init(
                 makeAutoApprover: { autoApprover },
                 makeRuntimeCoordinator: { config, eventLoop in

@@ -23,10 +23,6 @@ let package = Package(
             name: "XcodeMCPProxyKit",
             targets: ["XcodeMCPProxyKit"]
         ),
-        .library(
-            name: "ProxyCore",
-            targets: ["ProxyCore"]
-        ),
         .executable(
             name: "xcode-mcp-proxy",
             targets: ["XcodeMCPProxyCLI"]
