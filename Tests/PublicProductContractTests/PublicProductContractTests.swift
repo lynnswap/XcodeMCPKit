@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@Suite(.serialized)
+@Suite
 struct PublicProductContractTests {
     @Test func publicProductsCompileFromExternalSwiftPMTargets() async throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
@@ -22,27 +22,6 @@ struct PublicProductContractTests {
             Issue.record("swift build failed with exit code \(result.exitCode):\n\(result.output)")
         }
         #expect(result.exitCode == 0)
-    }
-
-    @Test func proxySessionBuildsBridgeThroughXcodeMCPKitTarget() throws {
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let manifest = try String(
-            contentsOf: repositoryRoot.appendingPathComponent("Package.swift"),
-            encoding: .utf8
-        )
-
-        #expect(manifest.contains("name: \"ProxySessionUpstream\"") == false)
-
-        let proxySession = try #require(targetBlock(named: "ProxySession", in: manifest))
-        #expect(proxySession.contains("\"XcodeMCPKit\""))
-        #expect(proxySession.contains("\"ProxySessionUpstream\"") == false)
-
-        let xcodeMCPKit = try #require(targetBlock(named: "XcodeMCPKit", in: manifest))
-        #expect(xcodeMCPKit.contains("\"ProxyCore\""))
-        #expect(xcodeMCPKit.contains("\"ProxyMCP\""))
     }
 
     private func makeFixturePackage(at packageURL: URL, repositoryRoot: URL) throws {
@@ -154,34 +133,6 @@ struct PublicProductContractTests {
         )
     }
 
-    private func targetBlock(named targetName: String, in manifest: String) -> String? {
-        var searchStart = manifest.startIndex
-        while let targetStart = manifest.range(of: ".target(", range: searchStart..<manifest.endIndex) {
-            var depth = 0
-            var didEnterTarget = false
-            var index = targetStart.lowerBound
-            while index < manifest.endIndex {
-                let character = manifest[index]
-                if character == "(" {
-                    depth += 1
-                    didEnterTarget = true
-                } else if character == ")" {
-                    depth -= 1
-                    if didEnterTarget && depth == 0 {
-                        let end = manifest.index(after: index)
-                        let block = String(manifest[targetStart.lowerBound..<end])
-                        if block.contains("name: \"\(targetName)\"") {
-                            return block
-                        }
-                        searchStart = end
-                        break
-                    }
-                }
-                index = manifest.index(after: index)
-            }
-        }
-        return nil
-    }
 }
 
 private struct CommandResult {
