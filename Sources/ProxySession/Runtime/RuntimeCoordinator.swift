@@ -69,19 +69,30 @@ package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
     case upstreamUnavailable
 }
 
-package protocol RuntimeCoordinating: Sendable {
+package protocol RuntimeSessionLifecyclePort: Sendable {
     func start()
+    func debugReset()
+    func shutdown() async
+}
+
+package protocol RuntimeSessionRegistryPort: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
     func negotiatedProtocolVersion(id: String) -> String?
     func markNotificationClientConnected(sessionID: String)
     func removeSession(id: String)
-    func debugReset()
-    func shutdown() async
     func isInitialized() -> Bool
+}
+
+package protocol RuntimeToolsCatalogPort: Sendable {
     func cachedToolsListResult() -> JSONValue?
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
+}
+
+package protocol RuntimeInitializeToolsPort: Sendable {
+    func session(id: String) -> SessionContext
+    func isInitialized() -> Bool
     func registerInitialize(
         sessionID: String,
         originalID: JSONRPC.ID,
@@ -101,14 +112,25 @@ package protocol RuntimeCoordinating: Sendable {
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationSearchOutcome
     func hasDocumentationSearchService() -> Bool
+}
+
+package protocol RuntimeToolRoutingPort: Sendable {
     func toolRoutingDecision(
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision
     func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision?
-    func chooseUpstreamIndex() -> Int?
     func preferredUpstreamIndex(for requestJSON: Any) -> Int?
     func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int?
+    func liveXcodeListWindowsResult(
+        route: ControlPlane.Route,
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue
+}
+
+package protocol RuntimeUpstreamForwardingPort: Sendable {
+    func session(id: String) -> SessionContext
+    func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
@@ -134,8 +156,14 @@ package protocol RuntimeCoordinating: Sendable {
         responseID: JSONRPC.ID,
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult>
+}
+
+package protocol RuntimeDebugSnapshotPort: Sendable {
     func debugSnapshot() -> ProxyDebug.Snapshot
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot
+}
+
+package protocol RuntimeRequestLeasePort: Sendable {
     func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID
     func activateRequestLease(
         _ leaseID: LeaseManager.ID,
@@ -164,23 +192,67 @@ package protocol RuntimeCoordinating: Sendable {
     )
 }
 
-extension RuntimeCoordinating {
-    package func start() {}
+package protocol RuntimeHTTPControlPort:
+    RuntimeSessionLifecyclePort,
+    RuntimeSessionRegistryPort,
+    RuntimeDebugSnapshotPort {}
 
+package protocol RuntimeLocalMCPResponderPort:
+    RuntimeSessionRegistryPort,
+    RuntimeInitializeToolsPort {}
+
+package protocol RuntimeMCPForwardingPort:
+    RuntimeSessionRegistryPort,
+    RuntimeToolsCatalogPort,
+    RuntimeInitializeToolsPort,
+    RuntimeToolRoutingPort,
+    RuntimeUpstreamForwardingPort,
+    RuntimeRequestLeasePort {}
+
+package protocol RuntimeHTTPPostPort:
+    RuntimeSessionRegistryPort,
+    RuntimeLocalMCPResponderPort,
+    RuntimeMCPForwardingPort {}
+
+package protocol RuntimeHTTPGatewayPort:
+    RuntimeHTTPControlPort,
+    RuntimeHTTPPostPort {}
+
+package protocol RuntimeCoordinating:
+    RuntimeHTTPGatewayPort {}
+
+extension RuntimeSessionLifecyclePort {
+    package func start() {}
+}
+
+extension RuntimeSessionRegistryPort {
     package func negotiatedProtocolVersion(id _: String) -> String? {
         nil
     }
 
     package func markNotificationClientConnected(sessionID _: String) {}
+}
 
+extension RuntimeToolsCatalogPort {
+    package func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
+        cachedToolsListResult()
+    }
+}
+
+extension RuntimeInitializeToolsPort {
     package func hasDocumentationSearchService() -> Bool {
         false
     }
 
-    package func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
-        cachedToolsListResult()
+    package func callDocumentationSearch(
+        requestData _: Data,
+        requestTimeoutOverride _: TimeAmount?
+    ) async throws -> DocumentationSearchOutcome {
+        .unavailable(.noAvailableProvider)
     }
+}
 
+extension RuntimeToolRoutingPort {
     package func toolRoutingDecision(
         for requestJSON: Any,
         requestTimeoutOverride _: TimeAmount?
@@ -199,7 +271,9 @@ extension RuntimeCoordinating {
     package func primaryUpstreamIndex(forXcodeProcessID _: pid_t) -> Int? {
         nil
     }
+}
 
+extension RuntimeUpstreamForwardingPort {
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
@@ -243,16 +317,11 @@ extension RuntimeCoordinating {
             starter: starter
         )
     }
+}
 
+extension RuntimeDebugSnapshotPort {
     func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
-    }
-
-    package func callDocumentationSearch(
-        requestData _: Data,
-        requestTimeoutOverride _: TimeAmount?
-    ) async throws -> DocumentationSearchOutcome {
-        .unavailable(.noAvailableProvider)
     }
 }
 

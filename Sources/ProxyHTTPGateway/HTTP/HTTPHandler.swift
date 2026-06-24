@@ -39,7 +39,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     package init(
         config: ProxyConfig,
-        sessionManager: any RuntimeCoordinating,
+        sessionManager: any RuntimeHTTPGatewayPort,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
         refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil,

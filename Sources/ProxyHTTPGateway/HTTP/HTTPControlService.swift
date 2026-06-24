@@ -46,12 +46,12 @@ package final class HTTPControlService: Sendable {
         }
     }
 
-    private let runtimeCoordinator: any RuntimeCoordinating
+    private let runtimeCoordinator: any RuntimeHTTPControlPort
     private let refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator?
     private let refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState?
 
     package init(
-        runtimeCoordinator: any RuntimeCoordinating,
+        runtimeCoordinator: any RuntimeHTTPControlPort,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil
     ) {

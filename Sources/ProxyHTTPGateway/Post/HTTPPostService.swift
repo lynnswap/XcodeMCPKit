@@ -33,7 +33,7 @@ package final class HTTPPostService: Sendable {
         let deadline: Date?
     }
 
-    package let sessionManager: any RuntimeCoordinating
+    package let sessionManager: any RuntimeHTTPPostPort
     package let disabledToolNames: Set<String>
     package let usesSynchronousLocalResolution: Bool
     package let localResponder: LocalMCPResponder
@@ -44,7 +44,7 @@ package final class HTTPPostService: Sendable {
 
     package init(
         config: ProxyConfig,
-        sessionManager: any RuntimeCoordinating,
+        sessionManager: any RuntimeHTTPPostPort,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
         refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,

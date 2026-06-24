@@ -26,10 +26,10 @@ package struct MCPForwardingService: Sendable {
     }
 
     private let config: ProxyConfig
-    private let sessionManager: any RuntimeCoordinating
+    private let sessionManager: any RuntimeMCPForwardingPort
     private let toolSurface: ToolSurface
 
-    package init(config: ProxyConfig, sessionManager: any RuntimeCoordinating) {
+    package init(config: ProxyConfig, sessionManager: any RuntimeMCPForwardingPort) {
         self.config = config
         self.sessionManager = sessionManager
         self.toolSurface = ToolSurface(config: config, sessionManager: sessionManager)

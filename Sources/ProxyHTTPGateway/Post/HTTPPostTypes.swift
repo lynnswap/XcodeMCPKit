@@ -144,7 +144,7 @@ extension HTTPPostService {
             }
         }
 
-        package func cancel(using runtime: any RuntimeCoordinating) {
+        package func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
             let snapshot = state.withLockedValue {
                 state -> (
                     Int?, UUID?, Task<Void, Never>?, [HTTPPostService.CancellationHandle], [String]
