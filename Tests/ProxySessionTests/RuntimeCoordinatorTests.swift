@@ -203,12 +203,16 @@ struct RuntimeCoordinatorTests {
         let recoveryUpstreamID = try extractUpstreamID(from: recoveryInitialize)
         await upstream0.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
         _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
-        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
-        #expect(manager.documentationCandidateProcessOrder() == [
+        let expectedCandidateProcessOrder = [
             newerTarget.processID,
             olderTarget.processID,
-        ])
+        ]
+        #expect(await waitUntil(timeout: .seconds(2)) {
+            manager.documentationCandidateProcessOrder() == expectedCandidateProcessOrder
+        })
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
+        #expect(manager.documentationCandidateProcessOrder() == expectedCandidateProcessOrder)
     }
 
     @Test func sessionManagerRoutesInitializeHandshakeNotificationsFromRetriedPrimaryProcess()
