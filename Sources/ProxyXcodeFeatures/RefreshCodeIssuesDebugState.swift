@@ -272,6 +272,13 @@ extension RefreshCodeIssues {
         private struct State {
             var activeRequests: [String: RequestRecord] = [:]
             var recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot] = []
+            var activeRequestCountWaiters: [ActiveRequestCountWaiter] = []
+        }
+
+        private struct ActiveRequestCountWaiter {
+            let id: UUID
+            let minimumCount: Int
+            let continuation: CheckedContinuation<Void, any Error>
         }
 
         private let lock = NSLock()
@@ -279,6 +286,7 @@ extension RefreshCodeIssues {
         private let defaultRequestTimeoutSeconds: Double
         private let recentCompletedLimit: Int
         private let clock: ClockClient
+        private var cancelledActiveRequestCountWaiterIDs: Set<UUID> = []
 
         package init(
             defaultRequestTimeoutSeconds: Double,
@@ -451,10 +459,51 @@ extension RefreshCodeIssues {
             )
         }
 
+        package func waitForActiveRequestCount(_ count: Int) async throws {
+            guard count > 0 else {
+                return
+            }
+
+            let waiterID = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, any Error>) in
+                    lock.lock()
+                    if cancelledActiveRequestCountWaiterIDs.remove(waiterID) != nil {
+                        lock.unlock()
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+
+                    if activeRequestCountLocked >= count {
+                        lock.unlock()
+                        continuation.resume(returning: ())
+                        return
+                    }
+
+                    state.activeRequestCountWaiters.append(
+                        ActiveRequestCountWaiter(
+                            id: waiterID,
+                            minimumCount: count,
+                            continuation: continuation
+                        )
+                    )
+                    lock.unlock()
+                }
+            } onCancel: {
+                cancelActiveRequestCountWaiter(id: waiterID)
+            }
+        }
+
         package func reset() {
+            let waiters: [ActiveRequestCountWaiter]
             lock.lock()
+            waiters = state.activeRequestCountWaiters
             state = State()
             lock.unlock()
+            for waiter in waiters {
+                waiter.continuation.resume(throwing: CancellationError())
+            }
         }
 
         private func updateRequest(
@@ -462,6 +511,7 @@ extension RefreshCodeIssues {
             mutate: (inout RequestRecord, Date) -> Void
         ) {
             let now = clock.now()
+            let waiters: [ActiveRequestCountWaiter]
             lock.lock()
             guard var record = state.activeRequests[requestID] else {
                 lock.unlock()
@@ -469,7 +519,42 @@ extension RefreshCodeIssues {
             }
             mutate(&record, now)
             state.activeRequests[requestID] = record
+            waiters = takeReadyActiveRequestCountWaitersLocked()
             lock.unlock()
+            for waiter in waiters {
+                waiter.continuation.resume(returning: ())
+            }
+        }
+
+        private var activeRequestCountLocked: Int {
+            state.activeRequests.values.filter { $0.state == .running }.count
+        }
+
+        private func takeReadyActiveRequestCountWaitersLocked() -> [ActiveRequestCountWaiter] {
+            let activeRequestCount = activeRequestCountLocked
+            var ready: [ActiveRequestCountWaiter] = []
+            state.activeRequestCountWaiters.removeAll { waiter in
+                if activeRequestCount >= waiter.minimumCount {
+                    ready.append(waiter)
+                    return true
+                }
+                return false
+            }
+            return ready
+        }
+
+        private func cancelActiveRequestCountWaiter(id: UUID) {
+            let waiter: ActiveRequestCountWaiter?
+            lock.lock()
+            if let index = state.activeRequestCountWaiters.firstIndex(where: { $0.id == id }) {
+                waiter = state.activeRequestCountWaiters.remove(at: index)
+            } else {
+                waiter = nil
+                cancelledActiveRequestCountWaiterIDs.insert(id)
+            }
+            lock.unlock()
+
+            waiter?.continuation.resume(throwing: CancellationError())
         }
     }
 }
