@@ -1,4 +1,5 @@
 import Foundation
+import ProxyMCP
 
 /// A JSON value used by MCP requests, responses, and dynamic metadata.
 ///
@@ -122,61 +123,55 @@ extension MCPJSONValue: ExpressibleByDictionaryLiteral {
 }
 
 extension MCPJSONValue {
-    package init?(foundationObject value: Any) {
+    package init(_ value: JSONValue) {
         switch value {
-        case is NSNull:
+        case .object(let values):
+            self = .object(values.mapValues(MCPJSONValue.init))
+        case .array(let values):
+            self = .array(values.map(MCPJSONValue.init))
+        case .string(let value):
+            self = .string(value)
+        case .number(let value):
+            switch value {
+            case .int(let value):
+                self = .integer(value)
+            case .double(let value):
+                self = .double(value)
+            }
+        case .bool(let value):
+            self = .bool(value)
+        case .null:
             self = .null
-        case let string as String:
-            self = .string(string)
-        case let number as NSNumber:
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                self = .bool(number.boolValue)
-            } else if CFNumberIsFloatType(number) {
-                self = .double(number.doubleValue)
-            } else {
-                self = .integer(number.int64Value)
-            }
-        case let array as [Any]:
-            var values: [MCPJSONValue] = []
-            values.reserveCapacity(array.count)
-            for item in array {
-                guard let value = MCPJSONValue(foundationObject: item) else {
-                    return nil
-                }
-                values.append(value)
-            }
-            self = .array(values)
-        case let object as [String: Any]:
-            var values: [String: MCPJSONValue] = [:]
-            values.reserveCapacity(object.count)
-            for (key, item) in object {
-                guard let value = MCPJSONValue(foundationObject: item) else {
-                    return nil
-                }
-                values[key] = value
-            }
-            self = .object(values)
-        default:
-            return nil
         }
     }
 
+    package init?(foundationObject value: Any) {
+        guard let value = JSONValue(any: value) else {
+            return nil
+        }
+        self.init(value)
+    }
+
     package var foundationObject: Any {
+        jsonValue.foundationObject
+    }
+
+    package var jsonValue: JSONValue {
         switch self {
         case .object(let value):
-            return value.mapValues(\.foundationObject)
+            return .object(value.mapValues(\.jsonValue))
         case .array(let value):
-            return value.map(\.foundationObject)
+            return .array(value.map(\.jsonValue))
         case .string(let value):
-            return value
+            return .string(value)
         case .integer(let value):
-            return NSNumber(value: value)
+            return .number(.int(value))
         case .double(let value):
-            return NSNumber(value: value)
+            return .number(.double(value))
         case .bool(let value):
-            return NSNumber(value: value)
+            return .bool(value)
         case .null:
-            return NSNull()
+            return .null
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import ProxyMCP
 import ProxyMCPContract
 import ProxySessionUpstream
 
@@ -315,9 +316,9 @@ extension XcodeMCP {
 
         let requestID = nextRequestID
         nextRequestID += 1
-        let idValue = MCPJSONValue.integer(requestID)
-        let idKey = String(requestID)
-        let payload = try makeJSONRPCPayload(id: idValue, method: method, params: params)
+        let id = JSONRPC.ID(any: NSNumber(value: requestID))!
+        let idKey = id.key
+        let payload = try makeJSONRPCPayload(id: id, method: method, params: params)
 
         return try await withRequestTimeout(method: method) { [self] in
             try await withTaskCancellationHandler {
@@ -443,53 +444,44 @@ private extension XcodeMCP {
     }
 
     func respondToUnsupportedServerRequest(id: MCPJSONValue, method _: String) async throws {
-        let payload = try makeJSONRPCResponse(
-            id: id,
-            error: .object([
-                "code": .integer(-32601),
-                "message": .string("Unsupported server request"),
-            ])
+        let payload = try JSONRPC.Wire.errorResponseData(
+            idValue: id.jsonValue,
+            code: -32601,
+            message: "Unsupported server request"
         )
         try await transport.send(payload)
     }
 
     func makeJSONRPCPayload(
-        id: MCPJSONValue?,
+        id: JSONRPC.ID?,
         method: String,
         params: MCPJSONValue?
     ) throws -> Data {
-        var object: [String: MCPJSONValue] = [
-            "jsonrpc": .string("2.0"),
-            "method": .string(method),
-        ]
+        let object: [String: Any]
         if let id {
-            object["id"] = id
-        }
-        if let params {
-            object["params"] = params
-        }
-        return try JSONSerialization.data(withJSONObject: MCPJSONValue.object(object).foundationObject)
-    }
-
-    func makeJSONRPCResponse(
-        id: MCPJSONValue,
-        result: MCPJSONValue? = nil,
-        error: MCPJSONValue? = nil
-    ) throws -> Data {
-        var object: [String: MCPJSONValue] = [
-            "jsonrpc": .string("2.0"),
-            "id": id,
-        ]
-        if let error {
-            object["error"] = error
+            object = JSONRPC.Wire.requestObject(
+                id: id,
+                method: method,
+                params: params?.jsonValue
+            )
         } else {
-            object["result"] = result ?? .null
+            object = JSONRPC.Wire.notificationObject(
+                method: method,
+                params: params?.jsonValue
+            )
         }
-        return try JSONSerialization.data(withJSONObject: MCPJSONValue.object(object).foundationObject)
+        return try JSONRPC.Wire.data(from: object)
     }
 
     func parseJSONObject(_ data: Data) throws -> [String: MCPJSONValue] {
-        let raw = try JSONSerialization.jsonObject(with: data)
+        let raw: [String: Any]
+        do {
+            raw = try JSONRPC.Wire.object(fromData: data)
+        } catch JSONRPC.Wire.DecodingFailure.messageWasNotObject {
+            throw XcodeMCPError.invalidResponse("JSON-RPC message is not an object")
+        } catch {
+            throw error
+        }
         guard let value = MCPJSONValue(foundationObject: raw),
               let object = value.objectValue
         else {

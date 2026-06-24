@@ -121,13 +121,11 @@ package struct LocalMCPResponder {
             let result: [String: Any] = (method == "resources/list")
                 ? ["resources": [Any]()]
                 : ["resourceTemplates": [Any]()]
-            let response: [String: Any] = [
-                "jsonrpc": "2.0",
-                "id": originalID.value.foundationObject,
-                "result": result,
-            ]
-            guard JSONSerialization.isValidJSONObject(response),
-                let data = try? JSONSerialization.data(withJSONObject: response, options: [])
+            guard let resultValue = JSONValue(any: result),
+                let data = try? JSONRPC.Wire.resultResponseData(
+                    id: originalID,
+                    result: resultValue
+                )
             else {
                 return nil
             }
@@ -243,16 +241,7 @@ package struct LocalMCPResponder {
         id: JSONRPC.ID,
         result: JSONValue
     ) throws -> Data {
-        struct EncodingError: Error {}
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
-            "result": result.foundationObject,
-        ]
-        guard JSONSerialization.isValidJSONObject(response) else {
-            throw EncodingError()
-        }
-        return try JSONSerialization.data(withJSONObject: response, options: [])
+        try JSONRPC.Wire.resultResponseData(id: id, result: result)
     }
 
     private static func encodeResultBuffer(
@@ -280,19 +269,11 @@ package struct LocalMCPResponder {
         error: Error
     ) throws -> Data {
         let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id.value.foundationObject,
-            "error": [
-                "code": mapped.code,
-                "message": mapped.message,
-            ],
-        ]
-        guard JSONSerialization.isValidJSONObject(response) else {
-            struct EncodingError: Error {}
-            throw EncodingError()
-        }
-        return try JSONSerialization.data(withJSONObject: response, options: [])
+        return try JSONRPC.Wire.errorResponseData(
+            id: id,
+            code: mapped.code,
+            message: mapped.message
+        )
     }
 
     private static func fallbackLocalError(
