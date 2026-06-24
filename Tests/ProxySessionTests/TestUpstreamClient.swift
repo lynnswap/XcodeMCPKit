@@ -1,5 +1,5 @@
 import Foundation
-import ProxySessionUpstream
+import XcodeMCPKit
 import XcodeMCPTestSupport
 
 @testable import ProxySession
