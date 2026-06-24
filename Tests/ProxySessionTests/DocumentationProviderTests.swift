@@ -26,6 +26,42 @@ extension RuntimeCoordinatorTests {
         )
     }
 
+    @Test func sessionBackedDocumentationProviderCloseDoesNotWaitForSessionStopDrain()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 119, xcodeVersion: "27.0")
+        let stopStarted = TestSignal()
+        let stopGate = AsyncGate()
+        let session = BlockingStopDocumentationSession(
+            serverVersion: "27.0",
+            stopStarted: stopStarted,
+            stopGate: stopGate
+        )
+        let transport = SessionBackedDocumentationProviderTransport(
+            sessionFactory: FixedDocumentationSessionFactory(session: session)
+        )
+        let route = try await transport.openRoute(
+            for: target,
+            requestTimeout: .seconds(1),
+            initializeParams: [:]
+        )
+
+        let closeTask = Task {
+            await transport.close(route: route)
+        }
+        try await stopStarted.wait(description: "waiting for provider session stop")
+
+        try await waitWithTimeout(
+            "documentation provider close should not wait for session stop drain",
+            timeout: .milliseconds(200)
+        ) {
+            await closeTask.value
+        }
+
+        #expect(await session.stopCount() == 1)
+        await stopGate.signal()
+    }
+
     @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
         var config = makeConfig(requestTimeout: 5)
         let transport = UnavailableDocumentationProviderTransport()
@@ -4063,6 +4099,114 @@ private actor RecordingDocumentationProviderTransport: DocumentationProviderRout
 
     func documentationSearchTimeouts() -> [TimeAmount?] {
         documentationSearchTimeoutValues
+    }
+}
+
+private actor FixedDocumentationSessionFactory: DocumentationProviderSessionMaking {
+    private let session: any UpstreamSession
+
+    init(session: any UpstreamSession) {
+        self.session = session
+    }
+
+    func startSession(for _: XcodeProcessTarget) async throws -> any UpstreamSession {
+        session
+    }
+}
+
+private actor BlockingStopDocumentationSession: UpstreamSession {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let serverVersion: String
+    private let stopStarted: TestSignal
+    private let stopGate: AsyncGate
+    private var stopCountValue = 0
+
+    init(
+        serverVersion: String,
+        stopStarted: TestSignal,
+        stopGate: AsyncGate
+    ) {
+        self.serverVersion = serverVersion
+        self.stopStarted = stopStarted
+        self.stopGate = stopGate
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
+              let method = object["method"] as? String else {
+            return .accepted
+        }
+        guard let requestID = object["id"] else {
+            return .accepted
+        }
+        switch method {
+        case "initialize":
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "serverInfo": [
+                        "name": "mcpbridge",
+                        "version": serverVersion,
+                    ],
+                ]
+            )
+        case "tools/list":
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "tools": [
+                        documentationDescriptor(version: serverVersion).foundationObject,
+                    ],
+                ]
+            )
+        case "tools/call":
+            yieldResponse(
+                id: requestID,
+                result: [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": "{\"ok\":true}",
+                        ],
+                    ],
+                    "isError": false,
+                ]
+            )
+        default:
+            break
+        }
+        return .accepted
+    }
+
+    func stop() async {
+        stopCountValue += 1
+        stopStarted.signal()
+        try? await stopGate.wait()
+        continuation.finish()
+    }
+
+    func stopCount() -> Int {
+        stopCountValue
+    }
+
+    private func yieldResponse(id: Any, result: [String: Any]) {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        ]
+        guard JSONSerialization.isValidJSONObject(response),
+              let data = try? JSONSerialization.data(withJSONObject: response, options: []) else {
+            return
+        }
+        continuation.yield(.message(data))
     }
 }
 

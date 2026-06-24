@@ -1346,11 +1346,12 @@ package actor DocumentationProviderConnection {
         let eventTask = self.eventTask
         eventTask?.cancel()
         self.eventTask = nil
-        let taskDrain = tasks.beginShutdown()
+        _ = tasks.beginShutdown()
         failAll(CancellationError())
-        await session.stop()
-        await eventTask?.value
-        await taskDrain.wait()
+        let session = self.session
+        Task {
+            await session.stop()
+        }
     }
 
     package func sendNotification(_ object: [String: Any]) async throws {
