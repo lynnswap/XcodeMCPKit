@@ -15,10 +15,6 @@ let package = Package(
         .macOS("15.4")
     ],
     products: [
-        .library(
-            name: "XcodeMCPKit",
-            targets: ["XcodeMCPKit"]
-        ),
         .executable(
             name: "xcode-mcp-proxy",
             targets: ["XcodeMCPProxyCLI"]
