@@ -1,14 +1,43 @@
 import Foundation
 
+/// A JSON value used by MCP requests, responses, and dynamic metadata.
+///
+/// Xcode MCP tools are discovered at runtime, so this package preserves tool
+/// arguments, input schemas, structured content, and unknown fields as raw JSON
+/// instead of projecting every value into tool-specific Swift types.
+///
+/// Literal conformances make small argument dictionaries concise:
+///
+/// ```swift
+/// let arguments: [String: MCPJSONValue] = [
+///     "query": "SwiftUI toolbar",
+///     "includeBeta": true,
+///     "limit": 5
+/// ]
+/// ```
 public enum MCPJSONValue: Codable, Equatable, Sendable {
+    /// A JSON object with string keys.
     case object([String: MCPJSONValue])
+
+    /// A JSON array.
     case array([MCPJSONValue])
+
+    /// A JSON string.
     case string(String)
+
+    /// A JSON number represented as an integer.
     case integer(Int64)
+
+    /// A JSON number represented as a floating-point value.
     case double(Double)
+
+    /// A JSON boolean.
     case bool(Bool)
+
+    /// A JSON null value.
     case null
 
+    /// Decodes a JSON value while preserving its dynamic shape.
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
@@ -28,6 +57,7 @@ public enum MCPJSONValue: Codable, Equatable, Sendable {
         }
     }
 
+    /// Encodes the value as JSON.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
@@ -50,36 +80,42 @@ public enum MCPJSONValue: Codable, Equatable, Sendable {
 }
 
 extension MCPJSONValue: ExpressibleByStringLiteral {
+    /// Creates a JSON string from a Swift string literal.
     public init(stringLiteral value: String) {
         self = .string(value)
     }
 }
 
 extension MCPJSONValue: ExpressibleByBooleanLiteral {
+    /// Creates a JSON boolean from a Swift boolean literal.
     public init(booleanLiteral value: Bool) {
         self = .bool(value)
     }
 }
 
 extension MCPJSONValue: ExpressibleByIntegerLiteral {
+    /// Creates a JSON integer from a Swift integer literal.
     public init(integerLiteral value: Int64) {
         self = .integer(value)
     }
 }
 
 extension MCPJSONValue: ExpressibleByFloatLiteral {
+    /// Creates a JSON floating-point number from a Swift float literal.
     public init(floatLiteral value: Double) {
         self = .double(value)
     }
 }
 
 extension MCPJSONValue: ExpressibleByArrayLiteral {
+    /// Creates a JSON array from a Swift array literal.
     public init(arrayLiteral elements: MCPJSONValue...) {
         self = .array(elements)
     }
 }
 
 extension MCPJSONValue: ExpressibleByDictionaryLiteral {
+    /// Creates a JSON object from a Swift dictionary literal.
     public init(dictionaryLiteral elements: (String, MCPJSONValue)...) {
         self = .object(Dictionary(uniqueKeysWithValues: elements))
     }

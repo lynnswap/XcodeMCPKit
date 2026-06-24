@@ -45,17 +45,98 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
     }
 }
 
+/// A high-level client for the local Xcode MCP bridge.
+///
+/// `XcodeMCP` starts an `mcpbridge` process, performs the MCP initialize
+/// handshake, and exposes the dynamic Xcode tool catalog through
+/// ``listTools()`` and ``callTool(_:arguments:onProgress:)``.
+///
+/// The tool catalog is discovered at runtime. This package intentionally does
+/// not promise tool-specific Swift methods or typed request/response models for
+/// individual Xcode tools. Pass tool arguments as ``MCPJSONValue`` and inspect
+/// the returned ``MCPToolResult`` for the final MCP response.
+///
+/// Server-to-client handlers such as roots, sampling, and elicitation are not
+/// exposed by this v1 API. Progress notifications are delivered only through
+/// the callback supplied to ``callTool(_:arguments:onProgress:)``; the streaming
+/// transport itself is an implementation detail.
+///
+/// ```swift
+/// import XcodeMCPKit
+///
+/// let xcode = try await XcodeMCP()
+///
+/// let tools = try await xcode.listTools()
+/// guard tools.contains(where: { $0.name == "DocumentationSearch" }) else {
+///     throw XcodeMCPError.invalidResponse("DocumentationSearch is unavailable")
+/// }
+///
+/// _ = try await xcode.callTool(
+///     "DocumentationSearch",
+///     arguments: ["query": "NavigationStack"]
+/// )
+///
+/// await xcode.close()
+/// ```
 public actor XcodeMCP {
+    /// Settings used to launch and initialize the local MCP bridge.
+    ///
+    /// The default configuration starts `xcrun mcpbridge` with the current
+    /// process environment and a conservative per-request timeout.
     public struct Configuration: Equatable, Sendable {
+        /// The executable used to start the upstream bridge process.
+        ///
+        /// The default is `/usr/bin/xcrun`, which allows `arguments` to select
+        /// Xcode's `mcpbridge` tool.
         public var command: String
+
+        /// Command-line arguments passed to ``command``.
+        ///
+        /// The default value is `["mcpbridge"]`.
         public var arguments: [String]
+
+        /// Environment variables passed to the upstream process.
+        ///
+        /// The default inherits `ProcessInfo.processInfo.environment`.
         public var environment: [String: String]
+
+        /// Client name sent in the MCP `initialize` request.
         public var clientName: String
+
+        /// Client version sent in the MCP `initialize` request.
         public var clientVersion: String
+
+        /// Additional MCP client capabilities sent during initialization.
+        ///
+        /// Values are encoded as raw MCP JSON. Capabilities that require
+        /// server-to-client handlers, such as `roots`, `sampling`, and
+        /// `elicitation`, are intentionally not exposed by this API.
         public var capabilities: [String: MCPJSONValue]
+
+        /// Maximum duration to wait for each request.
+        ///
+        /// Set this to `nil` to disable client-side request timeouts.
         public var requestTimeout: Duration?
+
+        /// Maximum number of outbound bytes that may be queued for the bridge.
         public var maxQueuedWriteBytes: Int
 
+        /// Creates a bridge configuration.
+        ///
+        /// - Parameters:
+        ///   - command: Executable used to start the upstream bridge process.
+        ///   - arguments: Command-line arguments passed to `command`.
+        ///   - environment: Environment variables passed to the upstream
+        ///     process.
+        ///   - clientName: Client name sent in the MCP `initialize` request.
+        ///   - clientVersion: Client version sent in the MCP `initialize`
+        ///     request.
+        ///   - capabilities: Additional MCP client capabilities encoded as raw
+        ///     MCP JSON.
+        ///   - requestTimeout: Maximum duration to wait for each request, or
+        ///     `nil` to disable client-side request timeouts.
+        ///   - maxQueuedWriteBytes: Maximum number of outbound bytes that may
+        ///     be queued for the bridge.
         public init(
             command: String = "/usr/bin/xcrun",
             arguments: [String] = ["mcpbridge"],
@@ -85,6 +166,13 @@ public actor XcodeMCP {
     private var eventTask: Task<Void, Never>?
     private var progressHandlers: [String: @Sendable (MCPProgress) async -> Void] = [:]
 
+    /// Starts the local MCP bridge and returns an initialized client.
+    ///
+    /// The initializer launches the configured process, sends MCP
+    /// `initialize`, then sends `notifications/initialized`. If initialization
+    /// fails, the process is closed before the error is rethrown.
+    ///
+    /// - Parameter config: Launch and initialization settings for the bridge.
     public init(config: Configuration = Configuration()) async throws {
         let transport = try await UpstreamProcessXcodeMCPTransport.start(
             config: UpstreamProcess.Config(
@@ -120,6 +208,11 @@ public actor XcodeMCP {
         eventTask?.cancel()
     }
 
+    /// Returns the currently available Xcode MCP tools.
+    ///
+    /// The returned catalog is dynamic and comes from the running Xcode MCP
+    /// server. Use the tool `name` with ``callTool(_:arguments:onProgress:)``
+    /// and treat `inputSchema` and `raw` as MCP JSON supplied by the server.
     public func listTools() async throws -> [MCPTool] {
         let result = try await request("tools/list")
         guard let tools = result.objectValue?["tools"]?.arrayValue else {
@@ -128,6 +221,21 @@ public actor XcodeMCP {
         return try tools.map { try MCPTool(json: $0) }
     }
 
+    /// Calls an Xcode MCP tool and returns its final result.
+    ///
+    /// This method sends an MCP `tools/call` request using the supplied raw JSON
+    /// arguments. It waits for the final `tools/call` response and returns it as
+    /// ``MCPToolResult``. Incremental transport events are not exposed as a
+    /// public stream; progress notifications are delivered through
+    /// `onProgress` when the server emits them.
+    ///
+    /// - Parameters:
+    ///   - name: Tool name from ``listTools()``.
+    ///   - arguments: Tool arguments encoded as MCP JSON.
+    ///   - onProgress: Optional callback for MCP progress notifications
+    ///     associated with this call.
+    /// - Returns: The final tool result, including content, structured content,
+    ///   error status, and the raw MCP JSON response.
     public func callTool(
         _ name: String,
         arguments: [String: MCPJSONValue] = [:],
@@ -163,6 +271,11 @@ public actor XcodeMCP {
         return try MCPToolResult(json: result)
     }
 
+    /// Closes the client and terminates the underlying transport.
+    ///
+    /// Closing is idempotent. Pending requests fail with ``XcodeMCPError/closed``,
+    /// registered progress callbacks are discarded, and no further requests may
+    /// be sent through this client.
     public func close() async {
         guard isClosed == false else {
             return
