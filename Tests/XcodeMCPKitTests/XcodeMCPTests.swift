@@ -89,7 +89,7 @@ struct XcodeMCPTests {
 
     @Test func callToolAddsProgressTokenAndRoutesMatchingProgress() async throws {
         let transport = FakeXcodeMCPTransport()
-        let recorder = ProgressRecorder()
+        let progressValues = RecordedValues<MCPProgress>()
         let xcode = try await XcodeMCP(config: .init(environment: [:]), transport: transport)
         defer {
             Task { await xcode.close() }
@@ -100,7 +100,7 @@ struct XcodeMCPTests {
             arguments: ["query": .string("Observation")]
         ) { progress in
             _ = try? await xcode.listTools()
-            await recorder.append(progress)
+            await progressValues.append(progress)
         }
 
         let calls = await transport.sentMessages().filter { $0.method == "tools/call" }
@@ -108,7 +108,9 @@ struct XcodeMCPTests {
         let progressToken = try #require(meta["progressToken"]?.stringValue)
         #expect(progressToken.isEmpty == false)
 
-        let progress = try await waitForProgress(recorder)
+        let progress = try await waitWithTimeout("progress callback was not invoked") {
+            try await progressValues.nextValue()
+        }
         #expect(progress.progressToken == progressToken)
         #expect(progress.progress == 0.5)
         #expect(progress.total == 1)
@@ -137,7 +139,13 @@ struct XcodeMCPTests {
 
         await transport.emitServerRequest(method: "sampling/createMessage", id: .integer(99))
 
-        let response = try await waitForUnsupportedServerResponse(transport)
+        let response = try await waitWithTimeout(
+            "unsupported server request response was not sent"
+        ) {
+            try await transport.nextSentMessage { message in
+                message.method == nil && message.error != nil
+            }
+        }
         #expect(response.id == .integer(99))
         #expect(response.error?.objectValue?["code"] == .integer(-32601))
 
@@ -212,22 +220,11 @@ private struct SentMessage: Sendable, Equatable {
     var error: MCPJSONValue?
 }
 
-private actor ProgressRecorder {
-    private var values: [MCPProgress] = []
-
-    func append(_ value: MCPProgress) {
-        values.append(value)
-    }
-
-    func snapshot() -> [MCPProgress] {
-        values
-    }
-}
-
 private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
 
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
+    private let sentMessageValues = RecordedValues<SentMessage>()
     private var messages: [SentMessage] = []
     private var closed = false
     private var closes = 0
@@ -251,6 +248,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
             error: object["error"]
         )
         messages.append(sent)
+        await sentMessageValues.append(sent)
 
         guard let method = sent.method,
               let id = sent.id
@@ -301,6 +299,12 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
 
     func sentMessages() -> [SentMessage] {
         messages
+    }
+
+    func nextSentMessage(
+        matching predicate: @escaping @Sendable (SentMessage) -> Bool
+    ) async throws -> SentMessage {
+        try await sentMessageValues.nextValue(matching: predicate)
     }
 
     func closeCount() -> Int {
@@ -378,28 +382,104 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     }
 }
 
-private func waitForProgress(_ recorder: ProgressRecorder) async throws -> MCPProgress {
-    for _ in 0..<20 {
-        if let progress = await recorder.snapshot().first {
-            return progress
-        }
-        try await Task.sleep(for: .milliseconds(50))
+private actor RecordedValues<Value: Sendable> {
+    private struct Waiter {
+        let id: UUID
+        let startingAt: Int
+        let predicate: @Sendable (Value) -> Bool
+        let continuation: CheckedContinuation<Value, Error>
     }
-    throw XcodeMCPError.invalidResponse("progress callback was not invoked")
+
+    private var values: [Value] = []
+    private var waiters: [Waiter] = []
+
+    func append(_ value: Value) {
+        let index = values.count
+        values.append(value)
+
+        var remaining: [Waiter] = []
+        for waiter in waiters {
+            if index >= waiter.startingAt, waiter.predicate(value) {
+                waiter.continuation.resume(returning: value)
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        waiters = remaining
+    }
+
+    func nextValue(
+        startingAt startIndex: Int = 0,
+        matching predicate: @escaping @Sendable (Value) -> Bool = { _ in true }
+    ) async throws -> Value {
+        let startIndex = max(startIndex, 0)
+        if let existing = firstValue(startingAt: startIndex, matching: predicate) {
+            return existing
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if let existing = firstValue(startingAt: startIndex, matching: predicate) {
+                    continuation.resume(returning: existing)
+                    return
+                }
+                waiters.append(
+                    Waiter(
+                        id: waiterID,
+                        startingAt: startIndex,
+                        predicate: predicate,
+                        continuation: continuation
+                    )
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: waiterID) }
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func firstValue(
+        startingAt startIndex: Int,
+        matching predicate: @Sendable (Value) -> Bool
+    ) -> Value? {
+        guard startIndex < values.count else {
+            return nil
+        }
+        for index in startIndex..<values.count where predicate(values[index]) {
+            return values[index]
+        }
+        return nil
+    }
 }
 
-private func waitForUnsupportedServerResponse(
-    _ transport: FakeXcodeMCPTransport
-) async throws -> SentMessage {
-    for _ in 0..<20 {
-        if let response = await transport.sentMessages().first(where: { message in
-            message.method == nil && message.error != nil
-        }) {
-            return response
+private func waitWithTimeout<T: Sendable>(
+    _ description: String,
+    timeout: Duration = .seconds(2),
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let clock = ContinuousClock()
+
+    return try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
         }
-        try await Task.sleep(for: .milliseconds(50))
+        group.addTask {
+            try await clock.sleep(until: clock.now.advanced(by: timeout))
+            throw XcodeMCPError.invalidResponse(description)
+        }
+
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
     }
-    throw XcodeMCPError.invalidResponse("unsupported server request response was not sent")
 }
 
 private func jsonObject(_ data: Data) throws -> [String: MCPJSONValue] {
