@@ -217,6 +217,46 @@ struct RuntimeCoordinatorTests {
         ])
     }
 
+    @Test func sessionManagerRetriesProcessPrimaryInitializeOnSiblingBeforeDroppingProcessAfterError()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 27103, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let failedInitialize = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let failedUpstreamID = try extractUpstreamID(from: failedInitialize)
+        await upstream0.yield(.message(try makeInitializeErrorResponse(id: failedUpstreamID)))
+
+        let retriedInitialize = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
+        await upstream1.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil)
+        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+    }
+
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterExit()
         async throws
     {

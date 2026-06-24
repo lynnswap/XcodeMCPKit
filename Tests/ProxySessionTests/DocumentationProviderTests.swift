@@ -2443,7 +2443,7 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
-    @Test func liveDocumentationSearchServiceRepairerSelectsClosestSameMajorAsset()
+    @Test func liveDocumentationSearchServiceRepairerSelectsLatestInstalledAsset()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -2474,7 +2474,6 @@ extension RuntimeCoordinatorTests {
         let writtenValues = NIOLockedValueBox<[String]>([])
         let repairer = LiveDocumentationSearchServiceRepairer(
             assetRoot: root,
-            currentOSVersion: { "26.5.1" },
             readConfigURLOverride: { nil },
             writeConfigURLOverride: { value in
                 writtenValues.withLockedValue { $0.append(value) }
@@ -2490,12 +2489,12 @@ extension RuntimeCoordinatorTests {
             Issue.record("expected repaired result, got \(result)")
             return
         }
-        #expect(report.xcodeVersion == "26.5")
-        #expect(report.osVersion == "26.2")
-        #expect(report.documentationRelease == 900339)
+        #expect(report.xcodeVersion == "27.0")
+        #expect(report.osVersion == "26.6")
+        #expect(report.documentationRelease == 950001)
         #expect(report.changedDefault)
         #expect(report.configURL.hasPrefix("/"))
-        #expect(report.configURL.contains("xcode-26-5.asset/AssetData/config.json"))
+        #expect(report.configURL.contains("xcode-27.asset/AssetData/config.json"))
         #expect(writtenValues.withLockedValue { $0 } == [report.configURL])
     }
 
@@ -2594,8 +2593,7 @@ extension RuntimeCoordinatorTests {
         ))
         let provider = LiveDocumentationAssetSearchProvider(
             assetRoot: root,
-            processRunner: runner,
-            currentOSVersion: { "26.5.1" }
+            processRunner: runner
         )
         let target = xcodeProcessTarget(processID: 123, xcodeVersion: "26.6")
 
@@ -2631,7 +2629,7 @@ extension RuntimeCoordinatorTests {
         #expect(requests.first?.arguments.joined(separator: " ").contains("lower(asset_id)") == true)
     }
 
-    @Test func liveDocumentationAssetSearchProviderUsesTargetCompatibleInstalledAsset()
+    @Test func liveDocumentationAssetSearchProviderUsesLatestInstalledAsset()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -2659,8 +2657,7 @@ extension RuntimeCoordinatorTests {
         ))
         let provider = LiveDocumentationAssetSearchProvider(
             assetRoot: root,
-            processRunner: runner,
-            currentOSVersion: { "27.0" }
+            processRunner: runner
         )
         let target = xcodeProcessTarget(processID: 128, xcodeVersion: "26.6")
 
@@ -2673,7 +2670,7 @@ extension RuntimeCoordinatorTests {
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
         #expect(requests.first?.arguments.joined(separator: " ").contains(
-            "xcode-26-5.asset/AssetData/documentation-db/index.sql"
+            "xcode-27.asset/AssetData/documentation-db/index.sql"
         ) == true)
     }
 
@@ -3618,6 +3615,7 @@ extension RuntimeCoordinatorTests {
             return
         }
         #expect(reason.message == DocumentationProvider.UnavailableReason.userFacingMessage)
+        let firstStartAttempts = await factory.startAttempts()
 
         let followUpTools = DocumentationProvider.ToolCatalog.applying(
             await manager.toolListUpdate(requestTimeout: .seconds(1)),
@@ -3628,6 +3626,19 @@ extension RuntimeCoordinatorTests {
             ])
         )
         #expect(DocumentationProvider.ToolCatalog.descriptor(in: followUpTools) == nil)
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 81, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .unavailable(let secondReason) = secondOutcome else {
+            Issue.record("expected second unavailable outcome, got \(secondOutcome)")
+            return
+        }
+        #expect(secondReason.message == DocumentationProvider.UnavailableReason.userFacingMessage)
+        #expect(await factory.startAttempts() == firstStartAttempts)
+        #expect(await factory.documentationQueries(for: xcode27.processID) == ["UIView"])
+        #expect(await factory.documentationQueries(for: xcode26.processID) == ["UIView"])
     }
 
     @Test func documentationProviderManagerDoesNotUseInheritedProcessPin() async throws {
@@ -3888,6 +3899,35 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
     }
 
+    @Test func documentationProviderManagerPreservesCallerTimeoutForFinalProvider() async throws {
+        let target = xcodeProcessTarget(processID: 486, xcodeVersion: "27.0")
+        let (clock, _, _) = makeRuntimeCoordinatorDeterministicClocks()
+        let transport = RecordingDocumentationProviderTransport(
+            responseData: try makeDocumentationSearchResponse(
+                id: 87,
+                text: "{\"answer\":\"final\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: transport,
+            clock: clock
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 87, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(5)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"final\"}")
+        let callTimeout = try #require(await transport.documentationSearchTimeouts().first)
+        #expect((callTimeout?.nanoseconds ?? 0) > 4_000_000_000)
+    }
+
     @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
         let xcode = xcodeProcessTarget(processID: 490, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
@@ -3977,6 +4017,52 @@ extension RuntimeCoordinatorTests {
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"after-cancel\"}")
         #expect(await factory.startedPIDs() == [xcode.processID])
         #expect(await factory.documentationQueries(for: xcode.processID) == ["UIView", "SwiftUI"])
+    }
+}
+
+private actor RecordingDocumentationProviderTransport: DocumentationProviderRouting {
+    private let responseData: Data
+    private var documentationSearchTimeoutValues: [TimeAmount?] = []
+
+    init(responseData: Data) {
+        self.responseData = responseData
+    }
+
+    func openRoute(
+        for target: XcodeProcessTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        DocumentationProviderRoute(
+            id: "recording-\(target.processID)",
+            target: target,
+            upstreamIndex: nil,
+            serverVersion: target.xcodeVersion
+        )
+    }
+
+    func toolsList(
+        route: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        try jsonValue([
+            "tools": [
+                documentationDescriptor(version: route.serverVersion).foundationObject,
+            ],
+        ])
+    }
+
+    func callDocumentationSearch(
+        route _: DocumentationProviderRoute,
+        requestData _: Data,
+        timeout: TimeAmount?
+    ) async throws -> Data {
+        documentationSearchTimeoutValues.append(timeout)
+        return responseData
+    }
+
+    func documentationSearchTimeouts() -> [TimeAmount?] {
+        documentationSearchTimeoutValues
     }
 }
 

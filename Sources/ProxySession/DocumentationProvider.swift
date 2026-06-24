@@ -751,19 +751,15 @@ package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServic
     private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
 
     private let assetRoot: URL
-    private let currentOSVersion: @Sendable () -> String
     private let readConfigURLOverride: @Sendable () -> String?
     private let writeConfigURLOverride: @Sendable (String) -> Bool
 
     package init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
-        currentOSVersion: @escaping @Sendable () -> String =
-            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
         readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
         writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
     ) {
         self.assetRoot = assetRoot
-        self.currentOSVersion = currentOSVersion
         self.readConfigURLOverride = readConfigURLOverride
         self.writeConfigURLOverride = writeConfigURLOverride
     }
@@ -777,11 +773,7 @@ package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServic
         } catch {
             return .failed("asset_scan_failed: \(error)")
         }
-        guard let asset = DocumentationSearchAssetLocator.bestAsset(
-            for: target.xcodeVersion,
-            currentOSVersion: currentOSVersion(),
-            from: scan.assets
-        ) else {
+        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
             return .skipped(scan.noAssetReason)
         }
 
@@ -1031,19 +1023,15 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
 
     private let assetRoot: URL
     private let processRunner: any ProcessRunning
-    private let currentOSVersion: @Sendable () -> String
     private let clock: ClockClient
 
     package init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
         processRunner: any ProcessRunning = ProcessRunner(),
-        currentOSVersion: @escaping @Sendable () -> String =
-            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
         clock: ClockClient = .liveValue
     ) {
         self.assetRoot = assetRoot
         self.processRunner = processRunner
-        self.currentOSVersion = currentOSVersion
         self.clock = clock
     }
 
@@ -1082,11 +1070,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         else {
             return nil
         }
-        return DocumentationSearchAssetLocator.bestAsset(
-            for: target.xcodeVersion,
-            currentOSVersion: currentOSVersion(),
-            from: scan.assets
-        )
+        return DocumentationSearchAssetLocator.latestAsset(from: scan.assets)
     }
 
     private func searchRows(
@@ -1759,6 +1743,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private var activeProvider: ActiveProvider?
     private var preparedProviders: [pid_t: CandidateProfile] = [:]
     private var providerPreparations: [pid_t: ProviderPreparation] = [:]
+    private var permanentlyUnusableProcessIDs: Set<pid_t> = []
     private var serviceRepairAttemptedProcessIDs: Set<pid_t> = []
     private var isShutdown = false
 
@@ -1987,8 +1972,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                         invalidatedProvider = true
                     }
                     return .handled(data, invalidatedProvider: invalidatedProvider)
-                case .rejected(let processID, _):
-                    rejectedProcessIDs.insert(processID)
+                case .rejected(let processID, let permanentlyUnusable):
+                    rememberRejectedProvider(
+                        processID: processID,
+                        permanentlyUnusable: permanentlyUnusable,
+                        rejectedProcessIDs: &rejectedProcessIDs
+                    )
                     invalidatedProvider = true
                     continue
                 case .requestFailed(let error):
@@ -2083,8 +2072,12 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
                             )
                         }
                         return .handled(data, invalidatedProvider: invalidatedProvider)
-                    case .rejected(let processID, _):
-                        rejectedProcessIDs.insert(processID)
+                    case .rejected(let processID, let permanentlyUnusable):
+                        rememberRejectedProvider(
+                            processID: processID,
+                            permanentlyUnusable: permanentlyUnusable,
+                            rejectedProcessIDs: &rejectedProcessIDs
+                        )
                         invalidatedProvider = true
                         progressed = true
                         await discardPreparedProvider(processID: processID)
@@ -2161,6 +2154,17 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         await closeTransportRouteIfPresent(previous.profile)
         return true
+    }
+
+    private func rememberRejectedProvider(
+        processID: pid_t,
+        permanentlyUnusable: Bool,
+        rejectedProcessIDs: inout Set<pid_t>
+    ) {
+        rejectedProcessIDs.insert(processID)
+        if permanentlyUnusable {
+            permanentlyUnusableProcessIDs.insert(processID)
+        }
     }
 
     private enum DocumentationAttemptResult: Sendable {
@@ -2356,6 +2360,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         preparedProviders.removeAll()
         let provider = activeProvider
         activeProvider = nil
+        permanentlyUnusableProcessIDs.removeAll()
         for profile in prepared.values where profile.id != provider?.profile.id {
             await closeTransportRouteIfPresent(profile)
         }
@@ -2651,6 +2656,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private func orderedTargets(
         excluding excludedProcessIDs: Set<pid_t>
     ) -> [XcodeProcessTarget] {
+        let excludedProcessIDs = excludedProcessIDs.union(permanentlyUnusableProcessIDs)
         let filtered = discovery.runningXcodeTargets().filter {
             excludedProcessIDs.contains($0.processID) == false
         }
@@ -3136,9 +3142,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             return .nanoseconds(0)
         }
         guard remainingCandidateCount > 1 else {
-            return .nanoseconds(
-                min(remaining.nanoseconds, candidateAttemptTimeoutNanoseconds)
-            )
+            return remaining
         }
         let fairShare = max(1, remaining.nanoseconds / Int64(remainingCandidateCount))
         return .nanoseconds(min(fairShare, candidateAttemptTimeoutNanoseconds))

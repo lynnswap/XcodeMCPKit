@@ -86,15 +86,55 @@ extension RuntimeCoordinator {
 
         let unavailable = unavailableXcodeProcessIDs()
         for route in xcodeProcessRoutes {
-            guard let upstreamIndex = route.primaryUpstreamIndex,
-                  excludedUpstreamIndices.contains(upstreamIndex) == false,
-                  unavailable.contains(route.target.processID) == false
-            else {
+            guard unavailable.contains(route.target.processID) == false else {
                 continue
             }
-            return upstreamIndex
+            if let upstreamIndex = primaryInitializeCandidate(
+                in: route,
+                excluding: excludedUpstreamIndices
+            ) {
+                return upstreamIndex
+            }
         }
         return nil
+    }
+
+    private func primaryInitializeCandidate(
+        in route: XcodeProcessRoute,
+        excluding excludedUpstreamIndices: Set<Int>
+    ) -> Int? {
+        let states = upstreamHealthManager.statesSnapshot()
+        return route.upstreamIndices.first { upstreamIndex in
+            guard excludedUpstreamIndices.contains(upstreamIndex) == false,
+                  upstreamIndex >= 0,
+                  upstreamIndex < states.count else {
+                return false
+            }
+            let state = states[upstreamIndex]
+            guard state.initInFlight == false,
+                  state.isInitialized == false else {
+                return false
+            }
+            switch state.healthState {
+            case .healthy, .degraded:
+                return true
+            case .quarantined:
+                return false
+            }
+        }
+    }
+
+    private func primaryInitializeRetryUpstreamIndex(failedUpstreamIndex: Int) -> Int? {
+        let excludedUpstreamIndices: Set<Int> = [failedUpstreamIndex]
+        if let failedRoute = xcodeProcessRoute(forUpstreamIndex: failedUpstreamIndex),
+           let siblingUpstreamIndex = primaryInitializeCandidate(
+               in: failedRoute,
+               excluding: excludedUpstreamIndices
+           )
+        {
+            return siblingUpstreamIndex
+        }
+        return primaryInitializeUpstreamIndex(excluding: excludedUpstreamIndices)
     }
 
     func retryPrimaryInitializeOnAlternativeUpstream(
@@ -105,11 +145,18 @@ extension RuntimeCoordinator {
         guard xcodeProcessRoutes.isEmpty == false else {
             return false
         }
-        markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
-        guard let retryUpstreamIndex = primaryInitializeUpstreamIndex(
-            excluding: [failedUpstreamIndex]
+        guard let retryUpstreamIndex = primaryInitializeRetryUpstreamIndex(
+            failedUpstreamIndex: failedUpstreamIndex
         ) else {
+            markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
             return false
+        }
+        let failedProcessID = xcodeProcessRoute(forUpstreamIndex: failedUpstreamIndex)?.target.processID
+        let retryProcessID = xcodeProcessRoute(forUpstreamIndex: retryUpstreamIndex)?.target.processID
+        if failedProcessID == retryProcessID {
+            markXcodeProcessRouteAvailable(upstreamIndex: retryUpstreamIndex)
+        } else {
+            markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
         }
         if let failedUpstreamID {
             upstreamRouter.remove(upstreamIndex: failedUpstreamIndex, upstreamID: failedUpstreamID)
