@@ -8,13 +8,26 @@ extension RuntimeCoordinator {
     package struct DefaultUpstreamPlan: Sendable {
         package let upstreams: [ManagedUpstreamSlot]
         package let xcodeProcessRoutes: [XcodeProcessRoute]
+        package let topology: UpstreamTopologySnapshot
 
         package init(
             upstreams: [ManagedUpstreamSlot],
-            xcodeProcessRoutes: [XcodeProcessRoute] = []
+            xcodeProcessRoutes: [XcodeProcessRoute] = [],
+            topology: UpstreamTopologySnapshot? = nil
         ) {
             self.upstreams = upstreams
-            self.xcodeProcessRoutes = xcodeProcessRoutes
+            self.topology = topology ?? UpstreamTopologySnapshot(
+                slotCount: upstreams.count,
+                xcodeProcessBindings: xcodeProcessRoutes.map { route in
+                    XcodeProcessBinding(
+                        target: route.target,
+                        slotIDs: route.upstreamIndices.map { UpstreamSlotID(rawValue: $0) }
+                    )
+                }
+            )
+            self.xcodeProcessRoutes = xcodeProcessRoutes.isEmpty
+                ? self.topology.xcodeProcessRoutes()
+                : xcodeProcessRoutes
         }
     }
 
@@ -42,16 +55,16 @@ extension RuntimeCoordinator {
             orderedXcodeTargets.isEmpty == false
             && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
         var upstreams: [ManagedUpstreamSlot] = []
-        var xcodeProcessRoutes: [XcodeProcessRoute] = []
+        var xcodeProcessBindings: [XcodeProcessBinding] = []
         let upstreamCount = max(1, count)
 
         if canUseProcessBoundXcodeUpstreams {
             upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
-            xcodeProcessRoutes.reserveCapacity(orderedXcodeTargets.count)
+            xcodeProcessBindings.reserveCapacity(orderedXcodeTargets.count)
 
             for target in orderedXcodeTargets {
-                var upstreamIndices: [Int] = []
-                upstreamIndices.reserveCapacity(upstreamCount)
+                var slotIDs: [UpstreamSlotID] = []
+                slotIDs.reserveCapacity(upstreamCount)
                 for _ in 0..<upstreamCount {
                     let upstreamIndex = upstreams.count
                     let upstreamConfig = makeDefaultUpstreamConfig(
@@ -62,11 +75,12 @@ extension RuntimeCoordinator {
                     upstreams.append(
                         ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
                     )
-                    upstreamIndices.append(upstreamIndex)
+                    slotIDs.append(UpstreamSlotID(rawValue: upstreamIndex))
                 }
 
-                let route = XcodeProcessRoute(target: target, upstreamIndices: upstreamIndices)
-                xcodeProcessRoutes.append(route)
+                xcodeProcessBindings.append(
+                    XcodeProcessBinding(target: target, slotIDs: slotIDs)
+                )
             }
         } else {
             upstreams.reserveCapacity(upstreamCount)
@@ -81,10 +95,15 @@ extension RuntimeCoordinator {
                 )
             }
         }
+        let topology = UpstreamTopologySnapshot(
+            slotCount: upstreams.count,
+            xcodeProcessBindings: xcodeProcessBindings
+        )
 
         return DefaultUpstreamPlan(
             upstreams: upstreams,
-            xcodeProcessRoutes: xcodeProcessRoutes
+            xcodeProcessRoutes: topology.xcodeProcessRoutes(),
+            topology: topology
         )
     }
 

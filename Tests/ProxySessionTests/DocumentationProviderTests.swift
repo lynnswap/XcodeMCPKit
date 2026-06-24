@@ -199,6 +199,27 @@ extension RuntimeCoordinatorTests {
         #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
     }
 
+    @Test func xcodeVersionKeyDistinguishesDeveloperDirAndMCPBridgePath() {
+        let base = XcodeVersionKey(
+            xcodeVersion: "27.0",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
+        )
+        let differentDeveloperDir = XcodeVersionKey(
+            xcodeVersion: "27.0",
+            developerDir: "/Applications/Xcode-Beta.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
+        )
+        let differentMCPBridgePath = XcodeVersionKey(
+            xcodeVersion: "27.0",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode-Beta.app/Contents/Developer/usr/bin/mcpbridge"
+        )
+
+        #expect(base != differentDeveloperDir)
+        #expect(base != differentMCPBridgePath)
+    }
+
     @Test func defaultUpstreamPlanBindsEachSlotToSingleXcodeProcess() throws {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
@@ -217,6 +238,20 @@ extension RuntimeCoordinatorTests {
         #expect(plan.xcodeProcessRoutes.count == 1)
         #expect(plan.xcodeProcessRoutes.first?.target.processID == target.processID)
         #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [0, 1])
+        #expect(plan.topology.slotIDs == [
+            UpstreamSlotID(rawValue: 0),
+            UpstreamSlotID(rawValue: 1),
+        ])
+        #expect(plan.topology.xcodeProcessRoutes() == plan.xcodeProcessRoutes)
+        let binding = try #require(plan.topology.xcodeProcessBindings.first)
+        #expect(binding.processID == XcodeProcessID(rawValue: target.processID))
+        #expect(binding.versionKey == XcodeVersionKey(target))
+        #expect(binding.slotIDs == [
+            UpstreamSlotID(rawValue: 0),
+            UpstreamSlotID(rawValue: 1),
+        ])
+        #expect(binding.selectionScope == .xcodeProcess(XcodeProcessID(rawValue: target.processID)))
+        #expect(plan.topology.binding(forUpstreamIndex: 1)?.processID == binding.processID)
         for upstream in plan.upstreams {
             let environment = try upstreamEnvironment(from: upstream)
             #expect(try upstreamCommand(from: upstream) == target.mcpbridgePath)
@@ -249,6 +284,11 @@ extension RuntimeCoordinatorTests {
             older.processID,
         ])
         #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0], [1]])
+        #expect(plan.topology.xcodeProcessRoutes() == plan.xcodeProcessRoutes)
+        #expect(plan.topology.xcodeProcessBindings.map(\.processID) == [
+            XcodeProcessID(rawValue: newer.processID),
+            XcodeProcessID(rawValue: older.processID),
+        ])
         let firstEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.first))
         let secondEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.dropFirst().first))
         #expect(firstEnvironment["MCP_XCODE_PID"] == "\(newer.processID)")
