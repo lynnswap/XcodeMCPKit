@@ -6,7 +6,6 @@ import NIOEmbedded
 import Testing
 import ProxyCore
 import ProxyMCP
-import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import XcodeMCPTestSupport
@@ -930,10 +929,12 @@ extension RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 746, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let providerManager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
             transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
-            providerSelectionTimeout: .seconds(1)
+            providerSelectionTimeout: .seconds(1),
+            clock: clock
         )
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
@@ -984,13 +985,24 @@ extension RuntimeCoordinatorTests {
             }
         )
 
-        let started = Date()
-        let outcome = try await providerManager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 96, query: "UIView"),
-            requestTimeoutOverride: .milliseconds(10)
+        let outcomeTask = Task {
+            try await providerManager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 96, query: "UIView"),
+                requestTimeoutOverride: .milliseconds(10)
+            )
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(10)
         )
+        let outcome = try await waitWithTimeout(
+            "documentation search should honor caller timeout while upstream slot is busy",
+            timeout: .milliseconds(500)
+        ) {
+            try await outcomeTask.value
+        }
 
-        #expect(Date().timeIntervalSince(started) < 0.5)
         guard case .failed(let error, _) = outcome else {
             Issue.record("expected timed-out outcome, got \(outcome)")
             return

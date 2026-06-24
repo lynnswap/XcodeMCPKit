@@ -84,21 +84,52 @@ public actor XcodeMCP {
     /// The default configuration starts `xcrun mcpbridge` with the current
     /// process environment and a conservative per-request timeout.
     public struct Configuration: Equatable, Sendable {
-        /// The executable used to start the upstream bridge process.
-        ///
-        /// The default is `/usr/bin/xcrun`, which allows `arguments` to select
-        /// Xcode's `mcpbridge` tool.
-        public var command: String
+        /// Upstream bridge process policy.
+        public enum Bridge: Equatable, Sendable {
+            /// Use Xcode's default `xcrun mcpbridge` invocation.
+            case defaultMCPBridge
 
-        /// Command-line arguments passed to ``command``.
-        ///
-        /// The default value is `["mcpbridge"]`.
-        public var arguments: [String]
+            /// Use an explicit upstream bridge command.
+            case custom(
+                command: String,
+                arguments: [String],
+                environment: [String: String]
+            )
 
-        /// Environment variables passed to the upstream process.
-        ///
-        /// The default inherits `ProcessInfo.processInfo.environment`.
-        public var environment: [String: String]
+            package var command: String {
+                switch self {
+                case .defaultMCPBridge:
+                    return "/usr/bin/xcrun"
+                case .custom(let command, _, _):
+                    return command
+                }
+            }
+
+            package var arguments: [String] {
+                switch self {
+                case .defaultMCPBridge:
+                    return ["mcpbridge"]
+                case .custom(_, let arguments, _):
+                    return arguments
+                }
+            }
+
+            package var environment: [String: String] {
+                switch self {
+                case .defaultMCPBridge:
+                    return ProcessInfo.processInfo.environment
+                case .custom(_, _, let environment):
+                    return environment
+                }
+            }
+
+            package var maxQueuedWriteBytes: Int {
+                4 * 1024 * 1024
+            }
+        }
+
+        /// Bridge process policy.
+        public var bridge: Bridge
 
         /// Client name sent in the MCP `initialize` request.
         public var clientName: String
@@ -118,16 +149,10 @@ public actor XcodeMCP {
         /// Set this to `nil` to disable client-side request timeouts.
         public var requestTimeout: Duration?
 
-        /// Maximum number of outbound bytes that may be queued for the bridge.
-        public var maxQueuedWriteBytes: Int
-
         /// Creates a bridge configuration.
         ///
         /// - Parameters:
-        ///   - command: Executable used to start the upstream bridge process.
-        ///   - arguments: Command-line arguments passed to `command`.
-        ///   - environment: Environment variables passed to the upstream
-        ///     process.
+        ///   - bridge: Upstream bridge process policy.
         ///   - clientName: Client name sent in the MCP `initialize` request.
         ///   - clientVersion: Client version sent in the MCP `initialize`
         ///     request.
@@ -135,26 +160,18 @@ public actor XcodeMCP {
         ///     MCP JSON.
         ///   - requestTimeout: Maximum duration to wait for each request, or
         ///     `nil` to disable client-side request timeouts.
-        ///   - maxQueuedWriteBytes: Maximum number of outbound bytes that may
-        ///     be queued for the bridge.
         public init(
-            command: String = "/usr/bin/xcrun",
-            arguments: [String] = ["mcpbridge"],
-            environment: [String: String] = ProcessInfo.processInfo.environment,
+            bridge: Bridge = .defaultMCPBridge,
             clientName: String = "XcodeMCPKit",
             clientVersion: String = "dev",
             capabilities: [String: MCPJSONValue] = [:],
-            requestTimeout: Duration? = .seconds(60),
-            maxQueuedWriteBytes: Int = 4 * 1024 * 1024
+            requestTimeout: Duration? = .seconds(60)
         ) {
-            self.command = command
-            self.arguments = arguments
-            self.environment = environment
+            self.bridge = bridge
             self.clientName = clientName
             self.clientVersion = clientVersion
             self.capabilities = capabilities
             self.requestTimeout = requestTimeout
-            self.maxQueuedWriteBytes = maxQueuedWriteBytes
         }
     }
 
@@ -176,10 +193,10 @@ public actor XcodeMCP {
     public init(config: Configuration = Configuration()) async throws {
         let transport = try await UpstreamProcessXcodeMCPTransport.start(
             config: UpstreamProcess.Config(
-                command: config.command,
-                args: config.arguments,
-                environment: config.environment,
-                maxQueuedWriteBytes: config.maxQueuedWriteBytes
+                command: config.bridge.command,
+                args: config.bridge.arguments,
+                environment: config.bridge.environment,
+                maxQueuedWriteBytes: config.bridge.maxQueuedWriteBytes
             )
         )
         try await self.init(config: config, transport: transport)

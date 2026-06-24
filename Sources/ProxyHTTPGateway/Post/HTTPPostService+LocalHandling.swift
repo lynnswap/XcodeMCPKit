@@ -250,7 +250,7 @@ extension HTTPPostService {
             sessionID: sessionID,
             requestIDKeys: routedResponseIDs.map(\.key)
         )
-        let deadline = Self.timeoutDeadline(
+        let deadline = timeoutDeadline(
             for: requestTimeoutOverride
                 ?? Self.topLevelRequestTimeoutOverride(
                     method: nil,
@@ -374,7 +374,7 @@ extension HTTPPostService {
             guard let originalID = JSONRPC.Message.Inspector.requestID(from: request) else {
                 continue
             }
-            let requestTimeout = Self.remainingRequestTimeout(until: deadline)
+            let requestTimeout = remainingRequestTimeout(until: deadline)
             if deadline != nil,
                 requestTimeout == nil
             {
@@ -452,7 +452,7 @@ extension HTTPPostService {
                 )
                 continue
             }
-            let requestTimeout = Self.remainingRequestTimeout(until: deadline)
+            let requestTimeout = remainingRequestTimeout(until: deadline)
             if deadline != nil,
                 requestTimeout == nil
             {

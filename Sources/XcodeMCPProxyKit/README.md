@@ -33,20 +33,16 @@ directly:
 import XcodeMCPProxyKit
 
 let config = XcodeMCPProxyServer.Configuration(
-    listenHost: "localhost",
-    listenPort: 8765,
-    upstreamCommand: "xcrun",
-    upstreamArguments: ["mcpbridge"],
-    upstreamProcessCount: 1,
-    maxBodyBytes: 1_048_576,
-    requestTimeout: 300,
-    discoveryFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-proxy.json"),
-    autoApproveXcodeDialog: false
+    bind: .localhost(port: 8765),
+    upstream: .defaultMCPBridge(processesPerXcode: 1),
+    limits: .init(maxBodyBytes: 1_048_576, requestTimeout: 300),
+    discovery: .init(fileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-proxy.json")),
+    approval: .manual
 )
 
 let server = XcodeMCPProxyServer(config: config)
-let address = try server.startAndWriteDiscovery()
-print("Listening on \(address.host):\(address.port)")
+let endpoint = try server.startAndWriteDiscovery()
+print("Listening on \(endpoint.url)")
 
 let waiter = Task {
     try await server.wait()
@@ -65,25 +61,23 @@ look up the running HTTP endpoint.
 
 Use `XcodeMCPProxyServer.Configuration` to configure the server:
 
-- `listenHost` and `listenPort` choose the HTTP bind address.
-- `upstreamCommand` and `upstreamArguments` choose the upstream MCP bridge
-  process.
-- `upstreamProcessCount` controls the number of upstream bridge processes.
-- `requestTimeout` and `maxBodyBytes` bound request handling.
-- `discoveryFileURL` overrides the endpoint discovery file.
-- `autoApproveXcodeDialog` enables Xcode permission dialog automation when the
-  host app has the required Accessibility permission.
-- `refreshCodeIssuesMode` selects proxy diagnostics or upstream forwarding for
-  `XcodeRefreshCodeIssuesInFile`.
+- `bind` chooses the HTTP bind address.
+- `upstream` chooses the upstream MCP bridge and process count.
+- `limits` bounds request timeout and body size.
+- `discovery` overrides the endpoint discovery file.
+- `approval` controls Xcode permission dialog automation.
+- `features.refreshCodeIssuesMode` selects proxy diagnostics or upstream
+  forwarding for `XcodeRefreshCodeIssuesInFile`.
 
 The server can also load TOML-backed initialize overrides and disabled tools
-when `configPath` is set.
+when `configurationFilePath` is set.
 
 ## Lifecycle
 
 `start()` binds HTTP channels, starts the proxy runtime, and returns the
-resolved listening address. `startAndWriteDiscovery()` does the same startup
-work, then writes the endpoint discovery file and logs a startup summary.
+resolved ``XcodeMCPProxyServer/Endpoint``. `startAndWriteDiscovery()` does the
+same startup work, then writes the endpoint discovery file and logs a startup
+summary.
 `wait()` suspends until the listening channels close. `shutdown()` stops
 permission automation, closes listening and accepted channels, shuts down the
 runtime, and terminates the event loop group.

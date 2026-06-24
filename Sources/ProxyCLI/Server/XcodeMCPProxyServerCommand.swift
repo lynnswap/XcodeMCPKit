@@ -4,6 +4,11 @@ import Foundation
 import ProxyCLICommon
 import XcodeMCPProxyKit
 
+package protocol ProxyServerCommandServer {
+    func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint
+    func wait() async throws
+}
+
 extension XcodeMCPProxyServer: ProxyServerCommandServer {}
 
 package struct XcodeMCPProxyServerCommand {

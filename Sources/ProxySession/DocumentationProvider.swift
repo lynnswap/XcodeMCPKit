@@ -5,7 +5,6 @@ import ProxySessionControlPlane
 import ProxySessionUpstream
 import ProxyCore
 import ProxyMCP
-import XcodeMCPKit
 
 package enum DocumentationProvider {}
 

@@ -27,8 +27,7 @@ Add the `XcodeMCPKit` product to your target, then construct a client:
 import XcodeMCPKit
 
 let config = XcodeMCP.Configuration(
-    command: "/usr/bin/xcrun",
-    arguments: ["mcpbridge"],
+    bridge: .defaultMCPBridge,
     clientName: "MyApp",
     clientVersion: "1.0"
 )
@@ -68,14 +67,14 @@ models keep raw values for unknown fields and future MCP extensions.
 
 ## Configuration
 
-`XcodeMCP.Configuration` controls process launch and MCP initialization:
+`XcodeMCP.Configuration` controls bridge selection and MCP initialization:
 
-- `command` and `arguments` choose the upstream process. The default is
+- `bridge` chooses the upstream bridge. The default is Xcode's
   `/usr/bin/xcrun mcpbridge`.
-- `environment` is passed to the process.
+- Use `.custom(command:arguments:environment:)` only when embedding a non-default
+  bridge command.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
 - `requestTimeout` bounds requests when non-`nil`.
-- `maxQueuedWriteBytes` limits queued outbound transport data.
 
 Capabilities that require server-to-client handlers are filtered because this
 v1 API does not expose those handlers.

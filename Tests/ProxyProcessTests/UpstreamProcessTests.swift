@@ -138,11 +138,12 @@ struct UpstreamProcessTests {
             Issue.record("send should not overload while checking buffered stdout reset")
         }
 
-        #expect(
-            await waitUntil(timeout: .seconds(2)) {
-                await observedSizesRecorder.snapshot().contains(where: { $0 > 0 })
-            }
-        )
+        _ = try await waitWithTimeout(
+            "buffered stdout should become non-empty before stop",
+            timeout: .seconds(2)
+        ) {
+            try await observedSizesRecorder.nextValue(matching: { $0 > 0 })
+        }
         await session.stop()
 
         let sizes = try await waitWithTimeout(

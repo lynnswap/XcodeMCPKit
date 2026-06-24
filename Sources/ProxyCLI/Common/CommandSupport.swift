@@ -6,11 +6,6 @@ package protocol CLICommandAdapter {
     func wait() async
 }
 
-package protocol ProxyServerCommandServer {
-    func startAndWriteDiscovery() throws -> (host: String, port: Int)
-    func wait() async throws
-}
-
 extension FileHandle {
     package static func writeLine(_ text: String, to handle: FileHandle) {
         let data = Data((text + "\n").utf8)

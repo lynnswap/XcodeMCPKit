@@ -121,7 +121,6 @@ let package = Package(
             dependencies: [
                 "ProxyCore",
                 "ProxyMCP",
-                "XcodeMCPKit",
                 "ProxySessionControlPlane",
                 "ProxySessionUpstream",
                 .product(name: "Logging", package: "swift-log"),
@@ -194,7 +193,6 @@ let package = Package(
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -323,7 +321,6 @@ let package = Package(
                 "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxyMCP",
-                "XcodeMCPKit",
                 "ProxySession",
                 "ProxySessionControlPlane",
                 "ProxySessionUpstream",

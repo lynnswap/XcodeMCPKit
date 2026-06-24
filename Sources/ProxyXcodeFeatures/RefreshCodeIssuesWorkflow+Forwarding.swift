@@ -317,9 +317,8 @@ extension RefreshCodeIssues.Workflow {
                             uniquingKeysWith: { _, new in new }
                         )
                     )
-                    do {
-                        try await Task.sleep(nanoseconds: delayNanos)
-                    } catch is CancellationError {
+                    await clock.sleep(.nanoseconds(Int64(delayNanos)))
+                    if Task.isCancelled {
                         debugState.updateStep(
                             requestID: debugRequestID,
                             step: .cancelled,
@@ -327,8 +326,6 @@ extension RefreshCodeIssues.Workflow {
                         )
                         finalResult = .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
                         break resultLoop
-                    } catch {
-                        continue
                     }
                     continue
                 }

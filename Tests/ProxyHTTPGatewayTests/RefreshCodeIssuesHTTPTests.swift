@@ -13,6 +13,27 @@ import XcodeMCPTestSupport
 
 @testable import ProxyHTTPGateway
 
+private func jsonRPCError(
+    from resolution: HTTPPostService.Resolution
+) throws -> (code: Int?, message: String?) {
+    switch resolution {
+    case .responseData(let data, _, _):
+        let body =
+            (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any]
+            ?? [:]
+        let error = body["error"] as? [String: Any]
+        return ((error?["code"] as? NSNumber)?.intValue, error?["message"] as? String)
+    case .mcpError(_, _, let code, let message, _, _, _):
+        return (code, message)
+    case .plain(let status, let body, _):
+        Issue.record("expected JSON-RPC response, got plain \(status): \(body)")
+        return (Int(status.code), body)
+    case .empty(let status, _):
+        Issue.record("expected JSON-RPC response, got empty \(status)")
+        return (Int(status.code), nil)
+    }
+}
+
 extension HTTPHandlerTests {
     @Test func httpRefreshCodeIssuesUsesNavigatorIssuesProxyByDefault() async throws {
         var config = makeConfig(requestTimeout: 2)
@@ -1681,7 +1702,8 @@ extension HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesClock: .testValue
         )
 
         do {
@@ -1791,7 +1813,8 @@ extension HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesClock: .testValue
         )
 
         do {
@@ -1963,68 +1986,68 @@ extension HTTPHandlerTests {
             }
         )
         sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let service = HTTPPostService(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
         )
+        var operations: [HTTPPostService.Operation] = []
 
         do {
             let requestCount = 6
-            let tasks = (0..<requestCount).map { index in
-                Task<(Int, Int?, String?), Error> {
-                    let (response, body) = try await postHTTPJSON(
-                        url: server.url,
-                        sessionID: "session-overload-\(index)",
-                        payload: toolsCallPayload(
-                            id: 21 + index,
-                            name: "XcodeRefreshCodeIssuesInFile",
-                            arguments: [
-                                "tabIdentifier": "windowtab-overload",
-                                "filePath": "File\(index).swift",
-                            ]
-                        )
-                    )
-                    let error = body["error"] as? [String: Any]
-                    let errorCode = (error?["code"] as? NSNumber)?.intValue
-                    let errorMessage = error?["message"] as? String
-                    return (response.statusCode, errorCode, errorMessage)
-                }
+            operations = try (0..<requestCount).map { index in
+                let payload = toolsCallPayload(
+                    id: 21 + index,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-overload",
+                        "filePath": "File\(index).swift",
+                    ]
+                )
+                let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+                return service.handle(
+                    bodyData: data,
+                    headerSessionID: "session-overload-\(index)",
+                    headerSessionExists: true,
+                    prefersEventStream: false,
+                    eventLoop: eventLoopGroup.next()
+                )
             }
 
             try await firstSent.wait(description: "waiting for first upstream refresh request")
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    sessionManager.sentUpstreamCount() == 1
-                        && sessionManager.pendingResponseCount() == 1
-                }
-            )
+            try await sessionManager.waitForPendingResponseCount(1)
+            #expect(sessionManager.sentUpstreamCount() == 1)
+            #expect(sessionManager.pendingResponseCount() == 1)
 
             for expectedCount in 1...requestCount {
                 #expect(sessionManager.sentUpstreamCount() == expectedCount)
                 #expect(sessionManager.pendingResponseCount() == 1)
                 sessionManager.deliverNextPendingResponse()
                 if expectedCount < requestCount {
-                    #expect(
-                        await waitUntil(timeout: .seconds(2)) {
-                            sessionManager.sentUpstreamCount() == expectedCount + 1
-                                && sessionManager.pendingResponseCount() == 1
-                        }
-                    )
+                    try await sessionManager.waitForPendingResponseCount(1)
+                    #expect(sessionManager.sentUpstreamCount() == expectedCount + 1)
+                    #expect(sessionManager.pendingResponseCount() == 1)
                 }
             }
 
-            for task in tasks {
-                let (statusCode, errorCode, errorMessage) = try await task.value
-                #expect(statusCode == 200)
+            for operation in operations {
+                let resolution = try await operation.future.get()
+                let (errorCode, errorMessage) = try jsonRPCError(from: resolution)
                 #expect(errorCode == nil)
                 #expect(errorMessage == nil)
             }
             #expect(sessionManager.sentUpstreamCount() == requestCount)
         } catch {
-            try? await server.shutdown()
+            for operation in operations {
+                operation.cancellationHandle?.cancel(using: sessionManager)
+            }
             throw error
         }
-        try await server.shutdown()
     }
 
     @Test func httpRefreshProxyQueuesBurstForSameTabWithoutBackpressureError() async throws {
@@ -2085,68 +2108,68 @@ extension HTTPHandlerTests {
             }
         )
         sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let service = HTTPPostService(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
         )
+        var operations: [HTTPPostService.Operation] = []
 
         do {
             let requestCount = 6
-            let tasks = (0..<requestCount).map { index in
-                Task<(Int, Int?, String?), Error> {
-                    let (response, body) = try await postHTTPJSON(
-                        url: server.url,
-                        sessionID: "session-proxy-overload-\(index)",
-                        payload: toolsCallPayload(
-                            id: 26 + index,
-                            name: "XcodeRefreshCodeIssuesInFile",
-                            arguments: [
-                                "tabIdentifier": "windowtab-proxy-overload",
-                                "filePath": "Missing.swift",
-                            ]
-                        )
-                    )
-                    let error = body["error"] as? [String: Any]
-                    let errorCode = (error?["code"] as? NSNumber)?.intValue
-                    let errorMessage = error?["message"] as? String
-                    return (response.statusCode, errorCode, errorMessage)
-                }
+            operations = try (0..<requestCount).map { index in
+                let payload = toolsCallPayload(
+                    id: 26 + index,
+                    name: "XcodeRefreshCodeIssuesInFile",
+                    arguments: [
+                        "tabIdentifier": "windowtab-proxy-overload",
+                        "filePath": "Missing.swift",
+                    ]
+                )
+                let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+                return service.handle(
+                    bodyData: data,
+                    headerSessionID: "session-proxy-overload-\(index)",
+                    headerSessionExists: true,
+                    prefersEventStream: false,
+                    eventLoop: eventLoopGroup.next()
+                )
             }
 
             try await firstSent.wait(description: "waiting for first proxy refresh request")
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    sessionManager.sentUpstreamCount() == 2
-                        && sessionManager.pendingResponseCount() == 1
-                }
-            )
+            try await sessionManager.waitForPendingResponseCount(1)
+            #expect(sessionManager.sentUpstreamCount() == 2)
+            #expect(sessionManager.pendingResponseCount() == 1)
 
             for expectedRequests in 1...requestCount {
                 #expect(sessionManager.sentUpstreamCount() == expectedRequests * 2)
                 #expect(sessionManager.pendingResponseCount() == 1)
                 sessionManager.deliverNextPendingResponse()
                 if expectedRequests < requestCount {
-                    #expect(
-                        await waitUntil(timeout: .seconds(2)) {
-                            sessionManager.sentUpstreamCount() == (expectedRequests + 1) * 2
-                                && sessionManager.pendingResponseCount() == 1
-                        }
-                    )
+                    try await sessionManager.waitForPendingResponseCount(1)
+                    #expect(sessionManager.sentUpstreamCount() == (expectedRequests + 1) * 2)
+                    #expect(sessionManager.pendingResponseCount() == 1)
                 }
             }
 
-            for task in tasks {
-                let (statusCode, errorCode, errorMessage) = try await task.value
-                #expect(statusCode == 200)
+            for operation in operations {
+                let resolution = try await operation.future.get()
+                let (errorCode, errorMessage) = try jsonRPCError(from: resolution)
                 #expect(errorCode == nil)
                 #expect(errorMessage == nil)
             }
             #expect(sessionManager.sentUpstreamCount() == requestCount * 2)
         } catch {
-            try? await server.shutdown()
+            for operation in operations {
+                operation.cancellationHandle?.cancel(using: sessionManager)
+            }
             throw error
         }
-        try await server.shutdown()
     }
 
     @Test func refreshWorkflowReturnsStandardTimeoutWhenPermitWaitConsumesRequestDeadline()
@@ -2267,10 +2290,7 @@ extension HTTPHandlerTests {
                         )
                     )
                 case "XcodeRefreshCodeIssuesInFile":
-                    return .delayed(
-                        try makeToolSuccessResponse(id: originalID, text: "late"),
-                        delayNanos: 500_000_000
-                    )
+                    return .manual(try makeToolSuccessResponse(id: originalID, text: "late"))
                 default:
                     return .immediate(
                         try makeToolErrorResponse(
@@ -2282,49 +2302,129 @@ extension HTTPHandlerTests {
             }
         )
         sessionManager.setInitialized(true)
-        let server = try TestHTTPHandlerServer.start(
+        let forwardingService = MCPForwardingService(
             config: config,
             sessionManager: sessionManager
         )
+        let eventLoop = EmbeddedEventLoop()
 
-        do {
-            let (response, body) = try await postHTTPJSON(
-                url: server.url,
+        func startInternalTool(
+            id: String,
+            name: String,
+            arguments: [String: Any]
+        ) throws -> MCPForwardingService.StartedRequest {
+            let requestObject: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": [
+                    "name": name,
+                    "arguments": arguments,
+                ],
+            ]
+            let bodyData = try JSONSerialization.data(withJSONObject: requestObject, options: [])
+            let parsed = try JSONSerialization.jsonObject(with: bodyData, options: [])
+            let preparedRequest = try forwardingService.prepareRequest(
+                bodyData: bodyData,
+                parsedRequestJSON: parsed,
                 sessionID: "session-internal-window-lookup",
-                payload: toolsCallPayload(
-                    id: 14,
-                    name: "XcodeRefreshCodeIssuesInFile",
-                    arguments: [
-                        "tabIdentifier": "windowtab-timeout",
-                        "filePath": "Missing.swift",
-                    ]
-                )
+                upstreamIndexOverride: 0
             )
-
-            #expect(response.statusCode == 200)
-            let error = body["error"] as? [String: Any]
-            #expect(error != nil)
-            #expect(
-                sessionManager.sentToolNames() == [
-                    "XcodeListWindows",
-                    "XcodeListNavigatorIssues",
-                    "XcodeRefreshCodeIssuesInFile",
-                ])
-            #expect(sessionManager.requestSuccessNotificationCount() == 2)
-            #expect(sessionManager.requestTimeoutNotificationCount() == 1)
-            #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
-        } catch {
-            try? await server.shutdown()
-            throw error
+            let prepared = try #require(preparedRequest)
+            return try forwardingService.startRequest(
+                prepared,
+                session: sessionManager.session(id: "session-internal-window-lookup"),
+                on: eventLoop,
+                requestTimeoutOverride: .milliseconds(200)
+            )
         }
-        try await server.shutdown()
+
+        func resolve(
+            _ started: MCPForwardingService.StartedRequest
+        ) -> MCPForwardingService.ResponseResolution {
+            eventLoop.run()
+            do {
+                return forwardingService.resolveResponse(
+                    .success(try started.future.wait()),
+                    started: started,
+                    sessionID: "session-internal-window-lookup"
+                )
+            } catch {
+                return forwardingService.resolveResponse(
+                    .failure(error),
+                    started: started,
+                    sessionID: "session-internal-window-lookup"
+                )
+            }
+        }
+
+        let windowsStarted = try startInternalTool(
+            id: "internal-windows",
+            name: "XcodeListWindows",
+            arguments: [:]
+        )
+        eventLoop.run()
+        switch resolve(windowsStarted) {
+        case .success:
+            break
+        default:
+            Issue.record("expected internal XcodeListWindows to succeed")
+        }
+
+        let navigatorStarted = try startInternalTool(
+            id: "internal-navigator",
+            name: "XcodeListNavigatorIssues",
+            arguments: [
+                "tabIdentifier": "windowtab-timeout",
+                "severity": "remark",
+                "glob": "**/Missing.swift",
+            ]
+        )
+        eventLoop.run()
+        switch resolve(navigatorStarted) {
+        case .success:
+            break
+        default:
+            Issue.record("expected internal XcodeListNavigatorIssues error payload to resolve")
+        }
+
+        let refreshStarted = try startInternalTool(
+            id: "internal-refresh",
+            name: "XcodeRefreshCodeIssuesInFile",
+            arguments: [
+                "tabIdentifier": "windowtab-timeout",
+                "filePath": target.path,
+            ]
+        )
+        #expect(sessionManager.sentUpstreamCount() == 3)
+        #expect(sessionManager.pendingResponseCount() == 1)
+        eventLoop.advanceTime(by: .milliseconds(300))
+        eventLoop.run()
+        switch resolve(refreshStarted) {
+        case .timeout:
+            break
+        default:
+            Issue.record("expected internal XcodeRefreshCodeIssuesInFile to time out")
+        }
+
+        #expect(
+            sessionManager.sentToolNames() == [
+                "XcodeListWindows",
+                "XcodeListNavigatorIssues",
+                "XcodeRefreshCodeIssuesInFile",
+            ])
+        #expect(sessionManager.requestSuccessNotificationCount() == 2)
+        #expect(sessionManager.requestTimeoutNotificationCount() == 1)
+        #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
     }
 
     @Test func forwardingServiceInternalToolRespectsRequestedOverride()
         async throws
     {
         let config = makeConfig(requestTimeout: 0.2)
-        let eventLoop = EmbeddedEventLoop()
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let eventLoop = eventLoopGroup.next()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
@@ -2370,7 +2470,9 @@ extension HTTPHandlerTests {
         async throws
     {
         let config = makeConfig(requestTimeout: 0.2)
-        let eventLoop = EmbeddedEventLoop()
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let eventLoop = eventLoopGroup.next()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
@@ -2416,7 +2518,9 @@ extension HTTPHandlerTests {
         async throws
     {
         let config = makeConfig(requestTimeout: 0.2)
-        let eventLoop = EmbeddedEventLoop()
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let eventLoop = eventLoopGroup.next()
         let sessionManager = TestRuntimeCoordinator(
             config: config,
             upstreamRequestResponder: { method, toolName, originalID in
@@ -2491,7 +2595,8 @@ extension HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let server = try TestHTTPHandlerServer.start(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesClock: .testValue
         )
         let requestTask = Task {
             try await postHTTPData(
@@ -2509,9 +2614,7 @@ extension HTTPHandlerTests {
         }
 
         do {
-            #expect(await waitUntil(timeout: .seconds(2)) {
-                sessionManager.sentUpstreamCount() == 2
-            })
+            try await sessionManager.waitForSentUpstreamCount(2)
             #expect(sessionManager.requeuedLeaseCount() == 1)
 
             let inFlightLease = try #require(sessionManager.leaseDebugSnapshots().first)

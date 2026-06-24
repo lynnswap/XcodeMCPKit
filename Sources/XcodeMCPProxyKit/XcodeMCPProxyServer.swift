@@ -15,12 +15,43 @@ import ProxyXcodeSupport
 /// `xcode-mcp-proxy-server` executable. Construct it with ``Configuration``,
 /// call ``startAndWriteDiscovery()`` or ``start()``, then keep the process
 /// alive with ``wait()`` until your application decides to call ``shutdown()``.
-/// Both start methods return the resolved listening address.
+/// Both start methods return the resolved endpoint.
 ///
 /// The server exposes the proxy lifecycle. CLI parsing, STDIO adapter behavior,
 /// and internal session routing are intentionally handled outside this public
 /// type.
 public final class XcodeMCPProxyServer {
+    /// A resolved Streamable HTTP proxy endpoint.
+    public struct Endpoint: Equatable, Sendable {
+        /// Hostname or IP address clients should connect to.
+        public let host: String
+
+        /// TCP port clients should connect to.
+        public let port: Int
+
+        /// Full MCP endpoint URL, including the `/mcp` path.
+        public let url: URL
+
+        /// Creates a resolved endpoint value.
+        public init(host: String, port: Int) {
+            self.host = host
+            self.port = port
+            self.url = Self.makeURL(host: host, port: port)
+        }
+
+        private static func makeURL(host: String, port: Int) -> URL {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = host
+            components.port = port
+            components.path = "/mcp"
+            if let url = components.url {
+                return url
+            }
+            return URL(string: "http://\(host):\(port)/mcp")!
+        }
+    }
+
     /// Public configuration for an embedded Xcode MCP proxy server.
     ///
     /// This type is the stable server configuration surface for
@@ -28,6 +59,119 @@ public final class XcodeMCPProxyServer {
     /// session-routing types stay internal to the package targets that own
     /// them.
     public struct Configuration: Equatable, Sendable {
+        /// Address that the Streamable HTTP server binds.
+        public struct BindAddress: Equatable, Sendable {
+            /// Hostname or IP address for the server socket.
+            public var host: String
+
+            /// TCP port for the server socket.
+            ///
+            /// Use `0` to request an ephemeral port from the operating system.
+            public var port: Int
+
+            /// Creates a bind address.
+            public init(host: String = "localhost", port: Int = 8765) {
+                self.host = host
+                self.port = port
+            }
+
+            /// Creates a loopback bind address.
+            public static func localhost(port: Int = 8765) -> Self {
+                Self(host: "localhost", port: port)
+            }
+        }
+
+        /// Upstream `mcpbridge` process policy.
+        public enum Upstream: Equatable, Sendable {
+            /// Use Xcode's default `xcrun mcpbridge` invocation.
+            case defaultMCPBridge(processesPerXcode: Int = 1, sessionID: String? = nil)
+
+            /// Use an explicit upstream command and arguments.
+            case custom(
+                command: String,
+                arguments: [String],
+                processesPerXcode: Int = 1,
+                sessionID: String? = nil
+            )
+
+            package var command: String {
+                switch self {
+                case .defaultMCPBridge:
+                    return "xcrun"
+                case .custom(let command, _, _, _):
+                    return command
+                }
+            }
+
+            package var arguments: [String] {
+                switch self {
+                case .defaultMCPBridge:
+                    return ["mcpbridge"]
+                case .custom(_, let arguments, _, _):
+                    return arguments
+                }
+            }
+
+            package var processesPerXcode: Int {
+                switch self {
+                case .defaultMCPBridge(let count, _), .custom(_, _, let count, _):
+                    return count
+                }
+            }
+
+            package var sessionID: String? {
+                switch self {
+                case .defaultMCPBridge(_, let sessionID), .custom(_, _, _, let sessionID):
+                    return sessionID
+                }
+            }
+        }
+
+        /// Request and payload limits enforced by the proxy.
+        public struct Limits: Equatable, Sendable {
+            /// Maximum accepted HTTP request body size in bytes.
+            public var maxBodyBytes: Int
+
+            /// Request timeout in seconds.
+            public var requestTimeout: TimeInterval
+
+            /// Creates proxy request limits.
+            public init(maxBodyBytes: Int = 1_048_576, requestTimeout: TimeInterval = 300) {
+                self.maxBodyBytes = maxBodyBytes
+                self.requestTimeout = requestTimeout
+            }
+
+            /// Default proxy limits.
+            public static let `default` = Self()
+        }
+
+        /// Endpoint discovery file policy.
+        public struct Discovery: Equatable, Sendable {
+            /// Optional discovery file URL.
+            ///
+            /// `nil` uses the package default discovery location.
+            public var fileURL: URL?
+
+            /// Creates a discovery policy.
+            public init(fileURL: URL? = nil) {
+                self.fileURL = fileURL
+            }
+
+            /// Uses the default discovery file location.
+            public static let `default` = Self()
+        }
+
+        /// Xcode permission dialog automation policy.
+        public enum ApprovalPolicy: Equatable, Sendable {
+            /// Do not automate the Xcode permission dialog.
+            case manual
+
+            /// Try to approve the Xcode permission dialog automatically.
+            ///
+            /// This requires macOS Accessibility permission for the host process.
+            case automatic
+        }
+
         /// How `XcodeRefreshCodeIssuesInFile` requests are served.
         public enum RefreshCodeIssuesMode: String, Equatable, Sendable {
             /// Serve refresh-code-issues requests through proxy diagnostics.
@@ -38,120 +182,117 @@ public final class XcodeMCPProxyServer {
             case upstream
         }
 
-        /// Hostname or IP address for the Streamable HTTP server.
-        public var listenHost: String
+        /// Optional proxy features that affect tool behavior.
+        public struct FeaturePolicy: Equatable, Sendable {
+            /// Whether the proxy should prewarm the upstream tools list.
+            public var prewarmToolsList: Bool
 
-        /// TCP port for the Streamable HTTP server.
-        ///
-        /// Use `0` to request an ephemeral port from the operating system.
-        public var listenPort: Int
+            /// Refresh-code-issues handling mode.
+            public var refreshCodeIssuesMode: RefreshCodeIssuesMode
 
-        /// Executable used to start the upstream MCP bridge.
-        public var upstreamCommand: String
+            /// Creates a feature policy.
+            public init(
+                prewarmToolsList: Bool = true,
+                refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
+            ) {
+                self.prewarmToolsList = prewarmToolsList
+                self.refreshCodeIssuesMode = refreshCodeIssuesMode
+            }
 
-        /// Arguments passed to ``upstreamCommand``.
-        public var upstreamArguments: [String]
+            /// Default feature policy.
+            public static let `default` = Self()
+        }
 
-        /// Number of upstream bridge processes to run per routed Xcode process.
-        public var upstreamProcessCount: Int
+        /// HTTP bind address.
+        public var bind: BindAddress
 
-        /// Optional upstream Xcode MCP session identifier.
-        public var upstreamSessionID: String?
+        /// Upstream bridge process policy.
+        public var upstream: Upstream
 
-        /// Maximum accepted HTTP request body size in bytes.
-        public var maxBodyBytes: Int
-
-        /// Request timeout in seconds.
-        public var requestTimeout: TimeInterval
+        /// Request and payload limits.
+        public var limits: Limits
 
         /// Optional TOML configuration path for initialize overrides and
         /// disabled tools.
-        public var configPath: String?
+        public var configurationFilePath: String?
 
-        /// Optional discovery file URL written by ``startAndWriteDiscovery()``.
-        public var discoveryFileURL: URL?
+        /// Endpoint discovery policy.
+        public var discovery: Discovery
 
-        /// Whether the proxy should prewarm the upstream tools list.
-        public var prewarmToolsList: Bool
+        /// Permission dialog automation policy.
+        public var approval: ApprovalPolicy
 
-        /// Whether to try approving Xcode's permission dialog automatically.
-        ///
-        /// This requires macOS Accessibility permission for the host process.
-        public var autoApproveXcodeDialog: Bool
-
-        /// Refresh-code-issues handling mode.
-        public var refreshCodeIssuesMode: RefreshCodeIssuesMode
+        /// Optional proxy feature policy.
+        public var features: FeaturePolicy
 
         /// Creates a public proxy server configuration.
         ///
         /// - Parameters:
-        ///   - listenHost: Hostname or IP address for the Streamable HTTP
-        ///     server.
-        ///   - listenPort: TCP port for the Streamable HTTP server. Use `0` to
-        ///     request an ephemeral port.
-        ///   - upstreamCommand: Executable used to start the upstream MCP
-        ///     bridge.
-        ///   - upstreamArguments: Arguments passed to `upstreamCommand`.
-        ///   - upstreamProcessCount: Number of upstream bridge processes to run
-        ///     per routed Xcode process.
-        ///   - upstreamSessionID: Optional upstream Xcode MCP session
-        ///     identifier.
-        ///   - maxBodyBytes: Maximum accepted HTTP request body size in bytes.
-        ///   - requestTimeout: Request timeout in seconds.
-        ///   - configPath: Optional TOML configuration path.
-        ///   - discoveryFileURL: Optional discovery file URL written by
-        ///     `startAndWriteDiscovery()`.
-        ///   - prewarmToolsList: Whether the proxy should prewarm the upstream
-        ///     tools list.
-        ///   - autoApproveXcodeDialog: Whether to try approving Xcode's
-        ///     permission dialog automatically.
-        ///   - refreshCodeIssuesMode: Refresh-code-issues handling mode.
+        ///   - bind: HTTP bind address.
+        ///   - upstream: Upstream bridge process policy.
+        ///   - limits: Request and payload limits.
+        ///   - configurationFilePath: Optional TOML configuration path.
+        ///   - discovery: Endpoint discovery policy.
+        ///   - approval: Permission dialog automation policy.
+        ///   - features: Optional proxy feature policy.
         public init(
-            listenHost: String = "localhost",
-            listenPort: Int = 8765,
-            upstreamCommand: String = "xcrun",
-            upstreamArguments: [String] = ["mcpbridge"],
-            upstreamProcessCount: Int = 1,
-            upstreamSessionID: String? = nil,
-            maxBodyBytes: Int = 1_048_576,
-            requestTimeout: TimeInterval = 300,
-            configPath: String? = nil,
-            discoveryFileURL: URL? = nil,
-            prewarmToolsList: Bool = true,
-            autoApproveXcodeDialog: Bool = false,
-            refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
+            bind: BindAddress = .localhost(),
+            upstream: Upstream = .defaultMCPBridge(),
+            limits: Limits = .default,
+            configurationFilePath: String? = nil,
+            discovery: Discovery = .default,
+            approval: ApprovalPolicy = .manual,
+            features: FeaturePolicy = .default
         ) {
-            self.listenHost = listenHost
-            self.listenPort = listenPort
-            self.upstreamCommand = upstreamCommand
-            self.upstreamArguments = upstreamArguments
-            self.upstreamProcessCount = upstreamProcessCount
-            self.upstreamSessionID = upstreamSessionID
-            self.maxBodyBytes = maxBodyBytes
-            self.requestTimeout = requestTimeout
-            self.configPath = configPath
-            self.discoveryFileURL = discoveryFileURL
-            self.prewarmToolsList = prewarmToolsList
-            self.autoApproveXcodeDialog = autoApproveXcodeDialog
-            self.refreshCodeIssuesMode = refreshCodeIssuesMode
+            self.bind = bind
+            self.upstream = upstream
+            self.limits = limits
+            self.configurationFilePath = configurationFilePath
+            self.discovery = discovery
+            self.approval = approval
+            self.features = features
         }
 
         package init(serverProxyConfig proxyConfig: ProxyConfig) {
             self.init(
-                listenHost: proxyConfig.listenHost,
-                listenPort: proxyConfig.listenPort,
-                upstreamCommand: proxyConfig.upstreamCommand,
-                upstreamArguments: proxyConfig.upstreamArgs,
-                upstreamProcessCount: proxyConfig.upstreamProcessCount,
-                upstreamSessionID: proxyConfig.upstreamSessionID,
-                maxBodyBytes: proxyConfig.maxBodyBytes,
-                requestTimeout: proxyConfig.requestTimeout,
-                configPath: proxyConfig.configPath,
-                discoveryFileURL: proxyConfig.discoveryFileURL,
-                prewarmToolsList: proxyConfig.prewarmToolsList,
-                autoApproveXcodeDialog: proxyConfig.autoApproveXcodeDialog,
-                refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
+                bind: BindAddress(
+                    host: proxyConfig.listenHost,
+                    port: proxyConfig.listenPort
+                ),
+                upstream: .custom(
+                    command: proxyConfig.upstreamCommand,
+                    arguments: proxyConfig.upstreamArgs,
+                    processesPerXcode: proxyConfig.upstreamProcessCount,
+                    sessionID: proxyConfig.upstreamSessionID
+                ),
+                limits: Limits(
+                    maxBodyBytes: proxyConfig.maxBodyBytes,
+                    requestTimeout: proxyConfig.requestTimeout
+                ),
+                configurationFilePath: proxyConfig.configPath,
+                discovery: Discovery(fileURL: proxyConfig.discoveryFileURL),
+                approval: proxyConfig.autoApproveXcodeDialog ? .automatic : .manual,
+                features: FeaturePolicy(
+                    prewarmToolsList: proxyConfig.prewarmToolsList,
+                    refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
+                )
             )
+        }
+
+        package var listenHost: String { bind.host }
+        package var listenPort: Int { bind.port }
+        package var upstreamCommand: String { upstream.command }
+        package var upstreamArguments: [String] { upstream.arguments }
+        package var upstreamProcessCount: Int { upstream.processesPerXcode }
+        package var upstreamSessionID: String? { upstream.sessionID }
+        package var maxBodyBytes: Int { limits.maxBodyBytes }
+        package var requestTimeout: TimeInterval { limits.requestTimeout }
+        package var configPath: String? { configurationFilePath }
+        package var discoveryFileURL: URL? { discovery.fileURL }
+        package var prewarmToolsList: Bool { features.prewarmToolsList }
+        package var autoApproveXcodeDialog: Bool { approval == .automatic }
+        package var refreshCodeIssuesMode: RefreshCodeIssuesMode {
+            features.refreshCodeIssuesMode
         }
     }
 
@@ -260,9 +401,9 @@ public final class XcodeMCPProxyServer {
     ///
     /// This is the usual entry point for embedded users. It binds HTTP
     /// channels, starts the proxy runtime, writes the discovery file configured
-    /// by ``Configuration/discoveryFileURL``, logs a startup summary, and returns
-    /// the resolved listening address.
-    public func startAndWriteDiscovery() throws -> (host: String, port: Int) {
+    /// by ``Configuration/discovery``, logs a startup summary, and returns the
+    /// resolved endpoint.
+    public func startAndWriteDiscovery() throws -> Endpoint {
         let channel = try startListening()
         let (host, port) = resolvedListenAddress(for: channel)
         let displayHost = config.listenHost == "localhost" ? "localhost" : host
@@ -274,7 +415,7 @@ public final class XcodeMCPProxyServer {
             xcodeTargets: dependencies.runningXcodeTargets()
         )
         logger.info("\(summary)")
-        return (host, port)
+        return Endpoint(host: host, port: port)
     }
 
     /// Waits until the listening HTTP channels close.

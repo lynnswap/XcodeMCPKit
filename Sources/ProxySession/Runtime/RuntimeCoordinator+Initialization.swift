@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import ProxyCore
@@ -691,6 +690,7 @@ extension RuntimeCoordinator {
         }
         result.timeout?.cancel()
         markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+        testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
         return true
     }
@@ -701,6 +701,7 @@ extension RuntimeCoordinator {
         }
         result.timeout?.cancel()
         markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+        testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
     }
 

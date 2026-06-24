@@ -6,7 +6,6 @@ import NIOEmbedded
 import Testing
 import ProxyCore
 import ProxyMCP
-import XcodeMCPKit
 import ProxySessionControlPlane
 import ProxySessionUpstream
 import XcodeMCPTestSupport
@@ -172,6 +171,7 @@ struct RuntimeCoordinatorTests {
     {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
         let fixture = RuntimeCoordinatorFixture(
@@ -180,6 +180,11 @@ struct RuntimeCoordinatorTests {
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
             ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { upstreamIndex in
+                    initializedUpstreams.append(upstreamIndex)
+                }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -207,9 +212,12 @@ struct RuntimeCoordinatorTests {
             newerTarget.processID,
             olderTarget.processID,
         ]
-        #expect(await waitUntil(timeout: .seconds(2)) {
-            manager.documentationCandidateProcessOrder() == expectedCandidateProcessOrder
-        })
+        let recoveredUpstreamIndex = try await waitWithTimeout(
+            "waiting for recovered primary upstream initialization"
+        ) {
+            try await initializedUpstreams.nextValue(at: 1)
+        }
+        #expect(recoveredUpstreamIndex == 0)
         #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
         #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
         #expect(manager.documentationCandidateProcessOrder() == expectedCandidateProcessOrder)

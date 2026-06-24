@@ -135,7 +135,7 @@ extension HTTPPostService {
             let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
             let refreshTask = Task { [self] in
                 var payloads: [Data?] = []
-                let splitDeadline = Self.timeoutDeadline(
+                let splitDeadline = timeoutDeadline(
                     for: requestTimeoutOverride
                         ?? Self.topLevelRequestTimeoutOverride(
                             method: nil,
@@ -145,7 +145,7 @@ extension HTTPPostService {
 
                 for route in refreshRouting.refreshRoutes {
                     guard !Task.isCancelled else { break }
-                    let remainingTimeout = Self.remainingRequestTimeout(
+                    let remainingTimeout = remainingRequestTimeout(
                         until: splitDeadline
                     )
                     if splitDeadline != nil, remainingTimeout == nil {
@@ -181,7 +181,7 @@ extension HTTPPostService {
                 if !Task.isCancelled,
                     let remainingBodyData = refreshRouting.remainingBodyData
                 {
-                    let remainingTimeout = Self.remainingRequestTimeout(
+                    let remainingTimeout = remainingRequestTimeout(
                         until: splitDeadline
                     )
                     if splitDeadline != nil, remainingTimeout == nil {

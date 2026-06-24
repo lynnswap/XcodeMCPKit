@@ -9,7 +9,6 @@ struct XcodeMCPTests {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(
             config: .init(
-                environment: [:],
                 clientName: "UnitTestClient",
                 clientVersion: "1.2.3",
                 capabilities: [
@@ -39,7 +38,7 @@ struct XcodeMCPTests {
 
     @Test func listToolsDecodesDescriptorAndPreservesDynamicFields() async throws {
         let transport = FakeXcodeMCPTransport()
-        let xcode = try await XcodeMCP(config: .init(environment: [:]), transport: transport)
+        let xcode = try await XcodeMCP(transport: transport)
         defer {
             Task { await xcode.close() }
         }
@@ -55,7 +54,7 @@ struct XcodeMCPTests {
 
     @Test func callToolSendsShapeAndDecodesFinalResult() async throws {
         let transport = FakeXcodeMCPTransport()
-        let xcode = try await XcodeMCP(config: .init(environment: [:]), transport: transport)
+        let xcode = try await XcodeMCP(transport: transport)
         defer {
             Task { await xcode.close() }
         }
@@ -90,7 +89,7 @@ struct XcodeMCPTests {
     @Test func callToolAddsProgressTokenAndRoutesMatchingProgress() async throws {
         let transport = FakeXcodeMCPTransport()
         let progressValues = RecordedValues<MCPProgress>()
-        let xcode = try await XcodeMCP(config: .init(environment: [:]), transport: transport)
+        let xcode = try await XcodeMCP(transport: transport)
         defer {
             Task { await xcode.close() }
         }
@@ -119,7 +118,7 @@ struct XcodeMCPTests {
 
     @Test func closeIsIdempotentAndRejectsFuturePublicCalls() async throws {
         let transport = FakeXcodeMCPTransport()
-        let xcode = try await XcodeMCP(config: .init(environment: [:]), transport: transport)
+        let xcode = try await XcodeMCP(transport: transport)
 
         await xcode.close()
         await xcode.close()
@@ -132,7 +131,7 @@ struct XcodeMCPTests {
 
     @Test func unsupportedServerRequestGetsInternalErrorResponse() async throws {
         let transport = FakeXcodeMCPTransport()
-        let xcode = try await XcodeMCP(config: .init(environment: [:]), transport: transport)
+        let xcode = try await XcodeMCP(transport: transport)
         defer {
             Task { await xcode.close() }
         }
