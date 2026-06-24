@@ -25,84 +25,28 @@ struct CLICommandIntegrationTests {
             "method": "notifications/progress",
             "params": ["value": 1],
         ]
-        let server = try StubMCPHTTPServer.start(
+        let result = try await CLICommandHarness.run(
             responseMode: .sse,
-            postSSEPreludeEventsByMethod: ["tools/list": [progressNotification]]
-        )
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+            postSSEPreludeEventsByMethod: ["tools/list": [progressNotification]],
+            stdinLines: [initializeRequest, toolsListRequest],
+            timeoutDescription: "CLI command should emit all SSE POST events"
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            let toolsList = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
-            inputPipe.fileHandleForWriting.write(
-                Data(initialize.utf8) + Data("\n".utf8) + Data(toolsList.utf8) + Data("\n".utf8)
-            )
-            inputPipe.fileHandleForWriting.closeFile()
-
-            let exitCode = try await waitWithTimeout(
-                "CLI command should emit all SSE POST events",
-                timeout: .seconds(5)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                    ],
-                    environment: [:]
-                )
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 3)
+        #expect((result.outputObjects.first?["id"] as? NSNumber)?.intValue == 1)
+        let notificationIndex = try #require(
+            result.outputObjects.firstIndex {
+                ($0["method"] as? String) == "notifications/progress"
             }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-
-            let responseObjects = try parseOutputObjects(outputData)
-            #expect(responseObjects.count == 3)
-            #expect((responseObjects.first?["id"] as? NSNumber)?.intValue == 1)
-            let notificationIndex = try #require(
-                responseObjects.firstIndex {
-                    ($0["method"] as? String) == "notifications/progress"
-                }
-            )
-            let toolsListIndex = try #require(
-                responseObjects.firstIndex {
-                    ($0["id"] as? NSNumber)?.intValue == 2
-                }
-            )
-            #expect(notificationIndex < toolsListIndex)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-
-        try await server.shutdown()
+        )
+        let toolsListIndex = try #require(
+            result.outputObjects.firstIndex {
+                ($0["id"] as? NSNumber)?.intValue == 2
+            }
+        )
+        #expect(notificationIndex < toolsListIndex)
     }
 
     @Test func cliCommandStartsSSEAfterInitializeResponseIsWritten() async throws {
@@ -111,471 +55,246 @@ struct CLICommandIntegrationTests {
             "method": "notifications/startup",
             "params": ["value": 1],
         ]
-        let server = try StubMCPHTTPServer.start(
+        let result = try await CLICommandHarness.run(
             responseMode: .json,
             delayedResponseMethod: "tools/list",
             delayedResponseMilliseconds: 1_000,
-            getSSEEvents: [startupNotification]
-        )
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+            getSSEEvents: [startupNotification],
+            stdinLines: [initializeRequest, toolsListRequest],
+            timeoutDescription: "CLI command should finish after stdin closes"
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            let toolsList = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
-            inputPipe.fileHandleForWriting.write(
-                Data(initialize.utf8) + Data("\n".utf8) + Data(toolsList.utf8) + Data("\n".utf8)
-            )
-            inputPipe.fileHandleForWriting.closeFile()
-            let exitCode = try await waitWithTimeout(
-                "CLI command should finish after stdin closes",
-                timeout: .seconds(5)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                    ],
-                    environment: [:]
-                )
-            }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-
-            let responseObjects = try parseOutputObjects(outputData)
-            #expect((responseObjects.first?["id"] as? NSNumber)?.intValue == 1)
-            #expect(server.recorder.snapshot().contains { $0.httpMethod == "GET" })
-            if let notificationIndex = responseObjects.firstIndex(where: {
-                ($0["method"] as? String) == "notifications/startup"
-            }) {
-                #expect(notificationIndex > 0)
-            }
-        } catch {
-            inputPipe.fileHandleForWriting.closeFile()
-            try? await server.shutdown()
-            throw error
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect((result.outputObjects.first?["id"] as? NSNumber)?.intValue == 1)
+        #expect(result.requests.contains { $0.httpMethod == "GET" })
+        if let notificationIndex = result.outputObjects.firstIndex(where: {
+            ($0["method"] as? String) == "notifications/startup"
+        }) {
+            #expect(notificationIndex > 0)
         }
-
-        try await server.shutdown()
     }
 
     @Test func cliCommandDoesNotSerializeRequestsAfterInitialize() async throws {
-        let server = try StubMCPHTTPServer.start(
+        let slowCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
+        let result = try await CLICommandHarness.run(
             responseMode: .json,
-            delayedResponseMethod: "tools/call"
-        )
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+            delayedResponseMethod: "tools/call",
+            stdinLines: [initializeRequest, slowCall, concurrentToolsListRequest],
+            timeoutDescription: "CLI command should finish after delayed concurrent request completes"
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            let slowCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
-            let toolsList = #"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#
-            inputPipe.fileHandleForWriting.write(
-                Data(initialize.utf8) + Data("\n".utf8)
-                    + Data(slowCall.utf8) + Data("\n".utf8)
-                    + Data(toolsList.utf8) + Data("\n".utf8)
-            )
-            inputPipe.fileHandleForWriting.closeFile()
-
-            let exitCode = try await waitWithTimeout(
-                "CLI command should finish after delayed concurrent request completes",
-                timeout: .seconds(5)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                    ],
-                    environment: [:]
-                )
-            }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-
-            let output = String(decoding: outputData, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let responseIDs = try output
-                .split(separator: "\n")
-                .map { line in
-                    let object = try #require(
-                        JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-                    )
-                    return try #require((object["id"] as? NSNumber)?.intValue)
-                }
-            #expect(responseIDs.count == 3)
-            #expect(responseIDs.first == 1)
-            let slowResponseIndex = try #require(responseIDs.firstIndex(of: 2))
-            let fastResponseIndex = try #require(responseIDs.firstIndex(of: 3))
-            #expect(fastResponseIndex < slowResponseIndex)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-
-        try await server.shutdown()
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let responseIDs = try result.outputIDs()
+        #expect(responseIDs.count == 3)
+        #expect(responseIDs.first == 1)
+        let slowResponseIndex = try #require(responseIDs.firstIndex(of: 2))
+        let fastResponseIndex = try #require(responseIDs.firstIndex(of: 3))
+        #expect(fastResponseIndex < slowResponseIndex)
     }
 
     @Test func cliCommandBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {
-        let server = try StubMCPHTTPServer.start(responseMode: .json, hangsDELETE: true)
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+        let result = try await CLICommandHarness.run(
+            responseMode: .json,
+            hangsDELETE: true,
+            stdinLines: [initializeRequest],
+            proxyArguments: ["--request-timeout", "0"],
+            timeoutDescription: "CLI command should not hang waiting for best-effort DELETE"
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            inputPipe.fileHandleForWriting.write(Data(initialize.utf8) + Data("\n".utf8))
-            inputPipe.fileHandleForWriting.closeFile()
-
-            let exitCode = try await waitWithTimeout(
-                "CLI command should not hang waiting for best-effort DELETE",
-                timeout: .seconds(5)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                        "--request-timeout",
-                        "0",
-                    ],
-                    environment: [:]
-                )
-            }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-            let output = String(decoding: outputData, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let responseObject = try #require(
-                JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
-            )
-            #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
-            #expect(server.recorder.snapshot().contains { $0.httpMethod == "DELETE" })
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-
-        try await server.shutdown()
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 1)
+        let responseObject = try #require(result.outputObjects.first)
+        #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
+        #expect(result.requests.contains { $0.httpMethod == "DELETE" })
     }
 
     @Test func cliCommandTreatsAcceptedJSONRPCResponseAsAcknowledged() async throws {
-        let server = try StubMCPHTTPServer.start(responseMode: .json)
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+        let response = #"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#
+        let result = try await CLICommandHarness.run(
+            responseMode: .json,
+            stdinLines: [initializeRequest, response],
+            timeoutDescription: "CLI command should treat accepted JSON-RPC response as acknowledged"
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            let response = #"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#
-            inputPipe.fileHandleForWriting.write(
-                Data(initialize.utf8) + Data("\n".utf8)
-                    + Data(response.utf8) + Data("\n".utf8)
-            )
-            inputPipe.fileHandleForWriting.closeFile()
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 1)
+        #expect((result.outputObjects.first?["id"] as? NSNumber)?.intValue == 1)
 
-            let exitCode = try await waitWithTimeout(
-                "CLI command should treat accepted JSON-RPC response as acknowledged",
-                timeout: .seconds(5)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                    ],
-                    environment: [:]
-                )
+        let responsePost = try #require(
+            result.requests.first {
+                $0.httpMethod == "POST" && $0.bodyMethod == nil
             }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-
-            let responseObjects = try parseOutputObjects(outputData)
-            #expect(responseObjects.count == 1)
-            #expect((responseObjects.first?["id"] as? NSNumber)?.intValue == 1)
-
-            let responsePost = try #require(
-                server.recorder.snapshot().first {
-                    $0.httpMethod == "POST" && $0.bodyMethod == nil
-                }
-            )
-            #expect(responsePost.sessionID == "server-session")
-            #expect(responsePost.protocolVersion == MCP.ProtocolVersion.current)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-
-        try await server.shutdown()
+        )
+        #expect(responsePost.sessionID == "server-session")
+        #expect(responsePost.protocolVersion == MCP.ProtocolVersion.current)
     }
 
     @Test func cliCommandSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
-        let server = try StubMCPHTTPServer.start(
+        let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
+        let result = try await CLICommandHarness.run(
             responseMode: .json,
-            hangingResponseMethod: "tools/call"
-        )
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+            hangingResponseMethod: "tools/call",
+            stdinLines: [initializeRequest, longRunningCall],
+            proxyArguments: ["--request-timeout", "0"],
+            timeoutDescription: "CLI command should delete the session after timed-out drain",
+            timeout: .seconds(6)
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
-            inputPipe.fileHandleForWriting.write(
-                Data(initialize.utf8) + Data("\n".utf8)
-                    + Data(longRunningCall.utf8) + Data("\n".utf8)
-            )
-            inputPipe.fileHandleForWriting.closeFile()
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let responseIDs = try result.outputIDs()
+        #expect(responseIDs.contains(1))
 
-            let exitCode = try await waitWithTimeout(
-                "CLI command should delete the session after timed-out drain",
-                timeout: .seconds(6)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                        "--request-timeout",
-                        "0",
-                    ],
-                    environment: [:]
-                )
-            }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-            let output = String(decoding: outputData, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let responseIDs = try output
-                .split(separator: "\n")
-                .map { line in
-                    let object = try #require(
-                        JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-                    )
-                    return try #require((object["id"] as? NSNumber)?.intValue)
-                }
-            #expect(responseIDs.contains(1))
-
-            let delete = try #require(server.recorder.snapshot().first { $0.httpMethod == "DELETE" })
-            #expect(delete.sessionID == "server-session")
-            #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-
-        try await server.shutdown()
+        let delete = try #require(result.requests.first { $0.httpMethod == "DELETE" })
+        #expect(delete.sessionID == "server-session")
+        #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
     }
 
     @Test func cliCommandDeletesUninitializedSessionAfterInitializeWithoutProtocol() async throws {
-        let server = try StubMCPHTTPServer.start(
+        let result = try await CLICommandHarness.run(
             responseMode: .json,
-            initializeProtocolVersion: nil
-        )
-        let errors = CapturedLines()
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+            initializeProtocolVersion: nil,
+            stdinLines: [initializeRequest],
+            timeoutDescription: "CLI command should delete uninitialized session after EOF"
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            inputPipe.fileHandleForWriting.write(Data(initialize.utf8) + Data("\n".utf8))
-            inputPipe.fileHandleForWriting.closeFile()
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 1)
+        let responseObject = try #require(result.outputObjects.first)
+        #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
 
-            let exitCode = try await waitWithTimeout(
-                "CLI command should delete uninitialized session after EOF",
-                timeout: .seconds(5)
-            ) {
-                await command.run(
-                    args: [
-                        "xcode-mcp-proxy",
-                        "--url",
-                        server.url.absoluteString,
-                    ],
-                    environment: [:]
-                )
-            }
-            outputPipe.fileHandleForWriting.closeFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-            let output = String(decoding: outputData, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let responseObject = try #require(
-                JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
-            )
-            #expect((responseObject["id"] as? NSNumber)?.intValue == 1)
-
-            let delete = try #require(server.recorder.snapshot().first { $0.httpMethod == "DELETE" })
-            #expect(delete.sessionID == "server-session")
-            #expect(delete.protocolVersion == nil)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-
-        try await server.shutdown()
+        let delete = try #require(result.requests.first { $0.httpMethod == "DELETE" })
+        #expect(delete.sessionID == "server-session")
+        #expect(delete.protocolVersion == nil)
     }
 
     private func runCLICommandRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
-        let server = try StubMCPHTTPServer.start(responseMode: responseMode)
+        let result = try await CLICommandHarness.run(
+            responseMode: responseMode,
+            stdinLines: [initializeRequest, toolsListRequest],
+            timeoutDescription: "CLI command should finish after stdin closes"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 2)
+        #expect((result.outputObjects.first?["id"] as? NSNumber)?.intValue == 1)
+        #expect((result.outputObjects.last?["id"] as? NSNumber)?.intValue == 2)
+        let toolsResult = result.outputObjects.last?["result"] as? [String: Any]
+        #expect(toolsResult?["transport"] as? String == "stub")
+
+        let initializePost = try #require(result.requests.first { $0.bodyMethod == "initialize" })
+        #expect(initializePost.httpMethod == "POST")
+        #expect(initializePost.sessionID == nil)
+        #expect(initializePost.protocolVersion == nil)
+        #expect(initializePost.accept == "application/json, text/event-stream")
+        #expect(initializePost.contentType == "application/json")
+
+        let toolsPost = try #require(result.requests.first { $0.bodyMethod == "tools/list" })
+        #expect(toolsPost.httpMethod == "POST")
+        #expect(toolsPost.sessionID == "server-session")
+        #expect(toolsPost.protocolVersion == MCP.ProtocolVersion.current)
+        #expect(toolsPost.accept == "application/json, text/event-stream")
+        #expect(toolsPost.contentType == "application/json")
+
+        let sseGet = try #require(result.requests.first { $0.httpMethod == "GET" })
+        #expect(sseGet.sessionID == "server-session")
+        #expect(sseGet.protocolVersion == MCP.ProtocolVersion.current)
+        #expect(sseGet.accept == "text/event-stream")
+
+        let delete = try #require(result.requests.first { $0.httpMethod == "DELETE" })
+        #expect(delete.sessionID == "server-session")
+        #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
+    }
+}
+
+private let initializeRequest =
+    #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+private let toolsListRequest = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
+private let concurrentToolsListRequest = #"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#
+
+private struct CLICommandRunResult {
+    let exitCode: Int32
+    let stderr: [String]
+    let outputObjects: [[String: Any]]
+    let requests: [StubMCPHTTPRequest]
+
+    init(
+        exitCode: Int32,
+        stderr: [String],
+        outputData: Data,
+        requests: [StubMCPHTTPRequest]
+    ) throws {
+        self.exitCode = exitCode
+        self.stderr = stderr
+        self.outputObjects = try parseOutputObjects(outputData)
+        self.requests = requests
+    }
+
+    func outputIDs() throws -> [Int] {
+        try outputObjects.map { object in
+            try #require((object["id"] as? NSNumber)?.intValue)
+        }
+    }
+}
+
+private struct CLICommandHarness {
+    static func run(
+        responseMode: StubMCPHTTPResponseMode,
+        delayedResponseMethod: String? = nil,
+        delayedResponseMilliseconds: Int = 250,
+        hangingResponseMethod: String? = nil,
+        initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
+        hangsDELETE: Bool = false,
+        postSSEPreludeEventsByMethod: [String: [[String: Any]]] = [:],
+        getSSEEvents: [[String: Any]] = [],
+        stdinLines: [String],
+        proxyArguments: [String] = [],
+        timeoutDescription: String,
+        timeout: Duration = .seconds(5),
+        environment: [String: String] = [:]
+    ) async throws -> CLICommandRunResult {
+        let server = try StubMCPHTTPServer.start(
+            responseMode: responseMode,
+            delayedResponseMethod: delayedResponseMethod,
+            delayedResponseMilliseconds: delayedResponseMilliseconds,
+            hangingResponseMethod: hangingResponseMethod,
+            initializeProtocolVersion: initializeProtocolVersion,
+            hangsDELETE: hangsDELETE,
+            postSSEPreludeEventsByMethod: postSSEPreludeEventsByMethod,
+            getSSEEvents: getSSEEvents
+        )
+
+        do {
+            let result = try await runProxyCLI(
+                server: server,
+                stdinLines: stdinLines,
+                proxyArguments: proxyArguments,
+                timeoutDescription: timeoutDescription,
+                timeout: timeout,
+                environment: environment
+            )
+            try await server.shutdown()
+            return result
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+    }
+
+    private static func runProxyCLI(
+        server: StubMCPHTTPServer,
+        stdinLines: [String],
+        proxyArguments: [String],
+        timeoutDescription: String,
+        timeout: Duration,
+        environment: [String: String]
+    ) async throws -> CLICommandRunResult {
         let errors = CapturedLines()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
@@ -602,84 +321,58 @@ struct CLICommandIntegrationTests {
             )
         )
 
-        do {
-            let initialize =
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
-            let toolsList = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
-            inputPipe.fileHandleForWriting.write(
-                Data(initialize.utf8) + Data("\n".utf8) + Data(toolsList.utf8) + Data("\n".utf8)
-            )
-            inputPipe.fileHandleForWriting.closeFile()
+        inputPipe.fileHandleForWriting.write(stdinData(for: stdinLines))
+        inputPipe.fileHandleForWriting.closeFile()
 
+        do {
             let exitCode = try await waitWithTimeout(
-                "CLI command should finish after stdin closes",
-                timeout: .seconds(5)
+                timeoutDescription,
+                timeout: timeout
             ) {
                 await command.run(
                     args: [
                         "xcode-mcp-proxy",
                         "--url",
                         server.url.absoluteString,
-                    ],
-                    environment: [:]
+                    ] + proxyArguments,
+                    environment: environment
                 )
             }
             outputPipe.fileHandleForWriting.closeFile()
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-
-            #expect(exitCode == 0)
-            #expect(errors.snapshot().isEmpty)
-
-            let responseObjects = try parseOutputObjects(outputData)
-            #expect(responseObjects.count == 2)
-            #expect((responseObjects.first?["id"] as? NSNumber)?.intValue == 1)
-            #expect((responseObjects.last?["id"] as? NSNumber)?.intValue == 2)
-            let result = responseObjects.last?["result"] as? [String: Any]
-            #expect(result?["transport"] as? String == "stub")
-
-            let requests = server.recorder.snapshot()
-            let initializePost = try #require(requests.first { $0.bodyMethod == "initialize" })
-            #expect(initializePost.httpMethod == "POST")
-            #expect(initializePost.sessionID == nil)
-            #expect(initializePost.protocolVersion == nil)
-            #expect(initializePost.accept == "application/json, text/event-stream")
-            #expect(initializePost.contentType == "application/json")
-
-            let toolsPost = try #require(requests.first { $0.bodyMethod == "tools/list" })
-            #expect(toolsPost.httpMethod == "POST")
-            #expect(toolsPost.sessionID == "server-session")
-            #expect(toolsPost.protocolVersion == MCP.ProtocolVersion.current)
-            #expect(toolsPost.accept == "application/json, text/event-stream")
-            #expect(toolsPost.contentType == "application/json")
-
-            let sseGet = try #require(requests.first { $0.httpMethod == "GET" })
-            #expect(sseGet.sessionID == "server-session")
-            #expect(sseGet.protocolVersion == MCP.ProtocolVersion.current)
-            #expect(sseGet.accept == "text/event-stream")
-
-            let delete = try #require(requests.first { $0.httpMethod == "DELETE" })
-            #expect(delete.sessionID == "server-session")
-            #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
+            return try CLICommandRunResult(
+                exitCode: exitCode,
+                stderr: errors.snapshot(),
+                outputData: outputData,
+                requests: server.recorder.snapshot()
+            )
         } catch {
-            try? await server.shutdown()
+            outputPipe.fileHandleForWriting.closeFile()
             throw error
         }
-
-        try await server.shutdown()
     }
 
-    private func parseOutputObjects(_ data: Data) throws -> [[String: Any]] {
-        let output = String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard output.isEmpty == false else { return [] }
-        return try output
-            .split(separator: "\n")
-            .map { line in
-                try #require(
-                    JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-                )
-            }
+    private static func stdinData(for lines: [String]) -> Data {
+        var data = Data()
+        for line in lines {
+            data.append(Data(line.utf8))
+            data.append(Data("\n".utf8))
+        }
+        return data
     }
+}
+
+private func parseOutputObjects(_ data: Data) throws -> [[String: Any]] {
+    let output = String(decoding: data, as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard output.isEmpty == false else { return [] }
+    return try output
+        .split(separator: "\n")
+        .map { line in
+            try #require(
+                JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            )
+        }
 }
 
 private struct StubMCPHTTPServer {
