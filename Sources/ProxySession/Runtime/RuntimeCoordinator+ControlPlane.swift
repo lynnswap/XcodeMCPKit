@@ -762,6 +762,7 @@ extension RuntimeCoordinator {
         onTimeout: @escaping @Sendable () -> Void = {}
     ) async throws -> Output {
         if let deadlineUptimeNs, let timeout = timeAmount(until: deadlineUptimeNs) {
+            let clock = clock
             return try await withThrowingTaskGroup(
                 of: EventLoopFutureWaitResult<Output>.self
             ) { group in
@@ -769,9 +770,8 @@ extension RuntimeCoordinator {
                     .value(try await future.get())
                 }
                 group.addTask {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(max(0, timeout.nanoseconds))
-                    )
+                    await clock.sleep(.nanoseconds(max(0, timeout.nanoseconds)))
+                    try Task.checkCancellation()
                     return .timedOut
                 }
                 let result = try await group.next()!
