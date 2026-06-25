@@ -402,9 +402,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
         startImmediately: Bool = true
     ) {
-        let count = max(1, min(config.upstreamProcessCount, 10))
+        let bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
         let xcodeProcessRoutingEnabled = MCPBridgeRuntime.supportsProcessBoundRouting(
-            config: config
+            config: bridgeRuntimeConfig
         )
         let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
             config: config
@@ -414,9 +414,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? xcodeTargetDiscovery?.runningXcodeTargets() ?? []
             : []
         let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: config,
-            sharedSessionID: config.upstreamSessionID,
-            count: count,
+            config: bridgeRuntimeConfig,
             xcodeTargets: xcodeTargets
         )
         let clock = ClockClient.liveValue
@@ -483,7 +481,9 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyConfig
     ) -> Bool {
         config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
-            && MCPBridgeRuntime.supportsProcessBoundRouting(config: config)
+            && MCPBridgeRuntime.supportsProcessBoundRouting(
+                config: config.mcpBridgeRuntimeConfiguration
+            )
     }
 
     package init(
