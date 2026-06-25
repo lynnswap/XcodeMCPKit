@@ -1,91 +1,80 @@
-import Foundation
-import ProxyBuildInfo
-import ProxyCLICommon
-import ProxyCore
 import XcodeMCPProxyKit
 
 extension XcodeMCPProxyServerCommand {
     package struct Runtime {
-    private let dependencies: XcodeMCPProxyServerCommand.Dependencies
+        private let dependencies: XcodeMCPProxyServerCommand.Dependencies
 
-    package init(dependencies: XcodeMCPProxyServerCommand.Dependencies) {
-        self.dependencies = dependencies
-    }
-
-    package func execute(args: [String], environment: [String: String]) async -> Int32 {
-        do {
-            var options = try XcodeMCPProxyServerCommand.parseOptions(args: args)
-            if options.showHelp {
-                dependencies.stdout(XcodeMCPProxyServerCommand.serverUsage())
-                return 0
-            }
-            if options.showVersion {
-                dependencies.stdout(
-                    ProxyBuildInfo.versionLine(
-                        arguments: args,
-                        defaultExecutableName: "xcode-mcp-proxy-server"
-                    )
-                )
-                return 0
-            }
-            try XcodeMCPProxyServerCommand.applyDefaults(from: environment, to: &options)
-
-            let proxyArgs = ["xcode-mcp-proxy"] + options.forwardedArgs
-            let proxyConfig = try CLIParser.parse(args: proxyArgs, environment: environment)
-            try proxyConfig.validateModernProtocolConfiguration()
-            let serverConfig = XcodeMCPProxyServer.Configuration(serverProxyConfig: proxyConfig)
-
-            let isDryRun = options.dryRun || XcodeMCPProxyServerCommand.isTruthy(environment["DRY_RUN"])
-            if isDryRun {
-                dependencies.stdout(
-                    XcodeMCPProxyServerCommand.dryRunCommandLine(options: options, config: serverConfig)
-                )
-                return 0
-            }
-            if options.forceRestart, serverConfig.listenPort > 0 {
-                _ = dependencies.existingProxyServerClient.terminateExistingServer(
-                    serverConfig.listenHost,
-                    serverConfig.listenPort,
-                    dependencies.stderr
-                )
-            }
-
-            do {
-                let server = dependencies.makeServer(serverConfig)
-                _ = try server.startAndWriteDiscovery()
-                try await server.wait()
-                return 0
-            } catch {
-                if serverConfig.listenPort > 0, dependencies.isAddressAlreadyInUse(error) {
-                    let message = XcodeMCPProxyServerCommand.portInUseMessage(
-                        host: serverConfig.listenHost,
-                        port: serverConfig.listenPort,
-                        pids: dependencies.existingProxyServerClient.detectExistingProxyServerPIDs(
-                            serverConfig.listenHost,
-                            serverConfig.listenPort
-                        )
-                    )
-                    dependencies.stderr(message)
-                    return 1
-                }
-                throw error
-            }
-        } catch let error as XcodeMCPProxyServerCommand.Error {
-            dependencies.stderr("error: \(error.description)")
-            dependencies.stderr("run with --help for usage")
-            return 1
-        } catch let error as CLIError {
-            dependencies.stderr(error.description)
-            dependencies.stderr(XcodeMCPProxyServerCommand.serverUsage())
-            return 1
-        } catch let error as ProxyConfig.ValidationError {
-            dependencies.stderr(error.description)
-            dependencies.stderr(XcodeMCPProxyServerCommand.serverUsage())
-            return 1
-        } catch {
-            dependencies.stderr("error: \(error)")
-            return 1
+        package init(dependencies: XcodeMCPProxyServerCommand.Dependencies) {
+            self.dependencies = dependencies
         }
-    }
+
+        package func execute(args: [String], environment: [String: String]) async -> Int32 {
+            do {
+                let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+                    arguments: args,
+                    environment: environment
+                )
+
+                switch plan.action {
+                case .showHelp:
+                    dependencies.stdout(plan.usage)
+                    return 0
+                case .showVersion:
+                    dependencies.stdout(plan.versionLine)
+                    return 0
+                case .dryRun:
+                    dependencies.stdout(plan.resolvedDryRunCommandLine ?? "")
+                    return 0
+                case .start:
+                    guard let serverConfig = plan.configuration else {
+                        throw XcodeMCPProxyServer.LaunchResolutionError(
+                            message: "server launch plan is missing configuration",
+                            presentation: .conciseUsageHint
+                        )
+                    }
+                    if plan.options.forceRestart, serverConfig.bind.port > 0 {
+                        _ = dependencies.existingServerController.terminateExistingServer(
+                            serverConfig.bind.host,
+                            serverConfig.bind.port,
+                            dependencies.stderr
+                        )
+                    }
+
+                    do {
+                        let server = dependencies.makeServer(serverConfig)
+                        _ = try server.startAndWriteDiscovery()
+                        try await server.wait()
+                        return 0
+                    } catch {
+                        if serverConfig.bind.port > 0, dependencies.isAddressAlreadyInUse(error) {
+                            let diagnostic = XcodeMCPProxyServer.PortInUseError(
+                                host: serverConfig.bind.host,
+                                port: serverConfig.bind.port,
+                                processIdentifiers: dependencies.existingServerController.detectExistingServerProcessIDs(
+                                    serverConfig.bind.host,
+                                    serverConfig.bind.port
+                                )
+                            )
+                            dependencies.stderr(diagnostic.description)
+                            return 1
+                        }
+                        throw error
+                    }
+                }
+            } catch let error as XcodeMCPProxyServer.LaunchResolutionError {
+                switch error.presentation {
+                case .conciseUsageHint:
+                    dependencies.stderr("error: \(error.description)")
+                    dependencies.stderr("run with --help for usage")
+                case .fullUsage:
+                    dependencies.stderr(error.description)
+                    dependencies.stderr(XcodeMCPProxyServer.serverUsage)
+                }
+                return 1
+            } catch {
+                dependencies.stderr("error: \(error)")
+                return 1
+            }
+        }
     }
 }

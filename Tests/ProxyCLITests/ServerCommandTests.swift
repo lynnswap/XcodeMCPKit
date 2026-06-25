@@ -1,37 +1,96 @@
-import ProxyCore
 import Foundation
 import Testing
-import ProxyBuildInfo
-import ProxyCLICommon
 import ProxyServerCLI
 import XcodeMCPProxyKit
 
 @Suite
 struct ServerCommandTests {
-    @Test func serverCommandParsesForceRestartAndDryRun() throws {
-        let options = try XcodeMCPProxyServerCommand.parseOptions(args: [
-            "xcode-mcp-proxy-server",
-            "--listen",
-            "127.0.0.1:9000",
-            "--auto-approve",
-            "--refresh-code-issues-mode",
-            "upstream",
-            "--force-restart",
-            "--dry-run",
-        ])
+    @Test func proxyKitLaunchPlanNormalizesServerArguments() throws {
+        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--listen",
+                "127.0.0.1:9000",
+                "--auto-approve",
+                "--refresh-code-issues-mode",
+                "upstream",
+                "--force-restart",
+                "--dry-run",
+            ],
+            environment: [:]
+        )
 
-        #expect(options.forwardedArgs == [
-            "--listen", "127.0.0.1:9000",
-            "--auto-approve",
-            "--refresh-code-issues-mode", "upstream",
-        ])
-        #expect(options.showHelp == false)
-        #expect(options.showVersion == false)
-        #expect(options.hasListenFlag == true)
-        #expect(options.hasAutoApproveFlag == true)
-        #expect(options.hasRefreshCodeIssuesModeFlag == true)
-        #expect(options.forceRestart == true)
-        #expect(options.dryRun == true)
+        let config = try #require(plan.configuration)
+        #expect(plan.action == .dryRun)
+        #expect(plan.options.forceRestart == true)
+        #expect(plan.options.dryRun == true)
+        #expect(config.bind.host == "127.0.0.1")
+        #expect(config.bind.port == 9000)
+        #expect(config.approval == .automatic)
+        #expect(config.features.refreshCodeIssuesMode == .upstream)
+        #expect(
+            plan.resolvedDryRunCommandLine ==
+                "xcode-mcp-proxy-server --listen 127.0.0.1:9000 --auto-approve --refresh-code-issues-mode upstream"
+        )
+    }
+
+    @Test func proxyKitLaunchPlanNormalizesEnvironmentDefaults() throws {
+        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+            arguments: ["xcode-mcp-proxy-server"],
+            environment: [
+                "HOST": "127.0.0.1",
+                "PORT": "9999",
+                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
+            ]
+        )
+
+        let config = try #require(plan.configuration)
+        #expect(plan.action == .start)
+        #expect(config.bind.host == "127.0.0.1")
+        #expect(config.bind.port == 9999)
+        #expect(config.configurationFilePath == "/tmp/proxy-config.toml")
+        #expect(config.features.refreshCodeIssuesMode == .upstream)
+        #expect(
+            plan.resolvedDryRunCommandLine ==
+                "xcode-mcp-proxy-server --listen 127.0.0.1:9999 --config /tmp/proxy-config.toml --refresh-code-issues-mode upstream"
+        )
+    }
+
+    @Test func proxyKitLaunchPlanLetsExplicitConfigOverrideEnvironment() throws {
+        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--config", "/tmp/explicit.toml",
+                "--dry-run",
+            ],
+            environment: [
+                "MCP_XCODE_CONFIG": "/tmp/environment.toml",
+            ]
+        )
+
+        let config = try #require(plan.configuration)
+        #expect(config.configurationFilePath == "/tmp/explicit.toml")
+        #expect(
+            plan.resolvedDryRunCommandLine ==
+                "xcode-mcp-proxy-server --config /tmp/explicit.toml --listen localhost:8765"
+        )
+    }
+
+    @Test func proxyKitLaunchPlanIgnoresRemovedXcodePIDEnvironment() throws {
+        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+            arguments: ["xcode-mcp-proxy-server"],
+            environment: [
+                "HOST": "127.0.0.1",
+                "PORT": "9999",
+                "XCODE_PID": "1234",
+                "MCP_XCODE_PID": "5678",
+            ]
+        )
+
+        let config = try #require(plan.configuration)
+        #expect(config.bind.host == "127.0.0.1")
+        #expect(config.bind.port == 9999)
     }
 
     @Test func serverCommandPrintsVersionBeforeValidation() async throws {
@@ -60,7 +119,7 @@ struct ServerCommandTests {
         )
 
         #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(ProxyBuildInfo.version)"])
+        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(XcodeMCPProxyServer.productMetadata.version)"])
     }
 
     @Test func serverCommandPrintsVersionWhenFlagAppearsAsConfigValue() async throws {
@@ -89,7 +148,7 @@ struct ServerCommandTests {
         )
 
         #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(ProxyBuildInfo.version)"])
+        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(XcodeMCPProxyServer.productMetadata.version)"])
     }
 
     @Test func serverCommandHelpWinsOverVersion() async throws {
@@ -155,94 +214,6 @@ struct ServerCommandTests {
         #expect(line.contains("Usage:"))
     }
 
-    @Test func serverCommandAppliesEnvironmentDefaultsWithoutXcodePID() throws {
-        var options = XcodeMCPProxyServerCommand.Options(
-            forwardedArgs: [],
-            showHelp: false,
-            showVersion: false,
-            hasListenFlag: false,
-            hasHostFlag: false,
-            hasPortFlag: false,
-            hasConfigFlag: false,
-            hasAutoApproveFlag: false,
-            hasRefreshCodeIssuesModeFlag: false,
-            forceRestart: false,
-            dryRun: false
-        )
-
-        try XcodeMCPProxyServerCommand.applyDefaults(
-            from: [
-                "HOST": "127.0.0.1",
-                "PORT": "9999",
-                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
-                "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
-            ],
-            to: &options
-        )
-
-        #expect(options.forwardedArgs == [
-            "--listen", "127.0.0.1:9999",
-        ])
-    }
-
-    @Test func serverCommandExplicitConfigOverridesEnvironment() throws {
-        var options = XcodeMCPProxyServerCommand.Options(
-            forwardedArgs: ["--config", "/tmp/explicit.toml"],
-            showHelp: false,
-            showVersion: false,
-            hasListenFlag: false,
-            hasHostFlag: false,
-            hasPortFlag: false,
-            hasConfigFlag: true,
-            hasAutoApproveFlag: false,
-            hasRefreshCodeIssuesModeFlag: false,
-            forceRestart: false,
-            dryRun: false
-        )
-
-        try XcodeMCPProxyServerCommand.applyDefaults(
-            from: [
-                "MCP_XCODE_CONFIG": "/tmp/environment.toml",
-            ],
-            to: &options
-        )
-
-        #expect(options.forwardedArgs == [
-            "--config", "/tmp/explicit.toml",
-            "--listen", "localhost:8765",
-        ])
-    }
-
-    @Test func serverCommandIgnoresRemovedXcodePIDEnvironment() throws {
-        var options = XcodeMCPProxyServerCommand.Options(
-            forwardedArgs: [],
-            showHelp: false,
-            showVersion: false,
-            hasListenFlag: false,
-            hasHostFlag: false,
-            hasPortFlag: false,
-            hasConfigFlag: false,
-            hasAutoApproveFlag: false,
-            hasRefreshCodeIssuesModeFlag: false,
-            forceRestart: false,
-            dryRun: false
-        )
-
-        try XcodeMCPProxyServerCommand.applyDefaults(
-            from: [
-                "HOST": "127.0.0.1",
-                "PORT": "9999",
-                "XCODE_PID": "1234",
-                "MCP_XCODE_PID": "5678",
-            ],
-            to: &options
-        )
-
-        #expect(options.forwardedArgs == [
-            "--listen", "127.0.0.1:9999",
-        ])
-    }
-
     @Test func serverCommandRejectsRemovedLazyInitEnvironment() async throws {
         let output = CapturedLines()
         let command = XcodeMCPProxyServerCommand(
@@ -264,7 +235,7 @@ struct ServerCommandTests {
 
         #expect(exitCode == 1)
         #expect(output.snapshot() == [
-            "error: \(CLIParser.removedLazyInitMessage)",
+            "error: \(XcodeMCPProxyServer.removedLazyInitializationMessage)",
             "run with --help for usage",
         ])
     }
@@ -290,7 +261,7 @@ struct ServerCommandTests {
 
         #expect(exitCode == 1)
         #expect(output.snapshot() == [
-            "error: \(CLIParser.removedLazyInitMessage)",
+            "error: \(XcodeMCPProxyServer.removedLazyInitializationMessage)",
             "run with --help for usage",
         ])
     }
@@ -316,45 +287,46 @@ struct ServerCommandTests {
 
         #expect(exitCode == 1)
         #expect(output.snapshot() == [
-            "error: \(CLIParser.removedXcodePIDMessage)",
+            "error: \(XcodeMCPProxyServer.removedXcodePIDMessage)",
             "run with --help for usage",
         ])
     }
 
-    @Test func serverCommandFormatsPortInUseMessage() throws {
-        let message = XcodeMCPProxyServerCommand.portInUseMessage(
+    @Test func proxyKitPortInUseDiagnosticFormatsMessage() throws {
+        let message = XcodeMCPProxyServer.PortInUseError(
             host: "::1",
             port: 8765,
-            pids: [111, 222]
+            processIdentifiers: [111, 222]
         )
+        .description
 
         #expect(message.contains("listen [::1]:8765"))
         #expect(message.contains("pids: 111, 222"))
         #expect(message.contains("--force-restart"))
     }
 
-    @Test func serverCommandHostMatchingHandlesLoopbackAndWildcard() throws {
+    @Test func proxyKitExistingServerControllerHostMatchingHandlesLoopbackAndWildcard() throws {
         #expect(
-            XcodeMCPProxyServerCommand.hostMatches(
+            XcodeMCPProxyServer.ExistingServerController.hostMatches(
                 requestedHost: "localhost",
                 actualHost: "127.0.0.1"
             )
         )
         #expect(
-            XcodeMCPProxyServerCommand.hostMatches(
+            XcodeMCPProxyServer.ExistingServerController.hostMatches(
                 requestedHost: "::",
                 actualHost: "127.0.0.1"
             )
         )
         #expect(
-            XcodeMCPProxyServerCommand.hostMatches(
+            XcodeMCPProxyServer.ExistingServerController.hostMatches(
                 requestedHost: "127.0.0.1",
                 actualHost: "::1"
             ) == false
         )
     }
 
-    @Test func serverCommandExtractsListeningPIDsFromLsofFieldOutputForLocalhost() throws {
+    @Test func proxyKitExistingServerControllerExtractsListeningPIDsFromLsofFieldOutputForLocalhost() throws {
         let output = """
         p51731
         f9
@@ -367,12 +339,14 @@ struct ServerCommandTests {
         """
 
         #expect(
-            XcodeMCPProxyServerCommand.listeningPIDs(fromLsofOutput: output, matchingHost: "localhost")
-                == [51731]
+            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+                fromLsofOutput: output,
+                matchingHost: "localhost"
+            ) == [51731]
         )
     }
 
-    @Test func serverCommandExtractsListeningPIDsFromLsofFieldOutputSkipsNonMatchingHosts() throws {
+    @Test func proxyKitExistingServerControllerExtractsListeningPIDsFromLsofFieldOutputSkipsNonMatchingHosts() throws {
         let output = """
         p51731
         f9
@@ -383,12 +357,15 @@ struct ServerCommandTests {
         """
 
         #expect(
-            XcodeMCPProxyServerCommand.listeningPIDs(fromLsofOutput: output, matchingHost: "127.0.0.1")
-                .isEmpty
+            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+                fromLsofOutput: output,
+                matchingHost: "127.0.0.1"
+            )
+            .isEmpty
         )
     }
 
-    @Test func serverCommandExtractsListeningPIDsFromLegacyTCPNames() throws {
+    @Test func proxyKitExistingServerControllerExtractsListeningPIDsFromLegacyTCPNames() throws {
         let output = """
         p111
         f9
@@ -402,8 +379,10 @@ struct ServerCommandTests {
         """
 
         #expect(
-            XcodeMCPProxyServerCommand.listeningPIDs(fromLsofOutput: output, matchingHost: "localhost")
-                == [111, 222]
+            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+                fromLsofOutput: output,
+                matchingHost: "localhost"
+            ) == [111, 222]
         )
     }
 
@@ -440,22 +419,21 @@ struct ServerCommandTests {
         #expect(exitCode == 0)
         #expect(restarted.snapshot() == ["127.0.0.1:9000"])
         let config = try #require(fakeServer.recordedConfig())
-        #expect(config.listenHost == "127.0.0.1")
-        #expect(config.listenPort == 9000)
+        #expect(config.bind.host == "127.0.0.1")
+        #expect(config.bind.port == 9000)
         #expect(fakeServer.startCount() == 1)
         #expect(fakeServer.waitCount() == 1)
     }
 
-    @Test func serverCommandUsesExistingProxyServerClientForForceRestart() async throws {
+    @Test func serverCommandUsesExistingServerControllerForForceRestart() async throws {
         let restarted = CapturedLines()
         let warnings = CapturedLines()
         let fakeServer = RecordingProxyServer()
-        let existingServerClient = testDependency(of: ExistingProxyServerClient.self) {
-            $0.terminateExistingServer = { host, port, emitWarning in
-                restarted.append("\(host):\(port)")
-                emitWarning("fake restart warning")
-                return true
-            }
+        var existingServerController = XcodeMCPProxyServer.ExistingServerController.testValue
+        existingServerController.terminateExistingServer = { host, port, emitWarning in
+            restarted.append("\(host):\(port)")
+            emitWarning("fake restart warning")
+            return true
         }
         let command = XcodeMCPProxyServerCommand(
             dependencies: .init(
@@ -467,7 +445,7 @@ struct ServerCommandTests {
                     return fakeServer
                 },
                 isAddressAlreadyInUse: { _ in false },
-                existingProxyServerClient: existingServerClient
+                existingServerController: existingServerController
             )
         )
 
@@ -486,7 +464,40 @@ struct ServerCommandTests {
         #expect(fakeServer.startCount() == 1)
     }
 
-    @Test func serverCommandDryRunPrintsResolvedCommand() async throws {
+    @Test func serverCommandReportsPortInUseThroughProxyKitDiagnostic() async throws {
+        let errors = CapturedLines()
+        let command = XcodeMCPProxyServerCommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { _ in },
+                stderr: { errors.append($0) },
+                terminateExistingServer: { _, _ in false },
+                makeServer: { _ in FailingProxyServer(error: AddressAlreadyInUseError()) },
+                isAddressAlreadyInUse: { _ in true },
+                detectExistingProxyServerPIDs: { _, _ in [321] }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: [
+                "xcode-mcp-proxy-server",
+                "--listen", "127.0.0.1:9002",
+            ],
+            environment: [:]
+        )
+
+        #expect(exitCode == 1)
+        #expect(errors.snapshot() == [
+            XcodeMCPProxyServer.PortInUseError(
+                host: "127.0.0.1",
+                port: 9002,
+                processIdentifiers: [321]
+            )
+            .description,
+        ])
+    }
+
+    @Test func serverCommandDryRunPrintsResolvedCommandFromLaunchPlan() async throws {
         let output = CapturedLines()
         let command = XcodeMCPProxyServerCommand(
             dependencies: .init(
@@ -599,6 +610,24 @@ struct ServerCommandTests {
         #expect(exitCode == 0)
         #expect(errors.snapshot().isEmpty)
         #expect(output.snapshot().first?.contains("Usage:") == true)
+    }
+}
+
+private struct AddressAlreadyInUseError: Error {}
+
+private final class FailingProxyServer: ProxyServerCommandServer {
+    private let error: any Error
+
+    init(error: any Error) {
+        self.error = error
+    }
+
+    func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint {
+        throw error
+    }
+
+    func wait() async throws {
+        Issue.record("wait should not be called when start fails")
     }
 }
 

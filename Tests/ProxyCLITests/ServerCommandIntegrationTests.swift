@@ -67,9 +67,9 @@ struct ServerCommandIntegrationTests {
         #expect(exitCode == 0)
         #expect(restarted.snapshot() == ["127.0.0.1:8766"])
         let config = try #require(fakeServer.recordedConfig())
-        #expect(config.listenHost == "127.0.0.1")
-        #expect(config.listenPort == 8766)
-        #expect(config.requestTimeout == 12)
+        #expect(config.bind.host == "127.0.0.1")
+        #expect(config.bind.port == 8766)
+        #expect(config.limits.requestTimeout == 12)
         #expect(fakeServer.startCount() == 1)
         #expect(fakeServer.waitCount() == 1)
     }

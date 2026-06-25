@@ -2,7 +2,6 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
-import ProxyBuildInfo
 import ProxyCore
 import ProxySession
 import ProxyHTTPGateway
@@ -565,7 +564,7 @@ public final class XcodeMCPProxyServer {
     }
 
     package static func listeningLogLine(displayHost: String, port: Int) -> String {
-        "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(ProxyBuildInfo.version))"
+        "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(productMetadata.version))"
     }
 
     package static func startupSummary(
@@ -583,7 +582,7 @@ public final class XcodeMCPProxyServer {
             ? upstreamsPerXcode * xcodeTargets.count
             : upstreamsPerXcode
         var lines = [
-            "XcodeMCPKit \(ProxyBuildInfo.version)",
+            "\(productMetadata.name) \(productMetadata.version)",
             "",
             "Server",
             "  URL: http://\(displayHost):\(port)/mcp",

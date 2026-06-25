@@ -80,6 +80,32 @@ The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
 `MCPToolResult`, `MCPContent`, and `MCPProgress`. Process launch, JSON-RPC
 framing, and session transport are internal implementation details.
 
+## Embed or Launch the Proxy Server
+
+Add the `XcodeMCPProxyKit` library product to embed the Streamable HTTP proxy
+server. Apps can construct `XcodeMCPProxyServer.Configuration` directly, or
+normalize the same argv/environment accepted by `xcode-mcp-proxy-server` into a
+launch plan:
+
+```swift
+import XcodeMCPProxyKit
+
+let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+    arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:8765"],
+    environment: ProcessInfo.processInfo.environment
+)
+
+if plan.action == .start, let config = plan.configuration {
+    let server = XcodeMCPProxyServer(config: config)
+    _ = try server.startAndWriteDiscovery()
+    try await server.wait()
+}
+```
+
+`LaunchPlan` also carries help/version text, `--dry-run` output,
+`--force-restart`, and product metadata so launchers do not need to compose the
+lower-level parser or config types directly.
+
 ## Set Up Your MCP Client
 
 ### 1. Start the Proxy Server
