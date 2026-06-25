@@ -182,11 +182,18 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "ProxyInstallSupport",
+            dependencies: [],
+            path: "Sources/ProxyInstallSupport",
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "ProxyBuildInfo",
                 "ProxyCLICommon",
                 "ProxyCore",
+                "ProxyInstallSupport",
                 "ProxySession",
                 "ProxyProcessManagement",
                 "ProxyXcodeSupport",
