@@ -422,6 +422,7 @@ struct XcodeMCPTests {
             eventStreamFinishesImmediately: true
         )
         let session = makeFakeHTTPURLSession(server: server)
+        let reconnectSleep = ManualReconnectSleep()
         defer {
             session.invalidateAndCancel()
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
@@ -430,22 +431,33 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
-            requestTimeout: .seconds(2)
+            requestTimeout: .seconds(2),
+            eventStreamReconnectSleep: { duration in
+                try await reconnectSleep.sleep(for: duration)
+            }
         )
         let xcode = try await XcodeMCP(
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
+        defer {
+            Task { await xcode.close() }
+        }
 
         let firstGET = try await waitWithTimeout("first event stream GET was not opened") {
             try await server.nextRequest { $0.httpMethod == "GET" }
         }
-        _ = try await waitWithTimeout("event stream GET was not reconnected") {
-            try await server.nextRequest(startingAt: firstGET.sequence + 1) { $0.httpMethod == "GET" }
+        let reconnectDelay = try await waitWithTimeout("event stream reconnect sleep was not requested") {
+            try await reconnectSleep.nextRequestedDuration()
         }
+        #expect(reconnectDelay == .milliseconds(100))
 
         let tools = try await xcode.listTools()
         #expect(tools.first?.name == "DocumentationSearch")
+        await reconnectSleep.resumeNext()
+        _ = try await waitWithTimeout("event stream GET was not reconnected") {
+            try await server.nextRequest(startingAt: firstGET.sequence + 1) { $0.httpMethod == "GET" }
+        }
         await xcode.close()
     }
 
@@ -1268,6 +1280,93 @@ private actor RecordedValues<Value: Sendable> {
             return values[index]
         }
         return nil
+    }
+}
+
+private actor ManualReconnectSleep {
+    private struct SleepWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private struct DurationWaiter {
+        let id: UUID
+        let index: Int
+        let continuation: CheckedContinuation<Duration, Error>
+    }
+
+    private var requestedDurations: [Duration] = []
+    private var sleepWaiters: [SleepWaiter] = []
+    private var durationWaiters: [DurationWaiter] = []
+
+    func sleep(for duration: Duration) async throws {
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                requestedDurations.append(duration)
+                sleepWaiters.append(SleepWaiter(id: waiterID, continuation: continuation))
+                resumeReadyDurationWaiters()
+            }
+        } onCancel: {
+            Task { await self.cancelSleepWaiter(id: waiterID) }
+        }
+    }
+
+    func nextRequestedDuration(at index: Int = 0) async throws -> Duration {
+        if requestedDurations.indices.contains(index) {
+            return requestedDurations[index]
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if requestedDurations.indices.contains(index) {
+                    continuation.resume(returning: requestedDurations[index])
+                    return
+                }
+                durationWaiters.append(
+                    DurationWaiter(id: waiterID, index: index, continuation: continuation)
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelDurationWaiter(id: waiterID) }
+        }
+    }
+
+    func resumeNext() {
+        guard sleepWaiters.isEmpty == false else {
+            return
+        }
+        let waiter = sleepWaiters.removeFirst()
+        waiter.continuation.resume()
+    }
+
+    private func cancelSleepWaiter(id: UUID) {
+        guard let index = sleepWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = sleepWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelDurationWaiter(id: UUID) {
+        guard let index = durationWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = durationWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumeReadyDurationWaiters() {
+        var remaining: [DurationWaiter] = []
+        for waiter in durationWaiters {
+            if requestedDurations.indices.contains(waiter.index) {
+                waiter.continuation.resume(returning: requestedDurations[waiter.index])
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        durationWaiters = remaining
     }
 }
 

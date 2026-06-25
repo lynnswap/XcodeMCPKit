@@ -13,6 +13,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
     private let endpoint: URL
     private let urlSession: URLSession
     private let requestTimeout: Duration?
+    private let eventStreamReconnectSleep: @Sendable (Duration) async throws -> Void
     private let streamContinuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let state = StreamableHTTPTransportState()
 
@@ -45,12 +46,16 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
     package init(
         endpoint: URL,
         urlSession: URLSession,
-        requestTimeout: Duration? = nil
+        requestTimeout: Duration? = nil,
+        eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
+            try await Task.sleep(for: duration)
+        }
     ) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.endpoint = endpoint
         self.urlSession = urlSession
         self.requestTimeout = requestTimeout
+        self.eventStreamReconnectSleep = eventStreamReconnectSleep
         self.events = stream.stream
         self.streamContinuation = stream.continuation
     }
@@ -185,12 +190,13 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
     }
 
     private func startEventStream(sessionID: String, protocolVersion: String) async {
-        let task = Task { [endpoint, urlSession, streamContinuation, state] in
+        let reconnectSleep = eventStreamReconnectSleep
+        let task = Task { [endpoint, urlSession, streamContinuation, state, reconnectSleep] in
             var attempt = 0
             while await state.isOpen {
                 if attempt > 0 {
                     do {
-                        try await Task.sleep(for: Self.eventStreamReconnectDelay(attempt: attempt))
+                        try await reconnectSleep(Self.eventStreamReconnectDelay(attempt: attempt))
                     } catch {
                         return
                     }
