@@ -5,13 +5,16 @@ Swift library API for embedding the Xcode MCP Streamable HTTP proxy server.
 ## Status
 
 `XcodeMCPProxyKit` is the public server-side kit used by the
-`xcode-mcp-proxy-server` executable. The CLI parses command-line options and
-then constructs `XcodeMCPProxyServer(config:)` from this target, so the package
-boundary is real and does not rely on a private server wrapper.
+`xcode-mcp-proxy-server` executable. The kit resolves command-line arguments and
+environment variables into `XcodeMCPProxyServer.LaunchPlan`, then the executable
+acts as a thin composition root that executes that plan.
 
 This target owns:
 
 - `XcodeMCPProxyServer`, the embeddable proxy server lifecycle object
+- server launch plan resolution from argv/environment
+- product metadata, version line, dry-run, force-restart, and port-in-use
+  diagnostics for server launchers
 - HTTP channel setup and request handling integration
 - startup, discovery writing, waiting, and shutdown entry points
 
@@ -84,3 +87,35 @@ runtime, and terminates the event loop group.
 
 Use one `XcodeMCPProxyServer` per proxy server instance. Create a new instance
 after shutdown instead of restarting the same object.
+
+## Launch Plans
+
+Launchers that want the same behavior as `xcode-mcp-proxy-server` can resolve a
+high-level launch plan instead of composing the lower-level parser and config
+types:
+
+```swift
+let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+    arguments: CommandLine.arguments,
+    environment: ProcessInfo.processInfo.environment
+)
+
+switch plan.action {
+case .showHelp:
+    print(plan.usage)
+case .showVersion:
+    print(plan.versionLine)
+case .dryRun:
+    print(plan.resolvedDryRunCommandLine ?? "")
+case .start:
+    let server = XcodeMCPProxyServer(config: plan.configuration!)
+    _ = try server.startAndWriteDiscovery()
+    try await server.wait()
+}
+```
+
+`LaunchPlan` exposes the resolved public server `Configuration`, normalized
+`LaunchOptions`, stable dry-run command line, and display text. Port-in-use
+messages are represented by `XcodeMCPProxyServer.PortInUseError`, and product
+version information is available through
+`XcodeMCPProxyServer.productMetadata`.

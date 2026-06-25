@@ -177,6 +177,7 @@ let package = Package(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "ProxyBuildInfo",
+                "ProxyCLICommon",
                 "ProxyCore",
                 "ProxyMCP",
                 "ProxySession",
@@ -214,9 +215,7 @@ let package = Package(
         .target(
             name: "ProxyServerCLI",
             dependencies: [
-                "ProxyBuildInfo",
                 "ProxyCLICommon",
-                "ProxyCore",
                 "XcodeMCPProxyKit",
             ],
             path: "Sources/ProxyCLI/Server",

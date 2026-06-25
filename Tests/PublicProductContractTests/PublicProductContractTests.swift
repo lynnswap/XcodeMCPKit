@@ -287,6 +287,43 @@ func compileOnlyProxyConfigurationSurface() {
     _ = (config, upstreamMode, server)
 }
 
+func compileOnlyProxyLaunchSurface() throws {
+    let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+        arguments: [
+            "xcode-mcp-proxy-server",
+            "--listen", "127.0.0.1:0",
+            "--dry-run",
+        ],
+        environment: [
+            "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
+        ]
+    )
+    let metadata = XcodeMCPProxyServer.productMetadata
+    let versionLine = metadata.versionLine(
+        arguments: ["/usr/local/bin/xcode-mcp-proxy-server"],
+        defaultExecutableName: "xcode-mcp-proxy-server"
+    )
+    let portError = XcodeMCPProxyServer.PortInUseError(
+        host: "localhost",
+        port: 8765,
+        processIdentifiers: [123]
+    )
+
+    _ = (
+        plan.action,
+        plan.configuration,
+        plan.options.dryRun,
+        plan.options.forceRestart,
+        plan.resolvedDryRunCommandLine,
+        plan.usage,
+        plan.versionLine,
+        metadata.name,
+        metadata.version,
+        versionLine,
+        portError.description
+    )
+}
+
 func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws {
     let address = try server.start()
     let discoveryAddress = try server.startAndWriteDiscovery()
