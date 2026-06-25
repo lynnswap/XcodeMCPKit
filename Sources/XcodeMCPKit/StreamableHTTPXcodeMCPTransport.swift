@@ -12,15 +12,26 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
 
     private let endpoint: URL
     private let urlSession: URLSession
+    private let requestTimeout: Duration?
     private let streamContinuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let state = StreamableHTTPTransportState()
 
-    package static func start(endpoint: URL) async throws -> StreamableHTTPXcodeMCPTransport {
+    package static func start(
+        endpoint: URL,
+        requestTimeout: Duration?
+    ) async throws -> StreamableHTTPXcodeMCPTransport {
         try validateEndpoint(endpoint)
-        return StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: .shared)
+        return StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: .shared,
+            requestTimeout: requestTimeout
+        )
     }
 
-    package static func start(discoveryFile: URL) async throws -> StreamableHTTPXcodeMCPTransport {
+    package static func start(
+        discoveryFile: URL,
+        requestTimeout: Duration?
+    ) async throws -> StreamableHTTPXcodeMCPTransport {
         guard let record = Discovery.read(overrideURL: discoveryFile),
               let endpoint = URL(string: record.url)
         else {
@@ -28,13 +39,18 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                 "Streamable HTTP discovery file is missing, stale, or invalid: \(discoveryFile.path)"
             )
         }
-        return try await start(endpoint: endpoint)
+        return try await start(endpoint: endpoint, requestTimeout: requestTimeout)
     }
 
-    package init(endpoint: URL, urlSession: URLSession) {
+    package init(
+        endpoint: URL,
+        urlSession: URLSession,
+        requestTimeout: Duration? = nil
+    ) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.endpoint = endpoint
         self.urlSession = urlSession
+        self.requestTimeout = requestTimeout
         self.events = stream.stream
         self.streamContinuation = stream.continuation
     }
@@ -99,6 +115,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
     private func makePostRequest(body: Data) async -> URLRequest {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = Self.urlTimeoutInterval(for: requestTimeout)
         request.httpBody = body
         request.setValue(Self.postAcceptHeader, forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -325,6 +342,16 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         default:
             return false
         }
+    }
+
+    private static func urlTimeoutInterval(for duration: Duration?) -> TimeInterval {
+        guard let duration else {
+            return .infinity
+        }
+        let components = duration.components
+        let seconds = Double(max(0, components.seconds))
+        let fractional = Double(max(0, components.attoseconds)) / 1_000_000_000_000_000_000
+        return seconds + fractional
     }
 
     private static func jsonObject(from data: Data) -> [String: MCPJSONValue]? {

@@ -246,7 +246,11 @@ struct XcodeMCPTests {
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
         }
 
-        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
         let xcode = try await XcodeMCP(
             config: .init(
                 transport: .streamableHTTP(endpoint: endpoint),
@@ -262,6 +266,7 @@ struct XcodeMCPTests {
         let requests = await server.recordedRequests()
         let initialize = try #require(requests.firstJSONRPC(method: "initialize"))
         #expect(initialize.httpMethod == "POST")
+        #expect(initialize.timeoutInterval == 2)
         #expect(initialize.header("Accept") == "application/json, text/event-stream")
         #expect(initialize.header("Content-Type") == "application/json")
         #expect(initialize.header("MCP-Session-Id") == nil)
@@ -272,6 +277,7 @@ struct XcodeMCPTests {
         #expect(initialized.header("MCP-Protocol-Version") == "2025-06-18")
 
         let list = try #require(requests.firstJSONRPC(method: "tools/list"))
+        #expect(list.timeoutInterval == 2)
         #expect(list.header("MCP-Session-Id") == "session-http-1")
         #expect(list.header("MCP-Protocol-Version") == "2025-06-18")
 
@@ -295,7 +301,11 @@ struct XcodeMCPTests {
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
         }
 
-        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
         let xcode = try await XcodeMCP(
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
@@ -336,7 +346,11 @@ struct XcodeMCPTests {
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
         }
 
-        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
         let xcode = try await XcodeMCP(
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
@@ -376,7 +390,11 @@ struct XcodeMCPTests {
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
         }
 
-        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
         let xcode = try await XcodeMCP(
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
@@ -409,7 +427,11 @@ struct XcodeMCPTests {
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
         }
 
-        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
         let xcode = try await XcodeMCP(
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
@@ -439,7 +461,11 @@ struct XcodeMCPTests {
             FakeStreamableHTTPURLProtocolRegistry.shared.reset()
         }
 
-        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
         await #expect(throws: XcodeMCPError.serverError(
             code: -32000,
             message: "initialize rejected",

@@ -288,9 +288,15 @@ public actor XcodeMCP {
                 )
             )
         case .streamableHTTP(let endpoint):
-            transport = try await StreamableHTTPXcodeMCPTransport.start(endpoint: endpoint)
+            transport = try await StreamableHTTPXcodeMCPTransport.start(
+                endpoint: endpoint,
+                requestTimeout: config.requestTimeout
+            )
         case .streamableHTTPDiscoveryFile(let discoveryFile):
-            transport = try await StreamableHTTPXcodeMCPTransport.start(discoveryFile: discoveryFile)
+            transport = try await StreamableHTTPXcodeMCPTransport.start(
+                discoveryFile: discoveryFile,
+                requestTimeout: config.requestTimeout
+            )
         }
         try await self.init(config: config, transport: transport)
     }
