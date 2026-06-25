@@ -1,4 +1,5 @@
 import Foundation
+import ProxyInstallSupport
 
 /// Installer facade for Xcode MCP proxy executables.
 public struct XcodeMCPProxyInstaller: Sendable {
@@ -212,19 +213,10 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     package static func buildProducts(_ products: [String], in directory: URL) throws {
-        for product in products {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["swift", "build", "-c", "release", "--product", product]
-            process.currentDirectoryURL = directory
-            process.standardOutput = FileHandle.standardOutput
-            process.standardError = FileHandle.standardError
-
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw Error.message("swift build failed; run from the repo root and try again")
-            }
+        do {
+            try ProxyProductBuilder.buildReleaseProducts(products, in: directory)
+        } catch let error as ProxyProductBuilder.Error {
+            throw Error.message(error.description)
         }
     }
 }
