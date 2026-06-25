@@ -77,22 +77,28 @@ private final class StdinWriter: @unchecked Sendable {
 }
 
 package struct UpstreamProcess: UpstreamSessionFactory {
-    package struct Config {
+    package struct Config: Sendable {
         package var command: String
         package var args: [String]
         package var environment: [String: String]
         package var maxQueuedWriteBytes: Int
+        package var terminationDrainGrace: Duration
+        package var clock: ClockClient
 
         package init(
             command: String,
             args: [String],
             environment: [String: String],
-            maxQueuedWriteBytes: Int
+            maxQueuedWriteBytes: Int,
+            terminationDrainGrace: Duration = .milliseconds(250),
+            clock: ClockClient = .liveValue
         ) {
             self.command = command
             self.args = args
             self.environment = environment
             self.maxQueuedWriteBytes = maxQueuedWriteBytes
+            self.terminationDrainGrace = terminationDrainGrace
+            self.clock = clock
         }
     }
 
@@ -114,7 +120,6 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private let config: UpstreamProcess.Config
     private let logger: Logger = ProxyLogging.make("upstream")
     private let maxBufferedStderrBytes = 16 * 1024
-    private let terminationDrainGraceNanoseconds: UInt64 = 250_000_000
 
     private var process: Process?
     private var stdinPipe = Pipe()
@@ -448,10 +453,16 @@ private extension ProcessBackedUpstreamSession {
             return
         }
 
-        let grace = terminationDrainGraceNanoseconds
+        let grace = config.terminationDrainGrace
+        if grace <= .zero {
+            forceTerminateDrainIfNeeded()
+            return
+        }
+
+        let clock = config.clock
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: grace)
+            await clock.sleep(grace)
             guard !Task.isCancelled else {
                 return
             }

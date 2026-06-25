@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPTestSupport
 
+@testable import ProxyCore
 @testable import ProxySession
 @testable import XcodeMCPKit
 
@@ -386,6 +387,7 @@ struct UpstreamProcessTests {
     }
 
     @Test func upstreamSessionEmitsExitWhenDescendantKeepsPipeOpen() async throws {
+        let drainClock = TestClock()
         let payload = try makeJSONRPCResponse(
             id: 62,
             text: String(repeating: "y", count: 8 * 1024)
@@ -399,17 +401,18 @@ struct UpstreamProcessTests {
                 childSleepSeconds: 2
             ),
             environment: ProcessInfo.processInfo.environment,
-            maxQueuedWriteBytes: 1024
+            maxQueuedWriteBytes: 1024,
+            terminationDrainGrace: .seconds(10),
+            clock: makeTestClockClient(drainClock)
         )
 
         try await withUpstreamSession(config: config) { session in
-            let events = try await waitWithTimeout(
-                "exit should not wait indefinitely for descendant-held pipe descriptors",
-                timeout: .seconds(1)
-            ) {
+            let recordedEvents = RecordedValues<Upstream.Event>()
+            let eventTask = Task { () -> [Upstream.Event] in
                 var observedEvents: [Upstream.Event] = []
                 for await event in session.events {
                     observedEvents.append(event)
+                    await recordedEvents.append(event)
 
                     let sawMessage = observedEvents.contains {
                         if case .message = $0 { return true }
@@ -424,6 +427,44 @@ struct UpstreamProcessTests {
                     }
                 }
                 return observedEvents
+            }
+            defer {
+                eventTask.cancel()
+            }
+
+            _ = try await waitWithTimeout(
+                "parent response should arrive before forcing descendant-held pipe drain",
+                timeout: .seconds(2)
+            ) {
+                try await recordedEvents.nextValue(matching: {
+                    if case .message = $0 { return true }
+                    return false
+                })
+            }
+
+            await drainClock.sleep(untilSuspendedBy: 1)
+            let eventsBeforeAdvance = await recordedEvents.snapshot()
+            #expect(!eventsBeforeAdvance.contains { event in
+                if case .exit = event { return true }
+                return false
+            })
+
+            drainClock.advance(by: .seconds(10))
+            _ = try await waitWithTimeout(
+                "exit should be emitted when drain grace is advanced",
+                timeout: .seconds(2)
+            ) {
+                try await recordedEvents.nextValue(matching: {
+                    if case .exit = $0 { return true }
+                    return false
+                })
+            }
+
+            let events = try await waitWithTimeout(
+                "event stream should complete after descendant-held pipe drain is forced",
+                timeout: .seconds(2)
+            ) {
+                await eventTask.value
             }
 
             let message = events.compactMap { event -> String? in
@@ -453,6 +494,17 @@ struct UpstreamProcessTests {
             }
         }
     }
+}
+
+private func makeTestClockClient(_ clock: TestClock) -> ClockClient {
+    ClockClient(
+        now: { Date(timeIntervalSince1970: 0) },
+        uptimeNanoseconds: { 0 },
+        sleep: { duration in
+            try? await clock.sleep(for: duration)
+        },
+        sleepForTimeInterval: { _ in }
+    )
 }
 
 private func withUpstreamSession<T: Sendable>(
