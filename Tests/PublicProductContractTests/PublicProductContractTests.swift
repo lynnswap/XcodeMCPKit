@@ -177,6 +177,26 @@ func compileOnlyClientDomainSurface() {
         requestTimeout: .seconds(1)
     )
 
+    let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+    let httpConfig = XcodeMCP.Configuration(
+        transport: .streamableHTTP(endpoint: endpoint),
+        clientName: "PublicHTTPContractClient",
+        clientVersion: "1.0",
+        requestTimeout: .seconds(1)
+    )
+    let discoveryConfig = XcodeMCP.Configuration(
+        transport: .streamableHTTP(discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json"))
+    )
+
+    let metadata = arguments["metadata"]?.objectValue
+    let tags = arguments["tags"]?.arrayValue?.compactMap { $0.stringValue }
+    let query = arguments["query"]?.stringValue
+    let includeBeta = arguments["includeBeta"]?.boolValue
+    let limit = arguments["limit"]?.intValue
+    let integerLimit = arguments["limit"]?.integerValue
+    let score = arguments["score"]?.doubleValue
+    let optionalIsNull = metadata?["optional"]?.isNull
+
     let tool = MCPTool(
         name: "DocumentationSearch",
         description: "Search Apple documentation",
@@ -240,7 +260,23 @@ func compileOnlyClientDomainSurface() {
         .transportUnavailable("mcpbridge closed"),
     ]
 
-    _ = (arguments, config, tool, result, progress, errors)
+    _ = (
+        arguments,
+        config,
+        httpConfig,
+        discoveryConfig,
+        tags,
+        query,
+        includeBeta,
+        limit,
+        integerLimit,
+        score,
+        optionalIsNull,
+        tool,
+        result,
+        progress,
+        errors
+    )
 }
 
 func compileOnlyClientLifecycleSurface(config: XcodeMCP.Configuration) async throws {

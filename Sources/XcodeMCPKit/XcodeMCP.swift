@@ -5,6 +5,7 @@ import ProxyMCPContract
 private final class XcodeMCPPendingRequests: @unchecked Sendable {
     private struct PendingRequest {
         let continuation: CheckedContinuation<MCPJSONValue, Error>
+        var sendTask: Task<Void, Never>?
     }
 
     private let lock = NSLock()
@@ -19,10 +20,21 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
         }
     }
 
+    func setSendTask(idKey: String, task: Task<Void, Never>) -> Bool {
+        lock.withLock {
+            guard requests[idKey] != nil else {
+                return false
+            }
+            requests[idKey]?.sendTask = task
+            return true
+        }
+    }
+
     func complete(idKey: String, result: MCPJSONValue) {
         let request = lock.withLock {
             requests.removeValue(forKey: idKey)
         }
+        request?.sendTask?.cancel()
         request?.continuation.resume(returning: result)
     }
 
@@ -30,6 +42,7 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
         let request = lock.withLock {
             requests.removeValue(forKey: idKey)
         }
+        request?.sendTask?.cancel()
         request?.continuation.resume(throwing: error)
     }
 
@@ -40,16 +53,19 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
             return current
         }
         for request in pending.values {
+            request.sendTask?.cancel()
             request.continuation.resume(throwing: error)
         }
     }
 }
 
-/// A high-level client for the local Xcode MCP bridge.
+/// A high-level client for Xcode MCP.
 ///
-/// `XcodeMCP` starts an `mcpbridge` process, performs the MCP initialize
-/// handshake, and exposes the dynamic Xcode tool catalog through
-/// ``listTools()`` and ``callTool(_:arguments:onProgress:)``.
+/// `XcodeMCP` connects through the configured transport, performs the MCP
+/// initialize handshake, and exposes the dynamic Xcode tool catalog through
+/// ``listTools()`` and ``callTool(_:arguments:onProgress:)``. The default
+/// transport starts a local `mcpbridge` process. Streamable HTTP transport can
+/// connect to a running proxy endpoint.
 ///
 /// The tool catalog is discovered at runtime. This package intentionally does
 /// not promise tool-specific Swift methods or typed request/response models for
@@ -79,11 +95,35 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
 /// await xcode.close()
 /// ```
 public actor XcodeMCP {
-    /// Settings used to launch and initialize the local MCP bridge.
+    /// Settings used to connect to and initialize an MCP endpoint.
     ///
     /// The default configuration starts `xcrun mcpbridge` with the current
-    /// process environment and a conservative per-request timeout.
+    /// process environment and a conservative per-request timeout. Use
+    /// ``Transport/streamableHTTP(endpoint:)`` to connect to a proxy
+    /// Streamable HTTP endpoint instead.
     public struct Configuration: Equatable, Sendable {
+        /// Transport used to reach the Xcode MCP server.
+        public enum Transport: Equatable, Sendable {
+            /// Launch and talk to a local bridge process over stdio.
+            case localBridge(Bridge)
+
+            /// Connect to a concrete Streamable HTTP MCP endpoint.
+            case streamableHTTP(endpoint: URL)
+
+            /// Connect to the Streamable HTTP endpoint recorded in a proxy
+            /// discovery file.
+            case streamableHTTPDiscoveryFile(URL)
+
+            /// Connect to the Streamable HTTP endpoint recorded in a proxy
+            /// discovery file.
+            ///
+            /// The discovery file uses the same shape written by
+            /// `xcode-mcp-proxy-server startAndWriteDiscovery()`.
+            public static func streamableHTTP(discoveryFile: URL) -> Self {
+                .streamableHTTPDiscoveryFile(discoveryFile)
+            }
+        }
+
         /// Upstream bridge process policy.
         public enum Bridge: Equatable, Sendable {
             /// Use Xcode's default `xcrun mcpbridge` invocation.
@@ -128,8 +168,25 @@ public actor XcodeMCP {
             }
         }
 
+        /// Transport used to reach the Xcode MCP server.
+        public var transport: Transport
+
         /// Bridge process policy.
-        public var bridge: Bridge
+        ///
+        /// This compatibility property reads and writes the local bridge used
+        /// by ``Transport/localBridge(_:)``. Setting it switches the
+        /// configuration back to local process transport.
+        public var bridge: Bridge {
+            get {
+                guard case .localBridge(let bridge) = transport else {
+                    return .defaultMCPBridge
+                }
+                return bridge
+            }
+            set {
+                transport = .localBridge(newValue)
+            }
+        }
 
         /// Client name sent in the MCP `initialize` request.
         public var clientName: String
@@ -149,7 +206,7 @@ public actor XcodeMCP {
         /// Set this to `nil` to disable client-side request timeouts.
         public var requestTimeout: Duration?
 
-        /// Creates a bridge configuration.
+        /// Creates a local bridge configuration.
         ///
         /// - Parameters:
         ///   - bridge: Upstream bridge process policy.
@@ -167,7 +224,32 @@ public actor XcodeMCP {
             capabilities: [String: MCPJSONValue] = [:],
             requestTimeout: Duration? = .seconds(60)
         ) {
-            self.bridge = bridge
+            self.transport = .localBridge(bridge)
+            self.clientName = clientName
+            self.clientVersion = clientVersion
+            self.capabilities = capabilities
+            self.requestTimeout = requestTimeout
+        }
+
+        /// Creates a configuration for the selected transport.
+        ///
+        /// - Parameters:
+        ///   - transport: Transport used to reach the Xcode MCP server.
+        ///   - clientName: Client name sent in the MCP `initialize` request.
+        ///   - clientVersion: Client version sent in the MCP `initialize`
+        ///     request.
+        ///   - capabilities: Additional MCP client capabilities encoded as raw
+        ///     MCP JSON.
+        ///   - requestTimeout: Maximum duration to wait for each request, or
+        ///     `nil` to disable client-side request timeouts.
+        public init(
+            transport: Transport,
+            clientName: String = "XcodeMCPKit",
+            clientVersion: String = "dev",
+            capabilities: [String: MCPJSONValue] = [:],
+            requestTimeout: Duration? = .seconds(60)
+        ) {
+            self.transport = transport
             self.clientName = clientName
             self.clientVersion = clientVersion
             self.capabilities = capabilities
@@ -183,22 +265,39 @@ public actor XcodeMCP {
     private var eventTask: Task<Void, Never>?
     private var progressHandlers: [String: @Sendable (MCPProgress) async -> Void] = [:]
 
-    /// Starts the local MCP bridge and returns an initialized client.
+    /// Connects to the configured MCP transport and returns an initialized
+    /// client.
     ///
-    /// The initializer launches the configured process, sends MCP
-    /// `initialize`, then sends `notifications/initialized`. If initialization
-    /// fails, the process is closed before the error is rethrown.
+    /// For local bridge transport the initializer launches the configured
+    /// process. For Streamable HTTP transport it connects to the configured
+    /// endpoint. In both cases it sends MCP `initialize`, then sends
+    /// `notifications/initialized`. If initialization fails, the transport is
+    /// closed before the error is rethrown.
     ///
-    /// - Parameter config: Launch and initialization settings for the bridge.
+    /// - Parameter config: Connection and initialization settings.
     public init(config: Configuration = Configuration()) async throws {
-        let transport = try await UpstreamProcessXcodeMCPTransport.start(
-            config: UpstreamProcess.Config(
-                command: config.bridge.command,
-                args: config.bridge.arguments,
-                environment: config.bridge.environment,
-                maxQueuedWriteBytes: config.bridge.maxQueuedWriteBytes
+        let transport: any XcodeMCPTransport
+        switch config.transport {
+        case .localBridge(let bridge):
+            transport = try await UpstreamProcessXcodeMCPTransport.start(
+                config: UpstreamProcess.Config(
+                    command: bridge.command,
+                    args: bridge.arguments,
+                    environment: bridge.environment,
+                    maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
+                )
             )
-        )
+        case .streamableHTTP(let endpoint):
+            transport = try await StreamableHTTPXcodeMCPTransport.start(
+                endpoint: endpoint,
+                requestTimeout: config.requestTimeout
+            )
+        case .streamableHTTPDiscoveryFile(let discoveryFile):
+            transport = try await StreamableHTTPXcodeMCPTransport.start(
+                discoveryFile: discoveryFile,
+                requestTimeout: config.requestTimeout
+            )
+        }
         try await self.init(config: config, transport: transport)
     }
 
@@ -323,12 +422,15 @@ extension XcodeMCP {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     self.pendingRequests.add(idKey: idKey, continuation: continuation)
-                    Task {
+                    let sendTask = Task {
                         do {
                             try await self.transport.send(payload)
                         } catch {
                             self.pendingRequests.fail(idKey: idKey, error: error)
                         }
+                    }
+                    if self.pendingRequests.setSendTask(idKey: idKey, task: sendTask) == false {
+                        sendTask.cancel()
                     }
                 }
             } onCancel: {

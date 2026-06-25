@@ -3,8 +3,9 @@
 [日本語](README.ja.md)
 
 XcodeMCPKit is a Swift library and local proxy for Xcode MCP. Apps can use the
-Swift API to operate a local `mcpbridge` process directly, while MCP clients can
-use the proxy for one stable endpoint and automated approval flow.
+Swift API to operate a local `mcpbridge` process directly or connect to a proxy
+Streamable HTTP endpoint, while MCP clients can use the proxy for one stable
+endpoint and automated approval flow.
 
 ## Requirements
 
@@ -61,9 +62,9 @@ source ~/.zshrc
 
 ## Use From Swift
 
-Add the `XcodeMCPKit` library product to your Swift package or Xcode target, then
-create a top-level client. The async initializer launches local `mcpbridge`,
-performs the MCP initialize handshake, and returns a ready client.
+Add the `XcodeMCPKit` library product to your Swift package or Xcode target,
+then create a top-level client. The default async initializer launches local
+`mcpbridge`, performs the MCP initialize handshake, and returns a ready client.
 
 ```swift
 import XcodeMCPKit
@@ -77,9 +78,37 @@ let result = try await xcode.callTool(
 await xcode.close()
 ```
 
+To connect through a running proxy server instead, select Streamable HTTP
+transport:
+
+```swift
+import XcodeMCPKit
+
+let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+let xcode = try await XcodeMCP(
+    config: .init(transport: .streamableHTTP(endpoint: endpoint))
+)
+
+let tools = try await xcode.listTools()
+await xcode.close()
+```
+
+If the proxy was started with discovery enabled, you can read its discovery file:
+
+```swift
+let xcode = try await XcodeMCP(
+    config: .init(
+        transport: .streamableHTTP(
+            discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json")
+        )
+    )
+)
+```
+
 The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
 `MCPToolResult`, `MCPContent`, and `MCPProgress`. Process launch, JSON-RPC
-framing, and session transport are internal implementation details.
+framing, HTTP session headers, SSE parsing, and session transport are internal
+implementation details.
 
 ## Embed or Launch the Proxy Server
 

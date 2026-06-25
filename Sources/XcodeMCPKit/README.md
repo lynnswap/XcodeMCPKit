@@ -4,9 +4,11 @@ Swift client API for talking to Xcode's local MCP bridge from an app or tool.
 
 ## Status
 
-`XcodeMCPKit` is the public client-side library target. It launches the
-configured `mcpbridge` process, performs the MCP initialize handshake, and
-exposes the dynamic Xcode MCP tool catalog through a small Swift API.
+`XcodeMCPKit` is the public client-side library target. It connects to the
+configured MCP transport, performs the MCP initialize handshake, and exposes the
+dynamic Xcode MCP tool catalog through a small Swift API. The default transport
+launches `xcrun mcpbridge`; clients can also connect to a proxy Streamable HTTP
+endpoint.
 
 This target owns:
 
@@ -27,7 +29,7 @@ Add the `XcodeMCPKit` product to your target, then construct a client:
 import XcodeMCPKit
 
 let config = XcodeMCP.Configuration(
-    bridge: .defaultMCPBridge,
+    transport: .localBridge(.defaultMCPBridge),
     clientName: "MyApp",
     clientVersion: "1.0"
 )
@@ -55,6 +57,30 @@ if tools.contains(where: { $0.name == "DocumentationSearch" }) {
 await xcode.close()
 ```
 
+To use a running `xcode-mcp-proxy-server`, configure Streamable HTTP:
+
+```swift
+let config = XcodeMCP.Configuration(
+    transport: .streamableHTTP(
+        endpoint: URL(string: "http://127.0.0.1:8765/mcp")!
+    ),
+    clientName: "MyApp",
+    clientVersion: "1.0"
+)
+
+let xcode = try await XcodeMCP(config: config)
+```
+
+Discovery files written by the proxy are supported as well:
+
+```swift
+let config = XcodeMCP.Configuration(
+    transport: .streamableHTTP(
+        discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json")
+    )
+)
+```
+
 ## Dynamic Tools And Raw Values
 
 The Xcode MCP server decides which tools are available at runtime. Call
@@ -63,26 +89,32 @@ selected tool name to `callTool(_:arguments:onProgress:)`.
 
 Arguments and dynamic response fields use `MCPJSONValue` so clients can send and
 inspect MCP data that this package does not model as a fixed Swift type. Domain
-models keep raw values for unknown fields and future MCP extensions.
+models keep raw values for unknown fields and future MCP extensions. Use public
+accessors such as `objectValue`, `arrayValue`, `stringValue`, `boolValue`,
+`integerValue`, `doubleValue`, and `isNull` when inspecting dynamic responses.
 
 ## Configuration
 
-`XcodeMCP.Configuration` controls bridge selection and MCP initialization:
+`XcodeMCP.Configuration` controls transport selection and MCP initialization:
 
-- `bridge` chooses the upstream bridge. The default is Xcode's
-  `/usr/bin/xcrun mcpbridge`.
-- Use `.custom(command:arguments:environment:)` only when embedding a non-default
-  bridge command.
+- `transport` chooses `.localBridge(...)`, `.streamableHTTP(endpoint:)`, or
+  `.streamableHTTP(discoveryFile:)`.
+- The compatibility `bridge` property still chooses the upstream bridge for
+  local process transport. The default is Xcode's `/usr/bin/xcrun mcpbridge`.
+- Use bridge `.custom(command:arguments:environment:)` only when embedding a
+  non-default bridge command.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
 - `requestTimeout` bounds requests when non-`nil`.
 
 Capabilities that require server-to-client handlers are filtered because this
-v1 API does not expose those handlers.
+v1 API does not expose those handlers. For Streamable HTTP, the transport owns
+`MCP-Session-Id`, `MCP-Protocol-Version`, POST response parsing, long-lived SSE
+GET parsing, and best-effort session DELETE during `close()`.
 
 ## Lifecycle
 
-Create one `XcodeMCP` per bridge session. The async initializer starts the
-process and completes initialization before returning. `callTool` returns the
+Create one `XcodeMCP` per MCP session. The async initializer connects the
+transport and completes initialization before returning. `callTool` returns the
 final MCP result; progress is callback-only and the underlying event stream is
 not public API. Call `close()` when finished. Closing is idempotent and rejects
 future requests.
