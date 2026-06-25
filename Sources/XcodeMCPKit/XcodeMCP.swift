@@ -5,6 +5,7 @@ import ProxyMCPContract
 private final class XcodeMCPPendingRequests: @unchecked Sendable {
     private struct PendingRequest {
         let continuation: CheckedContinuation<MCPJSONValue, Error>
+        var sendTask: Task<Void, Never>?
     }
 
     private let lock = NSLock()
@@ -19,10 +20,17 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
         }
     }
 
+    func setSendTask(idKey: String, task: Task<Void, Never>) {
+        lock.withLock {
+            requests[idKey]?.sendTask = task
+        }
+    }
+
     func complete(idKey: String, result: MCPJSONValue) {
         let request = lock.withLock {
             requests.removeValue(forKey: idKey)
         }
+        request?.sendTask?.cancel()
         request?.continuation.resume(returning: result)
     }
 
@@ -30,6 +38,7 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
         let request = lock.withLock {
             requests.removeValue(forKey: idKey)
         }
+        request?.sendTask?.cancel()
         request?.continuation.resume(throwing: error)
     }
 
@@ -40,6 +49,7 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
             return current
         }
         for request in pending.values {
+            request.sendTask?.cancel()
             request.continuation.resume(throwing: error)
         }
     }
@@ -402,13 +412,14 @@ extension XcodeMCP {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     self.pendingRequests.add(idKey: idKey, continuation: continuation)
-                    Task {
+                    let sendTask = Task {
                         do {
                             try await self.transport.send(payload)
                         } catch {
                             self.pendingRequests.fail(idKey: idKey, error: error)
                         }
                     }
+                    self.pendingRequests.setSendTask(idKey: idKey, task: sendTask)
                 }
             } onCancel: {
                 self.pendingRequests.fail(idKey: idKey, error: CancellationError())

@@ -129,6 +129,33 @@ struct XcodeMCPTests {
         }
     }
 
+    @Test func cancelledRequestCancelsInFlightTransportSend() async throws {
+        let transport = HangingSendXcodeMCPTransport()
+        let xcode = try await XcodeMCP(
+            config: .init(requestTimeout: nil),
+            transport: transport
+        )
+
+        let listTask = Task {
+            try await xcode.listTools()
+        }
+        _ = try await waitWithTimeout("tools/list send did not start") {
+            try await transport.nextStarted(method: "tools/list")
+        }
+
+        listTask.cancel()
+        do {
+            _ = try await listTask.value
+            Issue.record("expected cancellation")
+        } catch is CancellationError {
+        }
+
+        _ = try await waitWithTimeout("tools/list send was not cancelled") {
+            try await transport.nextCancelled(method: "tools/list")
+        }
+        await xcode.close()
+    }
+
     @Test func unsupportedServerRequestGetsInternalErrorResponse() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
@@ -423,6 +450,81 @@ struct XcodeMCPTests {
                 transport: transport
             )
         }
+    }
+}
+
+private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
+    nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
+
+    private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
+    private let startedValues = RecordedValues<String>()
+    private let cancelledValues = RecordedValues<String>()
+
+    init() {
+        let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
+        self.events = stream.stream
+        self.continuation = stream.continuation
+    }
+
+    func send(_ data: Data) async throws {
+        let object = try parse(data)
+        let method = object["method"]?.stringValue ?? ""
+        if method == "initialize" {
+            try yieldMessage([
+                "jsonrpc": .string("2.0"),
+                "id": object["id"] ?? .integer(1),
+                "result": .object([
+                    "protocolVersion": .string("2025-06-18"),
+                    "serverInfo": .object([
+                        "name": .string("hanging-transport"),
+                        "version": .string("test"),
+                    ]),
+                    "capabilities": .object([:]),
+                ]),
+            ])
+            return
+        }
+        if method == "notifications/initialized" {
+            return
+        }
+
+        await startedValues.append(method)
+        do {
+            try await Task.sleep(for: .seconds(3_600))
+        } catch {
+            await cancelledValues.append(method)
+            throw error
+        }
+    }
+
+    func close() async {
+        continuation.yield(.closed(nil))
+        continuation.finish()
+    }
+
+    func nextStarted(method: String) async throws -> String {
+        try await startedValues.nextValue { $0 == method }
+    }
+
+    func nextCancelled(method: String) async throws -> String {
+        try await cancelledValues.nextValue { $0 == method }
+    }
+
+    private func yieldMessage(_ object: [String: MCPJSONValue]) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: MCPJSONValue.object(object).foundationObject
+        )
+        continuation.yield(.message(data))
+    }
+
+    private func parse(_ data: Data) throws -> [String: MCPJSONValue] {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let value = MCPJSONValue(foundationObject: raw),
+              let object = value.objectValue
+        else {
+            throw XcodeMCPError.invalidRequest("message is not an object")
+        }
+        return object
     }
 }
 

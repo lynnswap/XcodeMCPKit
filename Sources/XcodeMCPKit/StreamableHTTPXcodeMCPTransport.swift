@@ -190,6 +190,9 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                         throw XcodeMCPError.transportUnavailable("Streamable HTTP event stream response was not HTTP")
                     }
                     guard (200..<300).contains(httpResponse.statusCode) else {
+                        if Self.isTerminalEventStreamStatus(httpResponse.statusCode) {
+                            return
+                        }
                         let bodyData = (try? await Self.collect(bytes)) ?? Data()
                         let body = String(data: bodyData, encoding: .utf8) ?? ""
                         let suffix = body.isEmpty ? "" : ": \(body)"
@@ -198,9 +201,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                         )
                     }
                     guard Self.isEventStream(httpResponse) else {
-                        throw XcodeMCPError.transportUnavailable(
-                            "Streamable HTTP event stream response was not text/event-stream"
-                        )
+                        return
                     }
                     try await Self.consumeEventStream(
                         bytes,
@@ -314,6 +315,15 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
             return .seconds(1)
         default:
             return .seconds(5)
+        }
+    }
+
+    private static func isTerminalEventStreamStatus(_ statusCode: Int) -> Bool {
+        switch statusCode {
+        case 404, 405, 406, 410, 501:
+            return true
+        default:
+            return false
         }
     }
 
