@@ -399,6 +399,31 @@ struct XcodeMCPTests {
         #expect(tools.first?.name == "DocumentationSearch")
         await xcode.close()
     }
+
+    @Test func streamableHTTPPreservesInitializeServerError() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            initializeError: true
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        await #expect(throws: XcodeMCPError.serverError(
+            code: -32000,
+            message: "initialize rejected",
+            data: nil
+        )) {
+            _ = try await XcodeMCP(
+                config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                transport: transport
+            )
+        }
+    }
 }
 
 private struct SentMessage: Sendable, Equatable {
@@ -653,6 +678,7 @@ private actor FakeStreamableHTTPServer {
     private let progressDelivery: ProgressDelivery
     private let sessionID: String?
     private let eventStreamFinishesImmediately: Bool
+    private let initializeError: Bool
     private let requestValues = RecordedValues<RecordedHTTPRequest>()
     private var requests: [RecordedHTTPRequest] = []
     private var eventConnection: ActiveHTTPConnection?
@@ -660,11 +686,13 @@ private actor FakeStreamableHTTPServer {
     init(
         progressDelivery: ProgressDelivery,
         sessionID: String? = "session-http-1",
-        eventStreamFinishesImmediately: Bool = false
+        eventStreamFinishesImmediately: Bool = false,
+        initializeError: Bool = false
     ) {
         self.progressDelivery = progressDelivery
         self.sessionID = sessionID
         self.eventStreamFinishesImmediately = eventStreamFinishesImmediately
+        self.initializeError = initializeError
     }
 
     func response(
@@ -723,6 +751,19 @@ private actor FakeStreamableHTTPServer {
 
         switch method {
         case "initialize":
+            if initializeError {
+                return FakeURLProtocolResponse(
+                    headers: ["Content-Type": "application/json"],
+                    chunks: [jsonData([
+                        "jsonrpc": "2.0",
+                        "id": request.body?.objectValue?["id"] ?? .null,
+                        "error": [
+                            "code": -32000,
+                            "message": "initialize rejected",
+                        ],
+                    ])]
+                )
+            }
             let headers = sessionID.map { ["Mcp-Session-Id": $0] } ?? [:]
             return jsonResponse(
                 id: request.body?.objectValue?["id"],

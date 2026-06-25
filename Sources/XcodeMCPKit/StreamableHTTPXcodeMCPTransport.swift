@@ -147,7 +147,16 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         guard requestInfo.method == "initialize" else {
             return
         }
-        guard let protocolVersion = Self.initializeProtocolVersion(from: data) else {
+        guard let requestIDKey = Self.jsonRPCIDKey(requestInfo.id),
+              let object = Self.jsonObject(from: data),
+              Self.jsonRPCIDKey(object["id"]) == requestIDKey
+        else {
+            return
+        }
+        if object["error"] != nil {
+            return
+        }
+        guard let protocolVersion = Self.initializeProtocolVersion(from: object) else {
             throw XcodeMCPError.invalidResponse(
                 "initialize response is missing protocolVersion"
             )
@@ -308,17 +317,37 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         }
     }
 
-    private static func initializeProtocolVersion(from data: Data) -> String? {
+    private static func jsonObject(from data: Data) -> [String: MCPJSONValue]? {
         guard let raw = try? JSONSerialization.jsonObject(with: data),
               let value = MCPJSONValue(foundationObject: raw),
-              let object = value.objectValue,
-              let result = object["result"]?.objectValue,
+              let object = value.objectValue
+        else {
+            return nil
+        }
+        return object
+    }
+
+    private static func initializeProtocolVersion(from object: [String: MCPJSONValue]) -> String? {
+        guard let result = object["result"]?.objectValue,
               let protocolVersion = result["protocolVersion"]?.stringValue,
               protocolVersion.isEmpty == false
         else {
             return nil
         }
         return protocolVersion
+    }
+
+    private static func jsonRPCIDKey(_ value: MCPJSONValue?) -> String? {
+        switch value {
+        case .string(let value):
+            return value
+        case .integer(let value):
+            return String(value)
+        case .double(let value):
+            return String(value)
+        case .object, .array, .bool, .null, .none:
+            return nil
+        }
     }
 }
 
