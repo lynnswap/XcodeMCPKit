@@ -189,7 +189,7 @@ func compileOnlyClientDomainSurface() {
     )
 
     let metadata = arguments["metadata"]?.objectValue
-    let tags = arguments["tags"]?.arrayValue?.compactMap(\\.stringValue)
+    let tags = arguments["tags"]?.arrayValue?.compactMap { $0.stringValue }
     let query = arguments["query"]?.stringValue
     let includeBeta = arguments["includeBeta"]?.boolValue
     let limit = arguments["limit"]?.intValue
