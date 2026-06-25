@@ -273,9 +273,6 @@ struct XcodeMCPTests {
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
-        defer {
-            Task { await xcode.close() }
-        }
 
         let progressValues = RecordedValues<MCPProgress>()
         let result = try await xcode.callTool(
@@ -300,6 +297,7 @@ struct XcodeMCPTests {
         #expect(call.header("Accept") == "application/json, text/event-stream")
         #expect(call.header("MCP-Session-Id") == "session-http-1")
         #expect(call.header("MCP-Protocol-Version") == "2025-06-18")
+        await xcode.close()
     }
 
     @Test func streamableHTTPGetSSERoutesProgressWhilePOSTReturnsJSONResult() async throws {
@@ -316,9 +314,6 @@ struct XcodeMCPTests {
             config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
-        defer {
-            Task { await xcode.close() }
-        }
 
         _ = try await waitWithTimeout("event stream GET was not opened") {
             try await server.nextRequest { $0.httpMethod == "GET" }
@@ -342,6 +337,67 @@ struct XcodeMCPTests {
             return
         }
         #expect(text == "Result for GET SSE")
+        await xcode.close()
+    }
+
+    @Test func streamableHTTPAllowsStatelessEndpointWithoutSessionHeader() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(progressDelivery: .none, sessionID: nil)
+        let session = makeFakeHTTPURLSession(server: server)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let xcode = try await XcodeMCP(
+            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+            transport: transport
+        )
+
+        let tools = try await xcode.listTools()
+        await xcode.close()
+
+        #expect(tools.first?.name == "DocumentationSearch")
+        let requests = await server.recordedRequests()
+        let initialized = try #require(requests.firstJSONRPC(method: "notifications/initialized"))
+        #expect(initialized.header("MCP-Session-Id") == nil)
+        #expect(initialized.header("MCP-Protocol-Version") == "2025-06-18")
+        let list = try #require(requests.firstJSONRPC(method: "tools/list"))
+        #expect(list.header("MCP-Session-Id") == nil)
+        #expect(list.header("MCP-Protocol-Version") == "2025-06-18")
+        #expect(requests.contains(where: { $0.httpMethod == "GET" }) == false)
+        #expect(requests.contains(where: { $0.httpMethod == "DELETE" }) == false)
+    }
+
+    @Test func streamableHTTPReconnectsGETSSEWithoutClosingPOSTs() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            eventStreamFinishesImmediately: true
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let transport = StreamableHTTPXcodeMCPTransport(endpoint: endpoint, urlSession: session)
+        let xcode = try await XcodeMCP(
+            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+            transport: transport
+        )
+
+        let firstGET = try await waitWithTimeout("first event stream GET was not opened") {
+            try await server.nextRequest { $0.httpMethod == "GET" }
+        }
+        _ = try await waitWithTimeout("event stream GET was not reconnected") {
+            try await server.nextRequest(startingAt: firstGET.sequence + 1) { $0.httpMethod == "GET" }
+        }
+
+        let tools = try await xcode.listTools()
+        #expect(tools.first?.name == "DocumentationSearch")
+        await xcode.close()
     }
 }
 
@@ -516,6 +572,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
 }
 
 private struct RecordedHTTPRequest: Sendable, Equatable {
+    var sequence: Int
     var httpMethod: String
     var url: URL
     var headers: [String: String]
@@ -523,6 +580,7 @@ private struct RecordedHTTPRequest: Sendable, Equatable {
     var body: MCPJSONValue?
 
     init(request: URLRequest) {
+        self.sequence = 0
         self.httpMethod = request.httpMethod ?? "GET"
         self.url = request.url ?? URL(string: "http://invalid.local/")!
         self.headers = request.allHTTPHeaderFields ?? [:]
@@ -593,39 +651,51 @@ private actor FakeStreamableHTTPServer {
     }
 
     private let progressDelivery: ProgressDelivery
+    private let sessionID: String?
+    private let eventStreamFinishesImmediately: Bool
     private let requestValues = RecordedValues<RecordedHTTPRequest>()
     private var requests: [RecordedHTTPRequest] = []
     private var eventConnection: ActiveHTTPConnection?
 
-    init(progressDelivery: ProgressDelivery) {
+    init(
+        progressDelivery: ProgressDelivery,
+        sessionID: String? = "session-http-1",
+        eventStreamFinishesImmediately: Bool = false
+    ) {
         self.progressDelivery = progressDelivery
+        self.sessionID = sessionID
+        self.eventStreamFinishesImmediately = eventStreamFinishesImmediately
     }
 
     func response(
         for request: URLRequest,
         connection: ActiveHTTPConnection
     ) async -> FakeURLProtocolResponse {
-        let recorded = RecordedHTTPRequest(request: request)
+        var recorded = RecordedHTTPRequest(request: request)
+        recorded.sequence = requests.count
         requests.append(recorded)
         await requestValues.append(recorded)
 
         switch recorded.httpMethod {
         case "GET":
             eventConnection = connection
+            var headers = [
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+            ]
+            if let sessionID {
+                headers["Mcp-Session-Id"] = sessionID
+            }
             return FakeURLProtocolResponse(
-                headers: [
-                    "Content-Type": "text/event-stream",
-                    "Cache-Control": "no-cache",
-                    "Mcp-Session-Id": "session-http-1",
-                ],
+                headers: headers,
                 chunks: [Data(": ok\n\n".utf8)],
-                finishesLoading: false
+                finishesLoading: eventStreamFinishesImmediately
             )
         case "DELETE":
             eventConnection?.finish()
             eventConnection = nil
             return FakeURLProtocolResponse(
-                headers: ["Mcp-Session-Id": "session-http-1"],
+                headers: sessionID.map { ["Mcp-Session-Id": $0] } ?? [:],
                 chunks: []
             )
         case "POST":
@@ -640,9 +710,10 @@ private actor FakeStreamableHTTPServer {
     }
 
     func nextRequest(
+        startingAt startIndex: Int = 0,
         matching predicate: @escaping @Sendable (RecordedHTTPRequest) -> Bool
     ) async throws -> RecordedHTTPRequest {
-        try await requestValues.nextValue(matching: predicate)
+        try await requestValues.nextValue(startingAt: startIndex, matching: predicate)
     }
 
     private func postResponse(for request: RecordedHTTPRequest) -> FakeURLProtocolResponse {
@@ -652,6 +723,7 @@ private actor FakeStreamableHTTPServer {
 
         switch method {
         case "initialize":
+            let headers = sessionID.map { ["Mcp-Session-Id": $0] } ?? [:]
             return jsonResponse(
                 id: request.body?.objectValue?["id"],
                 result: [
@@ -662,7 +734,7 @@ private actor FakeStreamableHTTPServer {
                     ],
                     "capabilities": [:],
                 ],
-                headers: ["Mcp-Session-Id": "session-http-1"]
+                headers: headers
             )
         case "notifications/initialized":
             return FakeURLProtocolResponse(statusCode: 202, chunks: [])

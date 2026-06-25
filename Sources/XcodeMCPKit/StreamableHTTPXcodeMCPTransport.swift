@@ -103,9 +103,12 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         request.setValue(Self.postAcceptHeader, forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if let session = await state.sessionHeaders() {
-            request.setValue(session.sessionID, forHTTPHeaderField: Self.sessionHeader)
-            request.setValue(session.protocolVersion, forHTTPHeaderField: Self.protocolVersionHeader)
+        let session = await state.sessionHeaders()
+        if let protocolVersion = session.protocolVersion {
+            request.setValue(protocolVersion, forHTTPHeaderField: Self.protocolVersionHeader)
+        }
+        if let sessionID = session.sessionID {
+            request.setValue(sessionID, forHTTPHeaderField: Self.sessionHeader)
         }
         return request
     }
@@ -149,49 +152,56 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                 "initialize response is missing protocolVersion"
             )
         }
-        let sessionID = try await state.completeInitialize(protocolVersion: protocolVersion)
-        await startEventStream(sessionID: sessionID, protocolVersion: protocolVersion)
+        let sessionID = await state.completeInitialize(protocolVersion: protocolVersion)
+        if let sessionID {
+            await startEventStream(sessionID: sessionID, protocolVersion: protocolVersion)
+        }
     }
 
     private func startEventStream(sessionID: String, protocolVersion: String) async {
         let task = Task { [endpoint, urlSession, streamContinuation, state] in
-            let request = Self.makeEventStreamRequest(
-                endpoint: endpoint,
-                sessionID: sessionID,
-                protocolVersion: protocolVersion
-            )
-            do {
-                let (bytes, response) = try await urlSession.bytes(for: request)
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    throw XcodeMCPError.transportUnavailable("Streamable HTTP event stream response was not HTTP")
+            var attempt = 0
+            while await state.isOpen {
+                if attempt > 0 {
+                    do {
+                        try await Task.sleep(for: Self.eventStreamReconnectDelay(attempt: attempt))
+                    } catch {
+                        return
+                    }
                 }
-                guard (200..<300).contains(httpResponse.statusCode) else {
-                    let bodyData = (try? await Self.collect(bytes)) ?? Data()
-                    let body = String(data: bodyData, encoding: .utf8) ?? ""
-                    let suffix = body.isEmpty ? "" : ": \(body)"
-                    throw XcodeMCPError.transportUnavailable(
-                        "Streamable HTTP event stream failed with status \(httpResponse.statusCode)\(suffix)"
+
+                do {
+                    let request = Self.makeEventStreamRequest(
+                        endpoint: endpoint,
+                        sessionID: sessionID,
+                        protocolVersion: protocolVersion
                     )
-                }
-                guard Self.isEventStream(httpResponse) else {
-                    throw XcodeMCPError.transportUnavailable(
-                        "Streamable HTTP event stream response was not text/event-stream"
+                    let (bytes, response) = try await urlSession.bytes(for: request)
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        throw XcodeMCPError.transportUnavailable("Streamable HTTP event stream response was not HTTP")
+                    }
+                    guard (200..<300).contains(httpResponse.statusCode) else {
+                        let bodyData = (try? await Self.collect(bytes)) ?? Data()
+                        let body = String(data: bodyData, encoding: .utf8) ?? ""
+                        let suffix = body.isEmpty ? "" : ": \(body)"
+                        throw XcodeMCPError.transportUnavailable(
+                            "Streamable HTTP event stream failed with status \(httpResponse.statusCode)\(suffix)"
+                        )
+                    }
+                    guard Self.isEventStream(httpResponse) else {
+                        throw XcodeMCPError.transportUnavailable(
+                            "Streamable HTTP event stream response was not text/event-stream"
+                        )
+                    }
+                    try await Self.consumeEventStream(
+                        bytes,
+                        streamContinuation: streamContinuation
                     )
-                }
-                try await Self.consumeEventStream(
-                    bytes,
-                    streamContinuation: streamContinuation
-                )
-                if await state.isOpen {
-                    streamContinuation.yield(.closed("Streamable HTTP event stream closed"))
-                    streamContinuation.finish()
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                if await state.isOpen {
-                    streamContinuation.yield(.closed(String(describing: error)))
-                    streamContinuation.finish()
+                    attempt += 1
+                } catch is CancellationError {
+                    return
+                } catch {
+                    attempt += 1
                 }
             }
         }
@@ -287,6 +297,17 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
             .contains(eventStreamContentType) == true
     }
 
+    private static func eventStreamReconnectDelay(attempt: Int) -> Duration {
+        switch attempt {
+        case ..<2:
+            return .milliseconds(100)
+        case 2..<5:
+            return .seconds(1)
+        default:
+            return .seconds(5)
+        }
+    }
+
     private static func initializeProtocolVersion(from data: Data) -> String? {
         guard let raw = try? JSONSerialization.jsonObject(with: data),
               let value = MCPJSONValue(foundationObject: raw),
@@ -317,23 +338,15 @@ private actor StreamableHTTPTransportState {
         }
     }
 
-    func sessionHeaders() -> (sessionID: String, protocolVersion: String)? {
-        guard let sessionID, let protocolVersion else {
-            return nil
-        }
-        return (sessionID, protocolVersion)
+    func sessionHeaders() -> (sessionID: String?, protocolVersion: String?) {
+        (sessionID, protocolVersion)
     }
 
     func setSessionID(_ sessionID: String) {
         self.sessionID = sessionID
     }
 
-    func completeInitialize(protocolVersion: String) throws -> String {
-        guard let sessionID, sessionID.isEmpty == false else {
-            throw XcodeMCPError.invalidResponse(
-                "initialize response is missing MCP-Session-Id"
-            )
-        }
+    func completeInitialize(protocolVersion: String) -> String? {
         self.protocolVersion = protocolVersion
         return sessionID
     }
