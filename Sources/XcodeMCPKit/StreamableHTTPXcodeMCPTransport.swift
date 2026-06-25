@@ -237,6 +237,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
     ) -> URLRequest {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
+        request.timeoutInterval = .infinity
         request.setValue(eventStreamContentType, forHTTPHeaderField: "Accept")
         request.setValue(sessionID, forHTTPHeaderField: sessionHeader)
         request.setValue(protocolVersion, forHTTPHeaderField: protocolVersionHeader)

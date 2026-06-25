@@ -249,6 +249,7 @@ struct XcodeMCPTests {
         #expect(list.header("MCP-Protocol-Version") == "2025-06-18")
 
         let get = try #require(requests.first(where: { $0.httpMethod == "GET" }))
+        #expect(get.timeoutInterval.isInfinite)
         #expect(get.header("Accept") == "text/event-stream")
         #expect(get.header("MCP-Session-Id") == "session-http-1")
         #expect(get.header("MCP-Protocol-Version") == "2025-06-18")
@@ -518,12 +519,14 @@ private struct RecordedHTTPRequest: Sendable, Equatable {
     var httpMethod: String
     var url: URL
     var headers: [String: String]
+    var timeoutInterval: TimeInterval
     var body: MCPJSONValue?
 
     init(request: URLRequest) {
         self.httpMethod = request.httpMethod ?? "GET"
         self.url = request.url ?? URL(string: "http://invalid.local/")!
         self.headers = request.allHTTPHeaderFields ?? [:]
+        self.timeoutInterval = request.timeoutInterval
         if let bodyData = Self.bodyData(from: request),
            let raw = try? JSONSerialization.jsonObject(with: bodyData),
            let value = MCPJSONValue(foundationObject: raw)
