@@ -93,22 +93,16 @@ extension RuntimeCoordinatorTests {
         }
 
         let shutdownFinished = TestSignal()
+        let shutdownStarted = TestSignal()
         let shutdownTask = Task {
+            shutdownStarted.signal()
             await transport.shutdown()
             shutdownFinished.signal()
         }
-        var shutdownReturnedBeforeStopDrain = false
-        do {
-            try await shutdownFinished.wait(
-                timeout: .milliseconds(100),
-                description: "shutdown should wait for detached provider session stop drain"
-            )
-            shutdownReturnedBeforeStopDrain = true
-        } catch is AsyncTestTimeoutError {
-            shutdownReturnedBeforeStopDrain = false
-        }
+        try await shutdownStarted.wait(description: "waiting for provider shutdown to start")
+        await Task.yield()
 
-        #expect(shutdownReturnedBeforeStopDrain == false)
+        #expect(shutdownFinished.isSignaled() == false)
         #expect(await session.stopCount() == 1)
         await stopGate.signal()
         try await shutdownFinished.wait(description: "waiting for provider shutdown")
@@ -926,12 +920,16 @@ extension RuntimeCoordinatorTests {
         let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let providerManager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
-            transport: RuntimeDocumentationProviderTransport(runtimeBox: runtimeBox),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                clock: clock
+            ),
             providerSelectionTimeout: .seconds(1),
             clock: clock
         )
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
+            clock: clock,
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
             startImmediately: false,
@@ -984,6 +982,11 @@ extension RuntimeCoordinatorTests {
                 requestData: makeDocumentationSearchRequest(id: 96, query: "UIView"),
                 requestTimeoutOverride: .milliseconds(10)
             )
+        }
+        try await waitWithTimeout("waiting for queued documentation provider route") {
+            while manager.debugSnapshot().queuedRequestCount == 0 {
+                await Task.yield()
+            }
         }
         await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,

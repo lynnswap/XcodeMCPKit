@@ -602,6 +602,10 @@ package final class TestSignal: @unchecked Sendable {
 
     package init() {}
 
+    package func isSignaled() -> Bool {
+        state.withLockedValue { $0.signaled }
+    }
+
     package func wait(
         timeout: Duration = .seconds(2),
         description: String
