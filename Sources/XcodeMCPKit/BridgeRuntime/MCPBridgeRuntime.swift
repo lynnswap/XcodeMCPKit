@@ -2,10 +2,33 @@ import Foundation
 import ProxyCore
 
 package enum MCPBridgeRuntime {
+    package struct Configuration: Sendable {
+        package let upstreamCommand: String
+        package let upstreamArgs: [String]
+        package let upstreamProcessCount: Int
+        package let sharedSessionID: String?
+        package let maxBodyBytes: Int
+        package let processBoundRoutingSupported: Bool
+
+        package init(
+            upstreamCommand: String,
+            upstreamArgs: [String],
+            upstreamProcessCount: Int,
+            sharedSessionID: String?,
+            maxBodyBytes: Int,
+            processBoundRoutingSupported: Bool
+        ) {
+            self.upstreamCommand = upstreamCommand
+            self.upstreamArgs = upstreamArgs
+            self.upstreamProcessCount = max(1, upstreamProcessCount)
+            self.sharedSessionID = sharedSessionID
+            self.maxBodyBytes = maxBodyBytes
+            self.processBoundRoutingSupported = processBoundRoutingSupported
+        }
+    }
+
     package static func makeUpstreamPlan(
-        config: ProxyConfig,
-        sharedSessionID: String?,
-        count: Int,
+        config: Configuration,
         xcodeTargets: [XcodeProcessTarget]
     ) -> MCPBridgeUpstreamPlan {
         let orderedXcodeTargets = orderedXcodeTargets(xcodeTargets)
@@ -14,7 +37,7 @@ package enum MCPBridgeRuntime {
             && supportsProcessBoundRouting(config: config)
         var upstreams: [ManagedUpstreamSlot] = []
         var xcodeProcessBindings: [XcodeProcessBinding] = []
-        let upstreamCount = max(1, count)
+        let upstreamCount = config.upstreamProcessCount
 
         if canUseProcessBoundXcodeUpstreams {
             upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
@@ -27,7 +50,6 @@ package enum MCPBridgeRuntime {
                     let upstreamIndex = upstreams.count
                     let upstreamConfig = makeDefaultUpstreamConfig(
                         config: config,
-                        sharedSessionID: sharedSessionID,
                         xcodeTarget: target
                     )
                     upstreams.append(
@@ -45,7 +67,6 @@ package enum MCPBridgeRuntime {
             for _ in 0..<upstreamCount {
                 let upstreamConfig = makeDefaultUpstreamConfig(
                     config: config,
-                    sharedSessionID: sharedSessionID,
                     xcodeTarget: nil
                 )
                 upstreams.append(
@@ -65,46 +86,42 @@ package enum MCPBridgeRuntime {
         )
     }
 
-    package static func supportsProcessBoundRouting(config: ProxyConfig) -> Bool {
-        XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
+    package static func supportsProcessBoundRouting(config: Configuration) -> Bool {
+        config.processBoundRoutingSupported
     }
 
     package static func makeProcessBoundSessionFactory(
-        config: ProxyConfig,
-        sharedSessionID: String?,
+        config: Configuration,
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> any UpstreamSessionFactory {
         UpstreamProcess(config: makeDefaultUpstreamConfig(
             config: config,
-            sharedSessionID: sharedSessionID,
             xcodeTarget: xcodeTarget,
             baseEnvironment: baseEnvironment
         ))
     }
 
     package static func startProcessBoundSession(
-        config: ProxyConfig,
-        sharedSessionID: String?,
+        config: Configuration,
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> any UpstreamSession {
         try await makeProcessBoundSessionFactory(
             config: config,
-            sharedSessionID: sharedSessionID,
             xcodeTarget: xcodeTarget,
             baseEnvironment: baseEnvironment
         ).startSession()
     }
 
     private static func makeDefaultUpstreamConfig(
-        config: ProxyConfig,
-        sharedSessionID: String?,
+        config: Configuration,
         xcodeTarget: XcodeProcessTarget?,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> UpstreamProcess.Config {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
+        let sharedSessionID = config.sharedSessionID
         if let sharedSessionID, !sharedSessionID.isEmpty {
             environment["MCP_XCODE_SESSION_ID"] = sharedSessionID
         } else {
@@ -129,7 +146,7 @@ package enum MCPBridgeRuntime {
         )
     }
 
-    private static func maxQueuedWriteBytes(for config: ProxyConfig) -> Int {
+    private static func maxQueuedWriteBytes(for config: Configuration) -> Int {
         let minimum = 1_048_576
         guard config.maxBodyBytes > 0 else { return minimum }
         let multiplied = config.maxBodyBytes.multipliedReportingOverflow(by: 4)

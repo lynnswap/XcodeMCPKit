@@ -36,6 +36,10 @@ func makeConfig(requestTimeout: TimeInterval) -> ProxyConfig {
     )
 }
 
+func makeBridgeRuntimeConfig(_ config: ProxyConfig) -> MCPBridgeRuntime.Configuration {
+    config.mcpBridgeRuntimeConfiguration
+}
+
 func jsonValue(_ object: [String: Any]) throws -> JSONValue {
     try #require(JSONValue(any: object))
 }
@@ -1321,9 +1325,7 @@ func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: Str
     var config = makeConfig(requestTimeout: 5)
     config.upstreamSessionID = sharedSessionID
     let upstreams = MCPBridgeRuntime.makeUpstreamPlan(
-        config: config,
-        sharedSessionID: sharedSessionID,
-        count: 1,
+        config: makeBridgeRuntimeConfig(config),
         xcodeTargets: []
     ).upstreams
     let upstream = try #require(upstreams.first)

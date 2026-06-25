@@ -305,12 +305,11 @@ extension RuntimeCoordinatorTests {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
         config.upstreamSessionID = "shared-docs-session"
+        config.upstreamProcessCount = 2
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
             MCPBridgeRuntime.makeUpstreamPlan(
-                config: config,
-                sharedSessionID: config.upstreamSessionID,
-                count: 2,
+                config: makeBridgeRuntimeConfig(config),
                 xcodeTargets: [target]
             )
         }
@@ -349,8 +348,7 @@ extension RuntimeCoordinatorTests {
         config.upstreamSessionID = "shared-docs-session"
 
         let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
-            config: config,
-            sharedSessionID: config.upstreamSessionID,
+            config: makeBridgeRuntimeConfig(config),
             xcodeTarget: target,
             baseEnvironment: [
                 "KEEP": "value",
@@ -378,8 +376,7 @@ extension RuntimeCoordinatorTests {
         let config = makeConfig(requestTimeout: 5)
 
         let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
-            config: config,
-            sharedSessionID: config.upstreamSessionID,
+            config: makeBridgeRuntimeConfig(config),
             xcodeTarget: target,
             baseEnvironment: [
                 "MCP_XCODE_SESSION_ID": "inherited-session",
@@ -401,9 +398,7 @@ extension RuntimeCoordinatorTests {
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
             MCPBridgeRuntime.makeUpstreamPlan(
-                config: config,
-                sharedSessionID: config.upstreamSessionID,
-                count: 1,
+                config: makeBridgeRuntimeConfig(config),
                 xcodeTargets: [older, newer]
             )
         }
@@ -430,13 +425,12 @@ extension RuntimeCoordinatorTests {
     @Test func defaultUpstreamPlanIgnoresInheritedMCPXcodePIDForProcessRouting() throws {
         let pinned = xcodeProcessTarget(processID: 730, xcodeVersion: "26.6")
         let newer = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
-        let config = makeConfig(requestTimeout: 5)
+        var config = makeConfig(requestTimeout: 5)
+        config.upstreamProcessCount = 2
 
         let plan = try withEnvironmentVariables(["MCP_XCODE_PID": "\(pinned.processID)"]) {
             MCPBridgeRuntime.makeUpstreamPlan(
-                config: config,
-                sharedSessionID: config.upstreamSessionID,
-                count: 2,
+                config: makeBridgeRuntimeConfig(config),
                 xcodeTargets: [newer, pinned]
             )
         }

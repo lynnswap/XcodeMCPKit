@@ -395,14 +395,14 @@ package protocol DocumentationProviderSessionMaking: Sendable {
 }
 
 package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
-    private let config: ProxyConfig
+    private let bridgeRuntimeConfig: MCPBridgeRuntime.Configuration
     private let baseEnvironment: [String: String]
 
     package init(
         config: ProxyConfig,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
-        self.config = config
+        self.bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
         self.baseEnvironment = baseEnvironment
     }
 
@@ -410,8 +410,7 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
         -> any UpstreamSession
     {
         try await MCPBridgeRuntime.startProcessBoundSession(
-            config: config,
-            sharedSessionID: config.upstreamSessionID,
+            config: bridgeRuntimeConfig,
             xcodeTarget: target,
             baseEnvironment: baseEnvironment
         )
