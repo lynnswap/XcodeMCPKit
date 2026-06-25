@@ -5456,13 +5456,22 @@ struct RuntimeCoordinatorTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let upstream0Initialized = TestSignal()
+        let upstream1Initialized = TestSignal()
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                upstreamInitialized: { upstreamIndex in
+                    if upstreamIndex == 0 {
+                        upstream0Initialized.signal()
+                    } else if upstreamIndex == 1 {
+                        upstream1Initialized.signal()
+                    }
+                }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -5483,6 +5492,12 @@ struct RuntimeCoordinatorTests {
         // Wait for per-upstream notifications/initialized.
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
         _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        try await upstream0Initialized.wait(
+            description: "waiting for primary upstream initialization"
+        )
+        try await upstream1Initialized.wait(
+            description: "waiting for secondary upstream initialization"
+        )
 
         // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
         await upstream0.yield(.exit(1))
@@ -5531,13 +5546,22 @@ struct RuntimeCoordinatorTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let upstream0Initialized = TestSignal()
+        let upstream1Initialized = TestSignal()
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                upstreamInitialized: { upstreamIndex in
+                    if upstreamIndex == 0 {
+                        upstream0Initialized.signal()
+                    } else if upstreamIndex == 1 {
+                        upstream1Initialized.signal()
+                    }
+                }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -5554,6 +5578,12 @@ struct RuntimeCoordinatorTests {
         // Wait for per-upstream notifications/initialized.
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
         _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        try await upstream0Initialized.wait(
+            description: "waiting for primary upstream initialization"
+        )
+        try await upstream1Initialized.wait(
+            description: "waiting for secondary upstream initialization"
+        )
 
         // Primary exit triggers warm init on primary.
         await upstream0.yield(.exit(1))
