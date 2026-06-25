@@ -20,9 +20,13 @@ private final class XcodeMCPPendingRequests: @unchecked Sendable {
         }
     }
 
-    func setSendTask(idKey: String, task: Task<Void, Never>) {
+    func setSendTask(idKey: String, task: Task<Void, Never>) -> Bool {
         lock.withLock {
+            guard requests[idKey] != nil else {
+                return false
+            }
             requests[idKey]?.sendTask = task
+            return true
         }
     }
 
@@ -419,7 +423,9 @@ extension XcodeMCP {
                             self.pendingRequests.fail(idKey: idKey, error: error)
                         }
                     }
-                    self.pendingRequests.setSendTask(idKey: idKey, task: sendTask)
+                    if self.pendingRequests.setSendTask(idKey: idKey, task: sendTask) == false {
+                        sendTask.cancel()
+                    }
                 }
             } onCancel: {
                 self.pendingRequests.fail(idKey: idKey, error: CancellationError())
