@@ -10,6 +10,8 @@ extension XcodeMCPProxyServer {
     /// to discover the HTTP endpoint automatically.
     ///
     /// - Returns: The resolved endpoint.
+    /// - Throws: ``XcodeMCPProxyServer/LifecycleError`` for server lifecycle
+    ///   failures, or an underlying NIO error when binding fails.
     public func start() throws -> Endpoint {
         let channel = try startListening()
         let (host, port) = resolvedListenAddress(for: channel)
@@ -47,16 +49,18 @@ extension XcodeMCPProxyServer {
             throw error
         }
 
-        guard installBoundChannels(boundChannels, preparedRuntime: preparedRuntime) else {
+        guard let first = boundChannels.first else {
+            stopPreparedRuntimeAfterStartFailure(preparedRuntime)
+            throw LifecycleError.failedToBind
+        }
+        do {
+            try installBoundChannels(boundChannels, preparedRuntime: preparedRuntime)
+        } catch {
             for channel in boundChannels {
                 channel.close(promise: nil)
             }
             stopPreparedRuntimeAfterStartFailure(preparedRuntime)
-            throw ProxyServerError.shutdownInProgress
-        }
-        guard let first = boundChannels.first else {
-            stopPreparedRuntimeAfterStartFailure(preparedRuntime)
-            throw ProxyServerError.failedToBind
+            throw error
         }
         preparedRuntime.startLifecycle()
         return first
@@ -64,20 +68,15 @@ extension XcodeMCPProxyServer {
 
     private func prepareRuntimeForStart() throws -> ProxyServerPreparedRuntime {
         runtimeLock.lock()
-        let existingSessionManager = isShuttingDown ? nil : sessionManager
         let wasShuttingDown = isShuttingDown
+        let wasStarted = hasStartedRuntimeOrChannels
         runtimeLock.unlock()
 
-        if let existing = existingSessionManager {
-            return ProxyServerPreparedRuntime(
-                sessionManager: existing,
-                autoApprover: nil,
-                ownsRuntime: false
-            )
-        }
-
         if wasShuttingDown {
-            throw ProxyServerError.shutdownInProgress
+            throw LifecycleError.shutdownInProgress
+        }
+        if wasStarted {
+            throw LifecycleError.alreadyStarted
         }
 
         let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
@@ -98,14 +97,14 @@ extension XcodeMCPProxyServer {
     private func installBoundChannels(
         _ boundChannels: [Channel],
         preparedRuntime: ProxyServerPreparedRuntime
-    ) -> Bool {
+    ) throws {
         runtimeLock.lock()
         defer { runtimeLock.unlock() }
         guard isShuttingDown == false else {
-            return false
+            throw LifecycleError.shutdownInProgress
         }
-        if sessionManager != nil, preparedRuntime.ownsRuntime {
-            return false
+        if hasStartedRuntimeOrChannels {
+            throw LifecycleError.alreadyStarted
         }
 
         setChannelsForStartedServer(boundChannels)
@@ -115,7 +114,6 @@ extension XcodeMCPProxyServer {
         if permissionDialogAutoApprover == nil {
             permissionDialogAutoApprover = preparedRuntime.autoApprover
         }
-        return true
     }
 
     private func stopPreparedRuntimeAfterStartFailure(_ preparedRuntime: ProxyServerPreparedRuntime) {

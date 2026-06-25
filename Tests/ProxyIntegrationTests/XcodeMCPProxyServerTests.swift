@@ -288,6 +288,47 @@ struct XcodeMCPProxyServerTests {
         try? await blocker.close().get()
         await shutdown(blockerGroup)
     }
+
+    @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
+        let autoApprover = RecordingAutoApprover()
+        let upstream = RecordingUpstreamSlot()
+        let config = ProxyConfig(
+            listenHost: "127.0.0.1",
+            listenPort: 0,
+            upstreamCommand: "xcrun",
+            upstreamArgs: ["mcpbridge"],
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            autoApproveXcodeDialog: true
+        )
+        let server = XcodeMCPProxyServer(
+            proxyConfig: config,
+            dependencies: .init(
+                makeAutoApprover: { autoApprover },
+                makeRuntimeCoordinator: { config, eventLoop in
+                    RuntimeCoordinator(
+                        config: config,
+                        eventLoop: eventLoop,
+                        upstreams: [upstream],
+                        startImmediately: false
+                    )
+                }
+            )
+        )
+
+        let endpoint = try server.start()
+        #expect(endpoint.port > 0)
+
+        #expect(throws: XcodeMCPProxyServer.LifecycleError.alreadyStarted) {
+            _ = try server.start()
+        }
+        #expect(throws: XcodeMCPProxyServer.LifecycleError.alreadyStarted) {
+            _ = try server.startAndWriteDiscovery()
+        }
+        #expect(autoApprover.startCount == 1)
+
+        try await server.shutdown()
+    }
 }
 
 private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermissionDialogAutoApprover {

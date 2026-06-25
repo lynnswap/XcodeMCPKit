@@ -51,6 +51,21 @@ public final class XcodeMCPProxyServer {
         }
     }
 
+    /// Errors thrown while starting or stopping a proxy server instance.
+    public enum LifecycleError: Error, Equatable, Sendable {
+        /// The configured listener could not bind to any requested address.
+        case failedToBind
+
+        /// The server instance has already been started.
+        ///
+        /// Create a new ``XcodeMCPProxyServer`` instance after calling
+        /// ``shutdown()`` instead of starting the same instance again.
+        case alreadyStarted
+
+        /// The server is already shutting down.
+        case shutdownInProgress
+    }
+
     /// Public configuration for an embedded Xcode MCP proxy server.
     ///
     /// This type is the stable server configuration surface for
@@ -375,6 +390,9 @@ public final class XcodeMCPProxyServer {
     package var isShuttingDown = false
     package var sessionManager: (any RuntimeCoordinating)?
     package var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
+    package var hasStartedRuntimeOrChannels: Bool {
+        sessionManager != nil || channels.isEmpty == false
+    }
 
     /// Creates a proxy server with live runtime dependencies.
     ///
@@ -402,6 +420,9 @@ public final class XcodeMCPProxyServer {
     /// channels, starts the proxy runtime, writes the discovery file configured
     /// by ``Configuration/discovery``, logs a startup summary, and returns the
     /// resolved endpoint.
+    ///
+    /// Each server instance can be started once. A second call to this method
+    /// or to ``start()`` throws ``LifecycleError/alreadyStarted``.
     public func startAndWriteDiscovery() throws -> Endpoint {
         let channel = try startListening()
         let (host, port) = resolvedListenAddress(for: channel)
@@ -763,11 +784,6 @@ private extension XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode {
             self = .upstream
         }
     }
-}
-
-package enum ProxyServerError: Error {
-    case failedToBind
-    case shutdownInProgress
 }
 
 package final class ProxyAcceptedChannelTracker: @unchecked Sendable {
