@@ -6,9 +6,16 @@ import ProxyStdioTransport
 public struct XcodeMCPProxyAdapterEndpoint: Equatable, Sendable {
     /// Source that selected the endpoint.
     public enum Source: String, Equatable, Sendable {
+        /// The endpoint was provided directly by the caller.
         case explicit
+
+        /// The endpoint came from `XCODE_MCP_PROXY_ENDPOINT`.
         case environment
+
+        /// The endpoint came from a proxy discovery file.
         case discovery
+
+        /// The default endpoint was used.
         case fallback
     }
 
@@ -18,6 +25,7 @@ public struct XcodeMCPProxyAdapterEndpoint: Equatable, Sendable {
     /// How the endpoint was selected.
     public let source: Source
 
+    /// Creates a resolved adapter endpoint.
     public init(url: URL, source: Source) {
         self.url = url
         self.source = source
@@ -26,6 +34,7 @@ public struct XcodeMCPProxyAdapterEndpoint: Equatable, Sendable {
 
 /// Resolves the Streamable HTTP endpoint used by the STDIO adapter.
 public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
+    /// Endpoint resolution inputs.
     public struct Configuration: Equatable, Sendable {
         /// Optional explicit endpoint string, usually from `--url` or `--stdio`.
         public var explicitURL: String?
@@ -42,6 +51,7 @@ public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
         /// Fallback endpoint when no explicit, environment, or discovery endpoint is available.
         public var fallbackURL: URL
 
+        /// Creates endpoint resolution configuration.
         public init(
             explicitURL: String? = nil,
             explicitURLLabel: String = "explicit URL",
@@ -57,9 +67,12 @@ public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
         }
     }
 
+    /// Endpoint resolution errors.
     public enum Error: Swift.Error, CustomStringConvertible, Equatable {
+        /// A configured endpoint was not an HTTP or HTTPS URL.
         case invalidURL(label: String)
 
+        /// User-facing error description.
         public var description: String {
             switch self {
             case .invalidURL(let label):
@@ -68,12 +81,18 @@ public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
         }
     }
 
+    /// Environment variable used to override the adapter endpoint.
     public static let endpointEnvironmentVariable = "XCODE_MCP_PROXY_ENDPOINT"
+
+    /// Default endpoint string used when no override or discovery file is available.
     public static let defaultEndpointURLString = "http://localhost:8765/mcp"
+
+    /// Default endpoint URL used when no override or discovery file is available.
     public static let defaultEndpointURL = URL(string: defaultEndpointURLString)!
 
     package var discoveryClient: DiscoveryClient
 
+    /// Creates a live endpoint resolver.
     public init() {
         self.init(discoveryClient: .liveValue)
     }
@@ -82,12 +101,14 @@ public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
         self.discoveryClient = discoveryClient
     }
 
+    /// Returns the discovery file URL used by the adapter for the environment.
     public static func discoveryFileURL(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
         ProxyFilesystemLocations.discoveryFileURL(environment: environment)
     }
 
+    /// Resolves the endpoint using explicit value, environment, discovery, then fallback.
     public func resolve(
         _ configuration: Configuration = Configuration()
     ) throws -> XcodeMCPProxyAdapterEndpoint {
@@ -147,10 +168,15 @@ public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
 
 /// Facade for running the STDIO compatibility adapter against the proxy server.
 public final class XcodeMCPProxyStdioAdapter: Sendable {
+    /// Configuration for a STDIO adapter instance.
     public struct Configuration: Equatable, Sendable {
+        /// Endpoint resolution configuration.
         public var endpoint: XcodeMCPProxyAdapterEndpointResolver.Configuration
+
+        /// HTTP request timeout used when forwarding STDIO messages.
         public var requestTimeout: TimeInterval
 
+        /// Creates STDIO adapter configuration.
         public init(
             endpoint: XcodeMCPProxyAdapterEndpointResolver.Configuration = .init(),
             requestTimeout: TimeInterval = 300
@@ -160,10 +186,12 @@ public final class XcodeMCPProxyStdioAdapter: Sendable {
         }
     }
 
+    /// Resolved Streamable HTTP endpoint used by this adapter.
     public let endpoint: XcodeMCPProxyAdapterEndpoint
 
     private let adapter: StdioAdapter
 
+    /// Creates an adapter by resolving the endpoint from configuration.
     public convenience init(
         configuration: Configuration = Configuration(),
         input: FileHandle = .standardInput,
@@ -178,6 +206,7 @@ public final class XcodeMCPProxyStdioAdapter: Sendable {
         )
     }
 
+    /// Creates an adapter for an already resolved endpoint.
     public convenience init(
         endpoint: XcodeMCPProxyAdapterEndpoint,
         requestTimeout: TimeInterval = 300,
@@ -210,14 +239,17 @@ public final class XcodeMCPProxyStdioAdapter: Sendable {
         )
     }
 
+    /// Starts reading STDIO input and forwarding messages to the proxy endpoint.
     public func start() async {
         await adapter.start()
     }
 
+    /// Waits until the adapter finishes.
     public func wait() async {
         await adapter.wait()
     }
 
+    /// Stops the adapter.
     public func stop() async {
         await adapter.stop()
     }

@@ -129,6 +129,7 @@ extension XcodeMCPProxyServer {
             self.presentation = presentation
         }
 
+        /// User-facing error description.
         public var description: String { message }
     }
 

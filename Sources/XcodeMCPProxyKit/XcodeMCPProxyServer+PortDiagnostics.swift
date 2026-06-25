@@ -20,6 +20,7 @@ extension XcodeMCPProxyServer {
             self.processIdentifiers = processIdentifiers
         }
 
+        /// User-facing diagnostic message.
         public var description: String {
             let displayHost: String = {
                 if host.contains(":"), !host.hasPrefix("[") {
