@@ -1,10 +1,9 @@
 import Foundation
 import Logging
 import ProxyCLICommon
-import ProxyCore
-import ProxyStdioTransport
+import XcodeMCPProxyKit
 
-extension StdioAdapter: CLICommandAdapter {}
+extension XcodeMCPProxyStdioAdapter: CLICommandAdapter {}
 
 package struct XcodeMCPProxyCLICommand {
     package struct LogSink {
@@ -34,7 +33,8 @@ package struct XcodeMCPProxyCLICommand {
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
         package var makeLogSink: () -> XcodeMCPProxyCLICommand.LogSink
-        package var makeAdapter: (URL, TimeInterval, FileHandle, FileHandle) -> any CLICommandAdapter
+        package var makeAdapter:
+            (XcodeMCPProxyAdapterEndpoint, TimeInterval, FileHandle, FileHandle) -> any CLICommandAdapter
         package var input: FileHandle
         package var output: FileHandle
 
@@ -42,7 +42,12 @@ package struct XcodeMCPProxyCLICommand {
             bootstrapLogging: @escaping ([String: String]) -> Void,
             stdout: @escaping (String) -> Void,
             makeLogSink: @escaping () -> XcodeMCPProxyCLICommand.LogSink,
-            makeAdapter: @escaping (URL, TimeInterval, FileHandle, FileHandle) -> any CLICommandAdapter,
+            makeAdapter: @escaping (
+                XcodeMCPProxyAdapterEndpoint,
+                TimeInterval,
+                FileHandle,
+                FileHandle
+            ) -> any CLICommandAdapter,
             input: FileHandle,
             output: FileHandle
         ) {
@@ -56,10 +61,10 @@ package struct XcodeMCPProxyCLICommand {
 
         package static var live: Self {
             return Self(
-                bootstrapLogging: ProxyLogging.bootstrap,
+                bootstrapLogging: XcodeMCPProxyLogging.bootstrap,
                 stdout: { print($0) },
                 makeLogSink: {
-                    let logger = ProxyLogging.make("cli")
+                    let logger = XcodeMCPProxyLogging.make("cli")
                     return XcodeMCPProxyCLICommand.LogSink(
                         error: { logger.error("\($0)") },
                         info: { message, metadata in
@@ -67,9 +72,9 @@ package struct XcodeMCPProxyCLICommand {
                         }
                     )
                 },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
+                makeAdapter: { endpoint, requestTimeout, input, output in
+                    XcodeMCPProxyStdioAdapter(
+                        endpoint: endpoint,
                         requestTimeout: requestTimeout,
                         input: input,
                         output: output

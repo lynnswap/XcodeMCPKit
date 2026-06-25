@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import ProxyBuildInfo
 import ProxyInstallCLI
+import XcodeMCPProxyKit
 
 @Suite
 struct InstallCommandTests {
@@ -15,8 +16,8 @@ struct InstallCommandTests {
                     Issue.record("executableURL should not be called for --version")
                     return nil
                 },
-                buildProducts: { _, _ in
-                    Issue.record("buildProducts should not be called for --version")
+                install: { _, _, _ in
+                    Issue.record("install should not be called for --version")
                 }
             )
         )
@@ -40,8 +41,8 @@ struct InstallCommandTests {
                     Issue.record("executableURL should not be called for --version")
                     return nil
                 },
-                buildProducts: { _, _ in
-                    Issue.record("buildProducts should not be called for --version")
+                install: { _, _, _ in
+                    Issue.record("install should not be called for --version")
                 }
             )
         )
@@ -66,8 +67,8 @@ struct InstallCommandTests {
                     Issue.record("executableURL should not be called for --help")
                     return nil
                 },
-                buildProducts: { _, _ in
-                    Issue.record("buildProducts should not be called for --help")
+                install: { _, _, _ in
+                    Issue.record("install should not be called for --help")
                 }
             )
         )
@@ -98,7 +99,7 @@ struct InstallCommandTests {
         #expect(options.bindir == "/tmp/bin")
         #expect(options.dryRun == true)
         #expect(
-            XcodeMCPProxyInstallCommand.resolveBinDir(
+            XcodeMCPProxyInstaller.resolveBinDirectory(
                 prefix: options.prefix,
                 bindir: options.bindir
             ).path == "/tmp/bin"
@@ -107,7 +108,7 @@ struct InstallCommandTests {
 
     @Test func installCommandExpandsHomeRelativePaths() throws {
         let home = NSHomeDirectory()
-        let resolved = XcodeMCPProxyInstallCommand.resolveBinDir(
+        let resolved = XcodeMCPProxyInstaller.resolveBinDirectory(
             prefix: "~/custom",
             bindir: nil
         )
@@ -117,7 +118,7 @@ struct InstallCommandTests {
 
     @Test func installCommandFindsRepositoryRootFromBuildProducts() throws {
         let executableURL = URL(fileURLWithPath: "/tmp/repo/.build/debug/xcode-mcp-proxy-install")
-        let root = XcodeMCPProxyInstallCommand.repositoryRoot(from: executableURL)
+        let root = XcodeMCPProxyInstaller.repositoryRoot(from: executableURL)
 
         #expect(root?.path == "/tmp/repo")
     }
@@ -130,10 +131,12 @@ struct InstallCommandTests {
 
         let executableURL = tempDir.appendingPathComponent("xcode-mcp-proxy-install")
 
-        #expect(throws: XcodeMCPProxyInstallCommand.Error.self) {
-            try XcodeMCPProxyInstallCommand.install(
-                options: XcodeMCPProxyInstallCommand.Options(prefix: nil, bindir: tempDir.path, dryRun: false),
+        #expect(throws: XcodeMCPProxyInstaller.Error.self) {
+            try XcodeMCPProxyInstaller(
+                configuration: .init(prefix: nil, bindir: tempDir.path, dryRun: false)
+            ).install(
                 executableURL: executableURL,
+                fileManager: .default,
                 buildProducts: { _, _ in },
                 stdout: { _ in }
             )
@@ -147,7 +150,7 @@ struct InstallCommandTests {
                 stdout: { output.append($0) },
                 stderr: { _ in },
                 executableURL: { nil },
-                buildProducts: { _, _ in }
+                install: { _, _, _ in }
             )
         )
 
@@ -168,7 +171,14 @@ struct InstallCommandTests {
                 stdout: { output.append($0) },
                 stderr: { errors.append($0) },
                 executableURL: { URL(fileURLWithPath: "/tmp/xcode-mcp-proxy-install") },
-                buildProducts: { _, _ in }
+                install: { configuration, executableURL, stdout in
+                    try XcodeMCPProxyInstaller(configuration: configuration).install(
+                        executableURL: executableURL,
+                        fileManager: .default,
+                        buildProducts: { _, _ in },
+                        stdout: stdout
+                    )
+                }
             )
         )
 
@@ -195,7 +205,7 @@ struct InstallCommandTests {
                 stdout: { output.append($0) },
                 stderr: { errors.append($0) },
                 executableURL: { nil },
-                buildProducts: { _, _ in }
+                install: { _, _, _ in }
             )
         )
 
@@ -211,5 +221,21 @@ struct InstallCommandTests {
         #expect(exitCode == 0)
         #expect(errors.snapshot().isEmpty)
         #expect(output.snapshot().first?.contains("Usage:") == true)
+    }
+
+    @Test func installerPlanUsesBinaryListAndBindirPriority() throws {
+        let executableURL = URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-proxy-install")
+        let installer = XcodeMCPProxyInstaller(
+            configuration: .init(prefix: "/tmp/prefix", bindir: "/tmp/bin", dryRun: true)
+        )
+        let plan = installer.plan(executableURL: executableURL)
+
+        #expect(plan.binDirectory.path == "/tmp/bin")
+        #expect(plan.dryRun)
+        #expect(plan.binaries.map(\.name) == XcodeMCPProxyInstaller.binaryNames)
+        #expect(plan.binaries.map(\.destinationURL.lastPathComponent) == [
+            "xcode-mcp-proxy",
+            "xcode-mcp-proxy-server",
+        ])
     }
 }

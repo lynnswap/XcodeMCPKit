@@ -1,30 +1,36 @@
 # XcodeMCPProxyKit
 
-Swift library API for embedding the Xcode MCP Streamable HTTP proxy server.
+Swift library API for embedding and composing the Xcode MCP proxy products.
 
 ## Status
 
-`XcodeMCPProxyKit` is the public server-side kit used by the
-`xcode-mcp-proxy-server` executable. The CLI parses command-line options and
-then constructs `XcodeMCPProxyServer(config:)` from this target, so the package
-boundary is real and does not rely on a private server wrapper.
+`XcodeMCPProxyKit` is the public product kit used by the proxy executables. The
+CLIs parse command-line options and then construct high-level facade types from
+this target, so the package boundary is real and does not rely on private
+wrappers in executable targets.
 
 This target owns:
 
 - `XcodeMCPProxyServer`, the embeddable proxy server lifecycle object
+- `XcodeMCPProxyStdioAdapter`, the STDIO compatibility adapter facade
+- `XcodeMCPProxyAdapterEndpointResolver`, the adapter endpoint resolver
+- `XcodeMCPProxyInstaller`, the install plan and copy/build policy facade
 - HTTP channel setup and request handling integration
-- startup, discovery writing, waiting, and shutdown entry points
+- startup, discovery writing, waiting, shutdown, adapter, and installer entry
+  points
 
 External embedders configure the server through
-`XcodeMCPProxyServer.Configuration`. Lower-level session routing, upstream
-process management, Xcode support, and MCP HTTP behavior stay in their own
-internal targets behind this kit boundary.
+`XcodeMCPProxyServer.Configuration`, configure the adapter through
+`XcodeMCPProxyStdioAdapter.Configuration`, and compose installs through
+`XcodeMCPProxyInstaller.Configuration`. Lower-level session routing, upstream
+process management, Xcode support, MCP HTTP behavior, and STDIO transport
+details stay in their own internal targets behind this kit boundary.
 
-This target intentionally does not expose the executable CLI parser, the STDIO
-adapter, per-tool typed wrappers, or direct access to the internal session
+This target intentionally does not expose the executable CLI parsers, per-tool
+typed wrappers, a public stream API, or direct access to the internal session
 router.
 
-## Quickstart
+## Server Quickstart
 
 Depend on the `XcodeMCPProxyKit` library product, then construct the server
 directly:
@@ -84,3 +90,64 @@ runtime, and terminates the event loop group.
 
 Use one `XcodeMCPProxyServer` per proxy server instance. Create a new instance
 after shutdown instead of restarting the same object.
+
+## STDIO Adapter
+
+`XcodeMCPProxyStdioAdapter` forwards MCP STDIO messages to a running
+Streamable HTTP proxy endpoint. The endpoint resolver uses this order:
+
+1. Explicit URL, such as a CLI `--url` value.
+2. `XCODE_MCP_PROXY_ENDPOINT`.
+3. The discovery file written by `XcodeMCPProxyServer.startAndWriteDiscovery()`.
+4. `http://localhost:8765/mcp`.
+
+```swift
+import Foundation
+import XcodeMCPProxyKit
+
+let endpoint = try XcodeMCPProxyAdapterEndpointResolver().resolve(
+    .init(
+        explicitURL: nil,
+        environment: ProcessInfo.processInfo.environment
+    )
+)
+
+let adapter = XcodeMCPProxyStdioAdapter(
+    endpoint: endpoint,
+    requestTimeout: 300,
+    input: .standardInput,
+    output: .standardOutput
+)
+
+await adapter.start()
+await adapter.wait()
+```
+
+The adapter preserves the proxy's modern MCP HTTP contract: initialize is sent
+without a session header, subsequent POST/GET/DELETE requests include the
+server-issued `MCP-Session-Id`, and the negotiated
+`MCP-Protocol-Version` is forwarded after initialize.
+
+## Installer
+
+`XcodeMCPProxyInstaller` owns the source install composition used by
+`xcode-mcp-proxy-install`. It installs the STDIO adapter and proxy server
+binaries:
+
+```swift
+import Foundation
+import XcodeMCPProxyKit
+
+let installer = XcodeMCPProxyInstaller(
+    configuration: .init(prefix: "\(NSHomeDirectory())/.local", dryRun: true)
+)
+let plan = installer.plan(
+    executableURL: URL(fileURLWithPath: "/path/to/xcode-mcp-proxy-install")
+)
+print(plan.dryRunLines.joined(separator: "\n"))
+```
+
+`--bindir` has priority over `--prefix`; otherwise the default destination is
+`~/.local/bin`. A non-dry-run install builds release products when the installer
+is running from a SwiftPM `.build` directory and then copies
+`XcodeMCPProxyInstaller.binaryNames` into the resolved bin directory.

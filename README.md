@@ -47,6 +47,7 @@ Custom install directory:
 ```bash
 swift run -c release xcode-mcp-proxy-install --prefix "$HOME/.local"
 swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
+swift run -c release xcode-mcp-proxy-install --dry-run
 ```
 
 Add to `PATH`:
@@ -79,6 +80,13 @@ await xcode.close()
 The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
 `MCPToolResult`, `MCPContent`, and `MCPProgress`. Process launch, JSON-RPC
 framing, and session transport are internal implementation details.
+
+For proxy-side integrations, depend on the `XcodeMCPProxyKit` library product.
+It exposes the embeddable `XcodeMCPProxyServer`, the
+`XcodeMCPProxyStdioAdapter` facade, adapter endpoint resolution, and the source
+installer composition API used by `xcode-mcp-proxy-install`. The STDIO adapter
+endpoint order is explicit URL, `XCODE_MCP_PROXY_ENDPOINT`, discovery file, then
+`http://localhost:8765/mcp`.
 
 ## Set Up Your MCP Client
 

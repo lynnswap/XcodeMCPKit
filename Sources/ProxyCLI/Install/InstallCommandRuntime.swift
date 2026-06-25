@@ -1,7 +1,6 @@
 import Foundation
 import ProxyBuildInfo
 import ProxyCLICommon
-import ProxyCore
 
 extension XcodeMCPProxyInstallCommand {
     package struct Runtime {
@@ -29,19 +28,10 @@ extension XcodeMCPProxyInstallCommand {
 
         do {
             let options = try XcodeMCPProxyInstallCommand.parseOptions(args, environment: environment)
-            if options.showHelp {
-                dependencies.stdout(XcodeMCPProxyInstallCommand.usage())
-                return 0
-            }
             guard let executableURL = dependencies.executableURL() else {
                 throw XcodeMCPProxyInstallCommand.Error.message("failed to locate installer executable")
             }
-            try XcodeMCPProxyInstallCommand.install(
-                options: options,
-                executableURL: executableURL,
-                buildProducts: dependencies.buildProducts,
-                stdout: dependencies.stdout
-            )
+            try dependencies.install(options, executableURL, dependencies.stdout)
             return 0
         } catch let error as XcodeMCPProxyInstallCommand.Error {
             dependencies.stderr("error: \(error.description)")
