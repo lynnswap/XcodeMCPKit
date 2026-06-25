@@ -2,6 +2,7 @@ import ProxyCore
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import ProxyProcessManagement
 import ProxySession
 import XcodeMCPKit
 import Testing
@@ -164,19 +165,19 @@ struct XcodeMCPProxyServerTests {
 
     @Test func existingServerControllerHostMatchingHandlesLoopbackAndWildcard() throws {
         #expect(
-            XcodeMCPProxyServer.ExistingServerController.hostMatches(
+            ExistingProxyServerProcessController.hostMatches(
                 requestedHost: "localhost",
                 actualHost: "127.0.0.1"
             )
         )
         #expect(
-            XcodeMCPProxyServer.ExistingServerController.hostMatches(
+            ExistingProxyServerProcessController.hostMatches(
                 requestedHost: "::",
                 actualHost: "127.0.0.1"
             )
         )
         #expect(
-            XcodeMCPProxyServer.ExistingServerController.hostMatches(
+            ExistingProxyServerProcessController.hostMatches(
                 requestedHost: "127.0.0.1",
                 actualHost: "::1"
             ) == false
@@ -196,7 +197,7 @@ struct XcodeMCPProxyServerTests {
         """
 
         #expect(
-            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+            ExistingProxyServerProcessController.listeningProcessIDs(
                 fromLsofOutput: output,
                 matchingHost: "localhost"
             ) == [51731]
@@ -214,7 +215,7 @@ struct XcodeMCPProxyServerTests {
         """
 
         #expect(
-            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+            ExistingProxyServerProcessController.listeningProcessIDs(
                 fromLsofOutput: output,
                 matchingHost: "127.0.0.1"
             )
@@ -236,7 +237,7 @@ struct XcodeMCPProxyServerTests {
         """
 
         #expect(
-            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+            ExistingProxyServerProcessController.listeningProcessIDs(
                 fromLsofOutput: output,
                 matchingHost: "localhost"
             ) == [111, 222]
