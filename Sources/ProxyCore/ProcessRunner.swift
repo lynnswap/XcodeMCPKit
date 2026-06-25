@@ -57,61 +57,132 @@ private final class PipeCollector: @unchecked Sendable {
     }
 }
 
+package enum ProcessRunnerScheduledDelayKind: Sendable {
+    case timeout
+    case terminationKillFallback
+}
+
+package final class ProcessRunnerScheduledDelay: @unchecked Sendable {
+    private let cancelImpl: @Sendable () -> Void
+
+    package init(cancel: @escaping @Sendable () -> Void) {
+        self.cancelImpl = cancel
+    }
+
+    package func cancel() {
+        cancelImpl()
+    }
+}
+
+package protocol ProcessRunnerDelayScheduling: Sendable {
+    @discardableResult
+    func schedule(
+        _ kind: ProcessRunnerScheduledDelayKind,
+        afterNanoseconds delayNanoseconds: Int64,
+        operation: @escaping @Sendable () -> Void
+    ) -> ProcessRunnerScheduledDelay
+}
+
+private struct DispatchProcessRunnerDelayScheduler: ProcessRunnerDelayScheduling {
+    @discardableResult
+    func schedule(
+        _ kind: ProcessRunnerScheduledDelayKind,
+        afterNanoseconds delayNanoseconds: Int64,
+        operation: @escaping @Sendable () -> Void
+    ) -> ProcessRunnerScheduledDelay {
+        let workItem = DispatchWorkItem(block: operation)
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + .nanoseconds(Int(delayNanoseconds)),
+            execute: workItem
+        )
+        let cancellation = DispatchWorkItemCancellation(workItem: workItem)
+        return ProcessRunnerScheduledDelay {
+            cancellation.cancel()
+        }
+    }
+}
+
+private final class DispatchWorkItemCancellation: @unchecked Sendable {
+    private let workItem: DispatchWorkItem
+
+    init(workItem: DispatchWorkItem) {
+        self.workItem = workItem
+    }
+
+    func cancel() {
+        workItem.cancel()
+    }
+}
+
 private final class ProcessTimeoutController: @unchecked Sendable {
     typealias Action = @Sendable () -> Void
 
     private struct State {
         var timeoutNanoseconds: Int64?
-        var workItem: DispatchWorkItem?
+        var scheduledDelay: ProcessRunnerScheduledDelay?
         var action: Action?
         var scheduled = false
     }
 
+    private let scheduler: any ProcessRunnerDelayScheduling
     private let state = NIOLockedValueBox(State())
+
+    init(scheduler: any ProcessRunnerDelayScheduling) {
+        self.scheduler = scheduler
+    }
 
     func configure(timeoutNanoseconds: Int64?, action: @escaping Action) {
         guard let timeoutNanoseconds, timeoutNanoseconds > 0 else {
             return
         }
-        let workItem = DispatchWorkItem { [self] in
-            fire()
-        }
         state.withLockedValue { state in
             state.timeoutNanoseconds = timeoutNanoseconds
-            state.workItem = workItem
             state.action = action
         }
     }
 
     func schedule() {
-        let scheduled = state.withLockedValue { state -> (DispatchWorkItem, Int64)? in
+        let timeoutNanoseconds = state.withLockedValue { state -> Int64? in
             guard
                 state.scheduled == false,
-                let workItem = state.workItem,
                 let timeoutNanoseconds = state.timeoutNanoseconds,
                 state.action != nil
             else {
                 return nil
             }
             state.scheduled = true
-            return (workItem, timeoutNanoseconds)
+            return timeoutNanoseconds
         }
-        guard let scheduled else {
+        guard let timeoutNanoseconds else {
             return
         }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + .nanoseconds(Int(scheduled.1)),
-            execute: scheduled.0
-        )
+        let scheduledDelay = scheduler.schedule(
+            .timeout,
+            afterNanoseconds: timeoutNanoseconds
+        ) { [self] in
+            fire()
+        }
+        let shouldCancel = state.withLockedValue { state in
+            guard state.action != nil else {
+                return true
+            }
+            state.scheduledDelay = scheduledDelay
+            return false
+        }
+        if shouldCancel {
+            scheduledDelay.cancel()
+        }
     }
 
     func cancel() {
-        state.withLockedValue { state in
-            state.workItem?.cancel()
+        let scheduledDelay = state.withLockedValue { state -> ProcessRunnerScheduledDelay? in
+            let scheduledDelay = state.scheduledDelay
+            state.scheduledDelay = nil
             state.timeoutNanoseconds = nil
-            state.workItem = nil
             state.action = nil
+            return scheduledDelay
         }
+        scheduledDelay?.cancel()
     }
 
     private func fire() {
@@ -120,7 +191,7 @@ private final class ProcessTimeoutController: @unchecked Sendable {
                 return nil
             }
             state.timeoutNanoseconds = nil
-            state.workItem = nil
+            state.scheduledDelay = nil
             state.action = nil
             return action
         }
@@ -236,7 +307,15 @@ package protocol ProcessRunning: Sendable {
 }
 
 package struct ProcessRunner: ProcessRunning {
-    package init() {}
+    private static let terminationKillFallbackDelayNanoseconds: Int64 = 1_000_000_000
+
+    private let delayScheduler: any ProcessRunnerDelayScheduling
+
+    package init(
+        delayScheduler: any ProcessRunnerDelayScheduling = DispatchProcessRunnerDelayScheduler()
+    ) {
+        self.delayScheduler = delayScheduler
+    }
 
     package func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         let cancellationState = ProcessCancellationState()
@@ -247,7 +326,7 @@ package struct ProcessRunner: ProcessRunning {
                 let stderrPipe = Pipe()
                 let stdinPipe = Pipe()
                 let drainGroup = DispatchGroup()
-                let timeoutController = ProcessTimeoutController()
+                let timeoutController = ProcessTimeoutController(scheduler: delayScheduler)
                 let stdoutCollector = PipeCollector(
                     fileHandle: stdoutPipe.fileHandleForReading,
                     drainGroup: drainGroup,
@@ -290,7 +369,10 @@ package struct ProcessRunner: ProcessRunning {
                     process.terminationHandler = nil
                     if process.isRunning {
                         process.terminate()
-                        DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(1)) {
+                        delayScheduler.schedule(
+                            .terminationKillFallback,
+                            afterNanoseconds: Self.terminationKillFallbackDelayNanoseconds
+                        ) {
                             guard process.isRunning else {
                                 return
                             }
