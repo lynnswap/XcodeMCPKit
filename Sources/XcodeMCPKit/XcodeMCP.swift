@@ -455,7 +455,7 @@ extension XcodeMCP {
 
 private extension XcodeMCP {
     func initialize() async throws {
-        _ = try await request(
+        let result = try await request(
             "initialize",
             params: .object([
                 "protocolVersion": .string(MCP.ProtocolVersion.current),
@@ -466,7 +466,23 @@ private extension XcodeMCP {
                 "capabilities": .object(initializeCapabilities()),
             ])
         )
+        try validateInitializeResult(result)
         try await notify("notifications/initialized")
+    }
+
+    func validateInitializeResult(_ result: MCPJSONValue) throws {
+        guard let object = result.objectValue else {
+            throw XcodeMCPError.invalidResponse("initialize result is not an object")
+        }
+        guard let protocolVersion = object["protocolVersion"]?.stringValue,
+              protocolVersion.isEmpty == false else {
+            throw XcodeMCPError.invalidResponse("initialize result is missing protocolVersion")
+        }
+        guard MCP.ProtocolVersion.isSupported(protocolVersion) else {
+            throw XcodeMCPError.invalidResponse(
+                "initialize result has unsupported protocolVersion \(protocolVersion)"
+            )
+        }
     }
 
     func initializeCapabilities() -> [String: MCPJSONValue] {

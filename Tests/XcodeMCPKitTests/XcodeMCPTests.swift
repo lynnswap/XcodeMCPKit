@@ -36,6 +36,43 @@ struct XcodeMCPTests {
         ]))
     }
 
+    @Test func asyncInitializerRejectsMalformedInitializeResult() async throws {
+        let transport = FakeXcodeMCPTransport(initializeResult: .object([
+            "capabilities": .object([:])
+        ]))
+
+        await #expect(throws: XcodeMCPError.invalidResponse(
+            "initialize result is missing protocolVersion"
+        )) {
+            _ = try await XcodeMCP(transport: transport)
+        }
+
+        let sent = await transport.sentMessages()
+        #expect(sent.compactMap(\.method) == ["initialize"])
+        #expect(await transport.closeCount() == 1)
+    }
+
+    @Test func asyncInitializerRejectsUnsupportedInitializeProtocolVersion() async throws {
+        let transport = FakeXcodeMCPTransport(initializeResult: .object([
+            "protocolVersion": .string("2099-01-01"),
+            "serverInfo": .object([
+                "name": .string("future-server"),
+                "version": .string("test"),
+            ]),
+            "capabilities": .object([:]),
+        ]))
+
+        await #expect(throws: XcodeMCPError.invalidResponse(
+            "initialize result has unsupported protocolVersion 2099-01-01"
+        )) {
+            _ = try await XcodeMCP(transport: transport)
+        }
+
+        let sent = await transport.sentMessages()
+        #expect(sent.compactMap(\.method) == ["initialize"])
+        #expect(await transport.closeCount() == 1)
+    }
+
     @Test func listToolsDecodesDescriptorAndPreservesDynamicFields() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
@@ -592,16 +629,25 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
 
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
+    private let initializeResult: MCPJSONValue
     private let sentMessageValues = RecordedValues<SentMessage>()
     private let closeValues = RecordedValues<Int>()
     private var messages: [SentMessage] = []
     private var closed = false
     private var closes = 0
 
-    init() {
+    init(initializeResult: MCPJSONValue = .object([
+        "protocolVersion": .string("2025-06-18"),
+        "serverInfo": .object([
+            "name": .string("fake-mcpbridge"),
+            "version": .string("test"),
+        ]),
+        "capabilities": .object([:]),
+    ])) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
+        self.initializeResult = initializeResult
     }
 
     func send(_ data: Data) async throws {
@@ -706,14 +752,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     private func responseResult(method: String, params: MCPJSONValue?) -> MCPJSONValue {
         switch method {
         case "initialize":
-            return .object([
-                "protocolVersion": .string("2025-06-18"),
-                "serverInfo": .object([
-                    "name": .string("fake-mcpbridge"),
-                    "version": .string("test"),
-                ]),
-                "capabilities": .object([:]),
-            ])
+            return initializeResult
         case "tools/list":
             return .object([
                 "tools": .array([
