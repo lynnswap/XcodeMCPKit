@@ -123,6 +123,61 @@ extension MCPJSONValue: ExpressibleByDictionaryLiteral {
 }
 
 extension MCPJSONValue {
+    /// Returns the object dictionary when this value is a JSON object.
+    public var objectValue: [String: MCPJSONValue]? {
+        guard case .object(let value) = self else { return nil }
+        return value
+    }
+
+    /// Returns the array elements when this value is a JSON array.
+    public var arrayValue: [MCPJSONValue]? {
+        guard case .array(let value) = self else { return nil }
+        return value
+    }
+
+    /// Returns the Swift string when this value is a JSON string.
+    public var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
+    }
+
+    /// Returns the Swift boolean when this value is a JSON boolean.
+    public var boolValue: Bool? {
+        guard case .bool(let value) = self else { return nil }
+        return value
+    }
+
+    /// Returns the integer when this value is an integer JSON number.
+    public var integerValue: Int64? {
+        guard case .integer(let value) = self else { return nil }
+        return value
+    }
+
+    /// Returns the integer when this value is an integer JSON number.
+    public var intValue: Int64? {
+        integerValue
+    }
+
+    /// Returns the numeric value as a `Double` when this value is any JSON
+    /// number.
+    public var doubleValue: Double? {
+        switch self {
+        case .integer(let value):
+            return Double(value)
+        case .double(let value):
+            return value
+        case .object, .array, .string, .bool, .null:
+            return nil
+        }
+    }
+
+    /// Whether this value is JSON null.
+    public var isNull: Bool {
+        self == .null
+    }
+}
+
+extension MCPJSONValue {
     package init(_ value: JSONValue) {
         switch value {
         case .object(let values):
@@ -175,29 +230,4 @@ extension MCPJSONValue {
         }
     }
 
-    package var objectValue: [String: MCPJSONValue]? {
-        guard case .object(let value) = self else { return nil }
-        return value
-    }
-
-    package var arrayValue: [MCPJSONValue]? {
-        guard case .array(let value) = self else { return nil }
-        return value
-    }
-
-    package var stringValue: String? {
-        guard case .string(let value) = self else { return nil }
-        return value
-    }
-
-    package var doubleValue: Double? {
-        switch self {
-        case .integer(let value):
-            return Double(value)
-        case .double(let value):
-            return value
-        case .object, .array, .string, .bool, .null:
-            return nil
-        }
-    }
 }
