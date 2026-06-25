@@ -320,8 +320,12 @@ public actor XcodeMCP {
         }
     }
 
-    deinit {
+    isolated deinit {
         eventTask?.cancel()
+        let transport = transport
+        Task {
+            await transport.close()
+        }
     }
 
     /// Returns the currently available Xcode MCP tools.

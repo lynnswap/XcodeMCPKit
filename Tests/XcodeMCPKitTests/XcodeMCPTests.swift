@@ -129,6 +129,20 @@ struct XcodeMCPTests {
         }
     }
 
+    @Test func deinitClosesTransportWhenCloseWasNotCalled() async throws {
+        let transport = FakeXcodeMCPTransport()
+        do {
+            let xcode = try await XcodeMCP(transport: transport)
+            _ = try await xcode.listTools()
+        }
+
+        let closeCount = try await waitWithTimeout("transport was not closed from XcodeMCP deinit") {
+            try await transport.nextCloseCount()
+        }
+        #expect(closeCount == 1)
+        #expect(await transport.closeCount() == 1)
+    }
+
     @Test func cancelledRequestCancelsInFlightTransportSend() async throws {
         let transport = HangingSendXcodeMCPTransport()
         let xcode = try await XcodeMCP(
@@ -579,6 +593,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
 
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let sentMessageValues = RecordedValues<SentMessage>()
+    private let closeValues = RecordedValues<Int>()
     private var messages: [SentMessage] = []
     private var closed = false
     private var closes = 0
@@ -638,6 +653,8 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         }
         closed = true
         closes += 1
+        let closeCount = closes
+        await closeValues.append(closeCount)
         continuation.yield(.closed(nil))
         continuation.finish()
     }
@@ -663,6 +680,10 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
 
     func closeCount() -> Int {
         closes
+    }
+
+    func nextCloseCount() async throws -> Int {
+        try await closeValues.nextValue()
     }
 
     private func yieldMessage(_ object: [String: MCPJSONValue]) throws {
