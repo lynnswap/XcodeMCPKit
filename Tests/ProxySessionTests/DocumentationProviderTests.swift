@@ -46,20 +46,20 @@ extension RuntimeCoordinatorTests {
             initializeParams: [:]
         )
 
+        let closeFinished = TestSignal()
         let closeTask = Task {
             await transport.close(route: route)
+            closeFinished.signal()
         }
         try await stopStarted.wait(description: "waiting for provider session stop")
 
-        try await waitWithTimeout(
-            "documentation provider close should not wait for session stop drain",
-            timeout: .milliseconds(200)
-        ) {
-            await closeTask.value
-        }
+        try await closeFinished.wait(
+            description: "documentation provider close should not wait for session stop drain"
+        )
 
         #expect(await session.stopCount() == 1)
         await stopGate.signal()
+        await closeTask.value
     }
 
     @Test func sessionBackedDocumentationProviderShutdownWaitsForDetachedSessionStopDrain()
@@ -81,16 +81,16 @@ extension RuntimeCoordinatorTests {
             requestTimeout: .seconds(1),
             initializeParams: [:]
         )
+        let closeFinished = TestSignal()
         let closeTask = Task {
             await transport.close(route: route)
+            closeFinished.signal()
         }
         try await stopStarted.wait(description: "waiting for detached provider session stop")
-        try await waitWithTimeout(
-            "documentation provider close should detach session stop",
-            timeout: .milliseconds(200)
-        ) {
-            await closeTask.value
-        }
+        try await closeFinished.wait(
+            description: "documentation provider close should detach session stop"
+        )
+        await closeTask.value
 
         let shutdownFinished = TestSignal()
         let shutdownStarted = TestSignal()

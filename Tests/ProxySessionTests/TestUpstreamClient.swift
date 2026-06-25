@@ -80,10 +80,12 @@ actor BlockingInitializedNotificationUpstreamClient: UpstreamSlotControlling {
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let sentMessages = RecordedValues<Data>()
     private let blockedSignal = TestSignal()
+    private let stopStarted: TestSignal?
     private var shouldBlockInitializedNotification = false
     private var blockedInitializedNotification: CheckedContinuation<Upstream.SendResult, Never>?
 
-    init() {
+    init(stopStarted: TestSignal? = nil) {
+        self.stopStarted = stopStarted
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
@@ -94,6 +96,7 @@ actor BlockingInitializedNotificationUpstreamClient: UpstreamSlotControlling {
     func start() async {}
 
     func stop() async {
+        stopStarted?.signal()
         continuation.finish()
         releaseBlockedInitializedNotification(.backpressure)
     }

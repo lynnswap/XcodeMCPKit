@@ -6943,7 +6943,8 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
-        let upstream1 = BlockingInitializedNotificationUpstreamClient()
+        let upstream1StopStarted = TestSignal()
+        let upstream1 = BlockingInitializedNotificationUpstreamClient(stopStarted: upstream1StopStarted)
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -6975,10 +6976,10 @@ struct RuntimeCoordinatorTests {
         }
 
         do {
-            try await shutdownFinished.wait(
-                timeout: .milliseconds(500),
+            try await upstream1StopStarted.wait(
                 description: "shutdown should stop upstreams before draining blocked runtime tasks"
             )
+            try await shutdownFinished.wait(description: "waiting for runtime shutdown")
         } catch {
             await upstream1.releaseBlockedInitializedNotification(.backpressure)
             await shutdownTask.value
