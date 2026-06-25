@@ -5,16 +5,17 @@ Swift library API for embedding and composing the Xcode MCP proxy products.
 ## Status
 
 `XcodeMCPProxyKit` is the public product kit used by the proxy executables. The
-CLIs parse command-line options and then construct high-level facade types from
-this target, so the package boundary is real and does not rely on private
-wrappers in executable targets.
+CLIs hand argv/environment and output sinks to high-level facade types from this
+target, so the package boundary is real and does not rely on private wrappers in
+executable targets.
 
 This target owns:
 
 - `XcodeMCPProxyServer`, the embeddable proxy server lifecycle object
-- server launch plan resolution from argv/environment
-- product metadata, version line, dry-run, force-restart, and port-in-use
-  diagnostics for server launchers
+- server launch plan resolution and launch runtime orchestration from
+  argv/environment
+- product metadata, version line, dry-run, force-restart, server start/wait, and
+  port-in-use diagnostics for server launchers
 - `XcodeMCPProxyStdioAdapter`, the STDIO compatibility adapter facade
 - `XcodeMCPProxyAdapterEndpointResolver`, the adapter endpoint resolver
 - `XcodeMCPProxyInstaller`, the install plan and copy/build policy facade
@@ -125,6 +126,9 @@ case .start:
 messages are represented by `XcodeMCPProxyServer.PortInUseError`, and product
 version information is available through
 `XcodeMCPProxyServer.productMetadata`.
+The package executable uses a package-level launcher facade to execute the same
+plan, keeping force-restart, start/wait, and port-in-use diagnostics inside this
+target.
 
 ## STDIO Adapter
 

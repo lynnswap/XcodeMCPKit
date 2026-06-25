@@ -148,6 +148,100 @@ struct XcodeMCPProxyServerTests {
         #expect(config.refreshCodeIssuesMode == .upstream)
     }
 
+    @Test func existingServerControllerHostMatchingHandlesLoopbackAndWildcard() throws {
+        #expect(
+            XcodeMCPProxyServer.ExistingServerController.hostMatches(
+                requestedHost: "localhost",
+                actualHost: "127.0.0.1"
+            )
+        )
+        #expect(
+            XcodeMCPProxyServer.ExistingServerController.hostMatches(
+                requestedHost: "::",
+                actualHost: "127.0.0.1"
+            )
+        )
+        #expect(
+            XcodeMCPProxyServer.ExistingServerController.hostMatches(
+                requestedHost: "127.0.0.1",
+                actualHost: "::1"
+            ) == false
+        )
+    }
+
+    @Test func existingServerControllerExtractsListeningPIDsFromLsofFieldOutputForLocalhost() throws {
+        let output = """
+        p51731
+        f9
+        n127.0.0.1:8765
+        f13
+        n[::1]:8765
+        p60000
+        f8
+        n10.0.0.5:8765
+        """
+
+        #expect(
+            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+                fromLsofOutput: output,
+                matchingHost: "localhost"
+            ) == [51731]
+        )
+    }
+
+    @Test func existingServerControllerExtractsListeningPIDsFromLsofFieldOutputSkipsNonMatchingHosts() throws {
+        let output = """
+        p51731
+        f9
+        n[::1]:8765
+        p60000
+        f8
+        n10.0.0.5:8765
+        """
+
+        #expect(
+            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+                fromLsofOutput: output,
+                matchingHost: "127.0.0.1"
+            )
+            .isEmpty
+        )
+    }
+
+    @Test func existingServerControllerExtractsListeningPIDsFromLegacyTCPNames() throws {
+        let output = """
+        p111
+        f9
+        nTCP 127.0.0.1:8765 (LISTEN)
+        p222
+        f13
+        nTCP [::1]:8765 (LISTEN)
+        p333
+        f8
+        nTCP 10.0.0.5:8765 (LISTEN)
+        """
+
+        #expect(
+            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
+                fromLsofOutput: output,
+                matchingHost: "localhost"
+            ) == [111, 222]
+        )
+    }
+
+    @Test func portInUseDiagnosticFormatsMessage() throws {
+        let message = XcodeMCPProxyServer.PortInUseError(
+            host: "::1",
+            port: 8765,
+            processIdentifiers: [111, 222]
+        )
+        .description
+
+        #expect(message.contains("listen [::1]:8765"))
+        #expect(message.contains("pids: 111, 222"))
+        #expect(message.contains("--force-restart"))
+    }
+
     @Test func startDoesNotLaunchRuntimeLifecycleWhenBindFails() async throws {
         let blockerGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let blocker = try await ServerBootstrap(group: blockerGroup)

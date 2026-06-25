@@ -95,22 +95,16 @@ struct ServerCommandTests {
 
     @Test func serverCommandPrintsVersionBeforeValidation() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { _ in },
-                terminateExistingServer: { _, _ in
-                    Issue.record("terminateExistingServer should not be called for --version")
-                    return false
-                },
-                makeServer: { _ in
-                    Issue.record("makeServer should not be called for --version")
-                    return RecordingProxyServer()
-                },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            forceRestartExistingServer: { _, _, _ in
+                Issue.record("forceRestartExistingServer should not be called for --version")
+                return false
+            },
+            makeServer: { _ in
+                Issue.record("makeServer should not be called for --version")
+                return RecordingProxyServer()
+            }
         )
 
         let exitCode = await command.run(
@@ -124,22 +118,16 @@ struct ServerCommandTests {
 
     @Test func serverCommandPrintsVersionWhenFlagAppearsAsConfigValue() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { _ in },
-                terminateExistingServer: { _, _ in
-                    Issue.record("terminateExistingServer should not be called for --version")
-                    return false
-                },
-                makeServer: { _ in
-                    Issue.record("makeServer should not be called for --version")
-                    return RecordingProxyServer()
-                },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            forceRestartExistingServer: { _, _, _ in
+                Issue.record("forceRestartExistingServer should not be called for --version")
+                return false
+            },
+            makeServer: { _ in
+                Issue.record("makeServer should not be called for --version")
+                return RecordingProxyServer()
+            }
         )
 
         let exitCode = await command.run(
@@ -154,19 +142,13 @@ struct ServerCommandTests {
     @Test func serverCommandHelpWinsOverVersion() async throws {
         let output = CapturedLines()
         let errors = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { errors.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in
-                    Issue.record("makeServer should not be called for --help")
-                    return RecordingProxyServer()
-                },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { errors.append($0) },
+            makeServer: { _ in
+                Issue.record("makeServer should not be called for --help")
+                return RecordingProxyServer()
+            }
         )
 
         let exitCode = await command.run(
@@ -183,19 +165,13 @@ struct ServerCommandTests {
     @Test func serverCommandHelpWinsOverVersionWhenRefreshModeValueIsMissing() async throws {
         let output = CapturedLines()
         let errors = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { errors.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in
-                    Issue.record("makeServer should not be called for --help")
-                    return RecordingProxyServer()
-                },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { errors.append($0) },
+            makeServer: { _ in
+                Issue.record("makeServer should not be called for --help")
+                return RecordingProxyServer()
+            }
         )
 
         let exitCode = await command.run(
@@ -216,16 +192,9 @@ struct ServerCommandTests {
 
     @Test func serverCommandRejectsRemovedLazyInitEnvironment() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { output.append($0) }
         )
 
         let exitCode = await command.run(
@@ -242,16 +211,9 @@ struct ServerCommandTests {
 
     @Test func serverCommandRejectsRemovedLazyInitFlagBeforeDryRun() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { output.append($0) }
         )
 
         let exitCode = await command.run(
@@ -268,16 +230,9 @@ struct ServerCommandTests {
 
     @Test func serverCommandRejectsRemovedXcodePIDFlagBeforeDryRun() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { output.append($0) }
         )
 
         let exitCode = await command.run(
@@ -292,119 +247,18 @@ struct ServerCommandTests {
         ])
     }
 
-    @Test func proxyKitPortInUseDiagnosticFormatsMessage() throws {
-        let message = XcodeMCPProxyServer.PortInUseError(
-            host: "::1",
-            port: 8765,
-            processIdentifiers: [111, 222]
-        )
-        .description
-
-        #expect(message.contains("listen [::1]:8765"))
-        #expect(message.contains("pids: 111, 222"))
-        #expect(message.contains("--force-restart"))
-    }
-
-    @Test func proxyKitExistingServerControllerHostMatchingHandlesLoopbackAndWildcard() throws {
-        #expect(
-            XcodeMCPProxyServer.ExistingServerController.hostMatches(
-                requestedHost: "localhost",
-                actualHost: "127.0.0.1"
-            )
-        )
-        #expect(
-            XcodeMCPProxyServer.ExistingServerController.hostMatches(
-                requestedHost: "::",
-                actualHost: "127.0.0.1"
-            )
-        )
-        #expect(
-            XcodeMCPProxyServer.ExistingServerController.hostMatches(
-                requestedHost: "127.0.0.1",
-                actualHost: "::1"
-            ) == false
-        )
-    }
-
-    @Test func proxyKitExistingServerControllerExtractsListeningPIDsFromLsofFieldOutputForLocalhost() throws {
-        let output = """
-        p51731
-        f9
-        n127.0.0.1:8765
-        f13
-        n[::1]:8765
-        p60000
-        f8
-        n10.0.0.5:8765
-        """
-
-        #expect(
-            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
-                fromLsofOutput: output,
-                matchingHost: "localhost"
-            ) == [51731]
-        )
-    }
-
-    @Test func proxyKitExistingServerControllerExtractsListeningPIDsFromLsofFieldOutputSkipsNonMatchingHosts() throws {
-        let output = """
-        p51731
-        f9
-        n[::1]:8765
-        p60000
-        f8
-        n10.0.0.5:8765
-        """
-
-        #expect(
-            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
-                fromLsofOutput: output,
-                matchingHost: "127.0.0.1"
-            )
-            .isEmpty
-        )
-    }
-
-    @Test func proxyKitExistingServerControllerExtractsListeningPIDsFromLegacyTCPNames() throws {
-        let output = """
-        p111
-        f9
-        nTCP 127.0.0.1:8765 (LISTEN)
-        p222
-        f13
-        nTCP [::1]:8765 (LISTEN)
-        p333
-        f8
-        nTCP 10.0.0.5:8765 (LISTEN)
-        """
-
-        #expect(
-            XcodeMCPProxyServer.ExistingServerController.listeningProcessIDs(
-                fromLsofOutput: output,
-                matchingHost: "localhost"
-            ) == [111, 222]
-        )
-    }
-
     @Test func serverCommandInvokesForceRestartBeforeStartingInjectedServer() async throws {
         let restarted = CapturedLines()
         let fakeServer = RecordingProxyServer()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                stderr: { _ in },
-                terminateExistingServer: { host, port in
-                    restarted.append("\(host):\(port)")
-                    return true
-                },
-                makeServer: { config in
-                    fakeServer.record(config: config)
-                    return fakeServer
-                },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            forceRestartExistingServer: { host, port, _ in
+                restarted.append("\(host):\(port)")
+                return true
+            },
+            makeServer: { config in
+                fakeServer.record(config: config)
+                return fakeServer
+            }
         )
 
         let exitCode = await command.run(
@@ -425,28 +279,21 @@ struct ServerCommandTests {
         #expect(fakeServer.waitCount() == 1)
     }
 
-    @Test func serverCommandUsesExistingServerControllerForForceRestart() async throws {
+    @Test func serverCommandEmitsLauncherForceRestartWarnings() async throws {
         let restarted = CapturedLines()
         let warnings = CapturedLines()
         let fakeServer = RecordingProxyServer()
-        var existingServerController = XcodeMCPProxyServer.ExistingServerController.testValue
-        existingServerController.terminateExistingServer = { host, port, emitWarning in
-            restarted.append("\(host):\(port)")
-            emitWarning("fake restart warning")
-            return true
-        }
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                stderr: { warnings.append($0) },
-                makeServer: { config in
-                    fakeServer.record(config: config)
-                    return fakeServer
-                },
-                isAddressAlreadyInUse: { _ in false },
-                existingServerController: existingServerController
-            )
+        let command = makeServerCommand(
+            stderr: { warnings.append($0) },
+            forceRestartExistingServer: { host, port, emitWarning in
+                restarted.append("\(host):\(port)")
+                emitWarning("fake restart warning")
+                return true
+            },
+            makeServer: { config in
+                fakeServer.record(config: config)
+                return fakeServer
+            }
         )
 
         let exitCode = await command.run(
@@ -466,16 +313,11 @@ struct ServerCommandTests {
 
     @Test func serverCommandReportsPortInUseThroughProxyKitDiagnostic() async throws {
         let errors = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                stderr: { errors.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in FailingProxyServer(error: AddressAlreadyInUseError()) },
-                isAddressAlreadyInUse: { _ in true },
-                detectExistingProxyServerPIDs: { _, _ in [321] }
-            )
+        let command = makeServerCommand(
+            stderr: { errors.append($0) },
+            makeServer: { _ in FailingProxyServer(error: AddressAlreadyInUseError()) },
+            isAddressAlreadyInUse: { _ in true },
+            detectExistingServerProcessIDs: { _, _ in [321] }
         )
 
         let exitCode = await command.run(
@@ -487,28 +329,18 @@ struct ServerCommandTests {
         )
 
         #expect(exitCode == 1)
-        #expect(errors.snapshot() == [
-            XcodeMCPProxyServer.PortInUseError(
-                host: "127.0.0.1",
-                port: 9002,
-                processIdentifiers: [321]
-            )
-            .description,
-        ])
+        let diagnostic = try #require(errors.snapshot().first)
+        #expect(errors.snapshot().count == 1)
+        #expect(diagnostic.contains("listen 127.0.0.1:9002"))
+        #expect(diagnostic.contains("pid: 321"))
+        #expect(diagnostic.contains("--force-restart"))
     }
 
     @Test func serverCommandDryRunPrintsResolvedCommandFromLaunchPlan() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { output.append($0) }
         )
 
         let exitCode = await command.run(
@@ -530,16 +362,9 @@ struct ServerCommandTests {
 
     @Test func serverCommandDryRunPrintsAutoApproveWhenExplicitlyEnabled() async throws {
         let output = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { output.append($0) }
         )
 
         let exitCode = await command.run(
@@ -555,16 +380,9 @@ struct ServerCommandTests {
     @Test func serverCommandTreatsHelpOnlyAsTopLevelFlag() async throws {
         let output = CapturedLines()
         let errors = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { errors.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { errors.append($0) }
         )
 
         let exitCode = await command.run(
@@ -586,16 +404,9 @@ struct ServerCommandTests {
     @Test func serverCommandPreservesExplicitHelpBeforeLaterParseErrors() async throws {
         let output = CapturedLines()
         let errors = CapturedLines()
-        let command = XcodeMCPProxyServerCommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { output.append($0) },
-                stderr: { errors.append($0) },
-                terminateExistingServer: { _, _ in false },
-                makeServer: { _ in RecordingProxyServer() },
-                isAddressAlreadyInUse: { _ in false },
-                detectExistingProxyServerPIDs: { _, _ in [] }
-            )
+        let command = makeServerCommand(
+            stdout: { output.append($0) },
+            stderr: { errors.append($0) }
         )
 
         let exitCode = await command.run(
@@ -613,9 +424,39 @@ struct ServerCommandTests {
     }
 }
 
+private func makeServerCommand(
+    stdout: @escaping (String) -> Void = { _ in },
+    stderr: @escaping (String) -> Void = { _ in },
+    forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
+        _, _, _ in false
+    },
+    makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
+        RecordingProxyServer()
+    },
+    isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool = { _ in false },
+    detectExistingServerProcessIDs: @escaping (_ host: String, _ port: Int) -> [Int] = { _, _ in [] }
+) -> XcodeMCPProxyServerCommand {
+    let launcher = XcodeMCPProxyServer.Launcher(
+        dependencies: .init(
+            makeServer: makeServer,
+            isAddressAlreadyInUse: isAddressAlreadyInUse,
+            forceRestartExistingServer: forceRestartExistingServer,
+            detectExistingServerProcessIDs: detectExistingServerProcessIDs
+        )
+    )
+    return XcodeMCPProxyServerCommand(
+        dependencies: .init(
+            bootstrapLogging: { _ in },
+            stdout: stdout,
+            stderr: stderr,
+            launcher: launcher
+        )
+    )
+}
+
 private struct AddressAlreadyInUseError: Error {}
 
-private final class FailingProxyServer: ProxyServerCommandServer {
+private final class FailingProxyServer: XcodeMCPProxyServer.LaunchServer {
     private let error: any Error
 
     init(error: any Error) {
@@ -631,7 +472,7 @@ private final class FailingProxyServer: ProxyServerCommandServer {
     }
 }
 
-private final class RecordingProxyServer: ProxyServerCommandServer {
+private final class RecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
     private let state = LockedBox(
         (config: Optional<XcodeMCPProxyServer.Configuration>.none, startCount: 0, waitCount: 0)
     )
