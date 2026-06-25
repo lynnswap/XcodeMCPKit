@@ -39,15 +39,23 @@ public final class XcodeMCPProxyServer {
         }
 
         private static func makeURL(host: String, port: Int) -> URL {
+            let urlHost = urlAuthorityHost(host)
             var components = URLComponents()
             components.scheme = "http"
-            components.host = host
+            components.host = urlHost
             components.port = port
             components.path = "/mcp"
             if let url = components.url {
                 return url
             }
-            return URL(string: "http://\(host):\(port)/mcp")!
+            return URL(string: "http://\(urlHost):\(port)/mcp")!
+        }
+
+        private static func urlAuthorityHost(_ host: String) -> String {
+            if host.contains(":"), !host.hasPrefix("[") {
+                return "[\(host)]"
+            }
+            return host
         }
     }
 

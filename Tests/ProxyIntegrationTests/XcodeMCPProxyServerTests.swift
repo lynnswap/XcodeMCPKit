@@ -10,6 +10,20 @@ import XcodeMCPTestSupport
 @testable import XcodeMCPProxyKit
 
 struct XcodeMCPProxyServerTests {
+    @Test func endpointURLBracketsIPv6LiteralHosts() {
+        let endpoint = XcodeMCPProxyServer.Endpoint(host: "::1", port: 8765)
+
+        #expect(endpoint.host == "::1")
+        #expect(endpoint.port == 8765)
+        #expect(endpoint.url.absoluteString == "http://[::1]:8765/mcp")
+    }
+
+    @Test func endpointURLPreservesNonIPv6Hosts() {
+        let endpoint = XcodeMCPProxyServer.Endpoint(host: "127.0.0.1", port: 8765)
+
+        #expect(endpoint.url.absoluteString == "http://127.0.0.1:8765/mcp")
+    }
+
     @Test func firstXcrunToolSelectionTreatsLogAsFlagWithoutValue() {
         let selection = XcrunArguments.firstToolSelection(
             from: ["--sdk", "macosx", "--log", "mcpbridge", "--some-flag"]
