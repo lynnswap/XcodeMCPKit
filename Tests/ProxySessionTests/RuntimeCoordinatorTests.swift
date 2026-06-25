@@ -1381,8 +1381,14 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 0.1)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let timeoutClock = TestClock()
+        let config = makeConfig(requestTimeout: 1)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-timeout-recreated"
@@ -1395,13 +1401,25 @@ struct RuntimeCoordinatorTests {
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        try await waitWithTimeout(
+            "waiting for initialize timeout sleeper",
+            timeout: .seconds(2)
+        ) {
+            await timeoutClock.sleep(untilSuspendedBy: 1)
+        }
 
         manager.removeSession(id: sessionID)
         _ = manager.session(id: sessionID)
         let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
+        timeoutClock.advance(by: .seconds(1))
 
-        await #expect(throws: TimeoutError.self) {
-            try await future.get()
+        try await waitWithTimeout(
+            "waiting for deterministic initialize timeout",
+            timeout: .seconds(2)
+        ) {
+            await #expect(throws: TimeoutError.self) {
+                try await future.get()
+            }
         }
 
         let replacementSnapshotAfterTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
@@ -6424,10 +6442,11 @@ struct RuntimeCoordinatorTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
+        let timeoutEventLoop = NIOAsyncTestingEventLoop()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
-        let config = makeConfig(requestTimeout: 0.3)
+        let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
@@ -6457,7 +6476,7 @@ struct RuntimeCoordinatorTests {
 
         // Send a request to upstream1, then kill upstream1 before it can respond.
         let originalA = JSONRPC.ID(any: NSNumber(value: 200))!
-        let futureA = session.router.registerRequest(idKey: originalA.key, on: eventLoop)
+        let futureA = session.router.registerRequest(idKey: originalA.key, on: timeoutEventLoop)
         let upstreamIDA = manager.assignUpstreamID(
             sessionID: sessionID, originalID: originalA, upstreamIndex: 1)
         manager.sendUpstream(try makeToolListRequest(id: upstreamIDA), upstreamIndex: 1)
@@ -6481,20 +6500,30 @@ struct RuntimeCoordinatorTests {
             sessionID: sessionID, originalID: originalB, upstreamIndex: upstreamIndexB)
         manager.sendUpstream(
             try makeToolListRequest(id: upstreamIDB), upstreamIndex: upstreamIndexB)
+        try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
+        let responseEventIndex = upstreamEvents.count()
         await upstream0.yield(.message(try makeToolListResponse(id: upstreamIDB)))
-        _ = try await futureB.get()
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: responseEventIndex,
+            description: "waiting for surviving upstream response"
+        )
+        _ = try await waitWithTimeout(
+            "waiting for request routed to surviving upstream",
+            timeout: .seconds(2)
+        ) {
+            try await futureB.get()
+        }
 
         // A should time out (mapping is cleared on exit, and no response arrives).
-        do {
-            _ = try await waitWithTimeout(
-                "request routed to exited upstream should fail with TimeoutError",
-                timeout: .seconds(2)
-            ) {
+        await timeoutEventLoop.advanceTime(by: .seconds(5))
+        try await waitWithTimeout(
+            "waiting for exited upstream request timeout",
+            timeout: .seconds(2)
+        ) {
+            await #expect(throws: TimeoutError.self) {
                 try await futureA.get()
             }
-            #expect(Bool(false))
-        } catch {
-            #expect(error is TimeoutError)
         }
     }
 
