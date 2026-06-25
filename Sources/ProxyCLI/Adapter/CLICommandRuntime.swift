@@ -1,8 +1,7 @@
 import Foundation
 import Logging
-import ProxyBuildInfo
 import ProxyCLICommon
-import ProxyCore
+import XcodeMCPProxyKit
 
 extension XcodeMCPProxyCLICommand {
     package struct Runtime {
@@ -22,7 +21,7 @@ extension XcodeMCPProxyCLICommand {
 
         if invocation.showVersion {
             dependencies.stdout(
-                ProxyBuildInfo.versionLine(
+                XcodeMCPProxyServer.productMetadata.versionLine(
                     arguments: args,
                     defaultExecutableName: "xcode-mcp-proxy"
                 )
@@ -53,36 +52,41 @@ extension XcodeMCPProxyCLICommand {
         }
 
         do {
-            var parseArgs = args
             if invocation.hasExplicitURL && invocation.hasStdioFlag {
-                throw CLIError.message("Use either --url or --stdio (not both).")
-            }
-            if invocation.hasExplicitURL {
-                parseArgs = try XcodeMCPProxyCLICommand.rewriteURLFlagToStdio(parseArgs)
-            }
-
-            if !parseArgs.contains("--stdio") {
-                parseArgs.append("--stdio")
+                throw XcodeMCPProxyCLICommand.Error.message(
+                    "Use either --url or --stdio (not both)."
+                )
             }
 
-            let config = try CLIParser.parse(args: parseArgs, environment: environment)
-            guard let upstreamURL = config.stdioUpstreamURL else {
-                logSink.error("Missing upstream URL (start xcode-mcp-proxy-server).")
-                return 1
-            }
+            let options = try XcodeMCPProxyCLICommand.parseOptions(args)
+            let endpoint = try XcodeMCPProxyAdapterEndpointResolver().resolve(
+                .init(
+                    explicitURL: options.explicitURL,
+                    explicitURLLabel: options.explicitURLLabel,
+                    environment: environment
+                )
+            )
 
-            logResolvedUpstream(config: config, upstreamURL: upstreamURL, logSink: logSink)
+            logResolvedUpstream(
+                endpoint: endpoint,
+                environment: environment,
+                logSink: logSink
+            )
 
             let adapter = dependencies.makeAdapter(
-                upstreamURL,
-                config.requestTimeout,
+                endpoint,
+                options.requestTimeout,
                 dependencies.input,
                 dependencies.output
             )
             await adapter.start()
             await adapter.wait()
             return 0
-        } catch let error as CLIError {
+        } catch let error as XcodeMCPProxyCLICommand.Error {
+            logSink.error(error.description)
+            logSink.error(XcodeMCPProxyCLICommand.usage())
+            return 1
+        } catch let error as XcodeMCPProxyAdapterEndpointResolver.Error {
             logSink.error(error.description)
             logSink.error(XcodeMCPProxyCLICommand.usage())
             return 1
@@ -93,22 +97,21 @@ extension XcodeMCPProxyCLICommand {
     }
 
     private func logResolvedUpstream(
-        config: ProxyConfig,
-        upstreamURL: URL,
+        endpoint: XcodeMCPProxyAdapterEndpoint,
+        environment: [String: String],
         logSink: XcodeMCPProxyCLICommand.LogSink
     ) {
-        let url = upstreamURL.absoluteString
-        guard let source = config.stdioUpstreamSource else {
-            return
-        }
-
-        switch source {
+        let url = endpoint.url.absoluteString
+        switch endpoint.source {
         case .discovery:
+            let discoveryPath = XcodeMCPProxyAdapterEndpointResolver.discoveryFileURL(
+                environment: environment
+            ).path
             logSink.info(
                 "STDIO upstream resolved from discovery file",
                 [
                     "url": "\(url)",
-                    "path": "\(config.discoveryFileURL?.path ?? Discovery.defaultFileURL.path)",
+                    "path": "\(discoveryPath)",
                 ]
             )
         case .fallback:

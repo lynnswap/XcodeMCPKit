@@ -1,10 +1,10 @@
 import Foundation
 import ProxyCLICommon
-import ProxyCore
+import XcodeMCPProxyKit
 
 extension XcodeMCPProxyInstallCommand {
     package static func scanInvocation(_ args: [String]) -> XcodeMCPProxyInstallCommand.Invocation {
-        let scan = CLI.InvocationScanner.scanInstall(args)
+        let scan = ProxyCLIInvocationScanner.scanInstall(args)
         var invocation = XcodeMCPProxyInstallCommand.Invocation()
         invocation.showHelp = scan.showHelp
         invocation.showVersion = scan.showVersion
@@ -29,58 +29,42 @@ extension XcodeMCPProxyInstallCommand {
         """
     }
 
-    package static func expandPath(_ path: String) -> String {
-        if path.hasPrefix("~") {
-            return (path as NSString).expandingTildeInPath
-        }
-        return path
-    }
-
     package static func parseOptions(
         _ args: [String],
         environment: [String: String]
     ) throws -> XcodeMCPProxyInstallCommand.Options {
-        var options = XcodeMCPProxyInstallCommand.Options(
+        var options = XcodeMCPProxyInstaller.Configuration(
             prefix: environment["PREFIX"],
             bindir: environment["BINDIR"],
             dryRun: false
         )
 
-        var cursor = CLI.ArgumentCursor(args: args)
-        while let arg = cursor.current {
+        var index = 1
+        while index < args.count {
+            let arg = args[index]
             switch arg {
             case "-h", "--help":
-                options.showHelp = true
-                cursor.advance()
+                index += 1
             case "--prefix":
-                options.prefix = try cursor.requiredValue(
-                    for: arg,
-                    error: { XcodeMCPProxyInstallCommand.Error.message("\($0) requires a value") }
-                )
+                guard index + 1 < args.count else {
+                    throw XcodeMCPProxyInstallCommand.Error.message("\(arg) requires a value")
+                }
+                options.prefix = args[index + 1]
+                index += 2
             case "--bindir":
-                options.bindir = try cursor.requiredValue(
-                    for: arg,
-                    error: { XcodeMCPProxyInstallCommand.Error.message("\($0) requires a value") }
-                )
+                guard index + 1 < args.count else {
+                    throw XcodeMCPProxyInstallCommand.Error.message("\(arg) requires a value")
+                }
+                options.bindir = args[index + 1]
+                index += 2
             case "--dry-run":
                 options.dryRun = true
-                cursor.advance()
+                index += 1
             default:
                 throw XcodeMCPProxyInstallCommand.Error.message("unknown option: \(arg)")
             }
         }
 
         return options
-    }
-
-    package static func resolveBinDir(prefix: String?, bindir: String?) -> URL {
-        if let bindir {
-            return URL(fileURLWithPath: expandPath(bindir), isDirectory: true)
-        }
-
-        let defaultPrefix = prefix ?? "\(NSHomeDirectory())/.local"
-        let expandedPrefix = expandPath(defaultPrefix)
-        return URL(fileURLWithPath: expandedPrefix, isDirectory: true)
-            .appendingPathComponent("bin", isDirectory: true)
     }
 }

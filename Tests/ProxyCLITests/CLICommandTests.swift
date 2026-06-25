@@ -4,6 +4,7 @@ import Testing
 import ProxyAdapterCLI
 import ProxyBuildInfo
 import ProxyCLICommon
+import XcodeMCPProxyKit
 
 @Suite
 struct CLICommandTests {
@@ -303,9 +304,9 @@ struct CLICommandTests {
                         info: { _, _ in }
                     )
                 },
-                makeAdapter: { url, timeout, _, _ in
+                makeAdapter: { endpoint, timeout, _, _ in
                     captured.withValue { value in
-                        value = (url, timeout)
+                        value = (endpoint.url, timeout)
                     }
                     return createdAdapter
                 },

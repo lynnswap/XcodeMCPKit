@@ -47,6 +47,7 @@ Custom install directory:
 ```bash
 swift run -c release xcode-mcp-proxy-install --prefix "$HOME/.local"
 swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
+swift run -c release xcode-mcp-proxy-install --dry-run
 ```
 
 Add to `PATH`:
@@ -83,9 +84,9 @@ framing, and session transport are internal implementation details.
 ## Embed or Launch the Proxy Server
 
 Add the `XcodeMCPProxyKit` library product to embed the Streamable HTTP proxy
-server. Apps can construct `XcodeMCPProxyServer.Configuration` directly, or
-normalize the same argv/environment accepted by `xcode-mcp-proxy-server` into a
-launch plan:
+server, run the STDIO adapter facade, or compose source installs. Apps can
+construct `XcodeMCPProxyServer.Configuration` directly, or normalize the same
+argv/environment accepted by `xcode-mcp-proxy-server` into a launch plan:
 
 ```swift
 import XcodeMCPProxyKit
@@ -105,6 +106,11 @@ if plan.action == .start, let config = plan.configuration {
 `LaunchPlan` also carries help/version text, `--dry-run` output,
 `--force-restart`, and product metadata so launchers do not need to compose the
 lower-level parser or config types directly.
+
+`XcodeMCPProxyKit` also exposes `XcodeMCPProxyStdioAdapter`,
+`XcodeMCPProxyAdapterEndpointResolver`, and `XcodeMCPProxyInstaller`. The STDIO
+adapter endpoint order is explicit URL, `XCODE_MCP_PROXY_ENDPOINT`, discovery
+file, then `http://localhost:8765/mcp`.
 
 ## Set Up Your MCP Client
 

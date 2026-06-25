@@ -1,10 +1,10 @@
 import Foundation
 import ProxyCLICommon
-import ProxyCore
+import XcodeMCPProxyKit
 
 extension XcodeMCPProxyCLICommand {
     package static func scanInvocation(_ args: [String]) -> XcodeMCPProxyCLICommand.Invocation {
-        let scan = CLI.InvocationScanner.scanAdapter(args)
+        let scan = ProxyCLIInvocationScanner.scanAdapter(args)
         var invocation = XcodeMCPProxyCLICommand.Invocation()
         invocation.showHelp = scan.showHelp
         invocation.showVersion = scan.showVersion
@@ -26,14 +26,18 @@ extension XcodeMCPProxyCLICommand {
             let arg = args[index]
             if arg == "--url" {
                 guard !didRewrite else {
-                    throw CLIError.message("--url may only be specified once.")
+                    throw XcodeMCPProxyCLICommand.Error.message("--url may only be specified once.")
                 }
                 guard index + 1 < args.count else {
-                    throw CLIError.message("--url requires a value (http/https URL).")
+                    throw XcodeMCPProxyCLICommand.Error.message(
+                        "--url requires a value (http/https URL)."
+                    )
                 }
                 let value = args[index + 1]
                 guard !value.hasPrefix("-") else {
-                    throw CLIError.message("--url requires a value (http/https URL).")
+                    throw XcodeMCPProxyCLICommand.Error.message(
+                        "--url requires a value (http/https URL)."
+                    )
                 }
                 rewritten.append("--stdio")
                 rewritten.append(value)
@@ -44,11 +48,13 @@ extension XcodeMCPProxyCLICommand {
 
             if arg.hasPrefix("--url=") {
                 guard !didRewrite else {
-                    throw CLIError.message("--url may only be specified once.")
+                    throw XcodeMCPProxyCLICommand.Error.message("--url may only be specified once.")
                 }
                 let value = String(arg.dropFirst("--url=".count))
                 guard !value.isEmpty else {
-                    throw CLIError.message("--url requires a value (http/https URL).")
+                    throw XcodeMCPProxyCLICommand.Error.message(
+                        "--url requires a value (http/https URL)."
+                    )
                 }
                 rewritten.append("--stdio")
                 rewritten.append(value)
@@ -64,7 +70,100 @@ extension XcodeMCPProxyCLICommand {
         return rewritten
     }
 
-    package static func usage(discoveryFileURL: URL = Discovery.defaultFileURL) -> String {
+    package struct Options {
+        package var requestTimeout: TimeInterval
+        package var explicitURL: String?
+        package var explicitURLLabel: String
+
+        package init(
+            requestTimeout: TimeInterval = 300,
+            explicitURL: String? = nil,
+            explicitURLLabel: String = "explicit URL"
+        ) {
+            self.requestTimeout = requestTimeout
+            self.explicitURL = explicitURL
+            self.explicitURLLabel = explicitURLLabel
+        }
+    }
+
+    package enum Error: Swift.Error, CustomStringConvertible {
+        case message(String)
+
+        package var description: String {
+            switch self {
+            case .message(let text):
+                return text
+            }
+        }
+    }
+
+    package static func parseOptions(_ args: [String]) throws -> Options {
+        var options = Options()
+        var index = 1
+        var didReadURLFlag = false
+
+        while index < args.count {
+            let arg = args[index]
+            switch arg {
+            case "--request-timeout":
+                guard index + 1 < args.count else {
+                    throw Error.message("--request-timeout requires seconds")
+                }
+                if let parsed = TimeInterval(args[index + 1]) {
+                    options.requestTimeout = parsed
+                }
+                index += 2
+            case "--url":
+                guard didReadURLFlag == false else {
+                    throw Error.message("--url may only be specified once.")
+                }
+                guard index + 1 < args.count else {
+                    throw Error.message("--url requires a value (http/https URL).")
+                }
+                let value = args[index + 1]
+                guard !value.hasPrefix("-") else {
+                    throw Error.message("--url requires a value (http/https URL).")
+                }
+                options.explicitURL = value
+                options.explicitURLLabel = "--url"
+                didReadURLFlag = true
+                index += 2
+            case let value where value.hasPrefix("--url="):
+                guard didReadURLFlag == false else {
+                    throw Error.message("--url may only be specified once.")
+                }
+                let explicitURL = String(value.dropFirst("--url=".count))
+                guard !explicitURL.isEmpty else {
+                    throw Error.message("--url requires a value (http/https URL).")
+                }
+                options.explicitURL = explicitURL
+                options.explicitURLLabel = "--url"
+                didReadURLFlag = true
+                index += 1
+            case "--stdio":
+                if index + 1 < args.count {
+                    let value = args[index + 1]
+                    if !value.hasPrefix("-") {
+                        options.explicitURL = value
+                        options.explicitURLLabel = "--stdio"
+                        index += 2
+                        continue
+                    }
+                }
+                index += 1
+            case "-h", "--help", "--version":
+                index += 1
+            default:
+                throw Error.message("Unknown argument: \(arg)")
+            }
+        }
+
+        return options
+    }
+
+    package static func usage(
+        discoveryFileURL: URL = XcodeMCPProxyAdapterEndpointResolver.discoveryFileURL()
+    ) -> String {
         """
         Usage:
           xcode-mcp-proxy [options]
@@ -89,6 +188,6 @@ extension XcodeMCPProxyCLICommand {
     }
 
     static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
-        CLI.InvocationScanner.shouldConsumeRequestTimeoutValue(token)
+        ProxyCLIInvocationScanner.shouldConsumeRequestTimeoutValue(token)
     }
 }

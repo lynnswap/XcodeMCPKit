@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import ProxyInstallCLI
+import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct InstallCommandIntegrationTests {
@@ -14,7 +15,14 @@ struct InstallCommandIntegrationTests {
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
                 executableURL: { tempDir.url.appendingPathComponent("xcode-mcp-proxy-install") },
-                buildProducts: { _, _ in }
+                install: { configuration, executableURL, stdout in
+                    try XcodeMCPProxyInstaller(configuration: configuration).install(
+                        executableURL: executableURL,
+                        fileManager: .default,
+                        buildProducts: { _, _ in },
+                        stdout: stdout
+                    )
+                }
             )
         )
 
@@ -58,8 +66,15 @@ struct InstallCommandIntegrationTests {
                 stdout: { output.append($0) },
                 stderr: { output.append($0) },
                 executableURL: { installerURL },
-                buildProducts: { _, _ in
-                    buildCalls.increment()
+                install: { configuration, executableURL, stdout in
+                    try XcodeMCPProxyInstaller(configuration: configuration).install(
+                        executableURL: executableURL,
+                        fileManager: .default,
+                        buildProducts: { _, _ in
+                            buildCalls.increment()
+                        },
+                        stdout: stdout
+                    )
                 }
             )
         )

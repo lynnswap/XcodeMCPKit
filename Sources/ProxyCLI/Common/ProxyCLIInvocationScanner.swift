@@ -1,6 +1,48 @@
 import Foundation
 import ProxyCore
 
+package enum ProxyCLIInvocationScanner {
+    package struct AdapterScan {
+        package var showHelp = false
+        package var showVersion = false
+        package var usesRemovedURLHelper = false
+        package var removedFlagMessage: String?
+        package var hasExplicitURL = false
+        package var hasStdioFlag = false
+        package var serverOnlyFlag: String?
+    }
+
+    package struct InstallScan {
+        package var showHelp = false
+        package var showVersion = false
+    }
+
+    package static let removedLazyInitMessage = CLIParser.removedLazyInitMessage
+    package static let removedXcodePIDMessage = CLIParser.removedXcodePIDMessage
+
+    package static func scanAdapter(_ args: [String]) -> AdapterScan {
+        let scan = CLI.InvocationScanner.scanAdapter(args)
+        return AdapterScan(
+            showHelp: scan.showHelp,
+            showVersion: scan.showVersion,
+            usesRemovedURLHelper: scan.usesRemovedURLHelper,
+            removedFlagMessage: scan.removedFlagMessage,
+            hasExplicitURL: scan.hasExplicitURL,
+            hasStdioFlag: scan.hasStdioFlag,
+            serverOnlyFlag: scan.serverOnlyFlag
+        )
+    }
+
+    package static func scanInstall(_ args: [String]) -> InstallScan {
+        let scan = CLI.InvocationScanner.scanInstall(args)
+        return InstallScan(showHelp: scan.showHelp, showVersion: scan.showVersion)
+    }
+
+    package static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
+        CLI.InvocationScanner.shouldConsumeRequestTimeoutValue(token)
+    }
+}
+
 extension CLI {
     package enum InvocationScanner {
         package struct AdapterScan {

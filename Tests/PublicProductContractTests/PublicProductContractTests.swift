@@ -283,8 +283,27 @@ func compileOnlyProxyConfigurationSurface() {
 
     let upstreamMode = XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode.upstream
     let server = XcodeMCPProxyServer(config: config)
+    let endpointConfig = XcodeMCPProxyAdapterEndpointResolver.Configuration(
+        explicitURL: "http://localhost:8765/mcp",
+        environment: [:]
+    )
+    let endpoint = try? XcodeMCPProxyAdapterEndpointResolver().resolve(endpointConfig)
+    let adapterConfig = XcodeMCPProxyStdioAdapter.Configuration(
+        endpoint: endpointConfig,
+        requestTimeout: 30
+    )
+    let installer = XcodeMCPProxyInstaller(
+        configuration: .init(prefix: "/tmp/xcode-mcp", bindir: nil, dryRun: true)
+    )
+    let plan = installer.plan(
+        executableURL: URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-proxy-install")
+    )
+    let adapter = endpoint.map {
+        XcodeMCPProxyStdioAdapter(endpoint: $0, requestTimeout: 30)
+    }
 
-    _ = (config, upstreamMode, server)
+    _ = (config, upstreamMode, server, adapterConfig, endpoint, adapter, plan)
+    _ = XcodeMCPProxyInstaller.binaryNames
 }
 
 func compileOnlyProxyLaunchSurface() throws {

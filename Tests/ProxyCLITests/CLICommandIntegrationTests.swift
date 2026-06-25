@@ -7,6 +7,7 @@ import NIOConcurrencyHelpers
 import NIOHTTP1
 import Testing
 import ProxyAdapterCLI
+import XcodeMCPProxyKit
 import XcodeMCPTestSupport
 
 @Suite(.serialized)
@@ -393,9 +394,9 @@ private struct CLICommandHarness {
                         info: { _, _ in }
                     )
                 },
-                makeAdapter: { upstreamURL, requestTimeout, input, output in
-                    StdioAdapter(
-                        upstreamURL: upstreamURL,
+                makeAdapter: { endpoint, requestTimeout, input, output in
+                    XcodeMCPProxyStdioAdapter(
+                        endpoint: endpoint,
                         requestTimeout: requestTimeout,
                         input: input,
                         output: output,
