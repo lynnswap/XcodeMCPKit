@@ -269,6 +269,23 @@ struct XcodeMCPTests {
         #expect(encodedResult["raw"] == nil)
         #expect(encodedResult["x-result"] == .string("kept"))
 
+        let synthesizedResult = MCPToolResult(
+            content: [
+                .text(
+                    "manual",
+                    raw: .object([
+                        "type": .string("text"),
+                        "text": .string("manual"),
+                    ])
+                )
+            ],
+            structuredContent: .object(["ok": .bool(true)]),
+            isError: true
+        )
+        let synthesizedRaw = try #require(synthesizedResult.raw.objectValue)
+        #expect(synthesizedRaw["structuredContent"] == .object(["ok": .bool(true)]))
+        #expect(synthesizedRaw["isError"] == .bool(true))
+
         let progress = try decoder.decode(
             MCPProgress.self,
             from: Data(

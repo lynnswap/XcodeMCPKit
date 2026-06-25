@@ -146,10 +146,18 @@ public struct MCPToolResult: Codable, Equatable, Sendable {
         self.content = content
         self.structuredContent = structuredContent
         self.isError = isError
-        self.raw = raw ?? .object([
-            "content": .array(content.map(\.rawValue)),
-            "isError": .bool(isError),
-        ])
+        if let raw {
+            self.raw = raw
+        } else {
+            var object: [String: MCPJSONValue] = [
+                "content": .array(content.map(\.rawValue)),
+                "isError": .bool(isError),
+            ]
+            if let structuredContent {
+                object["structuredContent"] = structuredContent
+            }
+            self.raw = .object(object)
+        }
     }
 
     /// Decodes a tool result from its raw MCP JSON object.
