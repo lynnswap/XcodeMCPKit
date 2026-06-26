@@ -1313,6 +1313,23 @@ private final class DocumentationPendingResponse: @unchecked Sendable {
     }
 }
 
+private final class DocumentationProviderManagerLifecycle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shutdown = false
+
+    var isShutdown: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return shutdown
+    }
+
+    func markShutdown() {
+        lock.lock()
+        shutdown = true
+        lock.unlock()
+    }
+}
+
 package actor DocumentationProviderConnection {
     private let session: any UpstreamSession
     private let clock: ClockClient
@@ -1516,6 +1533,11 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         self.clock = clock
     }
 
+    isolated deinit {
+        connections.removeAll()
+        backgroundSessionStops.removeAll()
+    }
+
     package func openRoute(
         for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
@@ -1715,6 +1737,102 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         let descriptor: JSONValue
     }
 
+    private struct ProviderPreparationContext: Sendable {
+        let transport: any DocumentationProviderRouting
+        let initializeParams: [String: JSONValue]
+        let localSearchProvider: any DocumentationSearchProviding
+        let preferLocalSearchProvider: Bool
+        let clock: ClockClient
+        let logger: Logger
+        let lifecycle: DocumentationProviderManagerLifecycle
+
+        func openProviderRoute(
+            target: XcodeProcessTarget,
+            requestTimeout: TimeAmount?
+        ) async throws -> CandidateProfile {
+            guard !lifecycle.isShutdown else {
+                throw CancellationError()
+            }
+            logger.debug(
+                "Preparing documentation provider candidate",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                ]
+            )
+            let startupDeadline = Deadline.fromNow(requestTimeout ?? .seconds(30), clock: clock)
+            try Task.checkCancellation()
+            let startupTimeout = remainingTimeout(until: startupDeadline)
+            guard startupTimeout?.nanoseconds != 0 else {
+                throw TimeoutError()
+            }
+            if preferLocalSearchProvider,
+               let localProfile = await installedDocumentationAssetPrimaryProfile(for: target)
+            {
+                return localProfile
+            }
+            let route = try await transport.openRoute(
+                for: target,
+                requestTimeout: startupTimeout,
+                initializeParams: initializeParams
+            )
+            do {
+                try Task.checkCancellation()
+                guard !lifecycle.isShutdown else {
+                    throw CancellationError()
+                }
+                guard remainingTimeout(until: startupDeadline)?.nanoseconds != 0 else {
+                    throw TimeoutError()
+                }
+            } catch {
+                if lifecycle.isShutdown {
+                    await transport.closeForShutdown(route: route)
+                } else {
+                    await transport.close(route: route)
+                }
+                throw error
+            }
+            return CandidateProfile(
+                id: UUID(),
+                target: target,
+                backend: .xcode(route: route, descriptor: nil),
+                serverVersion: route.serverVersion,
+                descriptorLookupCompleted: false
+            )
+        }
+
+        private func installedDocumentationAssetPrimaryProfile(
+            for target: XcodeProcessTarget
+        ) async -> CandidateProfile? {
+            guard let descriptor = await localSearchProvider.descriptor(for: target) else {
+                return nil
+            }
+            logger.info(
+                "Using installed documentation asset as primary DocumentationSearch provider",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                ]
+            )
+            return CandidateProfile(
+                id: UUID(),
+                target: target,
+                backend: .installedDocumentationAsset(descriptor: descriptor),
+                serverVersion: "installed-documentation-asset",
+                descriptorLookupCompleted: true
+            )
+        }
+
+        private func remainingTimeout(until deadline: Deadline?) -> TimeAmount? {
+            guard let deadline else {
+                return nil
+            }
+            return deadline.remaining()
+        }
+    }
+
     private struct PreparationWaitTimedOut: Error {}
 
     private final class PreparationWaiter: @unchecked Sendable {
@@ -1780,6 +1898,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private let clock: ClockClient
     private let testHooks: DocumentationProviderManagerTestHooks
     private let logger: Logger
+    private let lifecycle = DocumentationProviderManagerLifecycle()
     private let descriptorRefreshRetryDelayNanoseconds: Int64 = 250_000_000
     private let candidateAttemptTimeoutNanoseconds: Int64 = 2_000_000_000
     private var activeProvider: ActiveProvider?
@@ -1811,6 +1930,17 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         self.clock = clock
         self.testHooks = testHooks
         self.logger = logger
+    }
+
+    isolated deinit {
+        lifecycle.markShutdown()
+        for preparation in providerPreparations.values {
+            preparation.task.cancel()
+        }
+        providerPreparations.removeAll()
+        preparedProviders.removeAll()
+        activeProvider = nil
+        permanentlyUnusableProcessIDs.removeAll()
     }
 
     package init(
@@ -2462,6 +2592,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     package func shutdown() async {
+        lifecycle.markShutdown()
         isShutdown = true
         await invalidate(reason: "shutdown", awaitRouteTermination: true)
         await transport.shutdown()
@@ -2539,9 +2670,18 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
             testHooks.providerPreparationReused(target.processID)
         } else {
             let timeout = providerSelectionTimeout
+            let context = ProviderPreparationContext(
+                transport: transport,
+                initializeParams: initializeParams,
+                localSearchProvider: localSearchProvider,
+                preferLocalSearchProvider: preferLocalSearchProvider,
+                clock: clock,
+                logger: logger,
+                lifecycle: lifecycle
+            )
             preparation = ProviderPreparation(
                 task: Task {
-                    try await self.openProviderRoute(
+                    try await context.openProviderRoute(
                         target: target,
                         requestTimeout: timeout
                     )

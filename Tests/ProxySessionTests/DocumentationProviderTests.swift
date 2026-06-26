@@ -4109,6 +4109,77 @@ extension RuntimeCoordinatorTests {
         #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
     }
 
+    @Test func documentationProviderManagerReleasesAfterTimedOutSharedPreparation()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 487, xcodeVersion: "27.0")
+        let startGate = OperationGate<pid_t>()
+        let preparationTimedOut = TestSignal()
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"late\"}")
+                    ),
+                ],
+            ],
+            startGate: startGate
+        )
+
+        let releasedManager = WeakDocumentationProviderManagerBox()
+        do {
+            let manager = DocumentationProviderManager(
+                discovery: StubXcodeTargetDiscovery(targets: [target]),
+                sessionFactory: factory,
+                clock: clock,
+                testHooks: DocumentationProviderManagerTestHooks(
+                    providerPreparationWaitTimedOut: { processID in
+                        if processID == target.processID {
+                            preparationTimedOut.signal()
+                        }
+                    }
+                )
+            )
+            releasedManager.set(manager)
+
+            let request = Task {
+                try await manager.callDocumentationSearch(
+                    requestData: makeDocumentationSearchRequest(id: 88, query: "too soon"),
+                    requestTimeoutOverride: .milliseconds(1)
+                )
+            }
+            try await waitWithTimeout("waiting for shared preparation to suspend") {
+                try await startGate.waitUntilWaiting(for: target.processID, count: 1)
+            }
+            await advanceRuntimeCoordinatorTimeout(
+                timeoutClock: timeoutClock,
+                uptimeClock: uptimeClock,
+                by: .milliseconds(1)
+            )
+            try await preparationTimedOut.wait(
+                description: "waiting for preparation wait timeout"
+            )
+            let outcome = try await waitWithTimeout("waiting for timed out request") {
+                try await request.value
+            }
+            guard case .failed(let error, _) = outcome else {
+                Issue.record("expected timeout outcome, got \(outcome)")
+                return
+            }
+            #expect(error is TimeoutError)
+        }
+
+        try await waitWithTimeout("waiting for documentation provider manager release") {
+            while !releasedManager.isReleased {
+                await Task.yield()
+            }
+        }
+    }
+
     @Test func documentationProviderManagerPreservesCallerTimeoutForFinalProvider() async throws {
         let target = xcodeProcessTarget(processID: 486, xcodeVersion: "27.0")
         let (clock, _, _) = makeRuntimeCoordinatorDeterministicClocks()
@@ -4227,6 +4298,23 @@ extension RuntimeCoordinatorTests {
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"after-cancel\"}")
         #expect(await factory.startedPIDs() == [xcode.processID])
         #expect(await factory.documentationQueries(for: xcode.processID) == ["UIView", "SwiftUI"])
+    }
+}
+
+private final class WeakDocumentationProviderManagerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var value: DocumentationProviderManager?
+
+    func set(_ value: DocumentationProviderManager) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    var isReleased: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value == nil
     }
 }
 
