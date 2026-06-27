@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import ProxySessionControlPlane
 import ProxyCore
 import XcodeMCPRuntime
 

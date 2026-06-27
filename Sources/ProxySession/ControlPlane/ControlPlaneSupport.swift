@@ -58,7 +58,7 @@ extension ControlPlane {
         private struct Waiter {
             let id: UUID
             let predicate: @Sendable (ControlPlane.DebugSnapshot) -> Bool
-            let continuation: CheckedContinuation<ControlPlane.DebugSnapshot, Error>
+            let continuation: CheckedContinuation<ControlPlane.DebugSnapshot, any Swift.Error>
         }
 
         private struct State {

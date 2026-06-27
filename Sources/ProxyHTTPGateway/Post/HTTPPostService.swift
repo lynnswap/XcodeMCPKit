@@ -6,7 +6,6 @@ import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import ProxySession
-import ProxySessionControlPlane
 
 package final class HTTPPostService: Sendable {
     package struct FilteredToolCallRequest: Sendable {
