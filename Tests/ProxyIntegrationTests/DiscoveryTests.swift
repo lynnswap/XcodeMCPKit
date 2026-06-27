@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import XcodeMCPRuntime
 
 @testable import ProxyCore
 

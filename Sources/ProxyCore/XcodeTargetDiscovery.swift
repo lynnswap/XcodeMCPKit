@@ -1,6 +1,0 @@
-import XcodeMCPRuntime
-
-package typealias XcodeProcessTarget = XcodeMCPRuntime.XcodeProcessTarget
-package typealias XcodeTargetDiscovering = XcodeMCPRuntime.XcodeTargetDiscovering
-package typealias PriorityOrderedXcodeTargetDiscovering =
-    XcodeMCPRuntime.PriorityOrderedXcodeTargetDiscovering

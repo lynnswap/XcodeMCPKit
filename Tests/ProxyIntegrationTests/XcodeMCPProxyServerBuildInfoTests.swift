@@ -1,5 +1,6 @@
 import ProxyCore
 import Testing
+import XcodeMCPRuntime
 
 @testable import XcodeMCPProxyKit
 

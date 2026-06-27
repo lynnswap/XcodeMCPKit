@@ -1,5 +1,6 @@
 import Foundation
 import ProxyCore
+import XcodeMCPRuntime
 
 extension RefreshCodeIssues {
     package struct QueueSnapshot: Codable, Sendable {

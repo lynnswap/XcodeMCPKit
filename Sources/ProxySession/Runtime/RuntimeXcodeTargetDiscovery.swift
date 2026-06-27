@@ -1,5 +1,6 @@
 import Foundation
 import ProxyCore
+import XcodeMCPRuntime
 
 package final class RuntimeDocumentationTargetDiscovery:
     PriorityOrderedXcodeTargetDiscovering,

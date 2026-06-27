@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import NIOConcurrencyHelpers
+import XcodeMCPRuntime
 
 final class DispatchGroupLeaveGuard: @unchecked Sendable {
     private let group: DispatchGroup

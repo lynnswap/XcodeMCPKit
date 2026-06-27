@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import ProxyCore
+import XcodeMCPRuntime
 
 extension ControlPlaneCoordinator {
     func replaceToolsCatalogRequestLoad(

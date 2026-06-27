@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import XcodeMCPRuntime
 
 extension ControlPlaneCoordinator {
     private var sharedLoadPromotionGraceNanoseconds: UInt64 { 100_000_000 }
