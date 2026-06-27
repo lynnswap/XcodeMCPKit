@@ -588,7 +588,7 @@ private extension XcodeMCP {
                 }
             }
         } catch {
-            pendingRequests.failAll(error: error)
+            pendingRequests.failAll(error: Self.publicError(from: error))
         }
     }
 
