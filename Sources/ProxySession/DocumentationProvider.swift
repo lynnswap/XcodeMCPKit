@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import ProxySessionControlPlane
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import ProxyCore
 import ProxyMCP
 

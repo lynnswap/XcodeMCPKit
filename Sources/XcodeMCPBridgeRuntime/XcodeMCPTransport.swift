@@ -59,9 +59,9 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         case .accepted:
             return
         case .backpressure:
-            throw XcodeMCPError.transportUnavailable("mcpbridge write queue is full")
+            throw MCPBridgeRuntimeError.transportUnavailable("mcpbridge write queue is full")
         case .unavailable(let reason):
-            throw XcodeMCPError.transportUnavailable("mcpbridge is unavailable: \(reason)")
+            throw MCPBridgeRuntimeError.transportUnavailable("mcpbridge is unavailable: \(reason)")
         }
     }
 

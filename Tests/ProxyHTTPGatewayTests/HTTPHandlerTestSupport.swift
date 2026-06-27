@@ -8,7 +8,7 @@ import ProxyCore
 import ProxyMCP
 import ProxySession
 import ProxySessionControlPlane
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import XcodeMCPTestSupport

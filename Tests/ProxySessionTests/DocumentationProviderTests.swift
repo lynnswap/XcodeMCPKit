@@ -7,7 +7,7 @@ import Testing
 import ProxyCore
 import ProxyMCP
 import ProxySessionControlPlane
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import XcodeMCPTestSupport
 @testable import ProxySession
 

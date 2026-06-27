@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import ProxyCore
 import ProxyMCP
 

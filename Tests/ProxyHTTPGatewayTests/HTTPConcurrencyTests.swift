@@ -6,7 +6,7 @@ import NIOHTTP1
 import Testing
 import ProxyCore
 import ProxyMCP
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import ProxyXcodeFeatures
 import XcodeMCPTestSupport
 @testable import ProxySession
