@@ -147,33 +147,56 @@ struct HTTPConcurrencyTests {
     @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
         let config = makeEmbeddedConfig(requestTimeout: 0.15)
-        let firstChannel = EmbeddedChannel()
-        let secondChannel = EmbeddedChannel()
+        let eventLoop = EmbeddedEventLoop()
         let sessionManager = RuntimeCoordinator(
             config: config,
-            eventLoop: firstChannel.eventLoop,
+            eventLoop: eventLoop,
             upstreams: [upstream],
             startImmediately: false
         )
         defer {
             sessionManager.shutdownAndWait()
-            _ = try? firstChannel.finish()
-            _ = try? secondChannel.finish()
         }
 
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
-        try addEmbeddedHTTPHandler(
-            to: firstChannel,
+        let deadlineClock = ManualDateClock()
+        let service = HTTPPostService(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            ),
+            deadlineClock: deadlineClock.client,
+            usesSynchronousLocalResolution: true
         )
-        try addEmbeddedHTTPHandler(
-            to: secondChannel,
-            config: config,
-            sessionManager: sessionManager
-        )
-
         let sessionID = "session-queued-timeout-budget"
+
+        func makeBodyData(_ payload: [String: Any]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: payload, options: [])
+        }
+
+        func handlePost(_ payload: [String: Any]) throws -> HTTPPostService.Operation {
+            service.handle(
+                bodyData: try makeBodyData(payload),
+                headerSessionID: sessionID,
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: eventLoop
+            )
+        }
+
+        func responseObject(
+            from resolution: HTTPPostService.Resolution
+        ) throws -> [String: Any] {
+            guard case .responseData(let data, _, _) = resolution else {
+                throw ConcurrencyTestError.invalidResponse
+            }
+            return try #require(
+                JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+            )
+        }
+
         _ = sessionManager.session(id: sessionID)
         sessionManager.sessionRegistry.markInitialized(
             id: sessionID,
@@ -192,41 +215,32 @@ struct HTTPConcurrencyTests {
         sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
         upstream.clearRecordedRequests()
 
-        try postEmbeddedJSON(
-            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1"),
-            sessionID: sessionID,
-            to: firstChannel
+        let firstOperation = try handlePost(
+            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
         )
-        firstChannel.embeddedEventLoop.run()
+        eventLoop.run()
         #expect(try upstream.waitForRequestCount(1) == ["tools/call:ExecuteSnippet"])
 
-        try postEmbeddedJSON(
-            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2"),
-            sessionID: sessionID,
-            to: secondChannel
+        let secondOperation = try handlePost(
+            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2")
         )
-        secondChannel.embeddedEventLoop.run()
+        eventLoop.run()
         #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
 
-        secondChannel.embeddedEventLoop.advanceTime(by: .milliseconds(150))
-        secondChannel.embeddedEventLoop.run()
-        if let unexpected = try secondChannel.readOutbound(as: HTTPServerResponsePart.self) {
-            Issue.record("queued request produced a response before upstream dispatch: \(unexpected)")
-        }
+        deadlineClock.advance(by: config.requestTimeout)
+        eventLoop.run()
         #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
 
         let firstResponseData = try #require(
             upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
         )
         sessionManager.routeUpstreamMessage(firstResponseData, upstreamIndex: 0)
-        firstChannel.embeddedEventLoop.run()
-        let firstResponse = try collectEmbeddedResponse(from: firstChannel)
-        #expect(firstResponse.head.status == .ok)
-        let firstObject = try jsonObject(from: firstResponse.body)
+        eventLoop.run()
+        let firstObject = try responseObject(from: try await firstOperation.future.get())
         #expect((firstObject["id"] as? NSNumber)?.intValue == 300)
         #expect(firstObject["error"] == nil)
 
-        secondChannel.embeddedEventLoop.run()
+        eventLoop.run()
         #expect(try upstream.waitForRequestCount(2) == [
             "tools/call:ExecuteSnippet",
             "tools/call:ExecuteSnippet",
@@ -235,11 +249,9 @@ struct HTTPConcurrencyTests {
             upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
         )
         sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
-        secondChannel.embeddedEventLoop.run()
+        eventLoop.run()
 
-        let secondResponse = try collectEmbeddedResponse(from: secondChannel)
-        #expect(secondResponse.head.status == .ok)
-        let secondObject = try jsonObject(from: secondResponse.body)
+        let secondObject = try responseObject(from: try await secondOperation.future.get())
         #expect((secondObject["id"] as? NSNumber)?.intValue == 301)
         #expect(secondObject["error"] == nil)
     }
