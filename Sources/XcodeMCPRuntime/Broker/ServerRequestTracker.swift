@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
 
 package final class ServerRequestTracker: Sendable {
     package struct Route: Sendable {

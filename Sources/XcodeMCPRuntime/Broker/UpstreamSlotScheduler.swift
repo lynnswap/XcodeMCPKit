@@ -2,7 +2,6 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
 
 package struct UpstreamSlotSchedulerTestHooks: Sendable {
     package var requestQueued:
@@ -74,7 +73,7 @@ package final class UpstreamSlotScheduler: Sendable {
     private let testHooks: UpstreamSlotSchedulerTestHooks
 
     package init(
-        logger: Logger = ProxyLogging.make("upstream.scheduler"),
+        logger: Logger = XcodeMCPRuntimeLogging.make("upstream.scheduler"),
         canUseUpstream: @escaping @Sendable (Int) -> UpstreamHealthManager.UseEvaluation,
         selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult,
         applyHealthEffects: @escaping @Sendable ([UpstreamHealthManager.Effect]) -> Void = { _ in },

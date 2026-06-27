@@ -1,9 +1,8 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
 
-package final class ProxyRouter: Sendable {
+package final class JSONRPCResponseRouter: Sendable {
     package struct PendingRegistration {
         package let token: UUID
         package let future: EventLoopFuture<ByteBuffer>

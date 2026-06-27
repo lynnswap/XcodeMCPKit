@@ -1,5 +1,4 @@
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
 
 package final class UpstreamRouter: Sendable {
     private struct RequestLookupKey: Hashable, Sendable {
@@ -17,7 +16,7 @@ package final class UpstreamRouter: Sendable {
     private let state = NIOLockedValueBox(State())
     private let lateResponseMarkerLimit = 512
 
-    init(upstreamCount: Int) {
+    package init(upstreamCount: Int) {
         state.withLockedValue { state in
             state.mappingsByUpstream = Array(repeating: [:], count: upstreamCount)
             state.upstreamIDByRequestKeyByUpstream = Array(repeating: [:], count: upstreamCount)
@@ -25,7 +24,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
+    package func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
         -> Int64
     {
         state.withLockedValue { state in
@@ -48,7 +47,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func assignInitialize(upstreamIndex: Int) -> Int64 {
+    package func assignInitialize(upstreamIndex: Int) -> Int64 {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return 0
@@ -64,7 +63,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamRouter.Mapping? {
+    package func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamRouter.Mapping? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return nil
@@ -84,7 +83,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func remove(upstreamIndex: Int, upstreamID: Int64) {
+    package func remove(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
             let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamID)
@@ -108,7 +107,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func remove(
+    package func remove(
         upstreamIndex: Int,
         sessionID: String,
         requestIDKey: String
@@ -135,7 +134,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func reset(upstreamIndex: Int) {
+    package func reset(upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
             state.mappingsByUpstream[upstreamIndex].removeAll()
@@ -144,7 +143,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func resetAll() {
+    package func resetAll() {
         state.withLockedValue { state in
             for upstreamIndex in state.mappingsByUpstream.indices {
                 state.mappingsByUpstream[upstreamIndex].removeAll()
@@ -154,7 +153,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    func consumeReleasedResponseMarker(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+    package func consumeReleasedResponseMarker(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.recentlyReleasedResponseIDsByUpstream.count else {
                 return false
