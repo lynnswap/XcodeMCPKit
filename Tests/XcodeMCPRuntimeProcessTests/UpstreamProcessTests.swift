@@ -1,8 +1,8 @@
+import Darwin
 import Foundation
 import Testing
-import XcodeMCPProxyTestSupport
+import XcodeMCPRuntimeTestSupport
 
-@testable import XcodeMCPProxyKit
 @testable import XcodeMCPRuntime
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
@@ -169,8 +169,8 @@ struct UpstreamProcessTests {
 
     @Test func upstreamSessionTreatsInvalidStdoutAsFatalProtocolViolation() async throws {
         let config = UpstreamProcess.Config(
-            command: "/bin/sh",
-            args: ["-c", "printf 'Content-Length: abc\\r\\n\\r\\n{}'; sleep 5"],
+            command: "/usr/bin/python3",
+            args: makePythonInvalidContentLengthEmitterArgs(),
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
@@ -257,32 +257,20 @@ struct UpstreamProcessTests {
             command: "/usr/bin/python3",
             args: makePythonChunkEmitterArgs(
                 payloads: [payload],
-                chunkSize: 4096,
-                pauseSeconds: 0.001,
-                keepAliveSeconds: 1
+                chunkSize: 4096
             ),
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
         try await withUpstreamSession(config: config) { session in
-            let message = try await waitWithTimeout(
+            let messages = try await collectChunkedFixtureMessages(
+                from: session,
+                expectedCount: 1,
                 "large split JSON should be reconstructed as one message",
                 timeout: .seconds(5)
-            ) {
-                for await event in session.events {
-                    switch event {
-                    case .message(let message):
-                        return String(decoding: message, as: UTF8.self)
-                    case .stdoutProtocolViolation(let violation):
-                        return "VIOLATION:\(violation.reason.rawValue)"
-                    case .stderr, .stdoutBufferSize, .exit:
-                        continue
-                    }
-                }
-                return ""
-            }
+            )
 
-            #expect(message == payload)
+            #expect(messages == [payload])
         }
     }
 
@@ -296,34 +284,18 @@ struct UpstreamProcessTests {
             command: "/usr/bin/python3",
             args: makePythonChunkEmitterArgs(
                 payloads: payloads,
-                chunkSize: 2048,
-                pauseSeconds: 0.0005,
-                keepAliveSeconds: 1
+                chunkSize: 2048
             ),
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )
         try await withUpstreamSession(config: config) { session in
-            let messages = try await waitWithTimeout(
+            let messages = try await collectChunkedFixtureMessages(
+                from: session,
+                expectedCount: payloads.count,
                 "back-to-back large JSON payloads should preserve order",
                 timeout: .seconds(5)
-            ) {
-                var messages: [String] = []
-                for await event in session.events {
-                    switch event {
-                    case .message(let message):
-                        messages.append(String(decoding: message, as: UTF8.self))
-                        if messages.count == payloads.count {
-                            return messages
-                        }
-                    case .stdoutProtocolViolation(let violation):
-                        return ["VIOLATION:\(violation.reason.rawValue)"]
-                    case .stderr, .stdoutBufferSize, .exit:
-                        continue
-                    }
-                }
-                return messages
-            }
+            )
 
             #expect(messages == payloads)
         }
@@ -397,6 +369,10 @@ struct UpstreamProcessTests {
 
     @Test func upstreamSessionEmitsExitWhenDescendantKeepsPipeOpen() async throws {
         let drainClock = TestClock()
+        let childInfoFIFO = try TemporaryFIFO(name: "descendant-pid")
+        defer {
+            childInfoFIFO.cleanup()
+        }
         let payload = try makeJSONRPCResponse(
             id: 62,
             text: String(repeating: "y", count: 8 * 1024)
@@ -407,7 +383,7 @@ struct UpstreamProcessTests {
                 id: 62,
                 character: "y",
                 repeatCount: 8 * 1024,
-                childSleepSeconds: 2
+                childInfoFIFOPath: childInfoFIFO.path
             ),
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024,
@@ -416,6 +392,20 @@ struct UpstreamProcessTests {
         )
 
         try await withUpstreamSession(config: config) { session in
+            var childPID: pid_t?
+            defer {
+                if let childPID {
+                    kill(childPID, SIGKILL)
+                }
+            }
+            let childPIDLine = try await waitWithTimeout(
+                "descendant child should report pid",
+                timeout: .seconds(2)
+            ) {
+                try await childInfoFIFO.reader.readLine()
+            }
+            childPID = try parsePID(childPIDLine)
+
             let recordedEvents = RecordedValues<Upstream.Event>()
             let eventTask = Task { () -> [Upstream.Event] in
                 var observedEvents: [Upstream.Event] = []
@@ -505,17 +495,6 @@ struct UpstreamProcessTests {
     }
 }
 
-private func makeTestClockClient(_ clock: TestClock) -> ClockClient {
-    ClockClient(
-        now: { Date(timeIntervalSince1970: 0) },
-        uptimeNanoseconds: { 0 },
-        sleep: { duration in
-            try? await clock.sleep(for: duration)
-        },
-        sleepForTimeInterval: { _ in }
-    )
-}
-
 private func withUpstreamSession<T: Sendable>(
     config: UpstreamProcess.Config,
     _ body: @escaping @Sendable (any UpstreamSession) async throws -> T
@@ -531,6 +510,45 @@ private func withUpstreamSession<T: Sendable>(
     }
 }
 
+private func collectChunkedFixtureMessages(
+    from session: any UpstreamSession,
+    expectedCount: Int,
+    _ description: String,
+    timeout: Duration
+) async throws -> [String] {
+    try await waitWithTimeout(description, timeout: timeout) {
+        var messages: [String] = []
+        for await event in session.events {
+            switch event {
+            case .message(let message):
+                messages.append(String(decoding: message, as: UTF8.self))
+                if messages.count == expectedCount {
+                    return messages
+                }
+            case .stderr(let marker) where marker.hasPrefix("chunk-ready "):
+                await releaseChunkedFixture(session)
+            case .stderr, .stdoutBufferSize, .exit:
+                continue
+            case .stdoutProtocolViolation(let violation):
+                return ["VIOLATION:\(violation.reason.rawValue)"]
+            }
+        }
+        return messages
+    }
+}
+
+private func releaseChunkedFixture(_ session: any UpstreamSession) async {
+    let result = await session.send(Data("continue\n".utf8))
+    switch result {
+    case .accepted:
+        break
+    case .backpressure:
+        Issue.record("chunk fixture release should not hit backpressure")
+    case .unavailable(let reason):
+        Issue.record("chunk fixture release should not fail: \(reason)")
+    }
+}
+
 private func makeJSONRPCResponse(id: Int, text: String) throws -> String {
     let payload: [String: Any] = [
         "jsonrpc": "2.0",
@@ -543,32 +561,43 @@ private func makeJSONRPCResponse(id: Int, text: String) throws -> String {
     return String(decoding: data, as: UTF8.self)
 }
 
+private func makePythonInvalidContentLengthEmitterArgs() -> [String] {
+    let script = """
+    import signal
+    import sys
+
+    sys.stdout.write("Content-Length: abc\\r\\n\\r\\n{}")
+    sys.stdout.flush()
+    signal.pause()
+    """
+    return ["-c", script]
+}
+
 private func makePythonChunkEmitterArgs(
     payloads: [String],
-    chunkSize: Int,
-    pauseSeconds: Double,
-    keepAliveSeconds: Double
+    chunkSize: Int
 ) -> [String] {
     let script = """
     import sys
-    import time
 
     chunk_size = int(sys.argv[1])
-    pause = float(sys.argv[2])
-    keep_alive = float(sys.argv[3])
-    payloads = sys.argv[4:]
+    payloads = sys.argv[2:]
 
-    for payload in payloads:
+    for payload_index, payload in enumerate(payloads):
+        chunk_index = 0
         for start in range(0, len(payload), chunk_size):
             sys.stdout.write(payload[start:start + chunk_size])
             sys.stdout.flush()
-            time.sleep(pause)
-        sys.stdout.write("\\n")
-        sys.stdout.flush()
+            sys.stderr.write("chunk-ready " + str(payload_index) + " " + str(chunk_index) + "\\n")
+            sys.stderr.flush()
+            chunk_index += 1
+            if sys.stdin.readline() == "":
+                sys.exit(0)
 
-    time.sleep(keep_alive)
+    for _ in sys.stdin:
+        pass
     """
-    return ["-c", script, "\(chunkSize)", "\(pauseSeconds)", "\(keepAliveSeconds)"] + payloads
+    return ["-c", script, "\(chunkSize)"] + payloads
 }
 
 private func makePythonImmediateExitResponseArgs(
@@ -598,13 +627,13 @@ private func makePythonForkingExitResponseArgs(
     id: Int,
     character: String,
     repeatCount: Int,
-    childSleepSeconds: Int
+    childInfoFIFOPath: String
 ) -> [String] {
     let script = """
     import json
     import os
+    import signal
     import sys
-    import time
 
     payload = {
         "jsonrpc": "2.0",
@@ -616,7 +645,10 @@ private func makePythonForkingExitResponseArgs(
 
     pid = os.fork()
     if pid == 0:
-        time.sleep(float(sys.argv[4]))
+        with open(sys.argv[4], "w") as ready:
+            ready.write(str(os.getpid()) + "\\n")
+            ready.flush()
+        signal.pause()
         os._exit(0)
 
     sys.stdout.write(json.dumps(payload, separators=(",", ":")))
@@ -624,7 +656,7 @@ private func makePythonForkingExitResponseArgs(
     sys.stdout.flush()
     os._exit(0)
     """
-    return ["-c", script, "\(id)", character, "\(repeatCount)", "\(childSleepSeconds)"]
+    return ["-c", script, "\(id)", character, "\(repeatCount)", childInfoFIFOPath]
 }
 
 private func canonicalJSONString(_ string: String) throws -> String {

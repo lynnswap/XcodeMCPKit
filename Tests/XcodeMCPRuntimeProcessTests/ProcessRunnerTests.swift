@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import Testing
-import XcodeMCPProxyTestSupport
+import XcodeMCPRuntimeTestSupport
 
 @testable import XcodeMCPRuntime
 
@@ -39,26 +39,53 @@ struct ProcessRunnerTests {
 
     @Test func processRunnerPreservesLargeChunkedStdoutOrder() async throws {
         let runner = ProcessRunner()
+        let markerFIFO = try TemporaryFIFO(name: "chunk-marker")
+        let releaseFIFO = try TemporaryFIFO(name: "chunk-release")
+        defer {
+            markerFIFO.cleanup()
+            releaseFIFO.cleanup()
+        }
         let segments = (0..<64).map { index in
             let prefix = "[\(String(index).leftPadding(toLength: 3, withPad: "0"))]"
             let scalar = UnicodeScalar(65 + (index % 26))!
             return prefix + String(repeating: Character(scalar), count: 2048)
         }
         let expected = segments.joined()
-        let output = try await waitWithTimeout(
-            "ProcessRunner should preserve large chunk ordering",
-            timeout: .seconds(5)
-        ) {
-            try await runner.run(
-                ProcessRequest(
-                    label: "ordered-large-stdout",
-                    executablePath: "/usr/bin/python3",
-                    arguments: makePythonSegmentEmitterArgs(segments: segments, pauseSeconds: 0.0005),
-                    input: nil
+        let outputTask = Task {
+            try await waitWithTimeout(
+                "ProcessRunner should preserve large chunk ordering",
+                timeout: .seconds(5)
+            ) {
+                try await runner.run(
+                    ProcessRequest(
+                        label: "ordered-large-stdout",
+                        executablePath: "/usr/bin/python3",
+                        arguments: makePythonSegmentEmitterArgs(
+                            segments: segments,
+                            markerFIFOPath: markerFIFO.path,
+                            releaseFIFOPath: releaseFIFO.path
+                        ),
+                        input: nil
+                    )
                 )
-            )
+            }
+        }
+        defer {
+            outputTask.cancel()
         }
 
+        for index in segments.indices {
+            let marker = try await waitWithTimeout(
+                "ProcessRunner segment \(index) should complete",
+                timeout: .seconds(2)
+            ) {
+                try await markerFIFO.reader.readLine()
+            }
+            #expect(marker == "chunk \(index)")
+            try releaseFIFO.writer.writeLine("continue")
+        }
+
+        let output = try await outputTask.value
         #expect(output.terminationStatus == 0)
         #expect(output.stdout == expected)
     }
@@ -108,7 +135,7 @@ struct ProcessRunnerTests {
         let scheduler = TestProcessRunnerDelayScheduler()
         let runner = ProcessRunner(delayScheduler: scheduler)
         let timeoutNanoseconds: Int64 = 10_000_000_000
-        let fifo = try TemporaryFIFO()
+        let fifo = try TemporaryFIFO(name: "ready")
         var childPID: pid_t?
         defer {
             if let childPID {
@@ -155,7 +182,7 @@ struct ProcessRunnerTests {
     @Test func processRunnerCancelsRunningProcessPromptly() async throws {
         let scheduler = TestProcessRunnerDelayScheduler()
         let runner = ProcessRunner(delayScheduler: scheduler)
-        let fifo = try TemporaryFIFO()
+        let fifo = try TemporaryFIFO(name: "ready")
         defer {
             fifo.cleanup()
         }
@@ -333,88 +360,6 @@ private final class TestProcessRunnerDelayScheduler: ProcessRunnerDelaySchedulin
     }
 }
 
-private struct TemporaryFIFO: Sendable {
-    let path: String
-    let reader: FIFOMessageReader
-
-    private let directoryURL: URL
-
-    init() throws {
-        let directoryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ProcessRunnerTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-        let path = directoryURL.appendingPathComponent("ready").path
-        guard unsafe mkfifo(path, mode_t(0o600)) == 0 else {
-            throw currentPOSIXError()
-        }
-        self.path = path
-        self.reader = try FIFOMessageReader(path: path)
-        self.directoryURL = directoryURL
-    }
-
-    func cleanup() {
-        reader.close()
-        try? FileManager.default.removeItem(at: directoryURL)
-    }
-}
-
-private final class FIFOMessageReader: @unchecked Sendable {
-    private let lock = NSLock()
-    private var fd: CInt?
-
-    init(path: String) throws {
-        let fd = unsafe Darwin.open(path, O_RDWR | O_CLOEXEC)
-        guard fd >= 0 else {
-            throw currentPOSIXError()
-        }
-        self.fd = fd
-    }
-
-    deinit {
-        close()
-    }
-
-    func readLine() async throws -> String {
-        let fd = try currentFileDescriptor()
-        return try await withTaskCancellationHandler {
-            try await Task.detached(priority: .userInitiated) {
-                try readFIFOMessageLine(from: fd)
-            }.value
-        } onCancel: {
-            self.close()
-        }
-    }
-
-    func close() {
-        let fd = locked {
-            defer {
-                self.fd = nil
-            }
-            return self.fd
-        }
-        if let fd {
-            Darwin.close(fd)
-        }
-    }
-
-    private func currentFileDescriptor() throws -> CInt {
-        try locked {
-            guard let fd else {
-                throw POSIXError(.EBADF)
-            }
-            return fd
-        }
-    }
-
-    private func locked<T>(_ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        return try body()
-    }
-}
-
 private extension String {
     func leftPadding(toLength length: Int, withPad pad: String) -> String {
         guard count < length else { return self }
@@ -464,55 +409,24 @@ private func makePythonForkingPipeHolderArgs(readyFIFOPath: String) -> [String] 
 
 private func makePythonSegmentEmitterArgs(
     segments: [String],
-    pauseSeconds: Double
+    markerFIFOPath: String,
+    releaseFIFOPath: String
 ) -> [String] {
     let script = """
     import sys
-    import time
 
-    pause = float(sys.argv[1])
-    for segment in sys.argv[2:]:
-        sys.stdout.write(segment)
-        sys.stdout.flush()
-        time.sleep(pause)
+    marker_path = sys.argv[1]
+    release_path = sys.argv[2]
+    segments = sys.argv[3:]
+
+    with open(marker_path, "w") as marker, open(release_path, "r") as release:
+        for index, segment in enumerate(segments):
+            sys.stdout.write(segment)
+            sys.stdout.flush()
+            marker.write("chunk " + str(index) + "\\n")
+            marker.flush()
+            if release.readline() == "":
+                sys.exit(1)
     """
-    return ["-c", script, "\(pauseSeconds)"] + segments
-}
-
-private func parsePID(_ line: String) throws -> pid_t {
-    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let value = Int32(trimmed) else {
-        throw ProcessRunnerTestError.invalidPID(trimmed)
-    }
-    return pid_t(value)
-}
-
-private func readFIFOMessageLine(from fd: CInt) throws -> String {
-    var bytes: [UInt8] = []
-    while true {
-        var byte: UInt8 = 0
-        let readCount = unsafe Darwin.read(fd, &byte, 1)
-        if readCount == 1 {
-            if byte == UInt8(ascii: "\n") {
-                return String(decoding: bytes, as: UTF8.self)
-            }
-            bytes.append(byte)
-            continue
-        }
-        if readCount == 0 {
-            throw POSIXError(.EPIPE)
-        }
-        if errno == EINTR {
-            continue
-        }
-        throw currentPOSIXError()
-    }
-}
-
-private func currentPOSIXError() -> POSIXError {
-    POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-}
-
-private enum ProcessRunnerTestError: Error {
-    case invalidPID(String)
+    return ["-c", script, markerFIFOPath, releaseFIFOPath] + segments
 }

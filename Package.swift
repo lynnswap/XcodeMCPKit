@@ -103,6 +103,15 @@ let package = Package(
             path: "Tests/XcodeMCPProxyTestSupport",
             swiftSettings: strictSwiftSettings
         ),
+        .target(
+            name: "XcodeMCPRuntimeTestSupport",
+            dependencies: [
+                "XcodeMCPRuntime",
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            ],
+            path: "Tests/XcodeMCPRuntimeTestSupport",
+            swiftSettings: strictSwiftSettings
+        ),
         .executableTarget(
             name: "XcodeMCPProxyCLI",
             dependencies: [
@@ -187,7 +196,16 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "ProxyProcessTests",
+            name: "XcodeMCPRuntimeProcessTests",
+            dependencies: [
+                "XcodeMCPRuntime",
+                "XcodeMCPRuntimeTestSupport",
+            ],
+            path: "Tests/XcodeMCPRuntimeProcessTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "ProxyStdioAdapterTests",
             dependencies: [
                 "XcodeMCPProxyKit",
                 "XcodeMCPRuntime",
@@ -195,7 +213,7 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Tests/ProxyProcessTests",
+            path: "Tests/ProxyStdioAdapterTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
