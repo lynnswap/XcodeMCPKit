@@ -148,6 +148,12 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
+            name: "XcodeMCPRuntimeTests",
+            dependencies: ["XcodeMCPRuntime"],
+            path: "Tests/XcodeMCPRuntimeTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
             name: "PublicProductContractTests",
             dependencies: [],
             path: "Tests/PublicProductContractTests",
