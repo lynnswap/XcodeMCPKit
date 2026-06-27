@@ -272,10 +272,10 @@ extension XcodeMCPProxyServer {
     }
 
     package static func parseLaunchOptions(arguments: [String]) throws -> ParsedLaunchOptions {
-        let scan: CLI.InvocationScanner.ServerScan
+        let scan: ProxyCLIInvocationScanner.ServerScan
         do {
-            scan = try CLI.InvocationScanner.scanServer(arguments)
-        } catch let error as CLIError {
+            scan = try ProxyCLIInvocationScanner.scanServer(arguments)
+        } catch let error as ProxyCLIInvocationScanner.Error {
             throw LaunchResolutionError(
                 message: error.description,
                 presentation: .conciseUsageHint

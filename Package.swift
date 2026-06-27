@@ -20,6 +20,10 @@ let package = Package(
             targets: ["XcodeMCPKit"]
         ),
         .library(
+            name: "XcodeMCPKitTesting",
+            targets: ["XcodeMCPKitTesting"]
+        ),
+        .library(
             name: "XcodeMCPProxyKit",
             targets: ["XcodeMCPProxyKit"]
         ),
@@ -92,6 +96,15 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
             ],
             path: "Sources/XcodeMCPKit",
+            exclude: ["README.md"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
+            name: "XcodeMCPKitTesting",
+            dependencies: [
+                "XcodeMCPKit",
+            ],
+            path: "Sources/XcodeMCPKitTesting",
             exclude: ["README.md"],
             swiftSettings: strictSwiftSettings
         ),
@@ -209,9 +222,7 @@ let package = Package(
         ),
         .target(
             name: "ProxyCLICommon",
-            dependencies: [
-                "ProxyCore",
-            ],
+            dependencies: [],
             path: "Sources/ProxyCLI/Common",
             swiftSettings: strictSwiftSettings
         ),
@@ -286,6 +297,15 @@ let package = Package(
                 "XcodeMCPKit",
             ],
             path: "Tests/XcodeMCPKitTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "XcodeMCPKitTestingTests",
+            dependencies: [
+                "XcodeMCPKit",
+                "XcodeMCPKitTesting",
+            ],
+            path: "Tests/XcodeMCPKitTestingTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

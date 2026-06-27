@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package enum ProxyCLIInvocationScanner {
     package struct AdapterScan {
@@ -12,254 +11,263 @@ package enum ProxyCLIInvocationScanner {
         package var serverOnlyFlag: String?
     }
 
+    package struct ServerScan {
+        package var forwardedArgs: [String] = []
+        package var showHelp = false
+        package var showVersion = false
+        package var hasListenFlag = false
+        package var hasHostFlag = false
+        package var hasPortFlag = false
+        package var hasConfigFlag = false
+        package var hasAutoApproveFlag = false
+        package var hasRefreshCodeIssuesModeFlag = false
+        package var forceRestart = false
+        package var dryRun = false
+    }
+
     package struct InstallScan {
         package var showHelp = false
         package var showVersion = false
     }
 
-    package static let removedLazyInitMessage = CLIParser.removedLazyInitMessage
-    package static let removedXcodePIDMessage = CLIParser.removedXcodePIDMessage
+    package enum Error: Swift.Error, CustomStringConvertible {
+        case message(String)
+
+        package var description: String {
+            switch self {
+            case .message(let text):
+                return text
+            }
+        }
+    }
+
+    package static let removedLazyInitMessage =
+        "The proxy always uses eager initialization; --lazy-init has been removed."
+    package static let removedXcodePIDMessage =
+        "Xcode PID support has been removed; --xcode-pid is no longer supported."
+
+    private static let serverOnlyFlags: Set<String> = [
+        "--config",
+        "--auto-approve",
+        "--listen",
+        "--host",
+        "--port",
+        "--max-body-bytes",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--session-id",
+        "--refresh-code-issues-mode",
+    ]
+
+    private static let serverOnlyValueFlags: Set<String> = [
+        "--config",
+        "--listen",
+        "--host",
+        "--port",
+        "--max-body-bytes",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--session-id",
+        "--refresh-code-issues-mode",
+    ]
+
+    private static let serverForwardedValueFlags: Set<String> = [
+        "--config",
+        "--listen",
+        "--host",
+        "--port",
+        "--max-body-bytes",
+        "--upstream-command",
+        "--upstream-args",
+        "--upstream-arg",
+        "--upstream-processes",
+        "--session-id",
+        "--request-timeout",
+        "--refresh-code-issues-mode",
+    ]
 
     package static func scanAdapter(_ args: [String]) -> AdapterScan {
-        let scan = CLI.InvocationScanner.scanAdapter(args)
-        return AdapterScan(
-            showHelp: scan.showHelp,
-            showVersion: scan.showVersion,
-            usesRemovedURLHelper: scan.usesRemovedURLHelper,
-            removedFlagMessage: scan.removedFlagMessage,
-            hasExplicitURL: scan.hasExplicitURL,
-            hasStdioFlag: scan.hasStdioFlag,
-            serverOnlyFlag: scan.serverOnlyFlag
-        )
-    }
+        var scan = AdapterScan()
+        scan.showVersion = containsVersionFlag(args)
+        var cursor = ProxyCLIArgumentCursor(args: args)
 
-    package static func scanInstall(_ args: [String]) -> InstallScan {
-        let scan = CLI.InvocationScanner.scanInstall(args)
-        return InstallScan(showHelp: scan.showHelp, showVersion: scan.showVersion)
-    }
-
-    package static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
-        CLI.InvocationScanner.shouldConsumeRequestTimeoutValue(token)
-    }
-}
-
-extension CLI {
-    package enum InvocationScanner {
-        package struct AdapterScan {
-            package var showHelp = false
-            package var showVersion = false
-            package var usesRemovedURLHelper = false
-            package var removedFlagMessage: String?
-            package var hasExplicitURL = false
-            package var hasStdioFlag = false
-            package var serverOnlyFlag: String?
-        }
-
-        package struct ServerScan {
-            package var forwardedArgs: [String] = []
-            package var showHelp = false
-            package var showVersion = false
-            package var hasListenFlag = false
-            package var hasHostFlag = false
-            package var hasPortFlag = false
-            package var hasConfigFlag = false
-            package var hasAutoApproveFlag = false
-            package var hasRefreshCodeIssuesModeFlag = false
-            package var forceRestart = false
-            package var dryRun = false
-        }
-
-        package struct InstallScan {
-            package var showHelp = false
-            package var showVersion = false
-        }
-
-        private static let serverOnlyFlags = CLI.Flag.serverOnlyFlagNames
-        private static let serverOnlyValueFlags = CLI.Flag.serverOnlyValueFlagNames
-        private static let serverForwardedValueFlags = CLI.Flag.serverForwardedValueFlagNames
-
-        package static func scanAdapter(_ args: [String]) -> CLI.InvocationScanner.AdapterScan {
-            var scan = CLI.InvocationScanner.AdapterScan()
-            scan.showVersion = containsVersionFlag(args)
-            var cursor = CLI.ArgumentCursor(args: args)
-
-            while let arg = cursor.current {
-                switch arg {
-                case "-h", "--help":
-                    scan.showHelp = true
-                    cursor.advance()
-                case "--version":
-                    scan.showVersion = true
-                    cursor.advance()
-                case "url" where cursor.index == 1:
-                    scan.usesRemovedURLHelper = true
-                    cursor.advance()
-                case "--print-url":
-                    scan.usesRemovedURLHelper = true
-                    cursor.advance()
-                case "--url":
-                    scan.hasExplicitURL = true
-                    cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
-                case let value where value.hasPrefix("--url="):
-                    scan.hasExplicitURL = true
-                    cursor.advance()
-                case "--stdio":
-                    scan.hasStdioFlag = true
-                    cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
-                case "--lazy-init":
-                    if scan.removedFlagMessage == nil {
-                        scan.removedFlagMessage = CLIParser.removedLazyInitMessage
-                    }
-                    cursor.advance()
-                case "--xcode-pid":
-                    if scan.removedFlagMessage == nil {
-                        scan.removedFlagMessage = CLIParser.removedXcodePIDMessage
-                    }
+        while let arg = cursor.current {
+            switch arg {
+            case "-h", "--help":
+                scan.showHelp = true
+                cursor.advance()
+            case "--version":
+                scan.showVersion = true
+                cursor.advance()
+            case "url" where cursor.index == 1:
+                scan.usesRemovedURLHelper = true
+                cursor.advance()
+            case "--print-url":
+                scan.usesRemovedURLHelper = true
+                cursor.advance()
+            case "--url":
+                scan.hasExplicitURL = true
+                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
+            case let value where value.hasPrefix("--url="):
+                scan.hasExplicitURL = true
+                cursor.advance()
+            case "--stdio":
+                scan.hasStdioFlag = true
+                cursor.advancePastCurrentAndOptionalValue(where: { !$0.hasPrefix("-") })
+            case "--lazy-init":
+                if scan.removedFlagMessage == nil {
+                    scan.removedFlagMessage = removedLazyInitMessage
+                }
+                cursor.advance()
+            case "--xcode-pid":
+                if scan.removedFlagMessage == nil {
+                    scan.removedFlagMessage = removedXcodePIDMessage
+                }
+                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+            case "--request-timeout":
+                cursor.advancePastCurrentAndOptionalValue(
+                    where: shouldConsumeRequestTimeoutValue)
+            case let flag where serverOnlyFlags.contains(flag):
+                if scan.serverOnlyFlag == nil {
+                    scan.serverOnlyFlag = flag
+                }
+                if serverOnlyValueFlags.contains(flag) {
                     cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
-                case "--request-timeout":
-                    cursor.advancePastCurrentAndOptionalValue(
-                        where: shouldConsumeRequestTimeoutValue)
-                case let flag where serverOnlyFlags.contains(flag):
-                    if scan.serverOnlyFlag == nil {
-                        scan.serverOnlyFlag = flag
-                    }
-                    if serverOnlyValueFlags.contains(flag) {
-                        cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
-                    } else {
-                        cursor.advance()
-                    }
-                default:
+                } else {
                     cursor.advance()
                 }
+            default:
+                cursor.advance()
             }
-
-            return scan
         }
 
-        package static func scanServer(_ args: [String]) throws -> CLI.InvocationScanner.ServerScan
-        {
-            var scan = CLI.InvocationScanner.ServerScan()
-            scan.showVersion = containsVersionFlag(args)
-            var cursor = CLI.ArgumentCursor(args: args)
+        return scan
+    }
 
-            while let arg = cursor.current {
-                if scan.showVersion {
-                    switch arg {
-                    case "-h", "--help":
-                        scan.showHelp = true
-                        return scan
-                    default:
-                        if serverForwardedValueFlags.contains(arg) {
-                            if arg == "--refresh-code-issues-mode" {
-                                cursor.advance()
-                            } else {
-                                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
-                            }
-                        } else {
-                            cursor.advance()
-                        }
-                        continue
-                    }
-                }
+    package static func scanServer(_ args: [String]) throws -> ServerScan {
+        var scan = ServerScan()
+        scan.showVersion = containsVersionFlag(args)
+        var cursor = ProxyCLIArgumentCursor(args: args)
 
+        while let arg = cursor.current {
+            if scan.showVersion {
                 switch arg {
                 case "-h", "--help":
                     scan.showHelp = true
                     return scan
-                case "--version":
-                    scan.showVersion = true
-                    cursor.advance()
-                    continue
-                case "--dry-run":
-                    scan.dryRun = true
-                    cursor.advance()
-                    continue
-                case "--force-restart":
-                    scan.forceRestart = true
-                    cursor.advance()
-                    continue
-                case "--stdio":
-                    throw CLIError.message(
-                        "--stdio is not supported in server mode (use xcode-mcp-proxy)"
-                    )
-                case "--url":
-                    throw CLIError.message(
-                        "--url is not supported in server mode (use xcode-mcp-proxy)"
-                    )
-                case "--xcode-pid":
-                    throw CLIError.message(CLIParser.removedXcodePIDMessage)
-                case "--lazy-init":
-                    throw CLIError.message(CLIParser.removedLazyInitMessage)
-                case "--listen":
-                    scan.hasListenFlag = true
-                case "--host":
-                    scan.hasHostFlag = true
-                case "--port":
-                    scan.hasPortFlag = true
-                case "--config":
-                    scan.hasConfigFlag = true
-                case "--auto-approve":
-                    scan.hasAutoApproveFlag = true
-                case "--refresh-code-issues-mode":
-                    scan.hasRefreshCodeIssuesModeFlag = true
                 default:
-                    break
-                }
-
-                scan.forwardedArgs.append(arg)
-                if serverForwardedValueFlags.contains(arg) {
-                    let value = try cursor.requiredValue(
-                        for: arg,
-                        error: {
-                            CLIError.message("\($0) requires a value")
+                    if serverForwardedValueFlags.contains(arg) {
+                        if arg == "--refresh-code-issues-mode" {
+                            cursor.advance()
+                        } else {
+                            cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
                         }
-                    )
-                    scan.forwardedArgs.append(value)
-                } else {
-                    cursor.advance()
+                    } else {
+                        cursor.advance()
+                    }
+                    continue
                 }
             }
 
-            return scan
-        }
-
-        package static func scanInstall(_ args: [String]) -> CLI.InvocationScanner.InstallScan {
-            var scan = CLI.InvocationScanner.InstallScan()
-            scan.showVersion = containsVersionFlag(args)
-            var cursor = CLI.ArgumentCursor(args: args)
-
-            while let arg = cursor.current {
-                switch arg {
-                case "-h", "--help":
-                    scan.showHelp = true
-                    cursor.advance()
-                case "--version":
-                    scan.showVersion = true
-                    cursor.advance()
-                case "--prefix", "--bindir":
-                    cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
-                case "--dry-run":
-                    cursor.advance()
-                default:
-                    cursor.advance()
-                }
+            switch arg {
+            case "-h", "--help":
+                scan.showHelp = true
+                return scan
+            case "--version":
+                scan.showVersion = true
+                cursor.advance()
+                continue
+            case "--dry-run":
+                scan.dryRun = true
+                cursor.advance()
+                continue
+            case "--force-restart":
+                scan.forceRestart = true
+                cursor.advance()
+                continue
+            case "--stdio":
+                throw Error.message(
+                    "--stdio is not supported in server mode (use xcode-mcp-proxy)"
+                )
+            case "--url":
+                throw Error.message(
+                    "--url is not supported in server mode (use xcode-mcp-proxy)"
+                )
+            case "--xcode-pid":
+                throw Error.message(removedXcodePIDMessage)
+            case "--lazy-init":
+                throw Error.message(removedLazyInitMessage)
+            case "--listen":
+                scan.hasListenFlag = true
+            case "--host":
+                scan.hasHostFlag = true
+            case "--port":
+                scan.hasPortFlag = true
+            case "--config":
+                scan.hasConfigFlag = true
+            case "--auto-approve":
+                scan.hasAutoApproveFlag = true
+            case "--refresh-code-issues-mode":
+                scan.hasRefreshCodeIssuesModeFlag = true
+            default:
+                break
             }
 
-            return scan
+            scan.forwardedArgs.append(arg)
+            if serverForwardedValueFlags.contains(arg) {
+                let value = try cursor.requiredValue(
+                    for: arg,
+                    error: { Error.message("\($0) requires a value") }
+                )
+                scan.forwardedArgs.append(value)
+            } else {
+                cursor.advance()
+            }
         }
 
-        package static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
-            if token == "-h" || token == "--help" {
-                return true
+        return scan
+    }
+
+    package static func scanInstall(_ args: [String]) -> InstallScan {
+        var scan = InstallScan()
+        scan.showVersion = containsVersionFlag(args)
+        var cursor = ProxyCLIArgumentCursor(args: args)
+
+        while let arg = cursor.current {
+            switch arg {
+            case "-h", "--help":
+                scan.showHelp = true
+                cursor.advance()
+            case "--version":
+                scan.showVersion = true
+                cursor.advance()
+            case "--prefix", "--bindir":
+                cursor.advancePastCurrentAndOptionalValue(where: { _ in true })
+            case "--dry-run":
+                cursor.advance()
+            default:
+                cursor.advance()
             }
-            if Double(token) != nil {
-                return true
-            }
-            return !token.hasPrefix("-")
         }
 
-        private static func containsVersionFlag(_ args: [String]) -> Bool {
-            args.dropFirst().contains("--version")
+        return scan
+    }
+
+    package static func shouldConsumeRequestTimeoutValue(_ token: String) -> Bool {
+        if token == "-h" || token == "--help" {
+            return true
         }
+        if Double(token) != nil {
+            return true
+        }
+        return !token.hasPrefix("-")
+    }
+
+    private static func containsVersionFlag(_ args: [String]) -> Bool {
+        args.dropFirst().contains("--version")
     }
 }

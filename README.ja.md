@@ -9,6 +9,12 @@ XcodeMCPKitは、Xcode MCPのためのSwiftライブラリ兼ローカルプロ�
 - macOS 15.4+
 - Swift 6.3+
 
+## Library Products
+
+- `XcodeMCPKit`: `XcodeMCP`からローカル`mcpbridge`またはStreamable HTTP proxy endpointを操作するclient-side SDK。
+- `XcodeMCPKitTesting`: 実`mcpbridge`を起動せず、同じ`XcodeMCP` public APIをテストするためのin-memory runtime。
+- `XcodeMCPProxyKit`: proxy server、STDIO adapter、launch plan、installerを組み込むためのfacade。
+
 ## インストール
 
 ### GitHub Releasesからインストール
@@ -73,6 +79,37 @@ await xcode.close()
 ```
 
 public APIは`MCPJSONValue`、`MCPTool`、`MCPToolResult`、`MCPContent`、`MCPProgress`などのMCP domain valueを公開します。process launch、JSON-RPC framing、session transportはinternal implementation detailです。
+
+### XcodeMCPKitTestingでテストする
+
+テスト target に`XcodeMCPKitTesting` productを追加すると、実`mcpbridge`を起動せずに、production codeと同じ`XcodeMCP` APIを使えます。
+
+```swift
+import XcodeMCPKit
+import XcodeMCPKitTesting
+
+let runtime = XcodeMCPTestRuntime()
+await runtime.setToolResult(
+    MCPToolResult(
+        content: [
+            .text(
+                "NavigationStack documentation",
+                raw: ["type": "text", "text": "NavigationStack documentation"]
+            )
+        ]
+    ),
+    forToolNamed: "DocumentationSearch"
+)
+
+let xcode = try await runtime.makeClient()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": "NavigationStack"]
+)
+await xcode.close()
+```
+
+fake MCP response loopとrequest recordingはtesting runtimeが所有するため、app側のテストでJSON-RPC transportを組み立てる必要はありません。
 
 ## MCPクライアント設定
 

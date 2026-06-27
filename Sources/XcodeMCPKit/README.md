@@ -21,6 +21,10 @@ It intentionally does not expose tool-specific Swift wrappers, JSON-RPC framing,
 transport streams, or server-to-client handlers such as roots, sampling, and
 elicitation.
 
+Use the separate `XcodeMCPKitTesting` product when tests need deterministic
+tool catalogs, progress notifications, and tool results through the same
+`XcodeMCP` public API without launching `mcpbridge`.
+
 ## Quickstart
 
 Add the `XcodeMCPKit` product to your target, then construct a client:
@@ -118,3 +122,37 @@ transport and completes initialization before returning. `callTool` returns the
 final MCP result; progress is callback-only and the underlying event stream is
 not public API. Call `close()` when finished. Closing is idempotent and rejects
 future requests.
+
+## Testing
+
+`XcodeMCPKitTesting` provides `XcodeMCPTestRuntime`, an in-memory MCP runtime
+that creates initialized `XcodeMCP` clients:
+
+```swift
+import XcodeMCPKit
+import XcodeMCPKitTesting
+
+let runtime = XcodeMCPTestRuntime()
+await runtime.setToolResult(
+    MCPToolResult(
+        content: [
+            .text(
+                "Result text",
+                raw: ["type": "text", "text": "Result text"]
+            )
+        ]
+    ),
+    forToolNamed: "DocumentationSearch"
+)
+
+let xcode = try await runtime.makeClient()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": "NavigationStack"]
+)
+await xcode.close()
+```
+
+The runtime owns the fake transport and JSON-RPC response loop. Tests can read
+`recordedMessages()` to assert request shape while keeping production code on
+the public SDK surface.

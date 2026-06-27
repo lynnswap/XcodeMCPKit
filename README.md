@@ -12,6 +12,15 @@ endpoint and automated approval flow.
 - macOS 15.4+
 - Swift 6.3+
 
+## Library Products
+
+- `XcodeMCPKit`: client-side SDK for talking to a local `mcpbridge` process or
+  a Streamable HTTP proxy endpoint through `XcodeMCP`.
+- `XcodeMCPKitTesting`: in-memory test runtime for exercising the same
+  `XcodeMCP` public API without launching `mcpbridge`.
+- `XcodeMCPProxyKit`: embeddable proxy server, STDIO adapter, launch-plan, and
+  installer facades used by the command-line products.
+
 ## Install
 
 ### From GitHub Releases
@@ -109,6 +118,39 @@ The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
 `MCPToolResult`, `MCPContent`, and `MCPProgress`. Process launch, JSON-RPC
 framing, HTTP session headers, SSE parsing, and session transport are internal
 implementation details.
+
+### Test With XcodeMCPKitTesting
+
+Add the `XcodeMCPKitTesting` product to tests that should exercise code through
+the real `XcodeMCP` API without launching a real bridge process:
+
+```swift
+import XcodeMCPKit
+import XcodeMCPKitTesting
+
+let runtime = XcodeMCPTestRuntime()
+await runtime.setToolResult(
+    MCPToolResult(
+        content: [
+            .text(
+                "NavigationStack documentation",
+                raw: ["type": "text", "text": "NavigationStack documentation"]
+            )
+        ]
+    ),
+    forToolNamed: "DocumentationSearch"
+)
+
+let xcode = try await runtime.makeClient()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": "NavigationStack"]
+)
+await xcode.close()
+```
+
+The testing runtime owns the fake MCP response loop and records client
+requests, so app tests do not need to build JSON-RPC transports directly.
 
 ## Embed or Launch the Proxy Server
 

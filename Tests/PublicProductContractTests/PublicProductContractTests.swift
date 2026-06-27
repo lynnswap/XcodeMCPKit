@@ -33,6 +33,10 @@ struct PublicProductContractTests {
             at: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitClient"),
             withIntermediateDirectories: true
         )
+        try FileManager.default.createDirectory(
+            at: packageURL.appendingPathComponent("Sources/XcodeMCPKitTestingClient"),
+            withIntermediateDirectories: true
+        )
 
         try packageManifest(repositoryRoot: repositoryRoot)
             .write(
@@ -49,6 +53,12 @@ struct PublicProductContractTests {
         try xcodeMCPProxyKitClientSource
             .write(
                 to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitClient/Contract.swift"),
+                atomically: true,
+                encoding: .utf8
+            )
+        try xcodeMCPKitTestingClientSource
+            .write(
+                to: packageURL.appendingPathComponent("Sources/XcodeMCPKitTestingClient/Contract.swift"),
                 atomically: true,
                 encoding: .utf8
             )
@@ -72,6 +82,17 @@ struct PublicProductContractTests {
                     name: "XcodeMCPKitClient",
                     dependencies: [
                         .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
+                    ],
+                    swiftSettings: [
+                        .swiftLanguageMode(.v6),
+                        .defaultIsolation(nil),
+                    ]
+                ),
+                .target(
+                    name: "XcodeMCPKitTestingClient",
+                    dependencies: [
+                        .product(name: "XcodeMCPKit", package: "XcodeMCPKit"),
+                        .product(name: "XcodeMCPKitTesting", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -107,6 +128,8 @@ struct PublicProductContractTests {
             packageURL.path,
             "--target",
             "XcodeMCPKitClient",
+            "--target",
+            "XcodeMCPKitTestingClient",
             "--target",
             "XcodeMCPProxyKitClient",
             "-Xswiftc",
@@ -291,6 +314,62 @@ func compileOnlyClientLifecycleSurface(config: XcodeMCP.Configuration) async thr
         _ = progress.message
     }
     await client.close()
+}
+"""
+
+private let xcodeMCPKitTestingClientSource = """
+import XcodeMCPKit
+import XcodeMCPKitTesting
+
+func compileOnlyTestingRuntimeSurface() async throws {
+    let runtime = XcodeMCPTestRuntime()
+    await runtime.setTools([
+        MCPTool(
+            name: "DocumentationSearch",
+            description: "Search docs",
+            inputSchema: [
+                "type": "object",
+            ]
+        )
+    ])
+    await runtime.setProgressUpdates(
+        [
+            .init(progress: 0.5, total: 1, message: "Halfway"),
+        ],
+        forToolNamed: "DocumentationSearch"
+    )
+    await runtime.setToolResult(
+        MCPToolResult(
+            content: [
+                .text(
+                    "Result text",
+                    raw: [
+                        "type": "text",
+                        "text": "Result text",
+                    ]
+                )
+            ],
+            structuredContent: [
+                "matches": 1,
+            ]
+        ),
+        forToolNamed: "DocumentationSearch"
+    )
+
+    let client = try await runtime.makeClient()
+    _ = try await client.listTools()
+    _ = try await client.callTool(
+        "DocumentationSearch",
+        arguments: [
+            "query": "NavigationStack",
+        ]
+    ) { progress in
+        _ = progress.message
+    }
+    let messages = await runtime.recordedMessages()
+    await client.close()
+
+    _ = messages
 }
 """
 
