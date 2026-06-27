@@ -33,10 +33,6 @@ private enum EventLoopFutureWaitResult<Output: Sendable>: Sendable {
     case timedOut
 }
 
-private func compareDocumentationVersion(_ lhs: String, _ rhs: String) -> ComparisonResult {
-    lhs.compare(rhs, options: [.numeric])
-}
-
 /// The one place that decides which JSON-RPC error a control-plane or
 /// upstream-acquisition failure surfaces as.
 extension ControlPlane {
@@ -65,14 +61,9 @@ extension ControlPlane {
 }
 
 extension RuntimeCoordinator {
-    private struct ProcessToolsCatalogRoute: Sendable {
+    private struct AvailableToolsCatalogRoute: Sendable {
         let target: XcodeProcessTarget
         let upstreamIndices: [Int]
-    }
-
-    private enum ProcessToolsCatalogOutcome: Sendable {
-        case success(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)
-        case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
     }
 
     func loadCanonicalToolsCatalog(
@@ -87,7 +78,7 @@ extension RuntimeCoordinator {
             )
         let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
         if xcodeProcessRoutes.isEmpty == false {
-            return try await loadCanonicalToolsCatalogAcrossProcessRoutes(
+            return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
                 requestTimeout: effectiveRequestTimeout,
                 deadlineUptimeNs: requestDeadlineUptimeNs,
                 startedAt: startedAt
@@ -103,11 +94,20 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func loadCanonicalToolsCatalogAcrossProcessRoutes(
+    private func loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
         requestTimeout: TimeAmount?,
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
+        if let surface = processToolCatalogRegistry.availableToolCatalogSurface(),
+           let sourceUpstream = surface.sourceUpstream {
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: surface.rawResult,
+                sourceUpstream: sourceUpstream,
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+            )
+        }
+
         let candidateProcessOrder = documentationCandidateProcessOrder()
         let processRoutes =
             candidateProcessOrder.map { order in
@@ -115,121 +115,161 @@ extension RuntimeCoordinator {
                     xcodeProcessRoutes.first { $0.target.processID == processID }
                 }
             } ?? xcodeProcessRoutes
-        let routes = processRoutes.compactMap { route -> ProcessToolsCatalogRoute? in
+        let routes = processRoutes.compactMap { route -> AvailableToolsCatalogRoute? in
             let upstreamIndices = usableInitializedUpstreamIndices(in: route)
             guard upstreamIndices.isEmpty == false else {
                 return nil
             }
-            return ProcessToolsCatalogRoute(target: route.target, upstreamIndices: upstreamIndices)
+            return AvailableToolsCatalogRoute(target: route.target, upstreamIndices: upstreamIndices)
         }
         guard routes.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
-        return try await withThrowingTaskGroup(
-            of: ProcessToolsCatalogOutcome.self,
-            returning: CanonicalToolsCatalogLoadResult.self
-        ) { group in
-            for route in routes {
-                group.addTask {
-                    do {
-                        let result = try await self.loadCanonicalToolsCatalogFromProcessRoute(
-                            route,
-                            requestTimeout: requestTimeout,
-                            deadlineUptimeNs: deadlineUptimeNs,
-                            startedAt: startedAt
-                        )
-                        return .success(target: route.target, result: result)
-                    } catch is CancellationError {
-                        return .failure(
-                            target: route.target,
-                            upstreamIndex: route.upstreamIndices.last ?? -1,
-                            error: CancellationError()
-                        )
-                    } catch {
-                        return .failure(
-                            target: route.target,
-                            upstreamIndex: route.upstreamIndices.last ?? -1,
-                            error: error
-                        )
-                    }
-                }
-            }
+        return try await raceAvailableToolsCatalogRoutes(
+            routes,
+            requestTimeout: requestTimeout,
+            deadlineUptimeNs: deadlineUptimeNs,
+            startedAt: startedAt
+        )
+    }
 
-            var successes: [(target: XcodeProcessTarget, result: CanonicalToolsCatalogLoadResult)] = []
-            var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
-            while let outcome = try await group.next() {
-                switch outcome {
-                case .success(let target, let result):
-                    successes.append((target: target, result: result))
-                case .failure(let target, let upstreamIndex, let error):
-                    if error is CancellationError {
-                        throw CancellationError()
-                    }
-                    failures.append((target, upstreamIndex, error))
-                }
-            }
-
-            if successes.isEmpty == false {
-                for failure in failures {
-                    self.processToolCatalogRegistry.removeCatalog(
-                        forProcessID: failure.target.processID
-                    )
-                }
-                for success in successes {
-                    guard let sourceUpstream = success.result.sourceUpstream else {
-                        continue
-                    }
-                    self.processToolCatalogRegistry.record(
-                        target: success.target,
-                        upstreamIndex: sourceUpstream,
-                        associatedUpstreamIndices: self.xcodeProcessRoutes.first {
-                            $0.target.processID == success.target.processID
-                        }?.upstreamIndices ?? [],
-                        rawResult: success.result.rawResult
-                    )
-                }
-                let unionResult = self.processToolCatalogRegistry.unionToolsListResult()
-                    ?? successes[0].result.rawResult
-                let successfulProcessIDs = Set(successes.map { $0.target.processID })
-                let configuredProcessIDs = self.catalogEligibleConfiguredProcessIDs()
-                let hasCompleteProcessCatalog =
-                    configuredProcessIDs.isEmpty == false
-                    && successfulProcessIDs == configuredProcessIDs
-                let sourceUpstream: Int?
-                if hasCompleteProcessCatalog {
-                    sourceUpstream = successes.sorted {
-                        compareDocumentationVersion(
-                            $0.target.xcodeVersion,
-                            $1.target.xcodeVersion
-                        ) == .orderedDescending
-                    }.first?.result.sourceUpstream
-                } else {
-                    sourceUpstream = nil
-                }
-                return CanonicalToolsCatalogLoadResult(
-                    rawResult: unionResult,
-                    sourceUpstream: sourceUpstream,
-                    durationMilliseconds: self.elapsedMilliseconds(
-                        sinceUptimeNanoseconds: startedAt
-                    )
+    private func raceAvailableToolsCatalogRoutes(
+        _ routes: [AvailableToolsCatalogRoute],
+        requestTimeout: TimeAmount?,
+        deadlineUptimeNs: UInt64?,
+        startedAt: UInt64
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        let tasks = NIOLockedValueBox<[Task<Void, Never>]>([])
+        let cancelled = NIOLockedValueBox(false)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let completion = NIOLockedValueBox(false)
+                let failures = NIOLockedValueBox(
+                    [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)]()
                 )
-            }
 
-            let lastFailure = failures.last
-            if let lastFailure {
-                throw ControlPlane.RequestError(
-                    route: .pinnedUpstream(lastFailure.upstreamIndex),
-                    upstreamIndex: lastFailure.upstreamIndex,
-                    underlying: lastFailure.error
-                )
+                func finish(_ result: Result<CanonicalToolsCatalogLoadResult, any Error>) {
+                    let shouldResume = completion.withLockedValue { completed in
+                        guard completed == false else { return false }
+                        completed = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    tasks.withLockedValue { routeTasks in
+                        for task in routeTasks {
+                            task.cancel()
+                        }
+                        routeTasks.removeAll()
+                    }
+                    switch result {
+                    case .success(let catalog):
+                        continuation.resume(returning: catalog)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+
+                for route in routes {
+                    if completion.withLockedValue({ $0 }) {
+                        break
+                    }
+                    let task = Task {
+                        guard completion.withLockedValue({ $0 }) == false else {
+                            return
+                        }
+                        if cancelled.withLockedValue({ $0 }) {
+                            finish(.failure(CancellationError()))
+                            return
+                        }
+                        do {
+                            try Task.checkCancellation()
+                            let result = try await self.loadToolsCatalogFromAvailableProcessRoute(
+                                route,
+                                requestTimeout: requestTimeout,
+                                deadlineUptimeNs: deadlineUptimeNs,
+                                startedAt: startedAt
+                            )
+                            let catalog = self.recordAvailableToolsCatalog(
+                                target: route.target,
+                                result: result,
+                                startedAt: startedAt
+                            )
+                            finish(.success(catalog))
+                        } catch is CancellationError {
+                            finish(.failure(CancellationError()))
+                        } catch {
+                            let upstreamIndex = route.upstreamIndices.last ?? -1
+                            self.processToolCatalogRegistry.removeCatalog(
+                                forProcessID: route.target.processID
+                            )
+                            let allFailures = failures.withLockedValue { failures in
+                                failures.append((
+                                    target: route.target,
+                                    upstreamIndex: upstreamIndex,
+                                    error: error
+                                ))
+                                return failures.count == routes.count ? failures : nil
+                            }
+                            guard let allFailures else { return }
+                            if let lastFailure = allFailures.last {
+                                finish(
+                                    .failure(
+                                        ControlPlane.RequestError(
+                                            route: .pinnedUpstream(lastFailure.upstreamIndex),
+                                            upstreamIndex: lastFailure.upstreamIndex,
+                                            underlying: lastFailure.error
+                                        )
+                                    )
+                                )
+                            } else {
+                                finish(.failure(UpstreamSlotScheduler.AcquisitionError.unavailable))
+                            }
+                        }
+                    }
+                    tasks.withLockedValue { $0.append(task) }
+                    if completion.withLockedValue({ $0 }) || cancelled.withLockedValue({ $0 }) {
+                        task.cancel()
+                    }
+                }
             }
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        } onCancel: {
+            cancelled.withLockedValue { $0 = true }
+            tasks.withLockedValue { routeTasks in
+                for task in routeTasks {
+                    task.cancel()
+                }
+                routeTasks.removeAll()
+            }
         }
     }
 
-    private func loadCanonicalToolsCatalogFromProcessRoute(
-        _ route: ProcessToolsCatalogRoute,
+    private func recordAvailableToolsCatalog(
+        target: XcodeProcessTarget,
+        result: CanonicalToolsCatalogLoadResult,
+        startedAt: UInt64
+    ) -> CanonicalToolsCatalogLoadResult {
+        guard let sourceUpstream = result.sourceUpstream else {
+            return result
+        }
+        processToolCatalogRegistry.record(
+            target: target,
+            upstreamIndex: sourceUpstream,
+            associatedUpstreamIndices: xcodeProcessRoutes.first {
+                $0.target.processID == target.processID
+            }?.upstreamIndices ?? [],
+            rawResult: result.rawResult
+        )
+        let surface = processToolCatalogRegistry.availableToolCatalogSurface()
+        return CanonicalToolsCatalogLoadResult(
+            rawResult: surface?.rawResult ?? result.rawResult,
+            sourceUpstream: surface?.sourceUpstream ?? sourceUpstream,
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+        )
+    }
+
+    private func loadToolsCatalogFromAvailableProcessRoute(
+        _ route: AvailableToolsCatalogRoute,
         requestTimeout: TimeAmount?,
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64

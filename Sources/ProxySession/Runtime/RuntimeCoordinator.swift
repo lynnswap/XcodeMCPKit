@@ -803,18 +803,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
               canonicalBrokerState.toolsCatalogRaw() != nil else {
             return
         }
-        if let unionResult = processToolCatalogRegistry.unionToolsListResult(),
-           let sourceUpstream = processToolCatalogRegistry.representativeSourceUpstream(),
-           processToolCatalogRegistryHasCompleteConfiguredCatalog()
-        {
+        if let surface = processToolCatalogRegistry.availableToolCatalogSurface(),
+           let sourceUpstream = surface.sourceUpstream {
             canonicalBrokerState.syncCanonicalToolsCatalog(
-                unionResult,
+                surface.rawResult,
                 sourceUpstream: sourceUpstream
             )
-            return
-        }
-        if processToolCatalogRegistry.unionToolsListResult() != nil {
-            canonicalBrokerState.clearToolsCatalog()
             return
         }
         guard let sourceUpstream = canonicalBrokerState.toolsSourceUpstream() else {
@@ -1238,7 +1232,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             process: toolCatalogSourceProcess(),
             exposurePolicy: xcodeProcessRoutes.isEmpty
                 ? nil
-                : "union_latest_xcode_descriptor_runtime_guard"
+                : "available_route_catalog_surface"
         )
         logger.info("\(summary)")
     }
