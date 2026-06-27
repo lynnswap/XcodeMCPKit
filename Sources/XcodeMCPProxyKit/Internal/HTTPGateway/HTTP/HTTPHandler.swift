@@ -7,7 +7,6 @@ import NIOConcurrencyHelpers
 import ProxyCore
 import XcodeMCPRuntime
 import ProxySession
-import ProxyXcodeFeatures
 
 package final class HTTPHandler: ChannelInboundHandler, Sendable {
     package typealias InboundIn = HTTPServerRequestPart

@@ -4,7 +4,6 @@ import NIO
 import NIOHTTP1
 import ProxyCore
 import ProxySession
-import ProxyXcodeFeatures
 import ProxyXcodeSupport
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.

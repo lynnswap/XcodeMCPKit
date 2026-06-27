@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import ProxyXcodeFeatures
 import ProxySession
 
 package final class HTTPControlService: Sendable {

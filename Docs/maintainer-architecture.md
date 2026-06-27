@@ -7,11 +7,9 @@
 - `ProxyMCP`
   - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request inspection.
 - `ProxySession`
-  - Session lifecycle, initialize handshake, upstream process pool, leases, routing.
+  - Session lifecycle, initialize handshake, upstream process pool, leases, routing, and `XcodeRefreshCodeIssuesInFile` workflow.
 - `ProxyXcodeSupport`
   - Xcode window inspection and permission-dialog auto approval.
-- `ProxyXcodeFeatures`
-  - `XcodeRefreshCodeIssuesInFile` planning, target resolution, queueing, tool-list rewriting.
 - `ProxyHTTPGateway`
   - Streamable HTTP request handling, transport validation, local MCP responses, forwarding.
 - `XcodeMCPProxyKit`
@@ -20,22 +18,19 @@
 ## Ownership Boundaries
 
 - `ProxySession`
-  - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, and lease cleanup.
+  - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, lease cleanup, and refresh-code-issues feature workflow.
 - `ProxyHTTPGateway`
   - Owns HTTP transport validation, server-issued session ids, protocol-version enforcement, and request/response transport concerns.
   - Rejects JSON-RPC batch arrays at the HTTP boundary.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
-- `ProxyXcodeFeatures`
-  - Owns refresh workflow and other Xcode-specific feature logic.
 
 ## Dependency Direction
 
 - `ProxyCore` must not depend on gateway/session/Xcode modules.
 - `ProxyMCP` depends on `ProxyCore` for shared protocol primitives and extends the `MCP` namespace for JSON-RPC / MCP helpers.
   Avoid introducing gateway/session/Xcode knowledge here.
-- `ProxySession` depends on `ProxyCore` and `ProxyMCP`.
+- `ProxySession` depends on `ProxyCore`, `ProxyMCP`, and `ProxyXcodeSupport`.
 - `ProxyXcodeSupport` depends on `ProxyCore`.
-- `ProxyXcodeFeatures` depends on `ProxyCore`, `ProxyMCP`, and `ProxyXcodeSupport`.
 - `ProxyHTTPGateway` is the highest-level internal target and may depend on the lower-level targets above.
 - `ProxyCLI` depends on `XcodeMCPProxy` only.
 

@@ -3,7 +3,6 @@ import Foundation
 import Testing
 
 @testable import ProxyCore
-@testable import ProxyXcodeFeatures
 @testable import ProxyXcodeSupport
 
 @Suite(.serialized)

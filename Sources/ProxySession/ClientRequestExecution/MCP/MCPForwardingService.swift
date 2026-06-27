@@ -2,7 +2,6 @@ import Foundation
 import NIO
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeFeatures
 
 package struct MCPForwardingService: Sendable {
     package struct PreparedRequest: Sendable {

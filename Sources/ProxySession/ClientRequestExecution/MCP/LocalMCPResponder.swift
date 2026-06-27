@@ -4,7 +4,6 @@ import NIO
 import NIOConcurrencyHelpers
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeFeatures
 
 package enum LocalPostHandling {
     case pendingResponse(
