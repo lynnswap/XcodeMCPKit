@@ -250,6 +250,33 @@ extension JSONRPC {
             return try responsePayloadData(objects: objects, forceBatchArray: forceBatchArray)
         }
 
+        package static func errorResponseData(
+            idValues: [JSONValue],
+            code: Int,
+            message: String,
+            data errorData: JSONValue? = nil,
+            forceBatchArray: Bool = false,
+            includeNullIDWhenEmpty: Bool = false
+        ) throws -> Data? {
+            guard idValues.isEmpty == false else {
+                guard includeNullIDWhenEmpty else {
+                    return nil
+                }
+                return try errorResponseData(
+                    idValue: nil,
+                    code: code,
+                    message: message,
+                    data: errorData,
+                    forceBatchArray: forceBatchArray
+                )
+            }
+            let error = ErrorPayload(code: code, message: message, data: errorData)
+            let objects = idValues.map {
+                errorResponseObject(idValue: $0, error: error)
+            }
+            return try responsePayloadData(objects: objects, forceBatchArray: forceBatchArray)
+        }
+
         package static func responsePayloadData(
             objects: [[String: Any]],
             forceBatchArray: Bool
