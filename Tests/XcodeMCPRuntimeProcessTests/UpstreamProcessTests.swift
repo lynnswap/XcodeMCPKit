@@ -538,7 +538,7 @@ private func collectChunkedFixtureMessages(
 }
 
 private func releaseChunkedFixture(_ session: any UpstreamSession) async {
-    let result = await session.send(Data("continue".utf8))
+    let result = await session.send(Data("continue\n".utf8))
     switch result {
     case .accepted:
         break
