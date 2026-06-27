@@ -1,4 +1,3 @@
-import ProxyXcodeSupport
 import Foundation
 import NIO
 import NIOConcurrencyHelpers

@@ -3,7 +3,6 @@ import Logging
 import NIO
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeSupport
 
 package enum RefreshCodeIssues {}
 

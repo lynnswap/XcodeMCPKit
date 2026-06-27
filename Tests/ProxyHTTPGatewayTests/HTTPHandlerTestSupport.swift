@@ -7,7 +7,6 @@ import Testing
 import ProxyCore
 import XcodeMCPRuntime
 import ProxySession
-import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
 @testable import XcodeMCPProxyKit

@@ -5,7 +5,6 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeSupport
 
 extension ClientMCPRequestExecutor {
     package enum Status: Sendable, Equatable {

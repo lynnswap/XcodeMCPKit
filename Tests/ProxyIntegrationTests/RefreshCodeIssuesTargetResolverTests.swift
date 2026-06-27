@@ -3,7 +3,6 @@ import NIOEmbedded
 import Testing
 
 @testable import ProxySession
-@testable import ProxyXcodeSupport
 
 @Suite
 struct RefreshCodeIssuesTargetResolverTests {
