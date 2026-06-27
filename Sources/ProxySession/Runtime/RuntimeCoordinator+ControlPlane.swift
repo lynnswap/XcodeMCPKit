@@ -66,6 +66,11 @@ extension RuntimeCoordinator {
         let upstreamIndices: [Int]
     }
 
+    private enum AvailableToolsCatalogOutcome: Sendable {
+        case success(route: AvailableToolsCatalogRoute, result: CanonicalToolsCatalogLoadResult)
+        case failure(route: AvailableToolsCatalogRoute, upstreamIndex: Int, error: any Error)
+    }
+
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle
@@ -135,7 +140,7 @@ extension RuntimeCoordinator {
         var lastFailure: (any Error)?
         for routeBatch in routeBatches {
             do {
-                return try await loadFirstAvailableToolsCatalogInRouteOrder(
+                return try await loadFirstAvailableToolsCatalogInBatch(
                     routeBatch,
                     requestTimeout: requestTimeout,
                     deadlineUptimeNs: deadlineUptimeNs,
@@ -170,45 +175,65 @@ extension RuntimeCoordinator {
         return fallbackRoutes.isEmpty ? [ownerRoutes] : [ownerRoutes, fallbackRoutes]
     }
 
-    private func loadFirstAvailableToolsCatalogInRouteOrder(
+    private func loadFirstAvailableToolsCatalogInBatch(
         _ routes: [AvailableToolsCatalogRoute],
         requestTimeout: TimeAmount?,
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
-        for route in routes {
-            do {
-                try Task.checkCancellation()
-                let result = try await loadToolsCatalogFromAvailableProcessRoute(
-                    route,
-                    requestTimeout: requestTimeout,
-                    deadlineUptimeNs: deadlineUptimeNs,
-                    startedAt: startedAt
-                )
-                return recordAvailableToolsCatalog(
-                    target: route.target,
-                    result: result,
-                    startedAt: startedAt,
-                    exposedProcessIDs: exposedProcessIDs
-                )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                let upstreamIndex = route.upstreamIndices.last ?? -1
-                processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
-                failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
+        try await withThrowingTaskGroup(
+            of: AvailableToolsCatalogOutcome.self,
+            returning: CanonicalToolsCatalogLoadResult.self
+        ) { group in
+            for route in routes {
+                group.addTask {
+                    do {
+                        try Task.checkCancellation()
+                        let result = try await self.loadToolsCatalogFromAvailableProcessRoute(
+                            route,
+                            requestTimeout: requestTimeout,
+                            deadlineUptimeNs: deadlineUptimeNs,
+                            startedAt: startedAt
+                        )
+                        return .success(route: route, result: result)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        return .failure(
+                            route: route,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
+                            error: error
+                        )
+                    }
+                }
             }
+
+            var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
+            while let outcome = try await group.next() {
+                switch outcome {
+                case .success(let route, let result):
+                    group.cancelAll()
+                    return recordAvailableToolsCatalog(
+                        target: route.target,
+                        result: result,
+                        startedAt: startedAt,
+                        exposedProcessIDs: exposedProcessIDs
+                    )
+                case .failure(let route, let upstreamIndex, let error):
+                    processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
+                    failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
+                }
+            }
+            if let lastFailure = failures.last {
+                throw ControlPlane.RequestError(
+                    route: .pinnedUpstream(lastFailure.upstreamIndex),
+                    upstreamIndex: lastFailure.upstreamIndex,
+                    underlying: lastFailure.error
+                )
+            }
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        if let lastFailure = failures.last {
-            throw ControlPlane.RequestError(
-                route: .pinnedUpstream(lastFailure.upstreamIndex),
-                upstreamIndex: lastFailure.upstreamIndex,
-                underlying: lastFailure.error
-            )
-        }
-        throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
     private func recordAvailableToolsCatalog(

@@ -2147,7 +2147,6 @@ struct RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
-        manager.markUpstreamInitialized(upstreamIndex: 1)
 
         let fallbackTask = Task {
             try await manager.sharedToolsList(
@@ -2186,6 +2185,7 @@ struct RuntimeCoordinatorTests {
             )
         )
         #expect(manager.cachedToolsListResult() == nil)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
 
         let ownerTask = Task {
             try await manager.sharedToolsList(
@@ -2216,23 +2216,23 @@ struct RuntimeCoordinatorTests {
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
-    @Test func sessionManagerToolsListPreservesRoutePriorityWithinAvailableBatch()
+    @Test func sessionManagerToolsListReturnsLaterUsableRouteWithoutWaitingForEarlierRoute()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let firstUpstream = TestUpstreamClient()
-        let secondUpstream = TestUpstreamClient()
-        let firstTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
-        let secondTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
+        let earlierUpstream = TestUpstreamClient()
+        let laterUpstream = TestUpstreamClient()
+        let earlierTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
+        let laterTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [firstUpstream, secondUpstream],
+            upstreams: [earlierUpstream, laterUpstream],
             xcodeProcessRoutes: [
-                XcodeProcessRoute(target: firstTarget, upstreamIndices: [0]),
-                XcodeProcessRoute(target: secondTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: earlierTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: laterTarget, upstreamIndices: [1]),
             ],
             startImmediately: false
         )
@@ -2242,33 +2242,35 @@ struct RuntimeCoordinatorTests {
 
         let task = Task {
             try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-route-priority",
+                sessionID: "session-process-catalog-later-usable-route",
                 requestTimeoutOverride: .seconds(5)
             )
         }
 
-        let firstRequest = try await firstUpstream.nextSent {
+        _ = try await earlierUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        #expect(await secondUpstream.sentCount() == 0)
-        await firstUpstream.yield(
+        let laterRequest = try await laterUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        await laterUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: firstRequest),
+                    id: try extractUpstreamID(from: laterRequest),
                     tools: [
-                        toolDescriptor(name: "FirstRouteOnly"),
+                        toolDescriptor(name: "LaterRouteOnly"),
                     ]
                 )
             )
         )
 
-        let result = try await waitWithTimeout("waiting for prioritized tools/list") {
+        let result = try await waitWithTimeout("waiting for later route tools/list") {
             try await task.value
         }
-        #expect(toolNames(in: result) == ["FirstRouteOnly"])
-        #expect(await firstUpstream.sentCount() == 1)
-        #expect(await secondUpstream.sentCount() == 0)
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
+        #expect(toolNames(in: result) == ["LaterRouteOnly"])
+        #expect(await earlierUpstream.sentCount() == 1)
+        #expect(await laterUpstream.sentCount() == 1)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
@@ -2473,14 +2475,17 @@ struct RuntimeCoordinatorTests {
         _ = try await upstream0.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        #expect(await upstream1.sentCount() == 0)
+        _ = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
 
         task.cancel()
 
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
-        #expect(await upstream1.sentCount() == 0)
+        #expect(await upstream0.sentCount() == 1)
+        #expect(await upstream1.sentCount() == 1)
     }
 
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
