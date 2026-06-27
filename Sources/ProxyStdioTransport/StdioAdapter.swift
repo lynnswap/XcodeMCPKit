@@ -399,8 +399,14 @@ public actor StdioAdapter {
     }
 }
 
-private actor StdioStreamedResponseCompletion {
-    private var remainingIDKeys: Set<String>
+actor StdioStreamedResponseCompletion {
+    private enum ResponseIDKey: Hashable {
+        case string(String)
+        case int(Int64)
+        case double(Double)
+    }
+
+    private var remainingIDKeys: Set<ResponseIDKey>
 
     init(ids: [JSONValue]) {
         self.remainingIDKeys = Set(ids.compactMap(Self.idKey))
@@ -435,12 +441,17 @@ private actor StdioStreamedResponseCompletion {
         remainingIDKeys.remove(idKey)
     }
 
-    private static func idKey(_ value: JSONValue) -> String? {
+    private static func idKey(_ value: JSONValue) -> ResponseIDKey? {
         switch value {
         case .string(let value):
-            return value
+            return .string(value)
         case .number(let value):
-            return value.stringValue
+            switch value {
+            case .int(let value):
+                return .int(value)
+            case .double(let value):
+                return .double(value)
+            }
         case .object, .array, .bool, .null:
             return nil
         }
