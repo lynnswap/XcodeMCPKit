@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import ProxyCore
 
 extension RuntimeCoordinator {

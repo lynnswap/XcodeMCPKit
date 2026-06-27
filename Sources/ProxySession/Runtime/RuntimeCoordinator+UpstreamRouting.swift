@@ -1,9 +1,8 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import ProxyCore
-import ProxyMCP
 
 extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {

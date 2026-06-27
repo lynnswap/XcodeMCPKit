@@ -3,7 +3,7 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxySession
 import ProxySessionControlPlane

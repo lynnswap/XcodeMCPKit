@@ -1,5 +1,5 @@
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxyStdioTransport
 import Foundation
 import NIO

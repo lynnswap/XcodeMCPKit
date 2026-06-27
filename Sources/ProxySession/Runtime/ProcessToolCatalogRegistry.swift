@@ -1,7 +1,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 package final class ProcessToolCatalogRegistry: Sendable {
     package struct Catalog: Sendable {

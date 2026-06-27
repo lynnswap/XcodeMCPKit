@@ -4,7 +4,7 @@ import XcodeMCPTestSupport
 
 @testable import ProxyCore
 @testable import ProxySession
-@testable import XcodeMCPBridgeRuntime
+@testable import XcodeMCPRuntime
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct UpstreamProcessTests {

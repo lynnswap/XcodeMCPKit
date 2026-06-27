@@ -4,7 +4,7 @@ import NIO
 import NIOHTTP1
 import NIOConcurrencyHelpers
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 final class SSEHub: Sendable {
     private struct Waiter: Sendable {

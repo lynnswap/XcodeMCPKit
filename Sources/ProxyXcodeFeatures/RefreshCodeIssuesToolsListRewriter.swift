@@ -1,6 +1,6 @@
 import Foundation
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 extension RefreshCodeIssues {
     package enum ToolsListRewriter {

@@ -1,5 +1,5 @@
 import Foundation
-import ProxyMCP
+import XcodeMCPRuntime
 
 package enum ToolRoutingDecision: Sendable {
     case forward(preferredUpstreamIndex: Int?)

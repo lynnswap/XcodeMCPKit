@@ -22,7 +22,7 @@ transport streams, or server-to-client handlers such as roots, sampling, and
 elicitation.
 
 Bridge process, session, runtime topology, and transport implementations live
-in the internal `XcodeMCPBridgeRuntime` target. `XcodeMCPKit` uses that target
+in the internal `XcodeMCPRuntime` target. `XcodeMCPKit` uses that target
 to provide its configured transports without making those runtime types part of
 the public library product surface.
 

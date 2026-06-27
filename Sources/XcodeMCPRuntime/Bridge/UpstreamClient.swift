@@ -1,6 +1,5 @@
 import Foundation
 import ProxyCore
-import ProxyMCP
 
 package enum Upstream {}
 
@@ -20,9 +19,9 @@ extension Upstream {
         case shuttingDown
     }
 
-/// Why a send did not reach the upstream. Backpressure is the only case
-/// that should count against the upstream's health; an unavailable slot is
-/// already handled by the exit/quarantine machinery.
+    /// Why a send did not reach the upstream. Backpressure is the only case
+    /// that should count against the upstream's health; an unavailable slot is
+    /// already handled by the exit/quarantine machinery.
     package enum SendResult: Sendable, Equatable {
         case accepted
         case backpressure

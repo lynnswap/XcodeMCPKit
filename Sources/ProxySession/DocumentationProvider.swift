@@ -2,9 +2,8 @@ import Foundation
 import Logging
 import NIO
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import ProxyCore
-import ProxyMCP
 
 package enum DocumentationProvider {}
 

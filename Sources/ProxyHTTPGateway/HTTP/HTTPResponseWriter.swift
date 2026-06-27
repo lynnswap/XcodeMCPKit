@@ -3,7 +3,7 @@ import Logging
 import NIO
 import NIOHTTP1
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 package struct HTTPResponseWriter: Sendable {
     private let logger: Logger

@@ -3,7 +3,7 @@ import NIO
 import NIOConcurrencyHelpers
 import ProxySessionControlPlane
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 package final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting {
     private struct State: Sendable {

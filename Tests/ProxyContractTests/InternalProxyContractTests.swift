@@ -2,7 +2,7 @@ import Foundation
 import Testing
 
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxyAdapterCLI
 import ProxyServerCLI
 import ProxyXcodeFeatures

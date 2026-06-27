@@ -4,9 +4,8 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import ProxyCore
-import ProxyMCP
 
 package final class SessionContext: Sendable {
     package let id: String
@@ -336,7 +335,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         struct Upstream: Sendable {
             let isInitialized: Bool
             let initInFlight: Bool
-            let healthState: XcodeMCPBridgeRuntime.Upstream.HealthState
+            let healthState: XcodeMCPRuntime.Upstream.HealthState
         }
 
         struct Session: Sendable {

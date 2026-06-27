@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import XcodeMCPTestSupport
 
 @testable import ProxySession

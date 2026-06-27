@@ -1,5 +1,5 @@
 import Foundation
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxySession
 
 package struct ToolCallNormalizer: Sendable {
