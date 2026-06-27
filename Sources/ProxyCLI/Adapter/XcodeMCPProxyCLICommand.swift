@@ -1,42 +1,52 @@
 import Foundation
-import Logging
 import ProxyCLICommon
 import XcodeMCPProxyKit
 
 extension XcodeMCPProxyStdioAdapter: CLICommandAdapter {}
 
 package struct XcodeMCPProxyCLICommand {
-    package struct LogSink {
-        package var error: (String) -> Void
-        package var info: (String, Logger.Metadata) -> Void
+    package typealias LogSink = XcodeMCPProxyStdioAdapter.LogSink
 
-        package init(
-            error: @escaping (String) -> Void,
-            info: @escaping (String, Logger.Metadata) -> Void
-        ) {
-            self.error = error
-            self.info = info
-        }
-    }
-
-    package struct Invocation {
-        package var showHelp = false
-        package var showVersion = false
-        package var usesRemovedURLHelper = false
-        package var removedFlagMessage: String?
-        package var hasExplicitURL = false
-        package var hasStdioFlag = false
-        package var serverOnlyFlag: String?
+    package static func usage(discoveryFileURL: URL = XcodeMCPProxyAdapterEndpointResolver.discoveryFileURL()) -> String {
+        XcodeMCPProxyStdioAdapter.adapterUsage(discoveryFileURL: discoveryFileURL)
     }
 
     package struct Dependencies {
+        package typealias Launch = (
+            _ args: [String],
+            _ environment: [String: String],
+            _ stdout: @escaping (String) -> Void
+        ) async -> Int32
+
         package var bootstrapLogging: ([String: String]) -> Void
         package var stdout: (String) -> Void
-        package var makeLogSink: () -> XcodeMCPProxyCLICommand.LogSink
-        package var makeAdapter:
-            (XcodeMCPProxyAdapterEndpoint, TimeInterval, FileHandle, FileHandle) -> any CLICommandAdapter
-        package var input: FileHandle
-        package var output: FileHandle
+        package var launch: Launch
+
+        package init(
+            bootstrapLogging: @escaping ([String: String]) -> Void,
+            stdout: @escaping (String) -> Void,
+            launcher: XcodeMCPProxyStdioAdapter.Launcher
+        ) {
+            self.bootstrapLogging = bootstrapLogging
+            self.stdout = stdout
+            self.launch = { args, environment, stdout in
+                await launcher.run(
+                    arguments: args,
+                    environment: environment,
+                    stdout: stdout
+                )
+            }
+        }
+
+        package init(
+            bootstrapLogging: @escaping ([String: String]) -> Void,
+            stdout: @escaping (String) -> Void,
+            launch: @escaping Launch
+        ) {
+            self.bootstrapLogging = bootstrapLogging
+            self.stdout = stdout
+            self.launch = launch
+        }
 
         package init(
             bootstrapLogging: @escaping ([String: String]) -> Void,
@@ -51,37 +61,31 @@ package struct XcodeMCPProxyCLICommand {
             input: FileHandle,
             output: FileHandle
         ) {
-            self.bootstrapLogging = bootstrapLogging
-            self.stdout = stdout
-            self.makeLogSink = makeLogSink
-            self.makeAdapter = makeAdapter
-            self.input = input
-            self.output = output
+            let launcher = XcodeMCPProxyStdioAdapter.Launcher(
+                dependencies: .init(
+                    makeLogSink: makeLogSink,
+                    makeAdapter: { endpoint, timeout, input, output in
+                        CLICommandAdapterBox(
+                            makeAdapter(endpoint, timeout, input, output)
+                        )
+                    },
+                    input: input,
+                    output: output
+                )
+            )
+            self.init(
+                bootstrapLogging: bootstrapLogging,
+                stdout: stdout,
+                launcher: launcher
+            )
         }
 
         package static var live: Self {
+            let launcher = XcodeMCPProxyStdioAdapter.Launcher()
             return Self(
                 bootstrapLogging: XcodeMCPProxyLogging.bootstrap,
                 stdout: { print($0) },
-                makeLogSink: {
-                    let logger = XcodeMCPProxyLogging.make("cli")
-                    return XcodeMCPProxyCLICommand.LogSink(
-                        error: { logger.error("\($0)") },
-                        info: { message, metadata in
-                            logger.info("\(message)", metadata: metadata)
-                        }
-                    )
-                },
-                makeAdapter: { endpoint, requestTimeout, input, output in
-                    XcodeMCPProxyStdioAdapter(
-                        endpoint: endpoint,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output
-                    )
-                },
-                input: .standardInput,
-                output: .standardOutput
+                launcher: launcher
             )
         }
     }
@@ -94,9 +98,22 @@ package struct XcodeMCPProxyCLICommand {
 
     package func run(args: [String], environment: [String: String]) async -> Int32 {
         dependencies.bootstrapLogging(environment)
-        return await XcodeMCPProxyCLICommand.Runtime(dependencies: dependencies).execute(
-            args: args,
-            environment: environment
-        )
+        return await dependencies.launch(args, environment, dependencies.stdout)
+    }
+}
+
+private struct CLICommandAdapterBox: XcodeMCPProxyStdioAdapter.LaunchAdapter {
+    private let adapter: any CLICommandAdapter
+
+    init(_ adapter: any CLICommandAdapter) {
+        self.adapter = adapter
+    }
+
+    func start() async {
+        await adapter.start()
+    }
+
+    func wait() async {
+        await adapter.wait()
     }
 }

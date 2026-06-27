@@ -100,7 +100,7 @@ struct CLICommandTests {
     }
 
     @Test func cliCommandRewritesURLFlagToStdio() throws {
-        let rewritten = try XcodeMCPProxyCLICommand.rewriteURLFlagToStdio([
+        let rewritten = try XcodeMCPProxyStdioAdapter.rewriteURLFlagToStdio([
             "xcode-mcp-proxy",
             "--url",
             "http://localhost:8765/mcp",
@@ -111,6 +111,39 @@ struct CLICommandTests {
             "--stdio",
             "http://localhost:8765/mcp",
         ])
+    }
+
+    @Test func cliCommandDelegatesLaunchToProxyKit() async throws {
+        let output = CapturedLines()
+        let received = LockedBox<(args: [String], environment: [String: String])?>(
+            nil
+        )
+        let command = XcodeMCPProxyCLICommand(
+            dependencies: .init(
+                bootstrapLogging: { _ in },
+                stdout: { output.append($0) },
+                launch: { args, environment, stdout in
+                    received.withValue { value in
+                        value = (args, environment)
+                    }
+                    stdout("delegated")
+                    return 42
+                }
+            )
+        )
+
+        let exitCode = await command.run(
+            args: ["xcode-mcp-proxy", "--version"],
+            environment: ["XCODE_MCP_PROXY_ENDPOINT": "http://localhost:9001/mcp"]
+        )
+
+        #expect(exitCode == 42)
+        #expect(received.snapshot()?.args == ["xcode-mcp-proxy", "--version"])
+        #expect(
+            received.snapshot()?.environment["XCODE_MCP_PROXY_ENDPOINT"]
+                == "http://localhost:9001/mcp"
+        )
+        #expect(output.snapshot() == ["delegated"])
     }
 
     @Test func cliCommandRejectsURLAndStdioTogether() async throws {

@@ -85,8 +85,8 @@ struct InstallCommandTests {
     }
 
     @Test func installCommandParsesOptionsAndPrefersBindir() throws {
-        let options = try XcodeMCPProxyInstallCommand.parseOptions(
-            [
+        let plan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
+            arguments: [
                 "xcode-mcp-proxy-install",
                 "--prefix", "/tmp/prefix",
                 "--bindir", "/tmp/bin",
@@ -94,6 +94,7 @@ struct InstallCommandTests {
             ],
             environment: [:]
         )
+        let options = try #require(plan.configuration)
 
         #expect(options.prefix == "/tmp/prefix")
         #expect(options.bindir == "/tmp/bin")
@@ -104,6 +105,38 @@ struct InstallCommandTests {
                 bindir: options.bindir
             ).path == "/tmp/bin"
         )
+    }
+
+    @Test func installCommandDelegatesLaunchToProxyKit() throws {
+        let output = CapturedLines()
+        let errors = CapturedLines()
+        let received = LockedBox<(args: [String], environment: [String: String])?>(
+            nil
+        )
+        let command = XcodeMCPProxyInstallCommand(
+            dependencies: .init(
+                stdout: { output.append($0) },
+                stderr: { errors.append($0) },
+                launch: { args, environment, stdout, _ in
+                    received.withValue { value in
+                        value = (args, environment)
+                    }
+                    stdout("delegated")
+                    return 24
+                }
+            )
+        )
+
+        let exitCode = command.run(
+            args: ["xcode-mcp-proxy-install", "--dry-run"],
+            environment: ["BINDIR": "/tmp/bin"]
+        )
+
+        #expect(exitCode == 24)
+        #expect(received.snapshot()?.args == ["xcode-mcp-proxy-install", "--dry-run"])
+        #expect(received.snapshot()?.environment["BINDIR"] == "/tmp/bin")
+        #expect(output.snapshot() == ["delegated"])
+        #expect(errors.snapshot().isEmpty)
     }
 
     @Test func installCommandExpandsHomeRelativePaths() throws {

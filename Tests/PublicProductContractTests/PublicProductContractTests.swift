@@ -442,6 +442,26 @@ func compileOnlyProxyLaunchSurface() throws {
         port: 8765,
         processIdentifiers: [123]
     )
+    let adapterPlan = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
+        arguments: [
+            "xcode-mcp-proxy",
+            "--url", "http://localhost:8765/mcp",
+            "--request-timeout", "12",
+        ],
+        environment: [:]
+    )
+    let rewrittenAdapterArgs = try XcodeMCPProxyStdioAdapter.rewriteURLFlagToStdio([
+        "xcode-mcp-proxy",
+        "--url=http://localhost:8765/mcp",
+    ])
+    let installPlan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
+        arguments: [
+            "xcode-mcp-proxy-install",
+            "--prefix", "/tmp/xcode-mcp",
+            "--dry-run",
+        ],
+        environment: [:]
+    )
 
     _ = (
         plan.action,
@@ -454,7 +474,19 @@ func compileOnlyProxyLaunchSurface() throws {
         metadata.name,
         metadata.version,
         versionLine,
-        portError.description
+        portError.description,
+        adapterPlan.action,
+        adapterPlan.configuration,
+        adapterPlan.endpoint,
+        adapterPlan.options.requestTimeout,
+        adapterPlan.usage,
+        adapterPlan.versionLine,
+        rewrittenAdapterArgs,
+        installPlan.action,
+        installPlan.configuration,
+        installPlan.options.executableName,
+        installPlan.usage,
+        installPlan.versionLine
     )
 }
 

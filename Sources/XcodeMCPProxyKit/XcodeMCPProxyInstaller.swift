@@ -1,8 +1,66 @@
 import Foundation
+import ProxyCLICommon
 import ProxyInstallSupport
 
 /// Installer facade for Xcode MCP proxy executables.
 public struct XcodeMCPProxyInstaller: Sendable {
+    /// Top-level action for an installer invocation.
+    public enum LaunchAction: Equatable, Sendable {
+        /// Print usage and exit.
+        case showHelp
+
+        /// Print version information and exit.
+        case showVersion
+
+        /// Install proxy executables.
+        case install
+    }
+
+    /// Normalized installer launch options.
+    public struct LaunchOptions: Equatable, Sendable {
+        /// Executable name resolved from argv.
+        public let executableName: String
+
+        /// Creates normalized installer launch options.
+        public init(executableName: String) {
+            self.executableName = executableName
+        }
+    }
+
+    /// Resolved launch plan for `xcode-mcp-proxy-install`.
+    public struct LaunchPlan: Equatable, Sendable {
+        /// Top-level action to execute.
+        public let action: LaunchAction
+
+        /// Installer configuration. This is present for `.install` plans and
+        /// absent for display-only plans.
+        public let configuration: Configuration?
+
+        /// Normalized launch options.
+        public let options: LaunchOptions
+
+        /// Usage text for help or validation failures.
+        public let usage: String
+
+        /// Version line for version display.
+        public let versionLine: String
+
+        /// Creates an installer launch plan.
+        public init(
+            action: LaunchAction,
+            configuration: Configuration?,
+            options: LaunchOptions,
+            usage: String,
+            versionLine: String
+        ) {
+            self.action = action
+            self.configuration = configuration
+            self.options = options
+            self.usage = usage
+            self.versionLine = versionLine
+        }
+    }
+
     /// Destination and mode settings for a source install.
     public struct Configuration: Equatable, Sendable {
         /// Install prefix used when ``bindir`` is not set.
@@ -93,6 +151,114 @@ public struct XcodeMCPProxyInstaller: Sendable {
     /// Creates an installer facade.
     public init(configuration: Configuration = Configuration()) {
         self.configuration = configuration
+    }
+
+    /// CLI usage for `xcode-mcp-proxy-install`.
+    public static var installUsage: String {
+        """
+        Usage:
+          xcode-mcp-proxy-install [--bindir path] [--prefix path] [--dry-run]
+
+        Options:
+          --bindir path   Install to this directory (overrides --prefix)
+          --prefix path   Install to <prefix>/bin (default: ~/.local)
+          --dry-run       Print actions without copying files
+          --version       Show version
+          -h, --help      Show this help
+
+        Examples:
+          swift run -c release xcode-mcp-proxy-install
+          swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
+        """
+    }
+
+    /// Formats a CLI-compatible installer version line.
+    public static func installVersionLine(arguments: [String]) -> String {
+        XcodeMCPProxyServer.productMetadata.versionLine(
+            arguments: arguments,
+            defaultExecutableName: "xcode-mcp-proxy-install"
+        )
+    }
+
+    /// Resolves argv and environment into an installer launch plan.
+    public static func resolveLaunchPlan(
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> LaunchPlan {
+        let scan = ProxyCLIInvocationScanner.scanInstall(arguments)
+        let options = LaunchOptions(
+            executableName: executableName(
+                arguments: arguments,
+                defaultExecutableName: "xcode-mcp-proxy-install"
+            )
+        )
+        let versionLine = installVersionLine(arguments: arguments)
+
+        if scan.showHelp {
+            return LaunchPlan(
+                action: .showHelp,
+                configuration: nil,
+                options: options,
+                usage: installUsage,
+                versionLine: versionLine
+            )
+        }
+        if scan.showVersion {
+            return LaunchPlan(
+                action: .showVersion,
+                configuration: nil,
+                options: options,
+                usage: installUsage,
+                versionLine: versionLine
+            )
+        }
+
+        return LaunchPlan(
+            action: .install,
+            configuration: try parseLaunchConfiguration(arguments, environment: environment),
+            options: options,
+            usage: installUsage,
+            versionLine: versionLine
+        )
+    }
+
+    package static func parseLaunchConfiguration(
+        _ arguments: [String],
+        environment: [String: String]
+    ) throws -> Configuration {
+        var configuration = Configuration(
+            prefix: environment["PREFIX"],
+            bindir: environment["BINDIR"],
+            dryRun: false
+        )
+
+        var index = 1
+        while index < arguments.count {
+            let argument = arguments[index]
+            switch argument {
+            case "-h", "--help", "--version":
+                index += 1
+            case "--prefix":
+                guard index + 1 < arguments.count else {
+                    throw Error.message("\(argument) requires a value")
+                }
+                configuration.prefix = arguments[index + 1]
+                index += 2
+            case "--bindir":
+                guard index + 1 < arguments.count else {
+                    throw Error.message("\(argument) requires a value")
+                }
+                configuration.bindir = arguments[index + 1]
+                index += 2
+            case "--dry-run":
+                configuration.dryRun = true
+                index += 1
+            default:
+                throw Error.message("unknown option: \(argument)")
+            }
+        }
+
+        return configuration
     }
 
     /// Resolves the file operations that would be performed for an install.
@@ -217,6 +383,98 @@ public struct XcodeMCPProxyInstaller: Sendable {
             try ProxyProductBuilder.buildReleaseProducts(products, in: directory)
         } catch let error as ProxyProductBuilder.Error {
             throw Error.message(error.description)
+        }
+    }
+
+    private static func executableName(arguments: [String], defaultExecutableName: String) -> String {
+        guard let rawExecutable = arguments.first, !rawExecutable.isEmpty else {
+            return defaultExecutableName
+        }
+
+        let name = URL(fileURLWithPath: rawExecutable).lastPathComponent
+        return name.isEmpty ? defaultExecutableName : name
+    }
+}
+
+extension XcodeMCPProxyInstaller {
+    package struct Launcher {
+        package struct Dependencies {
+            package var executableURL: () -> URL?
+            package var install:
+                (XcodeMCPProxyInstaller.Configuration, URL, (String) -> Void) throws -> Void
+
+            package init(
+                executableURL: @escaping () -> URL?,
+                install: @escaping (
+                    XcodeMCPProxyInstaller.Configuration,
+                    URL,
+                    (String) -> Void
+                ) throws -> Void
+            ) {
+                self.executableURL = executableURL
+                self.install = install
+            }
+
+            package static var live: Self {
+                Self(
+                    executableURL: { Bundle.main.executableURL },
+                    install: { configuration, executableURL, stdout in
+                        try XcodeMCPProxyInstaller(configuration: configuration).install(
+                            executableURL: executableURL,
+                            stdout: stdout
+                        )
+                    }
+                )
+            }
+        }
+
+        private let dependencies: Dependencies
+
+        package init(dependencies: Dependencies = .live) {
+            self.dependencies = dependencies
+        }
+
+        package func run(
+            arguments: [String],
+            environment: [String: String],
+            stdout: (String) -> Void,
+            stderr: (String) -> Void
+        ) -> Int32 {
+            do {
+                let plan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
+                    arguments: arguments,
+                    environment: environment
+                )
+
+                switch plan.action {
+                case .showHelp:
+                    stdout(plan.usage)
+                    return 0
+                case .showVersion:
+                    stdout(plan.versionLine)
+                    return 0
+                case .install:
+                    guard let configuration = plan.configuration else {
+                        throw XcodeMCPProxyInstaller.Error.message(
+                            "installer launch plan is missing configuration"
+                        )
+                    }
+                    guard let executableURL = dependencies.executableURL() else {
+                        throw XcodeMCPProxyInstaller.Error.message(
+                            "failed to locate installer executable"
+                        )
+                    }
+                    try dependencies.install(configuration, executableURL, stdout)
+                    return 0
+                }
+            } catch let error as XcodeMCPProxyInstaller.Error {
+                stderr("error: \(error.description)")
+                stderr("run with --help for usage")
+                return 1
+            } catch {
+                stderr("error: \(error)")
+                return 1
+            }
         }
     }
 }
