@@ -145,53 +145,103 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
-        let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(
-            upstream: upstream,
-            requestTimeout: 0.15
+        let upstream = EmbeddedControlledUpstreamClient()
+        let config = makeEmbeddedConfig(requestTimeout: 0.15)
+        let firstChannel = EmbeddedChannel()
+        let secondChannel = EmbeddedChannel()
+        let sessionManager = RuntimeCoordinator(
+            config: config,
+            eventLoop: firstChannel.eventLoop,
+            upstreams: [upstream],
+            startImmediately: false
         )
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
-
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 300)
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 301)
-            )
-
-            let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
-            #expect(labels == ["tools/list"])
-            #expect(await upstream.respondNext(label: "tools/list"))
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect(secondResult.0.statusCode == 200)
-            #expect((firstResult.1["id"] as? NSNumber)?.intValue == 300)
-            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 301)
-            #expect(firstResult.1["error"] == nil)
-            #expect(secondResult.1["error"] == nil)
-        } catch {
-            try? await server.shutdown()
-            throw error
+        defer {
+            sessionManager.shutdownAndWait()
+            _ = try? firstChannel.finish()
+            _ = try? secondChannel.finish()
         }
-        try await server.shutdown()
+
+        ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
+        try addEmbeddedHTTPHandler(
+            to: firstChannel,
+            config: config,
+            sessionManager: sessionManager
+        )
+        try addEmbeddedHTTPHandler(
+            to: secondChannel,
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let sessionID = "session-queued-timeout-budget"
+        _ = sessionManager.session(id: sessionID)
+        sessionManager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current
+        )
+        sessionManager.markUpstreamInitialized(upstreamIndex: 0)
+        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
+            try #require(
+                JSONValue(any: [
+                    "protocolVersion": MCP.ProtocolVersion.current,
+                    "capabilities": [String: Any](),
+                ])
+            ),
+            sourceUpstream: 0
+        )
+        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        upstream.clearRecordedRequests()
+
+        try postEmbeddedJSON(
+            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1"),
+            sessionID: sessionID,
+            to: firstChannel
+        )
+        firstChannel.embeddedEventLoop.run()
+        #expect(try upstream.waitForRequestCount(1) == ["tools/call:ExecuteSnippet"])
+
+        try postEmbeddedJSON(
+            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2"),
+            sessionID: sessionID,
+            to: secondChannel
+        )
+        secondChannel.embeddedEventLoop.run()
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        secondChannel.embeddedEventLoop.advanceTime(by: .milliseconds(150))
+        secondChannel.embeddedEventLoop.run()
+        if let unexpected = try secondChannel.readOutbound(as: HTTPServerResponsePart.self) {
+            Issue.record("queued request produced a response before upstream dispatch: \(unexpected)")
+        }
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        let firstResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(firstResponseData, upstreamIndex: 0)
+        firstChannel.embeddedEventLoop.run()
+        let firstResponse = try collectEmbeddedResponse(from: firstChannel)
+        #expect(firstResponse.head.status == .ok)
+        let firstObject = try jsonObject(from: firstResponse.body)
+        #expect((firstObject["id"] as? NSNumber)?.intValue == 300)
+        #expect(firstObject["error"] == nil)
+
+        secondChannel.embeddedEventLoop.run()
+        #expect(try upstream.waitForRequestCount(2) == [
+            "tools/call:ExecuteSnippet",
+            "tools/call:ExecuteSnippet",
+        ])
+        let secondResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
+        secondChannel.embeddedEventLoop.run()
+
+        let secondResponse = try collectEmbeddedResponse(from: secondChannel)
+        #expect(secondResponse.head.status == .ok)
+        let secondObject = try jsonObject(from: secondResponse.body)
+        #expect((secondObject["id"] as? NSNumber)?.intValue == 301)
+        #expect(secondObject["error"] == nil)
     }
 
     @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() throws {
