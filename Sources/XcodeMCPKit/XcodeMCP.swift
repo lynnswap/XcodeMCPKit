@@ -277,29 +277,33 @@ public actor XcodeMCP {
     ///
     /// - Parameter config: Connection and initialization settings.
     public init(config: Configuration = Configuration()) async throws {
-        let transport: any XcodeMCPTransport
-        switch config.transport {
-        case .localBridge(let bridge):
-            transport = try await UpstreamProcessXcodeMCPTransport.start(
-                config: UpstreamProcess.Config(
-                    command: bridge.command,
-                    args: bridge.arguments,
-                    environment: bridge.environment,
-                    maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
+        do {
+            let transport: any XcodeMCPTransport
+            switch config.transport {
+            case .localBridge(let bridge):
+                transport = try await UpstreamProcessXcodeMCPTransport.start(
+                    config: UpstreamProcess.Config(
+                        command: bridge.command,
+                        args: bridge.arguments,
+                        environment: bridge.environment,
+                        maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
+                    )
                 )
-            )
-        case .streamableHTTP(let endpoint):
-            transport = try await StreamableHTTPXcodeMCPTransport.start(
-                endpoint: endpoint,
-                requestTimeout: config.requestTimeout
-            )
-        case .streamableHTTPDiscoveryFile(let discoveryFile):
-            transport = try await StreamableHTTPXcodeMCPTransport.start(
-                discoveryFile: discoveryFile,
-                requestTimeout: config.requestTimeout
-            )
+            case .streamableHTTP(let endpoint):
+                transport = try await StreamableHTTPXcodeMCPTransport.start(
+                    endpoint: endpoint,
+                    requestTimeout: config.requestTimeout
+                )
+            case .streamableHTTPDiscoveryFile(let discoveryFile):
+                transport = try await StreamableHTTPXcodeMCPTransport.start(
+                    discoveryFile: discoveryFile,
+                    requestTimeout: config.requestTimeout
+                )
+            }
+            try await self.init(config: config, transport: transport)
+        } catch {
+            throw Self.publicError(from: error)
         }
-        try await self.init(config: config, transport: transport)
     }
 
     package init(config: Configuration = Configuration(), transport: any XcodeMCPTransport) async throws {
@@ -431,7 +435,10 @@ extension XcodeMCP {
                         do {
                             try await self.transport.send(payload)
                         } catch {
-                            self.pendingRequests.fail(idKey: idKey, error: error)
+                            self.pendingRequests.fail(
+                                idKey: idKey,
+                                error: Self.publicError(from: error)
+                            )
                         }
                     }
                     if self.pendingRequests.setSendTask(idKey: idKey, task: sendTask) == false {
@@ -450,11 +457,31 @@ extension XcodeMCP {
         }
         try ensureOpen()
         let payload = try makeJSONRPCPayload(id: nil, method: method, params: params)
-        try await transport.send(payload)
+        do {
+            try await transport.send(payload)
+        } catch {
+            throw Self.publicError(from: error)
+        }
     }
 }
 
 private extension XcodeMCP {
+    static func publicError(from error: any Error) -> any Error {
+        guard let runtimeError = error as? MCPBridgeRuntimeError else {
+            return error
+        }
+        switch runtimeError {
+        case .closed:
+            return XcodeMCPError.closed
+        case .invalidRequest(let message):
+            return XcodeMCPError.invalidRequest(message)
+        case .invalidResponse(let message):
+            return XcodeMCPError.invalidResponse(message)
+        case .transportUnavailable(let reason):
+            return XcodeMCPError.transportUnavailable(reason)
+        }
+    }
+
     func initialize() async throws {
         let result = try await request(
             "initialize",

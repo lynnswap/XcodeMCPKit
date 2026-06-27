@@ -74,6 +74,18 @@ struct XcodeMCPTests {
         #expect(await transport.closeCount() == 1)
     }
 
+    @Test func asyncInitializerMapsRuntimeTransportErrorsToPublicError() async throws {
+        let transport = RuntimeFailingXcodeMCPTransport(
+            error: .transportUnavailable("mcpbridge write queue is full")
+        )
+
+        await #expect(throws: XcodeMCPError.transportUnavailable(
+            "mcpbridge write queue is full"
+        )) {
+            _ = try await XcodeMCP(transport: transport)
+        }
+    }
+
     @Test func listToolsDecodesDescriptorAndPreservesDynamicFields() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
@@ -641,6 +653,29 @@ private struct SentMessage: Sendable, Equatable {
     var params: MCPJSONValue?
     var result: MCPJSONValue?
     var error: MCPJSONValue?
+}
+
+private actor RuntimeFailingXcodeMCPTransport: XcodeMCPTransport {
+    nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
+
+    private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
+    private let error: MCPBridgeRuntimeError
+
+    init(error: MCPBridgeRuntimeError) {
+        let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
+        self.events = stream.stream
+        self.continuation = stream.continuation
+        self.error = error
+    }
+
+    func send(_ data: Data) async throws {
+        throw error
+    }
+
+    func close() async {
+        continuation.yield(.closed(nil))
+        continuation.finish()
+    }
 }
 
 private actor FakeXcodeMCPTransport: XcodeMCPTransport {
