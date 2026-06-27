@@ -6,7 +6,7 @@ import NIOHTTP1
 import Testing
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 @testable import XcodeMCPProxyKit
 
 @Suite(.serialized)

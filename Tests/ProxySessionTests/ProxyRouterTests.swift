@@ -4,7 +4,7 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct ProxyRouterTests {

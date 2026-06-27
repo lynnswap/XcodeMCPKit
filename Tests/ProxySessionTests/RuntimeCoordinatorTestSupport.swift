@@ -5,7 +5,7 @@ import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
     UpstreamSlotScheduler(

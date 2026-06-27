@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 import NIO
-import ProxySession
 import Testing
 import XcodeMCPRuntime
 

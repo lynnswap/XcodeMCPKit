@@ -1,11 +1,10 @@
-import ProxySession
+import XcodeMCPProxyKit
 import XcodeMCPRuntime
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import NIOHTTP1
 import Testing
-import XcodeMCPProxyKit
 import XcodeMCPTestSupport
 
 @Suite(.serialized)

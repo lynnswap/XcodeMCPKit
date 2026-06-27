@@ -1,7 +1,7 @@
 import XcodeMCPRuntime
 import Testing
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct ToolCatalogStartupLogFormatterTests {

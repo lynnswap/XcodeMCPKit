@@ -1,5 +1,4 @@
 import Foundation
-import ProxySession
 
 extension XcodeMCPProxyServer {
     /// Product metadata exposed by the server-side kit.

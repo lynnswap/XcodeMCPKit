@@ -5,7 +5,7 @@ import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 extension RuntimeCoordinatorTests {
     @Test func documentationProviderConnectionCancelsEventReaderOnDeinit() async throws {

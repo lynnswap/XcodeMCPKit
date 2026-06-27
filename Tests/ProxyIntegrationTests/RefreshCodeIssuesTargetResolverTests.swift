@@ -2,7 +2,7 @@ import Foundation
 import NIOEmbedded
 import Testing
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct RefreshCodeIssuesTargetResolverTests {

@@ -1,4 +1,4 @@
-import ProxySession
+import XcodeMCPProxyKit
 import Foundation
 
 final class CapturedLines: @unchecked Sendable {

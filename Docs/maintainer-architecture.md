@@ -5,17 +5,17 @@
 - `XcodeMCPRuntime`
   - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request
     inspection, and low-level process execution primitives.
-- `ProxySession`
-  - Session lifecycle, proxy config state, initialize handshake, upstream
-    process pool, leases, routing, discovery-file clients, Xcode target
-    discovery/window query/readiness, and `XcodeRefreshCodeIssuesInFile`
-    workflow.
 - `XcodeMCPProxyKit`
-  - Public proxy facades plus internal HTTP gateway, STDIO adapter, permission-dialog auto approval, process restart, and install-product helpers.
+  - Public proxy facades plus internal session lifecycle, proxy config state,
+    initialize handshake, upstream process pool, leases, routing,
+    discovery-file clients, Xcode target discovery/window query/readiness,
+    `XcodeRefreshCodeIssuesInFile` workflow, HTTP gateway, STDIO adapter,
+    permission-dialog auto approval, process restart, and install-product
+    helpers.
 
 ## Ownership Boundaries
 
-- `ProxySession`
+- `XcodeMCPProxyKit` session internals
   - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, lease cleanup, and refresh-code-issues feature workflow.
 - `XcodeMCPProxyKit` HTTP gateway internals
   - Owns HTTP transport validation, server-issued session ids, protocol-version enforcement, and request/response transport concerns.
@@ -26,11 +26,10 @@
 
 - `XcodeMCPRuntime` owns shared protocol/runtime primitives and must not depend on proxy-only modules.
   Avoid introducing gateway/session/Xcode knowledge here.
-- `ProxySession` depends on `XcodeMCPRuntime` and owns proxy session/config
-  state. It must not depend on product facade, CLI, installer, or HTTP gateway
-  modules.
-- `XcodeMCPProxyKit` is the highest-level proxy library target and may depend
-  on the lower-level targets above.
+- `XcodeMCPProxyKit` depends on `XcodeMCPRuntime` and owns proxy
+  session/config state, public proxy facades, CLI composition, installer
+  helpers, and HTTP gateway internals. Session implementation files live under
+  `Sources/XcodeMCPProxyKit/Internal/Session`.
 - Executable targets depend on `XcodeMCPProxyKit` only.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;

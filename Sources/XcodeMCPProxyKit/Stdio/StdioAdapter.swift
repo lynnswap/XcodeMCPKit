@@ -1,6 +1,5 @@
 import Foundation
 import Logging
-import ProxySession
 import XcodeMCPRuntime
 
 package struct StdioAdapterShutdownPolicy: Sendable {

@@ -1,6 +1,6 @@
 import Testing
 import XcodeMCPTestSupport
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 @Suite struct AsyncTaskSupervisorTests {
     @Test func runReportsAcceptedBeforeShutdown() async throws {

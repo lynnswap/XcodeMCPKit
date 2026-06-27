@@ -1,5 +1,4 @@
 import Foundation
-import ProxySession
 
 package enum CLIError: Error, CustomStringConvertible {
     case message(String)

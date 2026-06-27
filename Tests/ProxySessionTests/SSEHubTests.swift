@@ -4,7 +4,7 @@ import NIOEmbedded
 import NIOHTTP1
 import Testing
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct SSEHubTests {

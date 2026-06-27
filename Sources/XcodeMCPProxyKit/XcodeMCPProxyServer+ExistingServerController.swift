@@ -1,4 +1,3 @@
-import ProxySession
 
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.

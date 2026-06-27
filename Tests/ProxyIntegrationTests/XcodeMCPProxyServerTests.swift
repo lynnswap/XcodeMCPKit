@@ -1,4 +1,3 @@
-import ProxySession
 import Foundation
 import NIO
 import NIOConcurrencyHelpers

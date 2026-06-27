@@ -4,7 +4,6 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import ProxySession
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
 

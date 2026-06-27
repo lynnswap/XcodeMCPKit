@@ -1,5 +1,4 @@
 import Logging
-import ProxySession
 
 package enum XcodeMCPProxyLogging {
     package static func bootstrap(environment: [String: String]) {

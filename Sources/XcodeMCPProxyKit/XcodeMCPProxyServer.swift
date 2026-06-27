@@ -2,7 +2,6 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
-import ProxySession
 import XcodeMCPRuntime
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.

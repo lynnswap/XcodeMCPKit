@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPRuntime
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 private func makeTempDiscoveryURL() -> URL {
     FileManager.default.temporaryDirectory
