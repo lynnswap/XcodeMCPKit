@@ -1,5 +1,5 @@
 import Foundation
-import ProxyMCP
+import XcodeMCPRuntime
 
 package enum ToolCatalogStartupLogFormatter {
     package struct Process: Sendable, Equatable {

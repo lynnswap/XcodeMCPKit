@@ -2,9 +2,8 @@ import Foundation
 import Logging
 import NIOCore
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
 
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =

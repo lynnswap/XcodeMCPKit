@@ -1,9 +1,8 @@
 import Foundation
 import NIO
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import ProxyCore
-import ProxyMCP
 
 extension RuntimeCoordinator {
     func startEagerInitializePrimary(applyBackoff: Bool = false) {

@@ -2,7 +2,6 @@ import Foundation
 import Darwin
 import Logging
 import ProxyCore
-import ProxyMCP
 
 private final class StdinWriter: @unchecked Sendable {
     private struct State: Sendable {

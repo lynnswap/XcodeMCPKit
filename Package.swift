@@ -60,15 +60,8 @@ let package = Package(
             ]
         ),
         .target(
-            name: "ProxyMCPContract",
-            dependencies: [],
-            path: "Sources/ProxyMCPContract",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
             name: "ProxyCore",
             dependencies: [
-                "ProxyMCPContract",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -78,32 +71,20 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "ProxyMCP",
+            name: "XcodeMCPRuntime",
             dependencies: [
                 "ProxyCore",
-                .product(name: "NIO", package: "swift-nio"),
-            ],
-            path: "Sources/ProxyMCP",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "XcodeMCPBridgeRuntime",
-            dependencies: [
-                "ProxyCore",
-                "ProxyMCP",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
-            path: "Sources/XcodeMCPBridgeRuntime",
+            path: "Sources/XcodeMCPRuntime",
             swiftSettings: strictSwiftSettings
         ),
         .target(
             name: "XcodeMCPKit",
             dependencies: [
-                "XcodeMCPBridgeRuntime",
-                "ProxyMCP",
-                "ProxyMCPContract",
+                "XcodeMCPRuntime",
             ],
             path: "Sources/XcodeMCPKit",
             exclude: ["README.md"],
@@ -112,7 +93,7 @@ let package = Package(
         .target(
             name: "XcodeMCPKitTesting",
             dependencies: [
-                "XcodeMCPBridgeRuntime",
+                "XcodeMCPRuntime",
                 "XcodeMCPKit",
             ],
             path: "Sources/XcodeMCPKitTesting",
@@ -123,7 +104,7 @@ let package = Package(
             name: "ProxySessionControlPlane",
             dependencies: [
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -135,9 +116,8 @@ let package = Package(
             name: "ProxySession",
             dependencies: [
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySessionControlPlane",
-                "XcodeMCPBridgeRuntime",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -161,7 +141,7 @@ let package = Package(
             name: "ProxyXcodeFeatures",
             dependencies: [
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxyXcodeSupport",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -173,7 +153,7 @@ let package = Package(
             name: "ProxyHTTPGateway",
             dependencies: [
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxySessionControlPlane",
                 "ProxyXcodeSupport",
@@ -191,8 +171,7 @@ let package = Package(
             name: "ProxyStdioTransport",
             dependencies: [
                 "ProxyCore",
-                "ProxyMCP",
-                "XcodeMCPBridgeRuntime",
+                "XcodeMCPRuntime",
                 .product(name: "Logging", package: "swift-log"),
             ],
             path: "Sources/ProxyStdioTransport",
@@ -270,6 +249,7 @@ let package = Package(
             name: "XcodeMCPTestSupport",
             dependencies: [
                 "ProxySession",
+                "XcodeMCPRuntime",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
@@ -306,7 +286,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPKitTests",
             dependencies: [
-                "XcodeMCPBridgeRuntime",
+                "XcodeMCPRuntime",
                 "XcodeMCPKit",
             ],
             path: "Tests/XcodeMCPKitTests",
@@ -332,10 +312,9 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyKit",
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxySessionControlPlane",
-                "XcodeMCPBridgeRuntime",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
@@ -355,10 +334,9 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyKit",
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxySessionControlPlane",
-                "XcodeMCPBridgeRuntime",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
@@ -377,7 +355,7 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyKit",
                 "ProxySession",
-                "XcodeMCPBridgeRuntime",
+                "XcodeMCPRuntime",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -391,7 +369,7 @@ let package = Package(
                 "XcodeMCPProxyKit",
                 "ProxyCore",
                 "ProxySession",
-                "XcodeMCPBridgeRuntime",
+                "XcodeMCPRuntime",
                 "ProxyHTTPGateway",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
@@ -405,10 +383,9 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyKit",
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxySessionControlPlane",
-                "XcodeMCPBridgeRuntime",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
@@ -427,10 +404,9 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyKit",
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxySessionControlPlane",
-                "XcodeMCPBridgeRuntime",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
@@ -461,11 +437,10 @@ let package = Package(
                 "XcodeMCPProxyKit",
                 "ProxyBuildInfo",
                 "ProxyCore",
-                "ProxyMCP",
+                "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxyProcessManagement",
                 "ProxySessionControlPlane",
-                "XcodeMCPBridgeRuntime",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
@@ -484,6 +459,7 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyKit",
                 "ProxyCore",
+                "XcodeMCPRuntime",
                 "ProxyXcodeSupport",
                 .product(name: "NIO", package: "swift-nio"),
             ],

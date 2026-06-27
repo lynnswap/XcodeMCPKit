@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxySession
 

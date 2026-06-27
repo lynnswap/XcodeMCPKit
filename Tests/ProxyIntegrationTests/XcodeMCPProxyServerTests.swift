@@ -4,7 +4,7 @@ import NIO
 import NIOConcurrencyHelpers
 import ProxyProcessManagement
 import ProxySession
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import Testing
 import XcodeMCPTestSupport
 

@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import Testing
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxySession
 import ProxySessionControlPlane
 import ProxyXcodeFeatures

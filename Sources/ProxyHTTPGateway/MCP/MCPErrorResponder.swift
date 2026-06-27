@@ -1,6 +1,6 @@
 import Foundation
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 enum MCPErrorResponder {
     static func errorResponseData(

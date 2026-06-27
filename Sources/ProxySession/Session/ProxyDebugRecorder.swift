@@ -1,9 +1,8 @@
 import Foundation
 import NIOConcurrencyHelpers
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 import ProxyCore
-import ProxyMCP
 
 package final class ProxyDebugRecorder: Sendable {
     private struct DebugUpstreamState: Sendable {

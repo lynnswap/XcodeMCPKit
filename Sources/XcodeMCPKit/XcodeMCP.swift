@@ -1,7 +1,5 @@
 import Foundation
-import ProxyMCP
-import ProxyMCPContract
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 
 private final class XcodeMCPPendingRequests: @unchecked Sendable {
     private struct PendingRequest {

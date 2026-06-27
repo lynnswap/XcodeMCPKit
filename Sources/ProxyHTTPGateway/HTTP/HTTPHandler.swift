@@ -5,7 +5,7 @@ import NIOFoundationCompat
 import NIOHTTP1
 import NIOConcurrencyHelpers
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxySession
 import ProxyXcodeFeatures
 

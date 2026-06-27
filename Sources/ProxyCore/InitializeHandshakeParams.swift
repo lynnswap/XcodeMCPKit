@@ -2,7 +2,7 @@ import Foundation
 
 /// Core-owned defaults and Xcode chat client version lookup for the
 /// initialize params the proxy presents to mcpbridge. JSON shaping is kept
-/// in ProxySession so ProxyCore stays independent of ProxyMCP.
+/// in ProxySession so ProxyCore stays independent of XcodeMCPRuntime.
 package enum InitializeHandshakeParams {
     package static func hasExplicitClientVersionOverride(
         initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?

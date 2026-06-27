@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import NIOHTTP1
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 enum MCPResponseEmitter {
     enum EmitterError: Error {

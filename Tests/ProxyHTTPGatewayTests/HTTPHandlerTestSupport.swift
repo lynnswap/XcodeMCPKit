@@ -5,10 +5,9 @@ import NIOEmbedded
 import NIOHTTP1
 import Testing
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxySession
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import XcodeMCPTestSupport

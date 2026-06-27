@@ -1,6 +1,6 @@
 import Foundation
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 package enum InitializeHandshakeJSON {
     package static func resolved(

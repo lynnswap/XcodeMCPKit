@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxyXcodeSupport
 
 extension RefreshCodeIssues.Workflow {

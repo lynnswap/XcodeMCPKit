@@ -1,5 +1,5 @@
 import NIOConcurrencyHelpers
-import ProxyMCP
+import XcodeMCPRuntime
 
 package final class UpstreamRouter: Sendable {
     private struct RequestLookupKey: Hashable, Sendable {

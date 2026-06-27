@@ -4,7 +4,7 @@ import NIO
 import NIOConcurrencyHelpers
 import ProxySessionControlPlane
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 extension ControlPlane {
     package enum Error: Swift.Error, Sendable {

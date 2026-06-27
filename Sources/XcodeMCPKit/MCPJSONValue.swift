@@ -1,5 +1,5 @@
 import Foundation
-import ProxyMCP
+import XcodeMCPRuntime
 
 /// A JSON value used by MCP requests, responses, and dynamic metadata.
 ///

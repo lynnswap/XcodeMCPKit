@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import ProxyMCP
+import XcodeMCPRuntime
 
 package final class ServerRequestTracker: Sendable {
     package struct Route: Sendable {

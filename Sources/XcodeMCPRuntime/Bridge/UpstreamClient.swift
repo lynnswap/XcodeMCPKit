@@ -1,6 +1,5 @@
 import Foundation
 import ProxyCore
-import ProxyMCP
 
 package enum Upstream {}
 

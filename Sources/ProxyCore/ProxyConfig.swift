@@ -24,7 +24,7 @@ package struct ProxyConfig: Sendable {
         package var description: String {
             switch self {
             case .unsupportedProtocolVersion(let protocolVersion):
-                return "upstream_handshake.protocolVersion must be \(MCP.ProtocolVersion.current); \(protocolVersion) is not supported"
+                return "upstream_handshake.protocolVersion must be \(MCPProtocolVersion.current); \(protocolVersion) is not supported"
             }
         }
     }
@@ -116,7 +116,7 @@ package struct ProxyConfig: Sendable {
         guard let protocolVersion = initializeParamsOverride?.protocolVersion else {
             return
         }
-        guard MCP.ProtocolVersion.isSupported(protocolVersion) else {
+        guard MCPProtocolVersion.isSupported(protocolVersion) else {
             throw ValidationError.unsupportedProtocolVersion(protocolVersion)
         }
     }

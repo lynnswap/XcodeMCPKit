@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 
 package final class InitializeManager: Sendable {
     package enum PrimaryInitializePhase: Sendable, Equatable {

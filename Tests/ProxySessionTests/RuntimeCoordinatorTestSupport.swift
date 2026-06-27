@@ -5,9 +5,8 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 import ProxyCore
-import ProxyMCP
+import XcodeMCPRuntime
 import ProxySessionControlPlane
-import XcodeMCPBridgeRuntime
 import XcodeMCPTestSupport
 @testable import ProxySession
 

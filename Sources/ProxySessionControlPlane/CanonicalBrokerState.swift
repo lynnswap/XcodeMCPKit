@@ -1,6 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
-import ProxyMCP
+import XcodeMCPRuntime
 
 package final class CanonicalBrokerState: Sendable {
     package struct Incompatibility: Codable, Sendable {

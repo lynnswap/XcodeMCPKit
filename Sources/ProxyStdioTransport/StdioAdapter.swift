@@ -1,8 +1,7 @@
 import Foundation
 import Logging
 import ProxyCore
-import ProxyMCP
-import XcodeMCPBridgeRuntime
+import XcodeMCPRuntime
 
 package struct StdioAdapterShutdownPolicy: Sendable {
     package let requestDrainTimeout: Duration

@@ -1,4 +1,4 @@
-import ProxyMCP
+import XcodeMCPRuntime
 import Testing
 
 @testable import ProxySession
