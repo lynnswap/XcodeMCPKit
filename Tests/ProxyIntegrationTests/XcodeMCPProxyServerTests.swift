@@ -2,7 +2,6 @@ import ProxyCore
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import ProxyProcessManagement
 import ProxySession
 import XcodeMCPRuntime
 import Testing

@@ -2,7 +2,6 @@ import Foundation
 import Logging
 import ProxyCLICommon
 import ProxyCore
-import ProxyStdioTransport
 
 /// Resolved upstream endpoint for the STDIO compatibility adapter.
 public struct XcodeMCPProxyAdapterEndpoint: Equatable, Sendable {

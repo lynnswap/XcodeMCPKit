@@ -2,12 +2,12 @@ import Darwin
 import Foundation
 import ProxyCore
 
-package struct ExistingProxyServerProcessController: DependencyClient {
-    package var terminateExistingServer:
+struct ExistingProxyServerProcessController: DependencyClient {
+    var terminateExistingServer:
         @Sendable (_ host: String, _ port: Int, _ emitWarning: (String) -> Void) -> Bool
-    package var detectExistingServerProcessIDs: @Sendable (_ host: String, _ port: Int) -> [Int]
+    var detectExistingServerProcessIDs: @Sendable (_ host: String, _ port: Int) -> [Int]
 
-    package init(
+    init(
         terminateExistingServer: @escaping @Sendable (
             _ host: String,
             _ port: Int,
@@ -19,14 +19,14 @@ package struct ExistingProxyServerProcessController: DependencyClient {
         self.detectExistingServerProcessIDs = detectExistingServerProcessIDs
     }
 
-    package static let liveValue = live()
+    static let liveValue = live()
 
-    package static let testValue = Self(
+    static let testValue = Self(
         terminateExistingServer: { _, _, _ in false },
         detectExistingServerProcessIDs: { _, _ in [] }
     )
 
-    package static func live(
+    static func live(
         discoveryClient: DiscoveryClient = .liveValue,
         clock: ClockClient = .liveValue,
         currentProcessID: @escaping @Sendable () -> Int = {
@@ -60,17 +60,17 @@ package struct ExistingProxyServerProcessController: DependencyClient {
         )
     }
 
-    package struct SignalResult: Sendable {
-        package let result: Int32
-        package let errnoValue: Int32
+    struct SignalResult: Sendable {
+        let result: Int32
+        let errnoValue: Int32
 
-        package init(result: Int32, errnoValue: Int32) {
+        init(result: Int32, errnoValue: Int32) {
             self.result = result
             self.errnoValue = errnoValue
         }
     }
 
-    package static func hostMatches(requestedHost: String, actualHost: String) -> Bool {
+    static func hostMatches(requestedHost: String, actualHost: String) -> Bool {
         let requested = normalizeHost(requestedHost)
         let actual = normalizeHost(actualHost)
 
@@ -87,7 +87,7 @@ package struct ExistingProxyServerProcessController: DependencyClient {
         return requested == actual
     }
 
-    package static func listeningProcessIDs(fromLsofOutput output: String, matchingHost host: String) -> [Int] {
+    static func listeningProcessIDs(fromLsofOutput output: String, matchingHost host: String) -> [Int] {
         let matchAllHosts = isWildcardHost(host)
 
         var processIDs: [Int] = []

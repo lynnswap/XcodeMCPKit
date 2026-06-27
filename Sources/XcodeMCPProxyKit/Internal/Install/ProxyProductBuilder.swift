@@ -1,10 +1,10 @@
 import Foundation
 
-package enum ProxyProductBuilder {
-    package enum Error: Swift.Error, CustomStringConvertible, Equatable {
+enum ProxyProductBuilder {
+    enum Error: Swift.Error, CustomStringConvertible, Equatable {
         case buildFailed
 
-        package var description: String {
+        var description: String {
             switch self {
             case .buildFailed:
                 return "swift build failed; run from the repo root and try again"
@@ -12,7 +12,7 @@ package enum ProxyProductBuilder {
         }
     }
 
-    package static func buildReleaseProducts(_ products: [String], in directory: URL) throws {
+    static func buildReleaseProducts(_ products: [String], in directory: URL) throws {
         for product in products {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")

@@ -1,10 +1,9 @@
-import ProxyStdioTransport
 import Foundation
 import NIO
 import NIOHTTP1
 import Testing
-import XcodeMCPProxyKit
 import XcodeMCPTestSupport
+@testable import XcodeMCPProxyKit
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct StdioAdapterIntegrationTests {

@@ -1,19 +1,16 @@
 import ProxyCore
-import ProxyProcessManagement
 
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.
     ///
-    /// Low-level `lsof`/`ps`/signal mechanics are owned by
-    /// `ProxyProcessManagement`; this type keeps the server launcher facade in
-    /// `XcodeMCPProxyKit` without making process management part of its public
-    /// responsibility.
-    package struct ExistingServerController: DependencyClient {
-        package var terminateExistingServer:
+    /// Low-level `lsof`/`ps`/signal mechanics stay inside `XcodeMCPProxyKit`
+    /// without becoming part of the public server launcher facade.
+    struct ExistingServerController: DependencyClient {
+        var terminateExistingServer:
             @Sendable (_ host: String, _ port: Int, _ emitWarning: (String) -> Void) -> Bool
-        package var detectExistingServerProcessIDs: @Sendable (_ host: String, _ port: Int) -> [Int]
+        var detectExistingServerProcessIDs: @Sendable (_ host: String, _ port: Int) -> [Int]
 
-        package init(
+        init(
             terminateExistingServer: @escaping @Sendable (
                 _ host: String,
                 _ port: Int,
@@ -25,14 +22,14 @@ extension XcodeMCPProxyServer {
             self.detectExistingServerProcessIDs = detectExistingServerProcessIDs
         }
 
-        package static let liveValue = live()
+        static let liveValue = live()
 
-        package static let testValue = Self(
+        static let testValue = Self(
             terminateExistingServer: { _, _, _ in false },
             detectExistingServerProcessIDs: { _, _ in [] }
         )
 
-        package static func live(
+        static func live(
             processController: ExistingProxyServerProcessController = .liveValue
         ) -> Self {
             Self(
