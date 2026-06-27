@@ -83,6 +83,7 @@ package actor InitializedMCPClientSession {
     private var isClosed = false
     private var eventTask: Task<Void, Never>?
     private var progressHandlers: [String: ProgressHandler] = [:]
+    private var progressDeliveryTasks: [String: Task<Void, Never>] = [:]
 
     package init(transport: any XcodeMCPTransport, configuration: Configuration) async throws {
         self.configuration = configuration
@@ -141,6 +142,7 @@ package actor InitializedMCPClientSession {
         defer {
             if let progressToken {
                 progressHandlers.removeValue(forKey: progressToken)
+                progressDeliveryTasks.removeValue(forKey: progressToken)
             }
         }
 
@@ -191,6 +193,7 @@ package actor InitializedMCPClientSession {
         eventTask?.cancel()
         eventTask = nil
         progressHandlers.removeAll()
+        cancelProgressDeliveryTasks()
         pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
         await transport.close()
     }
@@ -288,6 +291,7 @@ private extension InitializedMCPClientSession {
         case .closed(let reason):
             isClosed = true
             progressHandlers.removeAll()
+            cancelProgressDeliveryTasks()
             pendingRequests.failAll(
                 error: MCPBridgeRuntimeError.transportUnavailable(reason ?? "mcpbridge closed")
             )
@@ -316,13 +320,28 @@ private extension InitializedMCPClientSession {
                let progressToken = params.progressToken,
                let handler = progressHandlers[progressToken]
             {
-                Task {
+                let previousDelivery = progressDeliveryTasks[progressToken]
+                let delivery = Task {
+                    if let previousDelivery {
+                        await previousDelivery.value
+                    }
+                    guard Task.isCancelled == false else {
+                        return
+                    }
                     await handler(params)
                 }
+                progressDeliveryTasks[progressToken] = delivery
             }
         } catch {
             pendingRequests.failAll(error: Self.runtimeError(from: error))
         }
+    }
+
+    func cancelProgressDeliveryTasks() {
+        for task in progressDeliveryTasks.values {
+            task.cancel()
+        }
+        progressDeliveryTasks.removeAll()
     }
 
     func respondToUnsupportedServerRequest(id: JSONValue) async throws {
