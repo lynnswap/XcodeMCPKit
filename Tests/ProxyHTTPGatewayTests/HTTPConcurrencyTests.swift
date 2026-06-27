@@ -6,7 +6,6 @@ import NIOHTTP1
 import Testing
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeFeatures
 import XcodeMCPTestSupport
 @testable import ProxySession
 @testable import XcodeMCPProxyKit

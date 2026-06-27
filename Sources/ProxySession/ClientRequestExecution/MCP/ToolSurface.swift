@@ -1,7 +1,6 @@
 import Foundation
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeFeatures
 
 package struct ToolSurface: Sendable {
     package struct RewriteResult: Sendable {

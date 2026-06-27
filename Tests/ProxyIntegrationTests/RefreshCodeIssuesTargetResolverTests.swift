@@ -2,7 +2,7 @@ import Foundation
 import NIOEmbedded
 import Testing
 
-@testable import ProxyXcodeFeatures
+@testable import ProxySession
 @testable import ProxyXcodeSupport
 
 @Suite

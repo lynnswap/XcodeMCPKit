@@ -2,7 +2,7 @@ import NIO
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxyXcodeFeatures
+@testable import ProxySession
 
 @Suite(.serialized)
 struct RefreshCodeIssuesCoordinatorTests {

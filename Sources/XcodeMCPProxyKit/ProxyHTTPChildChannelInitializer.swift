@@ -3,7 +3,6 @@ import NIO
 import NIOHTTP1
 import ProxyCore
 import ProxySession
-import ProxyXcodeFeatures
 
 final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {
     private let config: ProxyConfig

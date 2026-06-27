@@ -1,6 +1,5 @@
 import Testing
 
-@testable import ProxyXcodeFeatures
 @testable import ProxyXcodeSupport
 
 @Suite

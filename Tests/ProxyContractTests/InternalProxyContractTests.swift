@@ -5,7 +5,6 @@ import ProxyCore
 import XcodeMCPRuntime
 import XcodeMCPProxyKit
 import ProxySession
-import ProxyXcodeFeatures
 @testable import XcodeMCPProxyKit
 
 @Suite

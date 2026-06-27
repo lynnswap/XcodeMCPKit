@@ -3,7 +3,6 @@ import Logging
 import NIO
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeFeatures
 import ProxyXcodeSupport
 
 package final class ClientMCPRequestExecutor: Sendable {

@@ -5,7 +5,6 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeFeatures
 import ProxyXcodeSupport
 
 extension ClientMCPRequestExecutor {
