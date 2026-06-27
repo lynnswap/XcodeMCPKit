@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 struct ExistingProxyServerProcessController: DependencyClient {
     var terminateExistingServer:

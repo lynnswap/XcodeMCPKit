@@ -2,7 +2,9 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Logging
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension XcodePermissionDialog {
     package final class AutoApprover: @unchecked Sendable {

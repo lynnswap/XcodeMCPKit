@@ -1,7 +1,9 @@
 import Foundation
 import Testing
 
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 import XcodeMCPProxyKit
 @testable import XcodeMCPProxyKit
 

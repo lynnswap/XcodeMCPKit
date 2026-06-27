@@ -1,4 +1,6 @@
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 import Testing
 
 @testable import XcodeMCPProxyKit

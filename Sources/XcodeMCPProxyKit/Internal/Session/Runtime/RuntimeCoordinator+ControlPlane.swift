@@ -2,7 +2,9 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension ControlPlane {
     package enum Error: Swift.Error, Sendable {

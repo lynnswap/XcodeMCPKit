@@ -2,7 +2,9 @@ import Darwin
 import Foundation
 import NIO
 import Testing
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 @testable import XcodeMCPProxyKit
 

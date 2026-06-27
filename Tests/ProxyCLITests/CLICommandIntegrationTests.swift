@@ -1,5 +1,7 @@
 import XcodeMCPProxyKit
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 import Foundation
 import NIO
 import NIOConcurrencyHelpers

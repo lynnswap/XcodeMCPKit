@@ -1,6 +1,8 @@
 import Foundation
 import NIO
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 package struct MCPForwardingService: Sendable {
     package struct PreparedRequest: Sendable {
