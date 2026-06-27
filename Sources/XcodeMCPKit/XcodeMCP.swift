@@ -465,8 +465,14 @@ extension XcodeMCP {
 
 private extension XcodeMCP {
     static func publicError(from error: any Error) -> any Error {
-        guard let runtimeError = error as? MCPBridgeRuntimeError else {
+        if let error = error as? XcodeMCPError {
             return error
+        }
+        if error is CancellationError {
+            return error
+        }
+        guard let runtimeError = error as? MCPBridgeRuntimeError else {
+            return XcodeMCPError.transportUnavailable(errorDescription(error))
         }
         switch runtimeError {
         case .closed:
@@ -478,6 +484,14 @@ private extension XcodeMCP {
         case .transportUnavailable(let reason):
             return XcodeMCPError.transportUnavailable(reason)
         }
+    }
+
+    static func errorDescription(_ error: any Error) -> String {
+        let nsError = error as NSError
+        if nsError.localizedDescription.isEmpty == false {
+            return nsError.localizedDescription
+        }
+        return String(describing: error)
     }
 
     func initialize() async throws {
@@ -627,7 +641,9 @@ private extension XcodeMCP {
         } catch JSONRPC.Wire.DecodingFailure.messageWasNotObject {
             throw XcodeMCPError.invalidResponse("JSON-RPC message is not an object")
         } catch {
-            throw error
+            throw XcodeMCPError.invalidResponse(
+                "invalid JSON-RPC message: \(Self.errorDescription(error))"
+            )
         }
         guard let value = MCPJSONValue(foundationObject: raw),
               let object = value.objectValue

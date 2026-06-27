@@ -76,12 +76,20 @@ struct XcodeMCPTests {
 
     @Test func asyncInitializerMapsRuntimeTransportErrorsToPublicError() async throws {
         let transport = RuntimeFailingXcodeMCPTransport(
-            error: .transportUnavailable("mcpbridge write queue is full")
+            error: MCPBridgeRuntimeError.transportUnavailable("mcpbridge write queue is full")
         )
 
         await #expect(throws: XcodeMCPError.transportUnavailable(
             "mcpbridge write queue is full"
         )) {
+            _ = try await XcodeMCP(transport: transport)
+        }
+    }
+
+    @Test func asyncInitializerMapsRawTransportErrorsToPublicError() async throws {
+        let transport = RuntimeFailingXcodeMCPTransport(error: RawTransportError())
+
+        await #expect(throws: XcodeMCPError.transportUnavailable("socket closed")) {
             _ = try await XcodeMCP(transport: transport)
         }
     }
@@ -761,9 +769,9 @@ private actor RuntimeFailingXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
 
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
-    private let error: MCPBridgeRuntimeError
+    private let error: any Error
 
-    init(error: MCPBridgeRuntimeError) {
+    init(error: any Error) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
@@ -777,6 +785,12 @@ private actor RuntimeFailingXcodeMCPTransport: XcodeMCPTransport {
     func close() async {
         continuation.yield(.closed(nil))
         continuation.finish()
+    }
+}
+
+private struct RawTransportError: Error, LocalizedError {
+    var errorDescription: String? {
+        "socket closed"
     }
 }
 
