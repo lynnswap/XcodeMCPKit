@@ -5,14 +5,12 @@ import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
 
-@testable import XcodeMCPProxyKit
-
 @Suite
-struct ProxyRouterTests {
-    @Test func proxyRouterMatchesID() async throws {
+struct JSONRPCResponseRouterTests {
+    @Test func responseRouterMatchesID() async throws {
         let eventLoop = EmbeddedEventLoop()
 
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -28,8 +26,8 @@ struct ProxyRouterTests {
         #expect(string == response)
     }
 
-    @Test func proxyRouterBuffersNotifications() async throws {
-        let router = ProxyRouter(
+    @Test func responseRouterBuffersNotifications() async throws {
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -43,9 +41,9 @@ struct ProxyRouterTests {
         #expect(String(data: buffered[0], encoding: .utf8) == notification)
     }
 
-    @Test func proxyRouterSendsNotifications() async throws {
+    @Test func responseRouterSendsNotifications() async throws {
         let received = NIOLockedValueBox<[String]>([])
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             hasActiveClients: { true },
             sendNotification: { data in
@@ -60,9 +58,9 @@ struct ProxyRouterTests {
         #expect(received.withLockedValue { $0 } == [notification])
     }
 
-    @Test func proxyRouterHandlesBatchResponse() async throws {
+    @Test func responseRouterHandlesBatchResponse() async throws {
         let eventLoop = EmbeddedEventLoop()
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -78,9 +76,9 @@ struct ProxyRouterTests {
         #expect(string == response)
     }
 
-    @Test func proxyRouterMatchesOutOfOrderBatchResponseByID() async throws {
+    @Test func responseRouterMatchesOutOfOrderBatchResponseByID() async throws {
         let eventLoop = EmbeddedEventLoop()
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -120,9 +118,9 @@ struct ProxyRouterTests {
         ])
     }
 
-    @Test func proxyRouterTimesOutMatchingBatchByToken() async throws {
+    @Test func responseRouterTimesOutMatchingBatchByToken() async throws {
         let eventLoop = EmbeddedEventLoop()
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: nil,
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -161,9 +159,9 @@ struct ProxyRouterTests {
         #expect(firstFailed.withLockedValue { $0 } == false)
     }
 
-    @Test func proxyRouterTimesOutRequests() async throws {
+    @Test func responseRouterTimesOutRequests() async throws {
         let eventLoop = EmbeddedEventLoop()
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(1),
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -181,9 +179,9 @@ struct ProxyRouterTests {
         }
     }
 
-    @Test func proxyRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {
+    @Test func responseRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {
         let eventLoop = EmbeddedEventLoop()
-        let router = ProxyRouter(
+        let router = JSONRPCResponseRouter(
             requestTimeout: nil,
             hasActiveClients: { false },
             sendNotification: { _ in }
@@ -206,8 +204,8 @@ struct ProxyRouterTests {
         #expect(succeeded.withLockedValue { $0 } == false)
     }
 
-    @Test func proxyRouterEnforcesNotificationBufferLimit() async throws {
-        let router = ProxyRouter(
+    @Test func responseRouterEnforcesNotificationBufferLimit() async throws {
+        let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             notificationBufferLimit: 2,
             hasActiveClients: { false },

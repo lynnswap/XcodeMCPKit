@@ -7,7 +7,7 @@ import XcodeMCPRuntime
 
 package final class SessionContext: Sendable {
     package let id: String
-    package let router: ProxyRouter
+    package let router: JSONRPCResponseRouter
     package let notificationHub: NotificationHub
     package let serverRequestTracker: ServerRequestTracker
 
@@ -17,7 +17,7 @@ package final class SessionContext: Sendable {
         self.serverRequestTracker = ServerRequestTracker(
             routeTimeout: makeRequestTimeout(config.requestTimeout) ?? .seconds(300)
         )
-        self.router = ProxyRouter(
+        self.router = JSONRPCResponseRouter(
             requestTimeout: makeRequestTimeout(config.requestTimeout),
             hasActiveClients: { [weak notificationHub] in
                 notificationHub?.hasClients ?? false

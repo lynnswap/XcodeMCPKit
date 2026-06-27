@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import XcodeMCPRuntime
 
 package final class HTTPControlService: Sendable {
     package struct DebugSnapshot: Codable, Sendable {

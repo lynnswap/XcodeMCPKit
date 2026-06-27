@@ -98,7 +98,7 @@ package struct MCPForwardingService: Sendable {
                 defaultSeconds: config.requestTimeout
             )
         struct MissingRequestIDError: Error {}
-        let registration: ProxyRouter.PendingRegistration
+        let registration: JSONRPCResponseRouter.PendingRegistration
         if prepared.transform.isBatch {
             let responseIDKeys = prepared.transform.responseIDs.map(\.key)
             guard responseIDKeys.isEmpty == false else {
