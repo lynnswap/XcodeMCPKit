@@ -2689,6 +2689,90 @@ struct RuntimeCoordinatorTests {
         )
     }
 
+    @Test func documentationCandidatesPreserveRouteOrderWithinOwnersBeforeFallbacks()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let fallbackTarget0 = xcodeProcessTarget(processID: 80430, xcodeVersion: "27.0")
+        let ownerTarget0 = xcodeProcessTarget(processID: 80431, xcodeVersion: "27.0")
+        let fallbackTarget1 = xcodeProcessTarget(processID: 80432, xcodeVersion: "26.6")
+        let ownerTarget1 = xcodeProcessTarget(processID: 80433, xcodeVersion: "26.6")
+
+        func candidateOrder(routeTargets: [XcodeProcessTarget]) throws -> [pid_t]? {
+            let manager = RuntimeCoordinator(
+                config: makeConfig(requestTimeout: 5),
+                eventLoop: eventLoop,
+                upstreams: routeTargets.map { _ in TestUpstreamClient() },
+                xcodeProcessRoutes: routeTargets.enumerated().map { index, target in
+                    XcodeProcessRoute(target: target, upstreamIndices: [index])
+                },
+                startImmediately: false
+            )
+            defer { manager.shutdownAndWait() }
+            for index in routeTargets.indices {
+                manager.markUpstreamInitialized(upstreamIndex: index)
+            }
+
+            func upstreamIndex(for target: XcodeProcessTarget) throws -> Int {
+                try #require(routeTargets.firstIndex {
+                    $0.processID == target.processID
+                })
+            }
+
+            #expect(
+                manager.recordXcodeWindowOwners(
+                    from: try jsonValue([
+                        "structuredContent": [
+                            "message": "* tabIdentifier: tab-owner-1, workspacePath: /tmp/Owner1.xcworkspace",
+                        ],
+                    ]),
+                    upstreamIndex: try upstreamIndex(for: ownerTarget1)
+                )
+            )
+            #expect(
+                manager.recordXcodeWindowOwners(
+                    from: try jsonValue([
+                        "structuredContent": [
+                            "message": "* tabIdentifier: tab-owner-0, workspacePath: /tmp/Owner0.xcworkspace",
+                        ],
+                    ]),
+                    upstreamIndex: try upstreamIndex(for: ownerTarget0)
+                )
+            )
+
+            return manager.documentationCandidateProcessOrder()
+        }
+
+        #expect(
+            try candidateOrder(routeTargets: [
+                fallbackTarget0,
+                ownerTarget0,
+                fallbackTarget1,
+                ownerTarget1,
+            ]) == [
+                ownerTarget0.processID,
+                ownerTarget1.processID,
+                fallbackTarget0.processID,
+                fallbackTarget1.processID,
+            ]
+        )
+        #expect(
+            try candidateOrder(routeTargets: [
+                fallbackTarget0,
+                ownerTarget1,
+                fallbackTarget1,
+                ownerTarget0,
+            ]) == [
+                ownerTarget1.processID,
+                ownerTarget0.processID,
+                fallbackTarget0.processID,
+                fallbackTarget1.processID,
+            ]
+        )
+    }
+
     @Test func documentationCandidatesSkipUnavailableWorkspaceOwner() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

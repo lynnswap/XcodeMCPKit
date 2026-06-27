@@ -203,22 +203,18 @@ extension RuntimeCoordinator {
             unavailable.contains(route.target.processID) == false
                 && firstUsableInitializedUpstreamIndex(in: route) != nil
         }
-        let candidateProcessIDSet = Set(candidateRoutes.map(\.target.processID))
+        let candidateProcessIDsInRouteOrder = candidateRoutes.map(\.target.processID)
         let workspaceOwnerProcesses = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
         let tabOwnerProcesses = Set(tabOwnerProcessIDs.withLockedValue(\.values))
         let ownerProcesses = workspaceOwnerProcesses.union(tabOwnerProcesses)
         let ownerProcessIDs = orderedProcessIDs(
-            Array(ownerProcesses).filter { candidateProcessIDSet.contains($0) },
+            candidateProcessIDsInRouteOrder.filter { ownerProcesses.contains($0) },
             unavailable: unavailable
         )
+        let ownerProcessIDSet = Set(ownerProcessIDs)
 
         let nonOwnerProcessIDs = orderedProcessIDs(
-            candidateRoutes.compactMap { route -> pid_t? in
-                guard ownerProcessIDs.contains(route.target.processID) == false else {
-                    return nil
-                }
-                return route.target.processID
-            },
+            candidateProcessIDsInRouteOrder.filter { ownerProcessIDSet.contains($0) == false },
             unavailable: unavailable
         )
         let candidateProcessIDs = ownerProcessIDs + nonOwnerProcessIDs
