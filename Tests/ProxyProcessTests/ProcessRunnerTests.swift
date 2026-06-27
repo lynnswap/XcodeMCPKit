@@ -1,10 +1,9 @@
-@testable import ProxyCore
 import Darwin
 import Foundation
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxySession
+@testable import XcodeMCPRuntime
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct ProcessRunnerTests {

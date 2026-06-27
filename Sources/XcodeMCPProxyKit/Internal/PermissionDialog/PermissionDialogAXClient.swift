@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Logging
-import ProxyCore
+import ProxySession
 
 extension XcodePermissionDialog {
     package protocol AXAccessing: Sendable {

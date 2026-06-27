@@ -2,7 +2,6 @@ import Foundation
 import Logging
 import NIO
 import XcodeMCPRuntime
-import ProxyCore
 
 extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {

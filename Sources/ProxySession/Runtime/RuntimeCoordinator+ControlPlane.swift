@@ -2,7 +2,6 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import ProxyCore
 import XcodeMCPRuntime
 
 extension ControlPlane {

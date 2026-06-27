@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import ProxyCore
 
 package struct XcodeWindowQueryService {
     package typealias ToolCaller =

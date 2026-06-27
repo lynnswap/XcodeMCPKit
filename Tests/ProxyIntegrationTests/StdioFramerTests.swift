@@ -2,8 +2,6 @@ import Foundation
 import Testing
 import XcodeMCPRuntime
 
-@testable import ProxyCore
-
 @Suite
 struct StdioFramerTests {
     @Test func stdioFramerEmitsJSONObject() async throws {

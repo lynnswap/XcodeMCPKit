@@ -1,10 +1,10 @@
 import Foundation
 
-public enum ProxyFilesystemLocations {
-    public static let cacheRootEnv = "XCODE_MCP_PROXY_CACHE_ROOT"
-    public static let discoveryFileEnv = "XCODE_MCP_PROXY_DISCOVERY_FILE"
+package enum ProxyFilesystemLocations {
+    package static let cacheRootEnv = "XCODE_MCP_PROXY_CACHE_ROOT"
+    package static let discoveryFileEnv = "XCODE_MCP_PROXY_DISCOVERY_FILE"
 
-    public static func discoveryFileURL(
+    package static func discoveryFileURL(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> URL {

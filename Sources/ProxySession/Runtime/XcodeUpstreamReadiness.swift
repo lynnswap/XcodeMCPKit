@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 import XcodeMCPRuntime
 
 extension UpstreamReadinessGate {

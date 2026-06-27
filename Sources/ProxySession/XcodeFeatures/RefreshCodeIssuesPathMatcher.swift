@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 extension RefreshCodeIssues {
     package enum PathMatcher {

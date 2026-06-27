@@ -1,7 +1,6 @@
 import Logging
 import NIO
 import NIOHTTP1
-import ProxyCore
 import ProxySession
 
 final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {

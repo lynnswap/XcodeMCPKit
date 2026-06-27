@@ -1,7 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPRuntime
-import ProxyCore
 
 package final class ProxyDebugRecorder: Sendable {
     private struct DebugUpstreamState: Sendable {

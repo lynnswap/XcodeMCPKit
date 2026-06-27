@@ -1,6 +1,5 @@
 import Foundation
 import NIOConcurrencyHelpers
-import ProxyCore
 
 package struct SessionRecord: Sendable {
     package let context: SessionContext

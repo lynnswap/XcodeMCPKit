@@ -3,9 +3,8 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
-import ProxyCore
-import XcodeMCPRuntime
 import ProxySession
+import XcodeMCPRuntime
 import Testing
 import XcodeMCPTestSupport
 

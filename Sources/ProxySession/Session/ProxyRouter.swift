@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import ProxyCore
 import XcodeMCPRuntime
 
 package final class ProxyRouter: Sendable {

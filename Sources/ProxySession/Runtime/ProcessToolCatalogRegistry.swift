@@ -1,6 +1,5 @@
 import Foundation
 import NIOConcurrencyHelpers
-import ProxyCore
 import XcodeMCPRuntime
 
 package final class ProcessToolCatalogRegistry: Sendable {

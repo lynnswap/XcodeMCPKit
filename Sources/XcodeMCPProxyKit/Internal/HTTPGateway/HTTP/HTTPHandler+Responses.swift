@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import ProxyCore
 import ProxySession
 import XcodeMCPRuntime
 

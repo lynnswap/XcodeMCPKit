@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import ProxyCore
 import XcodeMCPRuntime
 
 package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {

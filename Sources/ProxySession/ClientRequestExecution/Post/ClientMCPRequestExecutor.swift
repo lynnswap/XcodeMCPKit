@@ -1,7 +1,6 @@
 import Foundation
 import Logging
 import NIO
-import ProxyCore
 import XcodeMCPRuntime
 
 package final class ClientMCPRequestExecutor: Sendable {

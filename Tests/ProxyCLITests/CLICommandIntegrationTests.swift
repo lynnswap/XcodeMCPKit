@@ -1,4 +1,4 @@
-import ProxyCore
+import ProxySession
 import XcodeMCPRuntime
 import Foundation
 import NIO

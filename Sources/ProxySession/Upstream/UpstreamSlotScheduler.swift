@@ -3,7 +3,6 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPRuntime
-import ProxyCore
 
 package final class UpstreamSlotScheduler: Sendable {
     package enum AcquisitionError: Error {

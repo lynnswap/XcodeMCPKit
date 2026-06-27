@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 import XcodeMCPRuntime
 
 package enum MCPErrorResponder {

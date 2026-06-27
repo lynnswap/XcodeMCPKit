@@ -1,9 +1,8 @@
 import Foundation
 import NIO
 import Testing
-import ProxyCore
-import XcodeMCPRuntime
 import ProxySession
+import XcodeMCPRuntime
 
 @testable import XcodeMCPProxyKit
 
