@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPRuntime
 
 extension RefreshCodeIssues {
     package enum PathMatcher {

@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import XcodeMCPRuntime
 
 extension RefreshCodeIssues {
     package struct ResolvedTarget: Sendable, Equatable {

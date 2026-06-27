@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Logging
+import XcodeMCPRuntime
 
 extension XcodePermissionDialog {
     package protocol AXAccessing: Sendable {
