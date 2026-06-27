@@ -25,15 +25,6 @@ package struct StdioAdapterShutdownPolicy: Sendable {
 }
 
 actor StdioAdapter {
-    private struct RequestEnvelope {
-        let method: String?
-        let ids: [JSONValue]
-
-        var expectsResponse: Bool {
-            !ids.isEmpty
-        }
-    }
-
     private enum AdapterError: Error {
         case invalidResponse
         case httpStatus(Int)
@@ -189,8 +180,8 @@ actor StdioAdapter {
         }
     }
 
-    private func sendRequest(_ data: Data, envelope: RequestEnvelope) async throws -> Int {
-        let responseCompletion = StdioStreamedResponseCompletion(ids: envelope.ids)
+    private func sendRequest(_ data: Data, envelope: JSONRPC.Request.Envelope) async throws -> Int {
+        let responseCompletion = JSONRPC.ResponseCompletionTracker(ids: envelope.ids)
         do {
             let result = try await client.send(data) { payload in
                 guard isValidJSONPayload(payload) else {
@@ -344,116 +335,17 @@ actor StdioAdapter {
         }
     }
 
-    private func inspectRequest(_ data: Data) -> RequestEnvelope {
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return RequestEnvelope(method: nil, ids: [])
-        }
-        if let object = json as? [String: Any] {
-            let method = JSONRPC.Message.Inspector.method(from: object)
-            let ids = JSONRPC.Message.Inspector.requestID(from: object).map { [$0.value] } ?? []
-            return RequestEnvelope(method: method, ids: ids)
-        }
-        if let array = json as? [Any] {
-            var ids: [JSONValue] = []
-            for item in array {
-                guard let object = item as? [String: Any] else { continue }
-                if let id = JSONRPC.Message.Inspector.requestID(from: object) {
-                    ids.append(id.value)
-                }
-            }
-            return RequestEnvelope(method: nil, ids: ids)
-        }
-        return RequestEnvelope(method: nil, ids: [])
+    private func inspectRequest(_ data: Data) -> JSONRPC.Request.Envelope {
+        JSONRPC.Request.Envelope.inspect(data)
     }
 
-    private func emitError(for envelope: RequestEnvelope, message: String) async {
+    private func emitError(for envelope: JSONRPC.Request.Envelope, message: String) async {
         guard envelope.expectsResponse else { return }
-        guard let payload = errorPayload(ids: envelope.ids, message: message) else { return }
+        guard let payload = try? JSONRPC.Wire.errorResponseData(
+            idValues: envelope.ids,
+            code: -32000,
+            message: message
+        ) else { return }
         await outputWriter.send(payload)
-    }
-
-    private func errorPayload(ids: [JSONValue], message: String) -> Data? {
-        let error: [String: Any] = [
-            "code": -32000,
-            "message": message,
-        ]
-
-        if ids.count == 1, let id = ids.first {
-            let response: [String: Any] = [
-                "jsonrpc": "2.0",
-                "id": id.foundationObject,
-                "error": error,
-            ]
-            return try? JSONSerialization.data(withJSONObject: response, options: [])
-        }
-
-        let responses: [[String: Any]] = ids.map { id in
-            [
-                "jsonrpc": "2.0",
-                "id": id.foundationObject,
-                "error": error,
-            ]
-        }
-        guard !responses.isEmpty else { return nil }
-        return try? JSONSerialization.data(withJSONObject: responses, options: [])
-    }
-}
-
-actor StdioStreamedResponseCompletion {
-    private enum ResponseIDKey: Hashable {
-        case string(String)
-        case int(Int64)
-        case double(Double)
-    }
-
-    private var remainingIDKeys: Set<ResponseIDKey>
-
-    init(ids: [JSONValue]) {
-        self.remainingIDKeys = Set(ids.compactMap(Self.idKey))
-    }
-
-    func record(_ payload: Data) -> Bool {
-        guard remainingIDKeys.isEmpty == false,
-              let json = try? JSONSerialization.jsonObject(with: payload, options: [])
-        else {
-            return false
-        }
-
-        if let object = json as? [String: Any] {
-            recordResponseObject(object)
-        } else if let array = json as? [Any] {
-            for item in array {
-                guard let object = item as? [String: Any] else { continue }
-                recordResponseObject(object)
-            }
-        }
-        return remainingIDKeys.isEmpty
-    }
-
-    private func recordResponseObject(_ object: [String: Any]) {
-        guard object["method"] == nil,
-              object["result"] != nil || object["error"] != nil,
-              let id = JSONRPC.Message.Inspector.responseID(from: object),
-              let idKey = Self.idKey(id.value)
-        else {
-            return
-        }
-        remainingIDKeys.remove(idKey)
-    }
-
-    private static func idKey(_ value: JSONValue) -> ResponseIDKey? {
-        switch value {
-        case .string(let value):
-            return .string(value)
-        case .number(let value):
-            switch value {
-            case .int(let value):
-                return .int(value)
-            case .double(let value):
-                return .double(value)
-            }
-        case .object, .array, .bool, .null:
-            return nil
-        }
     }
 }
