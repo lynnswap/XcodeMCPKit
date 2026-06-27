@@ -2,6 +2,14 @@ import Foundation
 import ProxyCore
 import ProxyMCP
 
+package struct StreamableHTTPMCPClientSendResult: Sendable {
+    package let messageCount: Int
+}
+
+package enum StreamableHTTPMCPClientError: Error, Sendable {
+    case httpStatus(Int, body: String, payloads: [Data])
+}
+
 package final class StreamableHTTPMCPClient: @unchecked Sendable {
     package nonisolated let events: AsyncStream<Data>
 
@@ -44,7 +52,10 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
         }
     }
 
-    package func send(_ data: Data) async throws -> [Data] {
+    package func send(
+        _ data: Data,
+        onMessage: @Sendable (Data) async throws -> Void
+    ) async throws -> StreamableHTTPMCPClientSendResult {
         try await state.ensureOpen()
         let requestInfo = try StreamableHTTPMCPRequestInfo(data: data)
         let request = await makePostRequest(body: data)
@@ -53,19 +64,28 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
             throw MCPBridgeRuntimeError.transportUnavailable("Streamable HTTP response was not HTTP")
         }
 
-        try await validateSuccess(httpResponse, body: responseBytes)
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw await httpStatusError(httpResponse, body: responseBytes)
+        }
+
         await recordSessionHeader(from: httpResponse, requestInfo: requestInfo)
 
         if Self.isEventStream(httpResponse) {
-            return try await responseEventStreamMessages(responseBytes, requestInfo: requestInfo)
+            let messageCount = try await emitResponseEventStreamMessages(
+                responseBytes,
+                requestInfo: requestInfo,
+                onMessage: onMessage
+            )
+            return StreamableHTTPMCPClientSendResult(messageCount: messageCount)
         }
 
         let responseData = try await Self.collect(responseBytes)
         guard responseData.isEmpty == false else {
-            return []
+            return StreamableHTTPMCPClientSendResult(messageCount: 0)
         }
         await recordInitializeResponseIfNeeded(responseData, requestInfo: requestInfo)
-        return [responseData]
+        try await onMessage(responseData)
+        return StreamableHTTPMCPClientSendResult(messageCount: 1)
     }
 
     package func startEventStreamIfReady() async {
@@ -171,18 +191,14 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
         return request
     }
 
-    private func validateSuccess(
+    private func httpStatusError(
         _ response: HTTPURLResponse,
         body responseBytes: URLSession.AsyncBytes
-    ) async throws {
-        guard (200..<300).contains(response.statusCode) else {
-            let responseData = (try? await Self.collect(responseBytes)) ?? Data()
-            let body = String(data: responseData, encoding: .utf8) ?? ""
-            let suffix = body.isEmpty ? "" : ": \(body)"
-            throw MCPBridgeRuntimeError.transportUnavailable(
-                "Streamable HTTP request failed with status \(response.statusCode)\(suffix)"
-            )
-        }
+    ) async -> StreamableHTTPMCPClientError {
+        let responseData = (try? await Self.collect(responseBytes)) ?? Data()
+        let body = String(data: responseData, encoding: .utf8) ?? ""
+        let payloads = Self.responsePayloadsData(responseData, from: response)
+        return .httpStatus(response.statusCode, body: body, payloads: payloads)
     }
 
     private func recordSessionHeader(
@@ -220,13 +236,14 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
         await state.completeInitialize(protocolVersion: protocolVersion)
     }
 
-    private func responseEventStreamMessages(
+    private func emitResponseEventStreamMessages(
         _ bytes: URLSession.AsyncBytes,
-        requestInfo: StreamableHTTPMCPRequestInfo
-    ) async throws -> [Data] {
+        requestInfo: StreamableHTTPMCPRequestInfo,
+        onMessage: @Sendable (Data) async throws -> Void
+    ) async throws -> Int {
         var decoder = SSEDecoder()
         var lineBuffer = Data()
-        var messages: [Data] = []
+        var messageCount = 0
         for try await byte in bytes {
             guard byte == 0x0A else {
                 lineBuffer.append(byte)
@@ -238,20 +255,23 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
                 continue
             }
             await recordInitializeResponseIfNeeded(data, requestInfo: requestInfo)
-            messages.append(data)
+            try await onMessage(data)
+            messageCount += 1
         }
         if lineBuffer.isEmpty == false {
             let line = String(data: lineBuffer, encoding: .utf8) ?? ""
             if let data = decoder.feed(line: line) {
                 await recordInitializeResponseIfNeeded(data, requestInfo: requestInfo)
-                messages.append(data)
+                try await onMessage(data)
+                messageCount += 1
             }
         }
         if let data = decoder.flushIfNeeded() {
             await recordInitializeResponseIfNeeded(data, requestInfo: requestInfo)
-            messages.append(data)
+            try await onMessage(data)
+            messageCount += 1
         }
-        return messages
+        return messageCount
     }
 
     private func performDelete(
@@ -331,6 +351,28 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
             .value(forHTTPHeaderField: "Content-Type")?
             .lowercased()
             .contains(eventStreamContentType) == true
+    }
+
+    private static func responsePayloadsData(_ data: Data, from response: HTTPURLResponse) -> [Data] {
+        guard data.isEmpty == false else { return [] }
+        guard isEventStream(response) else { return [data] }
+        return ssePayloadsData(from: data)
+    }
+
+    private static func ssePayloadsData(from data: Data) -> [Data] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        var decoder = SSEDecoder()
+        var payloads: [Data] = []
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.hasSuffix("\r") ? rawLine.dropLast() : Substring(rawLine)
+            if let payload = decoder.feed(line: String(line)) {
+                payloads.append(payload)
+            }
+        }
+        if let tail = decoder.flushIfNeeded() {
+            payloads.append(tail)
+        }
+        return payloads
     }
 
     private static func eventStreamReconnectDelay(attempt: Int) -> Duration {

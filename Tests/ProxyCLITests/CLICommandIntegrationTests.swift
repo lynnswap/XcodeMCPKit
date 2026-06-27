@@ -163,6 +163,34 @@ struct CLICommandIntegrationTests {
         #expect(responsePost.protocolVersion == MCP.ProtocolVersion.current)
     }
 
+    @Test func cliCommandForwardsJSONRPCErrorBodyFromHTTPErrorStatus() async throws {
+        let result = try await CLICommandHarness.run(
+            responseMode: .json,
+            httpErrorResponsesByMethod: [
+                "tools/list": StubMCPHTTPErrorResponse(
+                    status: .internalServerError,
+                    body: [
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "error": [
+                            "code": -32002,
+                            "message": "tool denied",
+                        ],
+                    ]
+                )
+            ],
+            stdinLines: [initializeRequest, toolsListRequest],
+            timeoutDescription: "CLI command should forward JSON-RPC HTTP error bodies"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 2)
+        let errorObject = try #require(result.outputObjects.last?["error"] as? [String: Any])
+        #expect((errorObject["code"] as? NSNumber)?.intValue == -32002)
+        #expect(errorObject["message"] as? String == "tool denied")
+    }
+
     @Test func cliCommandSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
         let shutdownClocks = makeStdioAdapterShutdownClocks()
         let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
@@ -326,6 +354,7 @@ private struct CLICommandHarness {
         hangingResponseMethod: String? = nil,
         initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
         hangsDELETE: Bool = false,
+        httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse] = [:],
         postSSEPreludeEventsByMethod: [String: [[String: Any]]] = [:],
         getSSEEvents: [[String: Any]] = [],
         stdinLines: [String],
@@ -344,6 +373,7 @@ private struct CLICommandHarness {
             hangingResponseMethod: hangingResponseMethod,
             initializeProtocolVersion: initializeProtocolVersion,
             hangsDELETE: hangsDELETE,
+            httpErrorResponsesByMethod: httpErrorResponsesByMethod,
             postSSEPreludeEventsByMethod: postSSEPreludeEventsByMethod,
             getSSEEvents: getSSEEvents
         )
@@ -496,6 +526,7 @@ private struct StubMCPHTTPServer {
         hangingResponseMethod: String? = nil,
         initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
         hangsDELETE: Bool = false,
+        httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse] = [:],
         postSSEPreludeEventsByMethod: [String: [[String: Any]]] = [:],
         getSSEEvents: [[String: Any]] = []
     ) throws -> StubMCPHTTPServer {
@@ -520,6 +551,7 @@ private struct StubMCPHTTPServer {
                             hangingResponseMethod: hangingResponseMethod,
                             initializeProtocolVersion: initializeProtocolVersion,
                             hangsDELETE: hangsDELETE,
+                            httpErrorResponsesByMethod: httpErrorResponsesByMethod,
                             postSSEPreludeEventDataByMethod: postSSEPreludeEventDataByMethod,
                             getSSEEventData: getSSEEventData
                         )
@@ -555,6 +587,17 @@ private struct StubMCPHTTPServer {
 private enum StubMCPHTTPResponseMode: Sendable {
     case json
     case sse
+}
+
+private struct StubMCPHTTPErrorResponse: @unchecked Sendable {
+    let status: HTTPResponseStatus
+    let bodyData: Data
+
+    init(status: HTTPResponseStatus, body: [String: Any]) {
+        self.status = status
+        self.bodyData =
+            (try? JSONSerialization.data(withJSONObject: body, options: [])) ?? Data("{}".utf8)
+    }
 }
 
 private struct StubMCPHTTPRequest: Sendable {
@@ -795,6 +838,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
     private let hangingResponseMethod: String?
     private let initializeProtocolVersion: String?
     private let hangsDELETE: Bool
+    private let httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse]
     private let postSSEPreludeEventDataByMethod: [String: [Data]]
     private let getSSEEventData: [Data]
     private var requestHead: HTTPRequestHead?
@@ -807,6 +851,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         hangingResponseMethod: String?,
         initializeProtocolVersion: String?,
         hangsDELETE: Bool,
+        httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse],
         postSSEPreludeEventDataByMethod: [String: [Data]],
         getSSEEventData: [Data]
     ) {
@@ -816,6 +861,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         self.hangingResponseMethod = hangingResponseMethod
         self.initializeProtocolVersion = initializeProtocolVersion
         self.hangsDELETE = hangsDELETE
+        self.httpErrorResponsesByMethod = httpErrorResponsesByMethod
         self.postSSEPreludeEventDataByMethod = postSSEPreludeEventDataByMethod
         self.getSSEEventData = getSSEEventData
     }
@@ -887,6 +933,12 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
                 return
             }
             if requestObject?["method"] as? String == hangingResponseMethod {
+                return
+            }
+            if let method = requestObject?["method"] as? String,
+                let errorResponse = httpErrorResponsesByMethod[method]
+            {
+                sendHTTPErrorResponse(errorResponse, requestHead: requestHead, context: context)
                 return
             }
             let isInitialize = requestObject?["method"] as? String == "initialize"
@@ -961,6 +1013,27 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
             context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
         }
+    }
+
+    private func sendHTTPErrorResponse(
+        _ errorResponse: StubMCPHTTPErrorResponse,
+        requestHead: HTTPRequestHead,
+        context: ChannelHandlerContext
+    ) {
+        let responseBody = errorResponse.bodyData
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "application/json")
+        headers.add(name: "Content-Length", value: "\(responseBody.count)")
+        let responseHead = HTTPResponseHead(
+            version: requestHead.version,
+            status: errorResponse.status,
+            headers: headers
+        )
+        var buffer = context.channel.allocator.buffer(capacity: responseBody.count)
+        buffer.writeBytes(responseBody)
+        context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
 
     private func makePOSTResponseSender(

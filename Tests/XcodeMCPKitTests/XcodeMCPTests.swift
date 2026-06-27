@@ -452,6 +452,43 @@ struct XcodeMCPTests {
         await xcode.close()
     }
 
+    @Test func streamableHTTPPostSSEResolvesBeforeConnectionEOF() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .postSSE,
+            postSSEFinishesLoading: false
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
+        let xcode = try await XcodeMCP(
+            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+            transport: transport
+        )
+
+        let result = try await waitWithTimeout("POST SSE final response was not delivered before EOF") {
+            try await xcode.callTool(
+                "DocumentationSearch",
+                arguments: ["query": .string("Open POST SSE")]
+            )
+        }
+        guard case .text(let text, _) = try #require(result.content.first) else {
+            Issue.record("expected text content")
+            await xcode.close()
+            return
+        }
+        #expect(text == "Result for Open POST SSE")
+        await xcode.close()
+    }
+
     @Test func streamableHTTPGetSSERoutesProgressWhilePOSTReturnsJSONResult() async throws {
         let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
         let server = FakeStreamableHTTPServer(progressDelivery: .getSSE)
@@ -1060,6 +1097,7 @@ private actor FakeStreamableHTTPServer {
     private let sessionID: String?
     private let eventStreamFinishesImmediately: Bool
     private let initializeError: Bool
+    private let postSSEFinishesLoading: Bool
     private let requestValues = RecordedValues<RecordedHTTPRequest>()
     private var requests: [RecordedHTTPRequest] = []
     private var eventConnection: ActiveHTTPConnection?
@@ -1068,12 +1106,14 @@ private actor FakeStreamableHTTPServer {
         progressDelivery: ProgressDelivery,
         sessionID: String? = "session-http-1",
         eventStreamFinishesImmediately: Bool = false,
-        initializeError: Bool = false
+        initializeError: Bool = false,
+        postSSEFinishesLoading: Bool = true
     ) {
         self.progressDelivery = progressDelivery
         self.sessionID = sessionID
         self.eventStreamFinishesImmediately = eventStreamFinishesImmediately
         self.initializeError = initializeError
+        self.postSSEFinishesLoading = postSSEFinishesLoading
     }
 
     func response(
@@ -1201,7 +1241,8 @@ private actor FakeStreamableHTTPServer {
                         query: query,
                         source: "post-sse"
                     )),
-                ]
+                ],
+                finishesLoading: postSSEFinishesLoading
             )
         case .getSSE:
             if let eventConnection {

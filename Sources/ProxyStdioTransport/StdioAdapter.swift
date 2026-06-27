@@ -37,6 +37,7 @@ public actor StdioAdapter {
 
     private enum AdapterError: Error {
         case invalidResponse
+        case httpStatus(Int)
     }
 
     private let requestTimeout: TimeInterval
@@ -167,12 +168,8 @@ public actor StdioAdapter {
         if stopped { return }
         let envelope = inspectRequest(data)
         do {
-            let payloads = try await sendRequest(data)
-            if payloads.isEmpty == false {
-                for payload in payloads {
-                    await outputWriter.send(payload)
-                }
-            } else if envelope.expectsResponse {
+            let messageCount = try await sendRequest(data)
+            if messageCount == 0, envelope.expectsResponse {
                 await emitError(for: envelope, message: "upstream returned empty response")
             }
             await client.startEventStreamIfReady()
@@ -182,6 +179,8 @@ public actor StdioAdapter {
             switch error {
             case .invalidResponse:
                 await emitError(for: envelope, message: "invalid upstream response")
+            case .httpStatus(let status):
+                await emitError(for: envelope, message: "upstream HTTP \(status)")
             }
         } catch {
             if stopped || Task.isCancelled { return }
@@ -190,12 +189,34 @@ public actor StdioAdapter {
         }
     }
 
-    private func sendRequest(_ data: Data) async throws -> [Data] {
-        let payloads = try await client.send(data)
-        guard payloads.allSatisfy({ isValidJSONPayload($0) }) else {
-            throw AdapterError.invalidResponse
+    private func sendRequest(_ data: Data) async throws -> Int {
+        do {
+            let result = try await client.send(data) { payload in
+                guard isValidJSONPayload(payload) else {
+                    throw AdapterError.invalidResponse
+                }
+                await outputWriter.send(payload)
+            }
+            return result.messageCount
+        } catch let error as StreamableHTTPMCPClientError {
+            return try await handleClientError(error)
         }
-        return payloads
+    }
+
+    private func handleClientError(_ error: StreamableHTTPMCPClientError) async throws -> Int {
+        switch error {
+        case .httpStatus(let statusCode, _, let payloads):
+            guard payloads.isEmpty == false else {
+                throw AdapterError.httpStatus(statusCode)
+            }
+            guard payloads.allSatisfy({ isValidJSONPayload($0) }) else {
+                throw AdapterError.invalidResponse
+            }
+            for payload in payloads {
+                await outputWriter.send(payload)
+            }
+            return payloads.count
+        }
     }
 
     private func startClientEventTaskIfNeeded() {

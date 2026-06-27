@@ -65,9 +65,12 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
     }
 
     package func send(_ data: Data) async throws {
-        let messages = try await client.send(data)
-        for message in messages {
-            streamContinuation.yield(.message(message))
+        do {
+            _ = try await client.send(data) { [streamContinuation] message in
+                streamContinuation.yield(.message(message))
+            }
+        } catch let error as StreamableHTTPMCPClientError {
+            throw Self.runtimeError(from: error)
         }
         await client.startEventStreamIfReady()
     }
@@ -77,5 +80,15 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         clientEventsTask.cancel()
         streamContinuation.yield(.closed(nil))
         streamContinuation.finish()
+    }
+
+    private static func runtimeError(from error: StreamableHTTPMCPClientError) -> MCPBridgeRuntimeError {
+        switch error {
+        case .httpStatus(let statusCode, let body, _):
+            let suffix = body.isEmpty ? "" : ": \(body)"
+            return .transportUnavailable(
+                "Streamable HTTP request failed with status \(statusCode)\(suffix)"
+            )
+        }
     }
 }
