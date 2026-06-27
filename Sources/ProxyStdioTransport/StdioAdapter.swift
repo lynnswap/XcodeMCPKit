@@ -2,6 +2,7 @@ import Foundation
 import Logging
 import ProxyCore
 import ProxyMCP
+import XcodeMCPBridgeRuntime
 
 package struct StdioAdapterShutdownPolicy: Sendable {
     package let requestDrainTimeout: Duration
@@ -34,30 +35,22 @@ public actor StdioAdapter {
         }
     }
 
-    private struct RequestResult {
-        let payloads: [Data]
-        let shouldStartSSEAfterOutput: Bool
-    }
-
     private enum AdapterError: Error {
         case invalidResponse
         case httpStatus(Int)
     }
 
-    private let upstreamURL: URL
     private let requestTimeout: TimeInterval
     private let inputHandle: FileHandle
     private let outputWriter: StdioWriter
     private let logger: Logger
-    private let session: URLSession
+    private let client: StreamableHTTPMCPClient
     private let shutdownPolicy: StdioAdapterShutdownPolicy
-    private var sessionID: String?
-    private var negotiatedProtocolVersion: String?
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
     private var initializationTask: Task<Void, Never>?
     private var readTask: Task<Void, Never>?
-    private var sseTask: Task<Void, Never>?
+    private var clientEventTask: Task<Void, Never>?
     private var started = false
     private var stopped = false
 
@@ -83,7 +76,6 @@ public actor StdioAdapter {
         output: FileHandle,
         shutdownPolicy: StdioAdapterShutdownPolicy
     ) {
-        self.upstreamURL = upstreamURL
         self.requestTimeout = requestTimeout
         self.inputHandle = input
         self.logger = ProxyLogging.make("stdio.adapter")
@@ -91,12 +83,18 @@ public actor StdioAdapter {
         self.shutdownPolicy = shutdownPolicy
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
-        self.session = URLSession(configuration: configuration)
+        self.client = StreamableHTTPMCPClient(
+            endpoint: upstreamURL,
+            urlSession: URLSession(configuration: configuration),
+            requestTimeout: Self.duration(fromRequestTimeout: requestTimeout),
+            automaticallyStartsEventStream: false
+        )
     }
 
     public func start() async {
         guard !started else { return }
         started = true
+        startClientEventTaskIfNeeded()
         readTask = Task { [weak self] in
             await self?.readLoop()
         }
@@ -171,27 +169,19 @@ public actor StdioAdapter {
         if stopped { return }
         let envelope = inspectRequest(data)
         do {
-            let result = try await sendRequest(data)
-            if result.payloads.isEmpty == false {
-                for payload in result.payloads {
-                    await outputWriter.send(payload)
-                }
-                if result.shouldStartSSEAfterOutput {
-                    startSSEIfNeeded()
-                }
-            } else if envelope.expectsResponse {
+            let messageCount = try await sendRequest(data, envelope: envelope)
+            if messageCount == 0, envelope.expectsResponse {
                 await emitError(for: envelope, message: "upstream returned empty response")
-            } else if result.shouldStartSSEAfterOutput {
-                startSSEIfNeeded()
             }
+            await client.startEventStreamIfReady()
         } catch let error as AdapterError {
             if stopped || Task.isCancelled { return }
             logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
             switch error {
-            case .httpStatus(let status):
-                await emitError(for: envelope, message: "upstream HTTP \(status)")
             case .invalidResponse:
                 await emitError(for: envelope, message: "invalid upstream response")
+            case .httpStatus(let status):
+                await emitError(for: envelope, message: "upstream HTTP \(status)")
             }
         } catch {
             if stopped || Task.isCancelled { return }
@@ -200,176 +190,56 @@ public actor StdioAdapter {
         }
     }
 
-    private func sendRequest(_ data: Data) async throws -> RequestResult {
-        let envelope = inspectRequest(data)
-        var request = URLRequest(url: upstreamURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
-        if envelope.method != "initialize", let sessionID {
-            request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
-        }
-        if envelope.method != "initialize", let negotiatedProtocolVersion {
-            request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
-        }
-        applyTimeout(to: &request)
-        request.httpBody = data
-
-        let (responseData, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw AdapterError.invalidResponse
-        }
-        if (200...299).contains(http.statusCode) {
-            let payloads = responsePayloadsData(responseData, from: http)
-            if payloads.isEmpty {
-                return RequestResult(payloads: [], shouldStartSSEAfterOutput: false)
+    private func sendRequest(_ data: Data, envelope: RequestEnvelope) async throws -> Int {
+        let responseCompletion = StdioStreamedResponseCompletion(ids: envelope.ids)
+        do {
+            let result = try await client.send(data) { payload in
+                guard isValidJSONPayload(payload) else {
+                    throw AdapterError.invalidResponse
+                }
+                await outputWriter.send(payload)
+                if await responseCompletion.record(payload) {
+                    return .stop
+                }
+                return .continue
             }
-            if envelope.method == "initialize" {
-                updateSessionState(from: http, payloads: payloads)
+            return result.messageCount
+        } catch let error as StreamableHTTPMCPClientError {
+            return try await handleClientError(error)
+        }
+    }
+
+    private func handleClientError(_ error: StreamableHTTPMCPClientError) async throws -> Int {
+        switch error {
+        case .httpStatus(let statusCode, _, let payloads):
+            guard payloads.isEmpty == false else {
+                throw AdapterError.httpStatus(statusCode)
             }
             guard payloads.allSatisfy({ isValidJSONPayload($0) }) else {
-                throw AdapterError.invalidResponse
+                throw AdapterError.httpStatus(statusCode)
             }
-            return RequestResult(
-                payloads: payloads,
-                shouldStartSSEAfterOutput: envelope.method == "initialize"
-            )
-        }
-        let payloads = responsePayloadsData(responseData, from: http)
-        if payloads.isEmpty == false,
-            payloads.allSatisfy({ isValidJSONPayload($0) })
-        {
-            return RequestResult(payloads: payloads, shouldStartSSEAfterOutput: false)
-        }
-        throw AdapterError.httpStatus(http.statusCode)
-    }
-
-    private func updateSessionState(from response: HTTPURLResponse, payloads: [Data]) {
-        if let returnedSessionID = response.value(forHTTPHeaderField: "MCP-Session-Id"),
-            returnedSessionID.isEmpty == false
-        {
-            sessionID = returnedSessionID
-        }
-        if let version = payloads.lazy.compactMap({ self.initializeProtocolVersion(from: $0) }).first {
-            negotiatedProtocolVersion = version
+            for payload in payloads {
+                await outputWriter.send(payload)
+            }
+            return payloads.count
         }
     }
 
-    private func responsePayloadsData(_ data: Data, from response: HTTPURLResponse) -> [Data] {
-        guard !data.isEmpty else { return [] }
-        let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
-        guard contentType.hasPrefix("text/event-stream") else { return [data] }
-        return ssePayloadsData(from: data)
-    }
-
-    private func ssePayloadsData(from data: Data) -> [Data] {
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        var decoder = SSEDecoder()
-        var payloads: [Data] = []
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = rawLine.hasSuffix("\r") ? rawLine.dropLast() : Substring(rawLine)
-            if let eventPayload = decoder.feed(line: String(line)) {
-                payloads.append(eventPayload)
+    private func startClientEventTaskIfNeeded() {
+        guard clientEventTask == nil else { return }
+        let events = client.events
+        let outputWriter = outputWriter
+        let logger = logger
+        clientEventTask = Task {
+            for await payload in events {
+                if Task.isCancelled { break }
+                guard isValidJSONPayload(payload) else {
+                    logger.warning("Dropping invalid SSE payload", metadata: ["bytes": "\(payload.count)"])
+                    continue
+                }
+                await outputWriter.send(payload)
             }
         }
-        if let tail = decoder.flushIfNeeded() {
-            payloads.append(tail)
-        }
-        return payloads
-    }
-
-    private func initializeProtocolVersion(from data: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-            let result = object["result"] as? [String: Any],
-            let protocolVersion = result["protocolVersion"] as? String,
-            MCP.ProtocolVersion.isSupported(protocolVersion)
-        else {
-            return nil
-        }
-        return protocolVersion
-    }
-
-    private func startSSEIfNeeded() {
-        guard sessionID != nil, negotiatedProtocolVersion != nil, sseTask == nil, !stopped else {
-            return
-        }
-        sseTask = Task { [weak self] in
-            await self?.sseLoop()
-        }
-    }
-
-    private func sseLoop() async {
-        var attempt = 0
-        while !stopped {
-            do {
-                try await consumeSSE()
-                attempt = 0
-            } catch is CancellationError {
-                return
-            } catch {
-                if stopped || Task.isCancelled { return }
-                logger.warning("SSE disconnected", metadata: ["error": "\(error)"])
-            }
-
-            if stopped || Task.isCancelled { break }
-            let delay = backoffDelay(for: attempt)
-            attempt += 1
-            try? await Task.sleep(nanoseconds: delay)
-        }
-    }
-
-    private func consumeSSE() async throws {
-        guard let sessionID, let negotiatedProtocolVersion else {
-            throw AdapterError.invalidResponse
-        }
-        var request = URLRequest(url: upstreamURL)
-        request.httpMethod = "GET"
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
-        request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
-        applyTimeout(to: &request, allowLongRunning: true)
-
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw AdapterError.invalidResponse
-        }
-        guard (200...299).contains(http.statusCode) else {
-            throw AdapterError.httpStatus(http.statusCode)
-        }
-
-        var decoder = SSEDecoder()
-        for try await line in bytes.lines {
-            if Task.isCancelled { break }
-            guard let payload = decoder.feed(line: line) else { continue }
-            guard isValidJSONPayload(payload) else {
-                logger.warning("Dropping invalid SSE payload", metadata: ["bytes": "\(payload.count)"])
-                continue
-            }
-            await outputWriter.send(payload)
-        }
-
-        // If the stream ends without a terminating blank line, flush any buffered event.
-        if let tail = decoder.flushIfNeeded(), isValidJSONPayload(tail) {
-            await outputWriter.send(tail)
-        }
-    }
-
-    private func applyTimeout(to request: inout URLRequest, allowLongRunning: Bool = false) {
-        if allowLongRunning {
-            request.timeoutInterval = .infinity
-            return
-        }
-        if requestTimeout > 0 {
-            request.timeoutInterval = requestTimeout
-        } else {
-            request.timeoutInterval = .infinity
-        }
-    }
-
-    private func backoffDelay(for attempt: Int) -> UInt64 {
-        let capped = min(attempt, 4)
-        let seconds = min(5.0, 0.5 * Double(1 << capped))
-        return UInt64(seconds * 1_000_000_000)
     }
 
     private func drainRequestTasks() async {
@@ -392,49 +262,29 @@ public actor StdioAdapter {
         }
 
         guard !requestTasks.isEmpty else { return }
-        sseTask?.cancel()
-        await deleteSessionIfNeeded()
+        clientEventTask?.cancel()
+        await closeClientSession()
         for task in requestTasks.values {
             task.cancel()
         }
         stopped = true
-        session.invalidateAndCancel()
+        client.cancelNetworkRequests()
         await drainRequestTasks()
     }
 
     private func stop(cancelReadTask: Bool) async {
         if !stopped {
-            await deleteSessionIfNeeded()
+            await closeClientSession()
         }
         stopLocked(cancelReadTask: cancelReadTask)
     }
 
-    private func deleteSessionIfNeeded() async {
-        guard let sessionID else { return }
-        let negotiatedProtocolVersion = self.negotiatedProtocolVersion
-        defer {
-            self.sessionID = nil
-            self.negotiatedProtocolVersion = nil
-        }
-        var request = URLRequest(url: upstreamURL)
-        request.httpMethod = "DELETE"
-        request.setValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
-        if let negotiatedProtocolVersion {
-            request.setValue(negotiatedProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
-        }
-        applyTimeout(to: &request)
-        let urlSession = session
-        let deleteRequest = request
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                _ = try? await urlSession.data(for: deleteRequest)
-            }
-            group.addTask { [shutdownPolicy] in
-                await shutdownPolicy.clock.sleep(shutdownPolicy.deleteSessionGrace)
-            }
-            _ = await group.next()
-            group.cancelAll()
-        }
+    private func closeClientSession() async {
+        await client.close(
+            deleteTimeout: Self.duration(fromRequestTimeout: requestTimeout),
+            deleteSessionGrace: shutdownPolicy.deleteSessionGrace,
+            clock: shutdownPolicy.clock
+        )
     }
 
     private func requestDrainDeadline() -> UInt64? {
@@ -473,16 +323,25 @@ public actor StdioAdapter {
         return total.overflow ? UInt64.max : total.partialValue
     }
 
+    private static func duration(fromRequestTimeout requestTimeout: TimeInterval) -> Duration? {
+        guard requestTimeout > 0, requestTimeout.isFinite else { return nil }
+        let nanoseconds = (requestTimeout * 1_000_000_000).rounded(.up)
+        if nanoseconds >= Double(Int64.max) {
+            return .nanoseconds(Int64.max)
+        }
+        return .nanoseconds(Int64(nanoseconds))
+    }
+
     private func stopLocked(cancelReadTask: Bool) {
         if cancelReadTask {
             readTask?.cancel()
         }
-        sseTask?.cancel()
+        clientEventTask?.cancel()
         readTask = nil
-        sseTask = nil
+        clientEventTask = nil
         if !stopped {
             stopped = true
-            session.invalidateAndCancel()
+            client.cancelNetworkRequests()
         }
     }
 
@@ -538,5 +397,53 @@ public actor StdioAdapter {
         }
         guard !responses.isEmpty else { return nil }
         return try? JSONSerialization.data(withJSONObject: responses, options: [])
+    }
+}
+
+private actor StdioStreamedResponseCompletion {
+    private var remainingIDKeys: Set<String>
+
+    init(ids: [JSONValue]) {
+        self.remainingIDKeys = Set(ids.compactMap(Self.idKey))
+    }
+
+    func record(_ payload: Data) -> Bool {
+        guard remainingIDKeys.isEmpty == false,
+              let json = try? JSONSerialization.jsonObject(with: payload, options: [])
+        else {
+            return false
+        }
+
+        if let object = json as? [String: Any] {
+            recordResponseObject(object)
+        } else if let array = json as? [Any] {
+            for item in array {
+                guard let object = item as? [String: Any] else { continue }
+                recordResponseObject(object)
+            }
+        }
+        return remainingIDKeys.isEmpty
+    }
+
+    private func recordResponseObject(_ object: [String: Any]) {
+        guard object["method"] == nil,
+              object["result"] != nil || object["error"] != nil,
+              let id = JSONRPC.Message.Inspector.responseID(from: object),
+              let idKey = Self.idKey(id.value)
+        else {
+            return
+        }
+        remainingIDKeys.remove(idKey)
+    }
+
+    private static func idKey(_ value: JSONValue) -> String? {
+        switch value {
+        case .string(let value):
+            return value
+        case .number(let value):
+            return value.stringValue
+        case .object, .array, .bool, .null:
+            return nil
+        }
     }
 }
