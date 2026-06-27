@@ -1,6 +1,4 @@
 import Foundation
-import ProxyCLICommon
-import XcodeMCPProxyKit
 
 package struct XcodeMCPProxyInstallCommand {
     package typealias Options = XcodeMCPProxyInstaller.Configuration

@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCLICommon
 
 /// Installer facade for Xcode MCP proxy executables.
 public struct XcodeMCPProxyInstaller: Sendable {

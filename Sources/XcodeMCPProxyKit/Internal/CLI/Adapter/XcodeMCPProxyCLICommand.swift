@@ -1,6 +1,4 @@
 import Foundation
-import ProxyCLICommon
-import XcodeMCPProxyKit
 
 extension XcodeMCPProxyStdioAdapter: CLICommandAdapter {}
 

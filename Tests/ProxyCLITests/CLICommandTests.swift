@@ -1,9 +1,7 @@
 import ProxyCore
 import Foundation
 import Testing
-import ProxyAdapterCLI
 import ProxyBuildInfo
-import ProxyCLICommon
 import XcodeMCPProxyKit
 
 @Suite

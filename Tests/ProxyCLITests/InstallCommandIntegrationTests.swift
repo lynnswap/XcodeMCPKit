@@ -1,6 +1,5 @@
 import Foundation
 import Testing
-import ProxyInstallCLI
 import XcodeMCPProxyKit
 
 @Suite(.serialized)

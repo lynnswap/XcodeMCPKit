@@ -3,8 +3,7 @@ import Testing
 
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyAdapterCLI
-import ProxyServerCLI
+import XcodeMCPProxyKit
 import ProxyXcodeFeatures
 @testable import ProxyHTTPGateway
 
