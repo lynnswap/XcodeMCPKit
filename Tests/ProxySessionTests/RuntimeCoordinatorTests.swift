@@ -2125,6 +2125,152 @@ struct RuntimeCoordinatorTests {
         #expect(latestCatalog.schemaConflicts == [])
     }
 
+    @Test func sessionManagerToolsListRefreshesFallbackCatalogAfterOwnerIsLearned()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let fallbackUpstream = TestUpstreamClient()
+        let ownerUpstream = TestUpstreamClient()
+        let ownerTarget = xcodeProcessTarget(processID: 80424, xcodeVersion: "27.0")
+        let fallbackTarget = xcodeProcessTarget(processID: 66337, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [fallbackUpstream, ownerUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: fallbackTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: ownerTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let fallbackTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-before-owner",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let fallbackRequest = try await fallbackUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        #expect(await ownerUpstream.sentCount() == 0)
+        await fallbackUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: fallbackRequest),
+                    tools: [
+                        toolDescriptor(name: "FallbackOnly"),
+                    ]
+                )
+            )
+        )
+        let fallbackResult = try await waitWithTimeout("waiting for fallback tools/list") {
+            try await fallbackTask.value
+        }
+        #expect(toolNames(in: fallbackResult) == ["FallbackOnly"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["FallbackOnly"])
+
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-owner-late, workspacePath: /tmp/LateOwner.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+        #expect(manager.cachedToolsListResult() == nil)
+
+        let ownerTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-after-owner",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let ownerRequest = try await ownerUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        #expect(await fallbackUpstream.sentCount() == 1)
+        await ownerUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: ownerRequest),
+                    tools: [
+                        toolDescriptor(name: "OwnerOnly"),
+                    ]
+                )
+            )
+        )
+        let ownerResult = try await waitWithTimeout("waiting for owner tools/list") {
+            try await ownerTask.value
+        }
+        #expect(toolNames(in: ownerResult) == ["OwnerOnly"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["OwnerOnly"])
+        #expect(await fallbackUpstream.sentCount() == 1)
+        #expect(await ownerUpstream.sentCount() == 1)
+    }
+
+    @Test func sessionManagerToolsListPreservesRoutePriorityWithinAvailableBatch()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let firstUpstream = TestUpstreamClient()
+        let secondUpstream = TestUpstreamClient()
+        let firstTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
+        let secondTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [firstUpstream, secondUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: firstTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: secondTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-route-priority",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let firstRequest = try await firstUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        #expect(await secondUpstream.sentCount() == 0)
+        await firstUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: firstRequest),
+                    tools: [
+                        toolDescriptor(name: "FirstRouteOnly"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for prioritized tools/list") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["FirstRouteOnly"])
+        #expect(await firstUpstream.sentCount() == 1)
+        #expect(await secondUpstream.sentCount() == 0)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
+    }
+
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -2327,15 +2473,14 @@ struct RuntimeCoordinatorTests {
         _ = try await upstream0.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        _ = try await upstream1.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        #expect(await upstream1.sentCount() == 0)
 
         task.cancel()
 
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
+        #expect(await upstream1.sentCount() == 0)
     }
 
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()

@@ -149,9 +149,11 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func availableToolCatalogSurface() -> AvailableToolCatalog? {
+    package func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
         state.withLockedValue { state in
-            let catalogs = Array(state.catalogsByProcessID.values)
+            let catalogs = state.catalogsByProcessID.values.filter { catalog in
+                processIDs?.contains(catalog.target.processID) ?? true
+            }
             guard let rawResult = Self.unionToolsListResult(from: catalogs) else {
                 return nil
             }

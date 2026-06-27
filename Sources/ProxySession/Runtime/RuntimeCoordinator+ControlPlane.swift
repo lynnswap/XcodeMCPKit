@@ -99,15 +99,6 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        if let surface = processToolCatalogRegistry.availableToolCatalogSurface(),
-           let sourceUpstream = surface.sourceUpstream {
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: surface.rawResult,
-                sourceUpstream: sourceUpstream,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
-            )
-        }
-
         let candidateProcessOrder = documentationCandidateProcessOrder()
         let processRoutes =
             candidateProcessOrder.map { order in
@@ -126,14 +117,30 @@ extension RuntimeCoordinator {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
+        let routeBatches = availableToolsCatalogRouteBatches(routes)
+        let highestPriorityProcessIDs = Set(routeBatches.first?.map { $0.target.processID } ?? [])
+        if let surface = processToolCatalogRegistry.availableToolCatalogSurface(
+            processIDs: highestPriorityProcessIDs
+        ),
+           let sourceUpstream = surface.sourceUpstream,
+           let highestPriorityProcessID = routeBatches.first?.first?.target.processID,
+           surface.processIDs.contains(highestPriorityProcessID) {
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: surface.rawResult,
+                sourceUpstream: sourceUpstream,
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+            )
+        }
+
         var lastFailure: (any Error)?
-        for routeBatch in availableToolsCatalogRouteBatches(routes) {
+        for routeBatch in routeBatches {
             do {
-                return try await raceAvailableToolsCatalogRoutes(
+                return try await loadFirstAvailableToolsCatalogInRouteOrder(
                     routeBatch,
                     requestTimeout: requestTimeout,
                     deadlineUptimeNs: deadlineUptimeNs,
-                    startedAt: startedAt
+                    startedAt: startedAt,
+                    exposedProcessIDs: Set(routeBatch.map { $0.target.processID })
                 )
             } catch is CancellationError {
                 throw CancellationError()
@@ -163,120 +170,52 @@ extension RuntimeCoordinator {
         return fallbackRoutes.isEmpty ? [ownerRoutes] : [ownerRoutes, fallbackRoutes]
     }
 
-    private func raceAvailableToolsCatalogRoutes(
+    private func loadFirstAvailableToolsCatalogInRouteOrder(
         _ routes: [AvailableToolsCatalogRoute],
         requestTimeout: TimeAmount?,
         deadlineUptimeNs: UInt64?,
-        startedAt: UInt64
+        startedAt: UInt64,
+        exposedProcessIDs: Set<pid_t>
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        let tasks = NIOLockedValueBox<[Task<Void, Never>]>([])
-        let cancelled = NIOLockedValueBox(false)
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let completion = NIOLockedValueBox(false)
-                let failures = NIOLockedValueBox(
-                    [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)]()
+        var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
+        for route in routes {
+            do {
+                try Task.checkCancellation()
+                let result = try await loadToolsCatalogFromAvailableProcessRoute(
+                    route,
+                    requestTimeout: requestTimeout,
+                    deadlineUptimeNs: deadlineUptimeNs,
+                    startedAt: startedAt
                 )
-
-                func finish(_ result: Result<CanonicalToolsCatalogLoadResult, any Error>) {
-                    let shouldResume = completion.withLockedValue { completed in
-                        guard completed == false else { return false }
-                        completed = true
-                        return true
-                    }
-                    guard shouldResume else { return }
-                    tasks.withLockedValue { routeTasks in
-                        for task in routeTasks {
-                            task.cancel()
-                        }
-                        routeTasks.removeAll()
-                    }
-                    switch result {
-                    case .success(let catalog):
-                        continuation.resume(returning: catalog)
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
-
-                for route in routes {
-                    if completion.withLockedValue({ $0 }) {
-                        break
-                    }
-                    let task = Task {
-                        guard completion.withLockedValue({ $0 }) == false else {
-                            return
-                        }
-                        if cancelled.withLockedValue({ $0 }) {
-                            finish(.failure(CancellationError()))
-                            return
-                        }
-                        do {
-                            try Task.checkCancellation()
-                            let result = try await self.loadToolsCatalogFromAvailableProcessRoute(
-                                route,
-                                requestTimeout: requestTimeout,
-                                deadlineUptimeNs: deadlineUptimeNs,
-                                startedAt: startedAt
-                            )
-                            let catalog = self.recordAvailableToolsCatalog(
-                                target: route.target,
-                                result: result,
-                                startedAt: startedAt
-                            )
-                            finish(.success(catalog))
-                        } catch is CancellationError {
-                            finish(.failure(CancellationError()))
-                        } catch {
-                            let upstreamIndex = route.upstreamIndices.last ?? -1
-                            self.processToolCatalogRegistry.removeCatalog(
-                                forProcessID: route.target.processID
-                            )
-                            let allFailures = failures.withLockedValue { failures in
-                                failures.append((
-                                    target: route.target,
-                                    upstreamIndex: upstreamIndex,
-                                    error: error
-                                ))
-                                return failures.count == routes.count ? failures : nil
-                            }
-                            guard let allFailures else { return }
-                            if let lastFailure = allFailures.last {
-                                finish(
-                                    .failure(
-                                        ControlPlane.RequestError(
-                                            route: .pinnedUpstream(lastFailure.upstreamIndex),
-                                            upstreamIndex: lastFailure.upstreamIndex,
-                                            underlying: lastFailure.error
-                                        )
-                                    )
-                                )
-                            } else {
-                                finish(.failure(UpstreamSlotScheduler.AcquisitionError.unavailable))
-                            }
-                        }
-                    }
-                    tasks.withLockedValue { $0.append(task) }
-                    if completion.withLockedValue({ $0 }) || cancelled.withLockedValue({ $0 }) {
-                        task.cancel()
-                    }
-                }
-            }
-        } onCancel: {
-            cancelled.withLockedValue { $0 = true }
-            tasks.withLockedValue { routeTasks in
-                for task in routeTasks {
-                    task.cancel()
-                }
-                routeTasks.removeAll()
+                return recordAvailableToolsCatalog(
+                    target: route.target,
+                    result: result,
+                    startedAt: startedAt,
+                    exposedProcessIDs: exposedProcessIDs
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                let upstreamIndex = route.upstreamIndices.last ?? -1
+                processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
+                failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
             }
         }
+        if let lastFailure = failures.last {
+            throw ControlPlane.RequestError(
+                route: .pinnedUpstream(lastFailure.upstreamIndex),
+                upstreamIndex: lastFailure.upstreamIndex,
+                underlying: lastFailure.error
+            )
+        }
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
     private func recordAvailableToolsCatalog(
         target: XcodeProcessTarget,
         result: CanonicalToolsCatalogLoadResult,
-        startedAt: UInt64
+        startedAt: UInt64,
+        exposedProcessIDs: Set<pid_t>
     ) -> CanonicalToolsCatalogLoadResult {
         guard let sourceUpstream = result.sourceUpstream else {
             return result
@@ -289,7 +228,9 @@ extension RuntimeCoordinator {
             }?.upstreamIndices ?? [],
             rawResult: result.rawResult
         )
-        let surface = processToolCatalogRegistry.availableToolCatalogSurface()
+        let surface = processToolCatalogRegistry.availableToolCatalogSurface(
+            processIDs: exposedProcessIDs
+        )
         return CanonicalToolsCatalogLoadResult(
             rawResult: surface?.rawResult ?? result.rawResult,
             sourceUpstream: surface?.sourceUpstream ?? sourceUpstream,
