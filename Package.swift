@@ -192,6 +192,7 @@ let package = Package(
             dependencies: [
                 "ProxyCore",
                 "ProxyMCP",
+                "XcodeMCPBridgeRuntime",
                 .product(name: "Logging", package: "swift-log"),
             ],
             path: "Sources/ProxyStdioTransport",
