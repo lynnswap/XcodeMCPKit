@@ -1389,6 +1389,86 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpToolRoutingForwardAnyUsesNextUsablePreferredCandidate() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamResponder: { _, originalID in
+                try makeToolSuccessResponse(id: originalID, text: "{\"ok\":true}")
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setToolRoutingDecision(.forwardAny(preferredUpstreamIndices: [0, 1]))
+        sessionManager.setUsablePreferredUpstreamIndices([1])
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-forward-any-fallback",
+                payload: toolsCallPayload(
+                    id: 3401,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-a"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            #expect(body["result"] != nil)
+            #expect(sessionManager.sentToolRequests() == ["BuildProject@1"])
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func httpToolRoutingForwardAnyUnavailableReleasesLeaseWithoutForwarding() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        sessionManager.setToolRoutingDecision(.forwardAny(preferredUpstreamIndices: [0, 1]))
+        sessionManager.setUsablePreferredUpstreamIndices([])
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-forward-any-unavailable",
+                payload: toolsCallPayload(
+                    id: 3402,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-a"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let error = try #require(body["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32001)
+            #expect((error["message"] as? String) == "upstream unavailable")
+            #expect(sessionManager.sentMethods().isEmpty)
+            #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+            let lease = try #require(
+                sessionManager.leaseDebugSnapshots().first {
+                    $0.label == "tools/call:BuildProject"
+                }
+            )
+            #expect(lease.state == .failed)
+            #expect(lease.releaseReason == "upstreamUnavailable")
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpToolRoutingRejectReturnsErrorsForNonToolBatchItems() async throws {
         let config = makeConfig()
         let sessionManager = TestRuntimeCoordinator(config: config)

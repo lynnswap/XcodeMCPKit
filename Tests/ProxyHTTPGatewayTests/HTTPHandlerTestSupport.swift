@@ -92,6 +92,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
         var preferredUpstreamIndex: Int?
+        var usablePreferredUpstreamIndices: Set<Int>?
         var toolRoutingDecision: ToolRoutingDecision?
         var forceAsyncToolRoutingDecision = false
         var toolRoutingStarted: TestSignal?
@@ -390,13 +391,23 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         leaseID _: LeaseManager.ID,
         descriptor _: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
-        preferredUpstreamIndex: Int?,
+        preferredUpstreamIndices: [Int]?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
-        let upstreamIndex = preferredUpstreamIndex ?? chooseUpstreamIndex()
+        let upstreamIndex: Int?
+        if let preferredUpstreamIndices, preferredUpstreamIndices.isEmpty == false {
+            upstreamIndex = state.withLockedValue { state in
+                guard let usable = state.usablePreferredUpstreamIndices else {
+                    return preferredUpstreamIndices.first
+                }
+                return preferredUpstreamIndices.first { usable.contains($0) }
+            }
+        } else {
+            upstreamIndex = chooseUpstreamIndex()
+        }
         guard let upstreamIndex else {
             return eventLoop.makeFailedFuture(
-                NSError(domain: "TestRuntimeCoordinator", code: 1)
+                UpstreamSlotScheduler.AcquisitionError.unavailable
             )
         }
         if cancelAfterStartingEnqueueRequest {
@@ -889,6 +900,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setPreferredUpstreamIndex(_ value: Int?) {
         state.withLockedValue { $0.preferredUpstreamIndex = value }
+    }
+
+    func setUsablePreferredUpstreamIndices(_ values: [Int]?) {
+        state.withLockedValue { state in
+            state.usablePreferredUpstreamIndices = values.map(Set.init)
+        }
     }
 
     func setToolRoutingDecision(_ value: ToolRoutingDecision?) {

@@ -136,13 +136,6 @@ package protocol RuntimeUpstreamForwardingPort: Sendable {
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
-        preferredUpstreamIndex: Int?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
-    ) -> EventLoopFuture<Output>
-    func enqueueOnUpstreamSlot<Output: Sendable>(
-        leaseID: LeaseManager.ID,
-        descriptor: SessionRequestPipeline.Descriptor,
-        on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int]?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
@@ -298,7 +291,7 @@ extension RuntimeUpstreamForwardingPort {
             leaseID: leaseID,
             descriptor: descriptor,
             on: eventLoop,
-            preferredUpstreamIndex: nil,
+            preferredUpstreamIndices: nil,
             starter: starter
         )
     }
@@ -307,14 +300,14 @@ extension RuntimeUpstreamForwardingPort {
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
-        preferredUpstreamIndices: [Int]?,
+        preferredUpstreamIndex: Int?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         enqueueOnUpstreamSlot(
             leaseID: leaseID,
             descriptor: descriptor,
             on: eventLoop,
-            preferredUpstreamIndex: preferredUpstreamIndices?.first,
+            preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] },
             starter: starter
         )
     }
