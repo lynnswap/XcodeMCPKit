@@ -773,6 +773,7 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let startedValues = RecordedValues<String>()
     private let cancelledValues = RecordedValues<String>()
+    private let sendBlocker = NeverCompletingSendBlocker()
 
     init() {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
@@ -804,7 +805,7 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
 
         await startedValues.append(method)
         do {
-            try await Task.sleep(for: .seconds(3_600))
+            try await sendBlocker.wait()
         } catch {
             await cancelledValues.append(method)
             throw error
@@ -812,6 +813,7 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     }
 
     func close() async {
+        await sendBlocker.cancelAll()
         continuation.yield(.closed(nil))
         continuation.finish()
     }
@@ -839,6 +841,51 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
             throw XcodeMCPError.invalidRequest("message is not an object")
         }
         return object
+    }
+}
+
+private actor NeverCompletingSendBlocker {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var waiters: [Waiter] = []
+    private var cancelledWaiterIDs: Set<UUID> = []
+
+    func wait() async throws {
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                if cancelledWaiterIDs.remove(waiterID) != nil {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                waiters.append(Waiter(id: waiterID, continuation: continuation))
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
+            }
+        }
+    }
+
+    func cancelAll() {
+        let waiters = waiters
+        self.waiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            cancelledWaiterIDs.insert(id)
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
     }
 }
 
