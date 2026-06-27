@@ -3,14 +3,12 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import NIOHTTP1
 import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
-import ProxySession
 
-extension HTTPPostService {
+extension ClientMCPRequestExecutor {
     package static func topLevelRequestTimeoutOverride(
         method: String?,
         defaultSeconds: TimeInterval
@@ -78,7 +76,7 @@ extension HTTPPostService {
         requestIsBatch: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostService.Resolution? {
+    ) -> ClientMCPRequestExecutor.Resolution? {
         guard requestRequiresInitialize(parsedRequestJSON) else {
             return nil
         }
@@ -99,7 +97,7 @@ extension HTTPPostService {
         requestIsBatch: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostService.Resolution {
+    ) -> ClientMCPRequestExecutor.Resolution {
         if localResponseData != nil {
             return makePartialBatchErrorResolution(
                 localResponseData: localResponseData,
@@ -137,7 +135,7 @@ extension HTTPPostService {
         requestIsBatch: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostService.Resolution {
+    ) -> ClientMCPRequestExecutor.Resolution {
         if requestIDs.isEmpty {
             return .plain(
                 status: .unprocessableEntity,
@@ -173,8 +171,8 @@ extension HTTPPostService {
         responseData: Data?,
         sessionID: String,
         prefersEventStream: Bool,
-        emptyStatus: HTTPResponseStatus
-    ) -> HTTPPostService.Resolution {
+        emptyStatus: Status
+    ) -> ClientMCPRequestExecutor.Resolution {
         guard let responseData else {
             return .empty(status: emptyStatus, sessionID: sessionID)
         }
@@ -193,9 +191,9 @@ extension HTTPPostService {
         sessionID: String,
         prefersEventStream: Bool,
         forceBatchArray: Bool,
-        fallbackStatus: HTTPResponseStatus,
+        fallbackStatus: Status,
         fallbackBody: String
-    ) -> HTTPPostService.Resolution {
+    ) -> ClientMCPRequestExecutor.Resolution {
         guard let localResponseData else {
             if responseIDs.isEmpty {
                 return .plain(
@@ -316,12 +314,12 @@ extension HTTPPostService {
 
     package static func mergeLocalToolResponseData(
         _ localResponseData: Data?,
-        into resolution: HTTPPostService.Resolution,
+        into resolution: ClientMCPRequestExecutor.Resolution,
         fallbackRequestIDs: [JSONRPC.ID],
         forceBatchArray: Bool,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostService.Resolution {
+    ) -> ClientMCPRequestExecutor.Resolution {
         guard localResponseData != nil else {
             return resolution
         }
@@ -369,7 +367,7 @@ extension HTTPPostService {
     }
 
     package static func responseDataForBatchResolution(
-        _ resolution: HTTPPostService.Resolution?,
+        _ resolution: ClientMCPRequestExecutor.Resolution?,
         fallbackRequestIDs: [JSONRPC.ID],
         forceBatchArray: Bool
     ) -> Data? {

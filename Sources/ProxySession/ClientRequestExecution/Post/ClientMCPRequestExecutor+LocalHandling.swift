@@ -3,20 +3,18 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import NIOHTTP1
 import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
-import ProxySession
 
-extension HTTPPostService {
+extension ClientMCPRequestExecutor {
     package func resolveLocalHandling(
         _ handling: LocalPostHandling,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         forceBatchArray: Bool
-    ) -> EventLoopFuture<HTTPPostService.Resolution> {
+    ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         switch handling {
         case .pendingResponse(let future, let sessionID, let errorSessionID, let originalID):
             return future.map { buffer in
@@ -242,7 +240,7 @@ extension HTTPPostService {
             requestIDs: routedResponseIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = HTTPPostService.CancellationHandle(
+        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: routedResponseIDs.map(\.key)
@@ -543,15 +541,15 @@ extension HTTPPostService {
         return RefreshCodeIssues.Request(requestObject: object)
     }
 
-    package func refreshRequestRouting(from requestJSON: Any) -> HTTPPostService.RefreshRouting? {
+    package func refreshRequestRouting(from requestJSON: Any) -> ClientMCPRequestExecutor.RefreshRouting? {
         if let object = requestJSON as? [String: Any],
             let refreshRequest = RefreshCodeIssues.Request(requestObject: object),
             Self.extractResponseIDs(from: object).isEmpty == false,
             let bodyData = try? JSONRPC.Wire.data(from: object)
         {
-            return HTTPPostService.RefreshRouting(
+            return ClientMCPRequestExecutor.RefreshRouting(
                 refreshRoutes: [
-                    HTTPPostService.RefreshRoute(
+                    ClientMCPRequestExecutor.RefreshRoute(
                         request: refreshRequest,
                         bodyData: bodyData,
                         requestIDs: Self.extractResponseIDs(from: object),
@@ -567,7 +565,7 @@ extension HTTPPostService {
         guard let requests = requestJSON as? [Any] else {
             return nil
         }
-        var refreshRoutes: [HTTPPostService.RefreshRoute] = []
+        var refreshRoutes: [ClientMCPRequestExecutor.RefreshRoute] = []
         var remainingRequestObjects: [[String: Any]] = []
         var remainingInvalidResponseObjects: [[String: Any]] = []
         for item in requests {
@@ -595,7 +593,7 @@ extension HTTPPostService {
                 return nil
             }
             refreshRoutes.append(
-                HTTPPostService.RefreshRoute(
+                ClientMCPRequestExecutor.RefreshRoute(
                     request: candidate,
                     bodyData: bodyData,
                     requestIDs: responseIDs,
@@ -624,7 +622,7 @@ extension HTTPPostService {
             from: remainingInvalidResponseObjects,
             forceBatchArray: remainingInvalidResponseObjects.count > 1
         )
-        return HTTPPostService.RefreshRouting(
+        return ClientMCPRequestExecutor.RefreshRouting(
             refreshRoutes: refreshRoutes,
             remainingBodyData: remainingBodyData,
             remainingRequestIDs: Self.extractResponseIDs(from: remainingPayload as Any),

@@ -5,7 +5,6 @@ import NIOConcurrencyHelpers
 import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
-import ProxySession
 
 package enum LocalPostHandling {
     case pendingResponse(
@@ -23,7 +22,7 @@ package struct LocalMCPResponder {
 
     private struct EmbeddedTestResolutionError: Error {}
 
-    private let sessionManager: any RuntimeLocalMCPResponderPort
+    private let sessionManager: any RuntimeClientLocalMCPResponderPort
     private let refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
     private let disabledToolNames: Set<String>
     /// EmbeddedChannel-based tests cannot complete promises from another
@@ -33,7 +32,7 @@ package struct LocalMCPResponder {
     private let logger: Logger
 
     package init(
-        sessionManager: any RuntimeLocalMCPResponderPort,
+        sessionManager: any RuntimeClientLocalMCPResponderPort,
         refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
         usesSynchronousLocalResolution: Bool = false,

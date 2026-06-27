@@ -11,10 +11,10 @@ import ProxyXcodeSupport
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 private func jsonRPCError(
-    from resolution: HTTPPostService.Resolution
+    from resolution: ClientMCPRequestExecutor.Resolution
 ) throws -> (code: Int?, message: String?) {
     switch resolution {
     case .responseData(let data, _, _):
@@ -1988,7 +1988,7 @@ extension HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(eventLoopGroup) }
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -1996,7 +1996,7 @@ extension HTTPHandlerTests {
                 defaultRequestTimeoutSeconds: config.requestTimeout
             )
         )
-        var operations: [HTTPPostService.Operation] = []
+        var operations: [ClientMCPRequestExecutor.Operation] = []
 
         do {
             let requestCount = 6
@@ -2110,7 +2110,7 @@ extension HTTPHandlerTests {
         sessionManager.setInitialized(true)
         let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(eventLoopGroup) }
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -2118,7 +2118,7 @@ extension HTTPHandlerTests {
                 defaultRequestTimeoutSeconds: config.requestTimeout
             )
         )
-        var operations: [HTTPPostService.Operation] = []
+        var operations: [ClientMCPRequestExecutor.Operation] = []
 
         do {
             let requestCount = 6

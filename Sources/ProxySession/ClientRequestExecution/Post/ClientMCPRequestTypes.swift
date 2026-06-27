@@ -3,14 +3,41 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import NIOHTTP1
 import ProxyCore
 import XcodeMCPRuntime
-import ProxySession
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 
-extension HTTPPostService {
+extension ClientMCPRequestExecutor {
+    package enum Status: Sendable, Equatable {
+        case ok
+        case accepted
+        case badRequest
+        case notFound
+        case unprocessableEntity
+        case badGateway
+        case serviceUnavailable
+
+        package var code: UInt {
+            switch self {
+            case .ok:
+                return 200
+            case .accepted:
+                return 202
+            case .badRequest:
+                return 400
+            case .notFound:
+                return 404
+            case .unprocessableEntity:
+                return 422
+            case .badGateway:
+                return 502
+            case .serviceUnavailable:
+                return 503
+            }
+        }
+    }
+
     package enum Resolution {
         case responseData(
             data: Data,
@@ -27,19 +54,19 @@ extension HTTPPostService {
             prefersEventStream: Bool
         )
         case plain(
-            status: HTTPResponseStatus,
+            status: Status,
             body: String,
             sessionID: String?
         )
         case empty(
-            status: HTTPResponseStatus,
+            status: Status,
             sessionID: String
         )
     }
 
     package struct Operation {
-        package let future: EventLoopFuture<HTTPPostService.Resolution>
-        package let cancellationHandle: HTTPPostService.CancellationHandle?
+        package let future: EventLoopFuture<ClientMCPRequestExecutor.Resolution>
+        package let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
     }
 
     package struct RefreshRoute: Sendable {
@@ -50,7 +77,7 @@ extension HTTPPostService {
     }
 
     package struct RefreshRouting: Sendable {
-        let refreshRoutes: [HTTPPostService.RefreshRoute]
+        let refreshRoutes: [ClientMCPRequestExecutor.RefreshRoute]
         let remainingBodyData: Data?
         let remainingRequestIDs: [JSONRPC.ID]
         let remainingLocalResponseData: Data?
@@ -67,7 +94,7 @@ extension HTTPPostService {
             var upstreamIndex: Int?
             var routerPendingToken: UUID?
             var refreshTask: Task<Void, Never>?
-            var childHandles: [HTTPPostService.CancellationHandle] = []
+            var childHandles: [ClientMCPRequestExecutor.CancellationHandle] = []
             var isTerminal = false
         }
 
@@ -136,7 +163,7 @@ extension HTTPPostService {
         }
 
         @discardableResult
-        package func bindChildHandle(_ handle: HTTPPostService.CancellationHandle) -> Bool {
+        package func bindChildHandle(_ handle: ClientMCPRequestExecutor.CancellationHandle) -> Bool {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return false }
                 state.childHandles.append(handle)
@@ -147,7 +174,7 @@ extension HTTPPostService {
         package func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
             let snapshot = state.withLockedValue {
                 state -> (
-                    Int?, UUID?, Task<Void, Never>?, [HTTPPostService.CancellationHandle], [String]
+                    Int?, UUID?, Task<Void, Never>?, [ClientMCPRequestExecutor.CancellationHandle], [String]
                 )?
                 in
                 guard !state.isTerminal else { return nil }

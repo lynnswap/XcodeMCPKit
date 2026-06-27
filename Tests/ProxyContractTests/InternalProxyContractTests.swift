@@ -4,8 +4,9 @@ import Testing
 import ProxyCore
 import XcodeMCPRuntime
 import XcodeMCPProxyKit
+import ProxySession
 import ProxyXcodeFeatures
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct InternalProxyContractTests {

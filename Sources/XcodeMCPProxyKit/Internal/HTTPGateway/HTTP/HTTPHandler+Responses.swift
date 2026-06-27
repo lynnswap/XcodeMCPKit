@@ -2,11 +2,12 @@ import Foundation
 import NIO
 import NIOHTTP1
 import ProxyCore
+import ProxySession
 import XcodeMCPRuntime
 
 extension HTTPHandler {
     func sendPostResolution(
-        _ resolution: HTTPPostService.Resolution,
+        _ resolution: ClientMCPRequestExecutor.Resolution,
         on channel: Channel,
         keepAlive: Bool,
         requestLog: RequestLogContext
@@ -69,7 +70,7 @@ extension HTTPHandler {
         case .plain(let status, let body, let sessionID):
             return sendPlain(
                 on: channel,
-                status: status,
+                status: Self.httpStatus(from: status),
                 body: body,
                 keepAlive: keepAlive,
                 sessionID: sessionID,
@@ -78,11 +79,30 @@ extension HTTPHandler {
         case .empty(let status, let sessionID):
             return sendEmpty(
                 on: channel,
-                status: status,
+                status: Self.httpStatus(from: status),
                 keepAlive: keepAlive,
                 sessionID: sessionID,
                 requestLog: requestLog
             )
+        }
+    }
+
+    private static func httpStatus(from status: ClientMCPRequestExecutor.Status) -> HTTPResponseStatus {
+        switch status {
+        case .ok:
+            return .ok
+        case .accepted:
+            return .accepted
+        case .badRequest:
+            return .badRequest
+        case .notFound:
+            return .notFound
+        case .unprocessableEntity:
+            return .unprocessableEntity
+        case .badGateway:
+            return .badGateway
+        case .serviceUnavailable:
+            return .serviceUnavailable
         }
     }
 

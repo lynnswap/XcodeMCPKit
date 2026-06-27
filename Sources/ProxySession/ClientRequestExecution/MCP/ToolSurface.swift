@@ -1,7 +1,6 @@
 import Foundation
 import ProxyCore
 import XcodeMCPRuntime
-import ProxySession
 import ProxyXcodeFeatures
 
 package struct ToolSurface: Sendable {

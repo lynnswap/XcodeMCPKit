@@ -198,7 +198,7 @@ package protocol RuntimeHTTPControlPort:
     RuntimeSessionRegistryPort,
     RuntimeDebugSnapshotPort {}
 
-package protocol RuntimeLocalMCPResponderPort:
+package protocol RuntimeClientLocalMCPResponderPort:
     RuntimeSessionRegistryPort,
     RuntimeInitializeToolsPort {}
 
@@ -210,14 +210,14 @@ package protocol RuntimeMCPForwardingPort:
     RuntimeUpstreamForwardingPort,
     RuntimeRequestLeasePort {}
 
-package protocol RuntimeHTTPPostPort:
+package protocol RuntimeClientMCPRequestPort:
     RuntimeSessionRegistryPort,
-    RuntimeLocalMCPResponderPort,
+    RuntimeClientLocalMCPResponderPort,
     RuntimeMCPForwardingPort {}
 
 package protocol RuntimeHTTPGatewayPort:
     RuntimeHTTPControlPort,
-    RuntimeHTTPPostPort {}
+    RuntimeClientMCPRequestPort {}
 
 package protocol RuntimeCoordinating:
     RuntimeHTTPGatewayPort {}

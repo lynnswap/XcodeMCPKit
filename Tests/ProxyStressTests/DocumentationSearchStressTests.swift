@@ -7,7 +7,7 @@ import XcodeMCPRuntime
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 @Suite(.serialized, .enabled(if: StressTestEnvironment.isEnabled))
 struct DocumentationSearchStressTests {

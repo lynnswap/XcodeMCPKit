@@ -1,6 +1,5 @@
 import Foundation
 import XcodeMCPRuntime
-import ProxySession
 
 package struct ToolCallNormalizer: Sendable {
     private static let structuredContentTools: Set<String> = [

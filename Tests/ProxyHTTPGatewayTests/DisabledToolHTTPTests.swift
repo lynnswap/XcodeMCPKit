@@ -11,7 +11,7 @@ import ProxyXcodeFeatures
  import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 extension HTTPHandlerTests {
     @Test func httpDisabledToolCallReturnsLocalToolErrorWhenNoUpstreamIsAvailable() async throws {

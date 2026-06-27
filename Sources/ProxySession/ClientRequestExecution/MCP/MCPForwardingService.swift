@@ -3,12 +3,16 @@ import NIO
 import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
-import ProxySession
 
 package struct MCPForwardingService: Sendable {
     package struct PreparedRequest: Sendable {
         package let transform: RequestTransform
         package let upstreamIndex: Int
+
+        package init(transform: RequestTransform, upstreamIndex: Int) {
+            self.transform = transform
+            self.upstreamIndex = upstreamIndex
+        }
     }
 
     package struct StartedRequest: Sendable {
@@ -17,6 +21,20 @@ package struct MCPForwardingService: Sendable {
         package let requestTimeout: TimeAmount?
         package let routerPendingToken: UUID
         package let future: EventLoopFuture<ByteBuffer>
+
+        package init(
+            transform: RequestTransform,
+            upstreamIndex: Int,
+            requestTimeout: TimeAmount?,
+            routerPendingToken: UUID,
+            future: EventLoopFuture<ByteBuffer>
+        ) {
+            self.transform = transform
+            self.upstreamIndex = upstreamIndex
+            self.requestTimeout = requestTimeout
+            self.routerPendingToken = routerPendingToken
+            self.future = future
+        }
     }
 
     package enum ResponseResolution: Sendable {
@@ -72,7 +90,7 @@ package struct MCPForwardingService: Sendable {
         on eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil,
         leaseID: LeaseManager.ID? = nil,
-        cancellationHandle: HTTPPostService.CancellationHandle? = nil,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
         let requestTimeout =
@@ -205,7 +223,7 @@ package struct MCPForwardingService: Sendable {
         arguments: [String: Any],
         sessionID: String,
         eventLoop: EventLoop,
-        cancellationHandle: HTTPPostService.CancellationHandle? = nil,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil,
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
     ) async -> RefreshCodeIssues.Workflow.InternalToolResult {
@@ -280,7 +298,7 @@ package struct MCPForwardingService: Sendable {
             isTopLevelClientRequest: false
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let internalCancellationHandle = HTTPPostService.CancellationHandle(
+        let internalCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: []
