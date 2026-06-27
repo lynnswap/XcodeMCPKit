@@ -5272,6 +5272,7 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let timeoutClock = TestClock()
+        let initializeCleanupCompleted = TestSignal()
         var config = makeConfig(requestTimeout: 0.1)
         config.configPath = configPath
         config.loadFileConfig()
@@ -5279,7 +5280,12 @@ struct RuntimeCoordinatorTests {
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock),
+            testHooks: RuntimeCoordinatorTestHooks(
+                primaryInitializeFailureCleanupCompleted: { _ in
+                    initializeCleanupCompleted.signal()
+                }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -5290,11 +5296,10 @@ struct RuntimeCoordinatorTests {
         )
         await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(100))
-        try await waitWithTimeout("waiting for eager initialize timeout") {
-            while manager.testStateSnapshot().initInFlight {
-                await Task.yield()
-            }
-        }
+        try await initializeCleanupCompleted.wait(
+            description: "waiting for eager initialize timeout cleanup"
+        )
+        #expect(manager.testStateSnapshot().initInFlight == false)
 
         _ = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 1))!,

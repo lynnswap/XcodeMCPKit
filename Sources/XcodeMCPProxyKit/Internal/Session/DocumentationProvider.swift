@@ -1516,18 +1516,33 @@ package actor DocumentationProviderConnection {
     }
 }
 
+package struct SessionBackedDocumentationProviderTransportTestHooks: Sendable {
+    package var shutdownWillAwaitDetachedSessionStops: @Sendable (_ stopCount: Int) -> Void
+
+    package init(
+        shutdownWillAwaitDetachedSessionStops: @escaping @Sendable (_ stopCount: Int) -> Void = { _ in }
+    ) {
+        self.shutdownWillAwaitDetachedSessionStops = shutdownWillAwaitDetachedSessionStops
+    }
+
+    package static let noop = Self()
+}
+
 package actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting {
     private let sessionFactory: any DocumentationProviderSessionMaking
     private let clock: ClockClient
+    private let testHooks: SessionBackedDocumentationProviderTransportTestHooks
     private var connections: [String: DocumentationProviderConnection] = [:]
     private var backgroundSessionStops: [UUID: Task<Void, Never>] = [:]
 
     package init(
         sessionFactory: any DocumentationProviderSessionMaking,
-        clock: ClockClient = .liveValue
+        clock: ClockClient = .liveValue,
+        testHooks: SessionBackedDocumentationProviderTransportTestHooks = .noop
     ) {
         self.sessionFactory = sessionFactory
         self.clock = clock
+        self.testHooks = testHooks
     }
 
     isolated deinit {
@@ -1614,6 +1629,9 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         self.connections.removeAll()
         let backgroundSessionStops = self.backgroundSessionStops
         self.backgroundSessionStops.removeAll()
+        if !backgroundSessionStops.isEmpty {
+            testHooks.shutdownWillAwaitDetachedSessionStops(backgroundSessionStops.count)
+        }
         for connection in connections.values {
             await connection.stopAwaitingSession()
         }
@@ -1660,13 +1678,16 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
 package struct DocumentationProviderManagerTestHooks: Sendable {
     package var providerPreparationReused: @Sendable (pid_t) -> Void
     package var providerPreparationWaitTimedOut: @Sendable (pid_t) -> Void
+    package var managerDeinitialized: @Sendable () -> Void
 
     package init(
         providerPreparationReused: @escaping @Sendable (pid_t) -> Void = { _ in },
-        providerPreparationWaitTimedOut: @escaping @Sendable (pid_t) -> Void = { _ in }
+        providerPreparationWaitTimedOut: @escaping @Sendable (pid_t) -> Void = { _ in },
+        managerDeinitialized: @escaping @Sendable () -> Void = {}
     ) {
         self.providerPreparationReused = providerPreparationReused
         self.providerPreparationWaitTimedOut = providerPreparationWaitTimedOut
+        self.managerDeinitialized = managerDeinitialized
     }
 
     package static let noop = Self()
@@ -1938,6 +1959,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         preparedProviders.removeAll()
         activeProvider = nil
         permanentlyUnusableProcessIDs.removeAll()
+        testHooks.managerDeinitialized()
     }
 
     package init(
