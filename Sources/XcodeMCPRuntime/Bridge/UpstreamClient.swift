@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package enum Upstream {}
 

@@ -62,6 +62,7 @@ let package = Package(
         .target(
             name: "ProxyCore",
             dependencies: [
+                "XcodeMCPRuntime",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -73,7 +74,6 @@ let package = Package(
         .target(
             name: "XcodeMCPRuntime",
             dependencies: [
-                "ProxyCore",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),

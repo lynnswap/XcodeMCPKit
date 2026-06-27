@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package struct UpstreamSlotID: Sendable, Hashable, Comparable {
     package let rawValue: Int
