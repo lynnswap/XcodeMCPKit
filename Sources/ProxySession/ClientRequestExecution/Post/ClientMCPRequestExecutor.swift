@@ -573,11 +573,15 @@ package final class ClientMCPRequestExecutor: Sendable {
                     if error is CancellationError {
                         return eventLoop.makeFailedFuture(error)
                     }
+                    let releaseReason: LeaseManager.ReleaseReason =
+                        error is UpstreamSlotScheduler.AcquisitionError
+                        ? .upstreamUnavailable
+                        : .upstreamOverloaded
                     cancellationHandle.markCompleted()
                     self.sessionManager.failRequestLease(
                         leaseID,
                         terminalState: .failed,
-                        reason: .upstreamOverloaded
+                        reason: releaseReason
                     )
                     return eventLoop.makeSucceededFuture(
                         Self.makeUpstreamUnavailableResolution(
