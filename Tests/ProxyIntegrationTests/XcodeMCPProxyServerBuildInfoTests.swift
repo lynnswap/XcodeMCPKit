@@ -1,5 +1,4 @@
 import ProxyCore
-import ProxyBuildInfo
 import Testing
 
 @testable import XcodeMCPProxyKit
@@ -33,7 +32,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
         )
 
         #expect(summary == """
-        XcodeMCPKit \(ProxyBuildInfo.version)
+        XcodeMCPKit \(XcodeMCPProxyServer.productMetadata.version)
 
         Server
           URL: http://localhost:8765/mcp

@@ -1,7 +1,6 @@
 import ProxyCore
 import Foundation
 import Testing
-import ProxyBuildInfo
 import XcodeMCPProxyKit
 
 @Suite
@@ -33,7 +32,7 @@ struct CLICommandTests {
         )
 
         #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy \(ProxyBuildInfo.version)"])
+        #expect(output.snapshot() == ["xcode-mcp-proxy \(XcodeMCPProxyServer.productMetadata.version)"])
     }
 
     @Test func cliCommandPrintsVersionWhenFlagAppearsAsURLValue() async throws {
@@ -63,7 +62,7 @@ struct CLICommandTests {
         )
 
         #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy \(ProxyBuildInfo.version)"])
+        #expect(output.snapshot() == ["xcode-mcp-proxy \(XcodeMCPProxyServer.productMetadata.version)"])
     }
 
     @Test func cliCommandHelpWinsOverVersion() async throws {

@@ -47,19 +47,6 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "ProxyBuildInfoSupport",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyBuildInfo",
-            dependencies: [],
-            path: "Sources/ProxyBuildInfo",
-            swiftSettings: strictSwiftSettings,
-            plugins: [
-                .plugin(name: "ProxyBuildInfoPlugin"),
-            ]
-        ),
-        .target(
             name: "ProxyCore",
             dependencies: [
                 "XcodeMCPRuntime",
@@ -128,7 +115,6 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
-                "ProxyBuildInfo",
                 "ProxyCore",
                 "ProxySession",
                 "XcodeMCPRuntime",
@@ -140,7 +126,10 @@ let package = Package(
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
             exclude: ["README.md"],
-            swiftSettings: strictSwiftSettings
+            swiftSettings: strictSwiftSettings,
+            plugins: [
+                .plugin(name: "ProxyBuildInfoPlugin"),
+            ]
         ),
         .target(
             name: "XcodeMCPTestSupport",
@@ -172,7 +161,6 @@ let package = Package(
         ),
         .executableTarget(
             name: "ProxyBuildInfoTool",
-            dependencies: ["ProxyBuildInfoSupport"],
             swiftSettings: strictSwiftSettings
         ),
         .plugin(
@@ -289,7 +277,6 @@ let package = Package(
                 "XcodeMCPRuntime",
                 "ProxySession",
                 "ProxyXcodeSupport",
-                "ProxyBuildInfo",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -298,18 +285,9 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "ProxyBuildInfoSupportTests",
-            dependencies: [
-                "ProxyBuildInfoSupport",
-            ],
-            path: "Tests/ProxyBuildInfoSupportTests",
-            swiftSettings: strictSwiftSettings
-        ),
-        .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
                 "XcodeMCPProxyKit",
-                "ProxyBuildInfo",
                 "ProxyCore",
                 "XcodeMCPRuntime",
                 "ProxySession",

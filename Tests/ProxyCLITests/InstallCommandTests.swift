@@ -1,6 +1,5 @@
 import Foundation
 import Testing
-import ProxyBuildInfo
 import XcodeMCPProxyKit
 
 @Suite
@@ -27,7 +26,7 @@ struct InstallCommandTests {
         )
 
         #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy-install \(ProxyBuildInfo.version)"])
+        #expect(output.snapshot() == ["xcode-mcp-proxy-install \(XcodeMCPProxyServer.productMetadata.version)"])
     }
 
     @Test func installCommandPrintsVersionWhenFlagAppearsAsBindirValue() throws {
@@ -52,7 +51,7 @@ struct InstallCommandTests {
         )
 
         #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy-install \(ProxyBuildInfo.version)"])
+        #expect(output.snapshot() == ["xcode-mcp-proxy-install \(XcodeMCPProxyServer.productMetadata.version)"])
     }
 
     @Test func installCommandHelpWinsOverVersion() throws {
