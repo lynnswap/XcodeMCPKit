@@ -1,7 +1,6 @@
 import Foundation
 import Darwin
 import Logging
-import ProxyCore
 
 private final class StdinWriter: @unchecked Sendable {
     private struct State: Sendable {
@@ -117,7 +116,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private let continuation: AsyncStream<Upstream.Event>.Continuation
 
     private let config: UpstreamProcess.Config
-    private let logger: Logger = ProxyLogging.make("upstream")
+    private let logger: Logger = XcodeMCPRuntimeLogging.make("upstream")
     private let maxBufferedStderrBytes = 16 * 1024
 
     private var process: Process?

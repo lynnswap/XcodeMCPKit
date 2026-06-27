@@ -1,7 +1,3 @@
-package enum MCPProtocolVersion {
-    package static let current = "2025-06-18"
+import XcodeMCPRuntime
 
-    package static func isSupported(_ version: String) -> Bool {
-        version == current
-    }
-}
+package typealias MCPProtocolVersion = XcodeMCPRuntime.MCPProtocolVersion

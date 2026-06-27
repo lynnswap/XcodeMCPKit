@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package struct StreamableHTTPMCPClientSendResult: Sendable {
     package let messageCount: Int

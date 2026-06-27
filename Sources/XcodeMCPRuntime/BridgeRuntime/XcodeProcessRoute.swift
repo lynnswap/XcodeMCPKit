@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package struct XcodeProcessRoute: Sendable, Equatable {
     package let target: XcodeProcessTarget

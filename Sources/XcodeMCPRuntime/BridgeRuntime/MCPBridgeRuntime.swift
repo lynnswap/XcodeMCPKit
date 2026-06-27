@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package enum MCPBridgeRuntime {
     package struct Configuration: Sendable {

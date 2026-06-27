@@ -1,5 +1,4 @@
 import Foundation
-import ProxyCore
 
 package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @unchecked Sendable {
     package nonisolated let events: AsyncStream<XcodeMCPTransportEvent>

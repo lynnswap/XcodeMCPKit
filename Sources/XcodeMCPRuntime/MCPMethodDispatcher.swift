@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import ProxyCore
 
 extension MCP {
     package enum MethodDispatcher {

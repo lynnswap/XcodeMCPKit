@@ -1,7 +1,6 @@
 import Foundation
 import Logging
 import NIOConcurrencyHelpers
-import ProxyCore
 
 package final class UpstreamReadinessWaiterToken: Sendable {
     private let isCancelledBox = NIOLockedValueBox(false)
