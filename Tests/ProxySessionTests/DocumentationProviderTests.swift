@@ -3,7 +3,6 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
-import ProxyCore
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
 @testable import ProxySession

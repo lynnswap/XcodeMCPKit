@@ -4,7 +4,6 @@ import NIO
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import ProxyCore
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
 @testable import ProxySession

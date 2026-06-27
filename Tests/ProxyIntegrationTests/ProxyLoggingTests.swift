@@ -1,7 +1,7 @@
 import Logging
 import Testing
 
-@testable import ProxyCore
+@testable import ProxySession
 
 @Suite
 struct ProxyLoggingTests {

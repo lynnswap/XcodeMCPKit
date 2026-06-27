@@ -2,7 +2,6 @@ import Foundation
 import NIO
 import NIOFoundationCompat
 import XcodeMCPRuntime
-import ProxyCore
 
 extension RuntimeCoordinator {
     func markRequestSucceeded(upstreamIndex: Int) {

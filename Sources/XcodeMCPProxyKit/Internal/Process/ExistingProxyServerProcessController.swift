@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import ProxyCore
+import ProxySession
 import XcodeMCPRuntime
 
 struct ExistingProxyServerProcessController: DependencyClient {

@@ -1,4 +1,4 @@
-import ProxyCore
+import ProxySession
 import Foundation
 
 final class CapturedLines: @unchecked Sendable {

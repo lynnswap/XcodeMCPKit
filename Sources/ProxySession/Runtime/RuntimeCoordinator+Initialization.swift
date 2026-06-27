@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import XcodeMCPRuntime
-import ProxyCore
 
 extension RuntimeCoordinator {
     func startEagerInitializePrimary(applyBackoff: Bool = false) {

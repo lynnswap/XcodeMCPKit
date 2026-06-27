@@ -3,7 +3,6 @@ import Logging
 import NIO
 import NIOHTTP1
 import NIOConcurrencyHelpers
-import ProxyCore
 import XcodeMCPRuntime
 
 final class SSEHub: Sendable {

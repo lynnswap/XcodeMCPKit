@@ -1,4 +1,3 @@
-import ProxyCore
 import XcodeMCPRuntime
 
 extension ProxyConfig {

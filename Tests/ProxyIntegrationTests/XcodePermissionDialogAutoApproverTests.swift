@@ -2,7 +2,7 @@ import ApplicationServices
 import Foundation
 import Testing
 
-@testable import ProxyCore
+@testable import ProxySession
 @testable import XcodeMCPProxyKit
 
 @Suite(.serialized)

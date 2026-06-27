@@ -4,7 +4,6 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPRuntime
-import ProxyCore
 
 package final class SessionContext: Sendable {
     package let id: String

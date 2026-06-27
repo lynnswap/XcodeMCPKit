@@ -1,6 +1,5 @@
 import Foundation
 import XcodeMCPRuntime
-import ProxyCore
 
 extension RuntimeCoordinator {
     func runWhenUpstreamReady(

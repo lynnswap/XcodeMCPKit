@@ -2,7 +2,6 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
-import ProxyCore
 import Testing
 
 @testable import ProxySession

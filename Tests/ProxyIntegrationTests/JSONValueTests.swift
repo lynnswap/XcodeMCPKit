@@ -2,8 +2,6 @@ import Foundation
 import Testing
 import XcodeMCPRuntime
 
-@testable import ProxyCore
-
 @Suite
 struct JSONValueTests {
     @Test func rpcIDFromString() async throws {

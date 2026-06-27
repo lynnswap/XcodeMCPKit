@@ -1,7 +1,6 @@
 import Foundation
 import Logging
 import NIOCore
-import ProxyCore
 import XcodeMCPRuntime
 
 extension RuntimeCoordinator {

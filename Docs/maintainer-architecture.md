@@ -2,14 +2,14 @@
 
 ## Module Layout
 
-- `ProxyCore`
-  - CLI/config parsing, discovery file handling, logging, small shared helpers.
-  - Does not re-export runtime primitives; consumers import `XcodeMCPRuntime`
-    directly for runtime-owned contracts.
 - `XcodeMCPRuntime`
-  - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request inspection.
+  - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request
+    inspection, and low-level process execution primitives.
 - `ProxySession`
-  - Session lifecycle, initialize handshake, upstream process pool, leases, routing, Xcode target discovery/window query/readiness, and `XcodeRefreshCodeIssuesInFile` workflow.
+  - Session lifecycle, proxy config state, initialize handshake, upstream
+    process pool, leases, routing, discovery-file clients, Xcode target
+    discovery/window query/readiness, and `XcodeRefreshCodeIssuesInFile`
+    workflow.
 - `XcodeMCPProxyKit`
   - Public proxy facades plus internal HTTP gateway, STDIO adapter, permission-dialog auto approval, process restart, and install-product helpers.
 
@@ -24,13 +24,13 @@
 
 ## Dependency Direction
 
-- `ProxyCore` must not depend on gateway/session/Xcode modules.
-- `ProxyCore` may refer to `XcodeMCPRuntime` for runtime contract validation,
-  but it must not add proxy-facing aliases for runtime-owned primitives.
 - `XcodeMCPRuntime` owns shared protocol/runtime primitives and must not depend on proxy-only modules.
   Avoid introducing gateway/session/Xcode knowledge here.
-- `ProxySession` depends on `ProxyCore` and `XcodeMCPRuntime`.
-- `XcodeMCPProxyKit` is the highest-level proxy library target and may depend on the lower-level targets above.
+- `ProxySession` depends on `XcodeMCPRuntime` and owns proxy session/config
+  state. It must not depend on product facade, CLI, installer, or HTTP gateway
+  modules.
+- `XcodeMCPProxyKit` is the highest-level proxy library target and may depend
+  on the lower-level targets above.
 - Executable targets depend on `XcodeMCPProxyKit` only.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
