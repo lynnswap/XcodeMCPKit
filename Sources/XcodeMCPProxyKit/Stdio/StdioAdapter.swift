@@ -24,7 +24,7 @@ package struct StdioAdapterShutdownPolicy: Sendable {
     package static let live = Self()
 }
 
-public actor StdioAdapter {
+actor StdioAdapter {
     private struct RequestEnvelope {
         let method: String?
         let ids: [JSONValue]
@@ -53,7 +53,7 @@ public actor StdioAdapter {
     private var started = false
     private var stopped = false
 
-    public init(
+    init(
         upstreamURL: URL,
         requestTimeout: TimeInterval,
         input: FileHandle = .standardInput,
@@ -68,7 +68,7 @@ public actor StdioAdapter {
         )
     }
 
-    package init(
+    init(
         upstreamURL: URL,
         requestTimeout: TimeInterval,
         input: FileHandle,
@@ -90,7 +90,7 @@ public actor StdioAdapter {
         )
     }
 
-    public func start() async {
+    func start() async {
         guard !started else { return }
         started = true
         startClientEventTaskIfNeeded()
@@ -99,11 +99,11 @@ public actor StdioAdapter {
         }
     }
 
-    public func wait() async {
+    func wait() async {
         _ = await readTask?.value
     }
 
-    public func stop() async {
+    func stop() async {
         await stop(cancelReadTask: true)
     }
 

@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import XcodeMCPRuntime
-@testable import ProxyStdioTransport
+@testable import XcodeMCPProxyKit
 
 struct StdioStreamedResponseCompletionTests {
     @Test func completionTracksStringAndNumericIDsSeparately() async throws {

@@ -154,42 +154,16 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "ProxyStdioTransport",
-            dependencies: [
-                "ProxyCore",
-                "XcodeMCPRuntime",
-                .product(name: "Logging", package: "swift-log"),
-            ],
-            path: "Sources/ProxyStdioTransport",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyProcessManagement",
-            dependencies: [
-                "ProxyCore",
-            ],
-            path: "Sources/ProxyProcessManagement",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyInstallSupport",
-            dependencies: [],
-            path: "Sources/ProxyInstallSupport",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "ProxyBuildInfo",
                 "ProxyCLICommon",
                 "ProxyCore",
-                "ProxyInstallSupport",
                 "ProxySession",
-                "ProxyProcessManagement",
+                "XcodeMCPRuntime",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -303,7 +277,6 @@ let package = Package(
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 "ProxyAdapterCLI",
                 "ProxyServerCLI",
                 "XcodeMCPTestSupport",
@@ -324,7 +297,6 @@ let package = Package(
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
@@ -372,7 +344,6 @@ let package = Package(
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
@@ -392,7 +363,6 @@ let package = Package(
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 "ProxyBuildInfo",
                 "ProxyAdapterCLI",
                 "ProxyCLICommon",
@@ -421,11 +391,9 @@ let package = Package(
                 "ProxyCore",
                 "XcodeMCPRuntime",
                 "ProxySession",
-                "ProxyProcessManagement",
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyStdioTransport",
                 "XcodeMCPTestSupport",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),

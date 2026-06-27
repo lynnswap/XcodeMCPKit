@@ -14,10 +14,8 @@
   - `XcodeRefreshCodeIssuesInFile` planning, target resolution, queueing, tool-list rewriting.
 - `ProxyHTTPGateway`
   - Streamable HTTP request handling, transport validation, local MCP responses, forwarding.
-- `ProxyStdioTransport`
-  - STDIO compatibility adapter that forwards through the Streamable HTTP proxy.
-- `XcodeMCPProxy`
-  - Composition root only.
+- `XcodeMCPProxyKit`
+  - Public proxy facades plus internal STDIO adapter, process restart, and install-product helpers.
 
 ## Ownership Boundaries
 
