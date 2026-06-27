@@ -481,6 +481,7 @@ extension RuntimeCoordinator {
             startEagerInitializePrimary(applyBackoff: true)
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        testHooks.primaryInitializeFailureCleanupCompleted?(result.upstreamIndex)
     }
 
     func sendInitializedNotificationIfNeeded(
@@ -610,6 +611,7 @@ extension RuntimeCoordinator {
             startEagerInitializePrimary(applyBackoff: true)
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        testHooks.primaryInitializeFailureCleanupCompleted?(result.upstreamIndex)
     }
 
     func removePendingInitializeSessionIfCurrent(

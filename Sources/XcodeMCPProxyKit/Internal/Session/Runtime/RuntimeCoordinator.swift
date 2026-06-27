@@ -40,17 +40,33 @@ package struct RuntimeCoordinatorTestHooks: Sendable {
     package var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     package var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
     package var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    package var upstreamRequestQueued:
+        (@Sendable (
+            _ leaseID: LeaseManager.ID,
+            _ descriptor: SessionRequestPipeline.Descriptor,
+            _ queuedRequestCount: Int
+        ) -> Void)?
+    package var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
 
     package init(
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
-        upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil
+        upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
+        upstreamRequestQueued:
+            (@Sendable (
+                _ leaseID: LeaseManager.ID,
+                _ descriptor: SessionRequestPipeline.Descriptor,
+                _ queuedRequestCount: Int
+            ) -> Void)? = nil,
+        primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil
     ) {
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.upstreamInitialized = upstreamInitialized
+        self.upstreamRequestQueued = upstreamRequestQueued
+        self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
     }
 }
 
@@ -559,7 +575,12 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             },
             applyHealthEffects: { [runtimeBox] effects in
                 runtimeBox.value?.applyHealthEffects(effects)
-            }
+            },
+            testHooks: UpstreamSlotSchedulerTestHooks(
+                requestQueued: { leaseID, descriptor, queuedRequestCount in
+                    testHooks.upstreamRequestQueued?(leaseID, descriptor, queuedRequestCount)
+                }
+            )
         )
         self.initializeParamsOverride = config.initializeParamsOverride
         self.controlPlaneCoordinator = ControlPlaneCoordinator(

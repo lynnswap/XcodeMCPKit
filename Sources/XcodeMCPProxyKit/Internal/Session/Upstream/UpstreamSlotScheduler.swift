@@ -4,6 +4,27 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPRuntime
 
+package struct UpstreamSlotSchedulerTestHooks: Sendable {
+    package var requestQueued:
+        @Sendable (
+            _ leaseID: LeaseManager.ID,
+            _ descriptor: SessionRequestPipeline.Descriptor,
+            _ queuedRequestCount: Int
+        ) -> Void
+
+    package init(
+        requestQueued: @escaping @Sendable (
+            _ leaseID: LeaseManager.ID,
+            _ descriptor: SessionRequestPipeline.Descriptor,
+            _ queuedRequestCount: Int
+        ) -> Void = { _, _, _ in }
+    ) {
+        self.requestQueued = requestQueued
+    }
+
+    package static let noop = Self()
+}
+
 package final class UpstreamSlotScheduler: Sendable {
     package enum AcquisitionError: Error {
         case unavailable
@@ -50,17 +71,20 @@ package final class UpstreamSlotScheduler: Sendable {
     private let canUseUpstream: @Sendable (Int) -> UpstreamHealthManager.UseEvaluation
     private let selectUpstream: @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult
     private let applyHealthEffects: @Sendable ([UpstreamHealthManager.Effect]) -> Void
+    private let testHooks: UpstreamSlotSchedulerTestHooks
 
     package init(
         logger: Logger = ProxyLogging.make("upstream.scheduler"),
         canUseUpstream: @escaping @Sendable (Int) -> UpstreamHealthManager.UseEvaluation,
         selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult,
-        applyHealthEffects: @escaping @Sendable ([UpstreamHealthManager.Effect]) -> Void = { _ in }
+        applyHealthEffects: @escaping @Sendable ([UpstreamHealthManager.Effect]) -> Void = { _ in },
+        testHooks: UpstreamSlotSchedulerTestHooks = .noop
     ) {
         self.logger = logger
         self.canUseUpstream = canUseUpstream
         self.selectUpstream = selectUpstream
         self.applyHealthEffects = applyHealthEffects
+        self.testHooks = testHooks
         self.state = NIOLockedValueBox(
             State(
                 pendingRequests: [],
@@ -110,9 +134,11 @@ package final class UpstreamSlotScheduler: Sendable {
             failCancelled: failCancelled
         )
 
-        state.withLockedValue { state in
+        let queuedRequestCount = state.withLockedValue { state in
             state.pendingRequests.append(request)
+            return state.pendingRequests.count
         }
+        testHooks.requestQueued(leaseID, descriptor, queuedRequestCount)
         dispatchQueuedRequestsIfPossible()
     }
 

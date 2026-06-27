@@ -69,8 +69,16 @@ extension RuntimeCoordinatorTests {
             stopStarted: stopStarted,
             stopGate: stopGate
         )
+        let shutdownAwaitingDetachedStops = TestSignal()
         let transport = SessionBackedDocumentationProviderTransport(
-            sessionFactory: FixedDocumentationSessionFactory(session: session)
+            sessionFactory: FixedDocumentationSessionFactory(session: session),
+            testHooks: SessionBackedDocumentationProviderTransportTestHooks(
+                shutdownWillAwaitDetachedSessionStops: { stopCount in
+                    if stopCount == 1 {
+                        shutdownAwaitingDetachedStops.signal()
+                    }
+                }
+            )
         )
         let route = try await transport.openRoute(
             for: target,
@@ -96,7 +104,9 @@ extension RuntimeCoordinatorTests {
             shutdownFinished.signal()
         }
         try await shutdownStarted.wait(description: "waiting for provider shutdown to start")
-        await Task.yield()
+        try await shutdownAwaitingDetachedStops.wait(
+            description: "waiting for shutdown to await detached provider session stop"
+        )
 
         #expect(shutdownFinished.isSignaled() == false)
         #expect(await session.stopCount() == 1)
@@ -923,11 +933,21 @@ extension RuntimeCoordinatorTests {
             providerSelectionTimeout: .seconds(1),
             clock: clock
         )
+        let queuedRequestLabels = LockedRecordedValues<String>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             clock: clock,
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             documentationProviderManager: providerManager,
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamRequestQueued: { _, descriptor, queuedRequestCount in
+                    if descriptor.label == "tools/list:DocumentationProvider",
+                       queuedRequestCount > 0
+                    {
+                        queuedRequestLabels.append(descriptor.label)
+                    }
+                }
+            ),
             startImmediately: false,
             runtimeBox: runtimeBox
         )
@@ -980,9 +1000,7 @@ extension RuntimeCoordinatorTests {
             )
         }
         try await waitWithTimeout("waiting for queued documentation provider route") {
-            while manager.debugSnapshot().queuedRequestCount == 0 {
-                await Task.yield()
-            }
+            try await queuedRequestLabels.nextValue(at: 0)
         }
         await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
@@ -4111,6 +4129,7 @@ extension RuntimeCoordinatorTests {
         let target = xcodeProcessTarget(processID: 487, xcodeVersion: "27.0")
         let startGate = OperationGate<pid_t>()
         let preparationTimedOut = TestSignal()
+        let managerDeinitialized = TestSignal()
         let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
@@ -4126,7 +4145,6 @@ extension RuntimeCoordinatorTests {
             startGate: startGate
         )
 
-        let releasedManager = WeakDocumentationProviderManagerBox()
         do {
             let manager = DocumentationProviderManager(
                 discovery: StubXcodeTargetDiscovery(targets: [target]),
@@ -4137,10 +4155,12 @@ extension RuntimeCoordinatorTests {
                         if processID == target.processID {
                             preparationTimedOut.signal()
                         }
+                    },
+                    managerDeinitialized: {
+                        managerDeinitialized.signal()
                     }
                 )
             )
-            releasedManager.set(manager)
 
             let request = Task {
                 try await manager.callDocumentationSearch(
@@ -4169,11 +4189,9 @@ extension RuntimeCoordinatorTests {
             #expect(error is TimeoutError)
         }
 
-        try await waitWithTimeout("waiting for documentation provider manager release") {
-            while !releasedManager.isReleased {
-                await Task.yield()
-            }
-        }
+        try await managerDeinitialized.wait(
+            description: "waiting for documentation provider manager release"
+        )
     }
 
     @Test func documentationProviderManagerPreservesCallerTimeoutForFinalProvider() async throws {
@@ -4315,23 +4333,6 @@ extension RuntimeCoordinatorTests {
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"after-cancel\"}")
         #expect(await factory.startedPIDs() == [xcode.processID])
         #expect(await factory.documentationQueries(for: xcode.processID) == ["UIView", "SwiftUI"])
-    }
-}
-
-private final class WeakDocumentationProviderManagerBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private weak var value: DocumentationProviderManager?
-
-    func set(_ value: DocumentationProviderManager) {
-        lock.lock()
-        self.value = value
-        lock.unlock()
-    }
-
-    var isReleased: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return value == nil
     }
 }
 
