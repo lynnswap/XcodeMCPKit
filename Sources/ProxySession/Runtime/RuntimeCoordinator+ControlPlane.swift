@@ -126,12 +126,41 @@ extension RuntimeCoordinator {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
-        return try await raceAvailableToolsCatalogRoutes(
-            routes,
-            requestTimeout: requestTimeout,
-            deadlineUptimeNs: deadlineUptimeNs,
-            startedAt: startedAt
-        )
+        var lastFailure: (any Error)?
+        for routeBatch in availableToolsCatalogRouteBatches(routes) {
+            do {
+                return try await raceAvailableToolsCatalogRoutes(
+                    routeBatch,
+                    requestTimeout: requestTimeout,
+                    deadlineUptimeNs: deadlineUptimeNs,
+                    startedAt: startedAt
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastFailure = error
+            }
+        }
+        if let lastFailure {
+            throw lastFailure
+        }
+        throw UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    private func availableToolsCatalogRouteBatches(
+        _ routes: [AvailableToolsCatalogRoute]
+    ) -> [[AvailableToolsCatalogRoute]] {
+        let ownerProcessIDs = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
+            .union(Set(tabOwnerProcessIDs.withLockedValue(\.values)))
+        guard ownerProcessIDs.isEmpty == false else {
+            return [routes]
+        }
+        let ownerRoutes = routes.filter { ownerProcessIDs.contains($0.target.processID) }
+        guard ownerRoutes.isEmpty == false else {
+            return [routes]
+        }
+        let fallbackRoutes = routes.filter { ownerProcessIDs.contains($0.target.processID) == false }
+        return fallbackRoutes.isEmpty ? [ownerRoutes] : [ownerRoutes, fallbackRoutes]
     }
 
     private func raceAvailableToolsCatalogRoutes(

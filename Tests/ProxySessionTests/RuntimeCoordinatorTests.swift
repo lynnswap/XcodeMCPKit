@@ -2091,10 +2091,7 @@ struct RuntimeCoordinatorTests {
             methodName(from: $0) == "tools/list"
         }
         #expect(methodName(from: latestRequest) == "tools/list")
-        let olderRequest = try await olderUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
-        #expect(methodName(from: olderRequest) == "tools/list")
+        #expect(await olderUpstream.sentCount() == 0)
         await latestUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2114,7 +2111,7 @@ struct RuntimeCoordinatorTests {
         #expect(toolDescription(in: result, name: "SharedTool") == "from-27")
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["Only27", "SharedTool"])
-        #expect(await olderUpstream.sentCount() == 1)
+        #expect(await olderUpstream.sentCount() == 0)
 
         let catalogs = manager.debugSnapshot().processToolCatalogs
         #expect(catalogs.count == 1)
