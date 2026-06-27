@@ -676,6 +676,8 @@ extension RuntimeCoordinator {
         guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
             return false
         }
+        let previousTabOwners = tabOwnerProcessIDs.withLockedValue { $0 }
+        let previousWorkspaceOwners = workspaceOwnerProcessIDs.withLockedValue { $0 }
         if removeExistingOwners {
             removeXcodeWindowOwners(forProcessID: processID)
         }
@@ -696,6 +698,14 @@ extension RuntimeCoordinator {
                     owners[entry.workspacePath] = processID
                 }
             }
+        }
+        if tabOwnerProcessIDs.withLockedValue({ $0 }) != previousTabOwners
+            || workspaceOwnerProcessIDs.withLockedValue({ $0 }) != previousWorkspaceOwners {
+            invalidateControlPlane(
+                reason: "xcode_window_owners_updated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
         }
         return true
     }

@@ -17,6 +17,16 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
+    package struct AvailableToolCatalog: Sendable {
+        package let rawResult: JSONValue
+        package let sourceUpstream: Int?
+        package let processIDs: Set<pid_t>
+
+        package var isEmpty: Bool {
+            processIDs.isEmpty
+        }
+    }
+
     package struct DebugSnapshot: Codable, Sendable {
         package let processID: Int32
         package let appPath: String
@@ -139,6 +149,22 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
+    package func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
+        state.withLockedValue { state in
+            let catalogs = state.catalogsByProcessID.values.filter { catalog in
+                processIDs?.contains(catalog.target.processID) ?? true
+            }
+            guard let rawResult = Self.unionToolsListResult(from: catalogs) else {
+                return nil
+            }
+            return AvailableToolCatalog(
+                rawResult: rawResult,
+                sourceUpstream: catalogs.sorted(by: Self.catalogSort).first?.upstreamIndex,
+                processIDs: Set(catalogs.map { $0.target.processID })
+            )
+        }
+    }
+
     package func representativeSourceUpstream() -> Int? {
         state.withLockedValue { state in
             state.catalogsByProcessID.values.sorted(by: Self.catalogSort).first?.upstreamIndex
@@ -207,7 +233,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
                         default: 0
                     ],
                     isCanonicalSource: catalog.upstreamIndex == canonicalSourceUpstream,
-                    exposurePolicy: "union_latest_xcode_descriptor_runtime_guard",
+                    exposurePolicy: "available_route_catalog_surface",
                     missingFromExposedCatalog: Array(toolNames.subtracting(exposedNames)).sorted(),
                     extraBeyondExposedCatalog: Array(exposedNames.subtracting(toolNames)).sorted(),
                     schemaConflicts: conflicts

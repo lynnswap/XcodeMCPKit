@@ -247,10 +247,10 @@ func seedProcessToolCatalogs(
             rawResult: result
         )
     }
-    if let union = manager.processToolCatalogRegistry.unionToolsListResult(),
-       let sourceUpstream = manager.processToolCatalogRegistry.representativeSourceUpstream()
+    if let surface = manager.processToolCatalogRegistry.availableToolCatalogSurface(),
+       let sourceUpstream = surface.sourceUpstream
     {
-        manager.setCachedToolsListResult(union, sourceUpstream: sourceUpstream)
+        manager.setCachedToolsListResult(surface.rawResult, sourceUpstream: sourceUpstream)
     }
 }
 
