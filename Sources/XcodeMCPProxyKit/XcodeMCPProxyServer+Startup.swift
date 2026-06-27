@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import ProxySession
 
 extension XcodeMCPProxyServer {
     /// Starts the proxy server without writing discovery information.

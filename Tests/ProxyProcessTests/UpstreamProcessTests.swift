@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPTestSupport
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 @testable import XcodeMCPRuntime
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))

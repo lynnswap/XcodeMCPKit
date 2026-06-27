@@ -1,4 +1,4 @@
-import ProxySession
+import XcodeMCPProxyKit
 import Dispatch
 import Foundation
 import NIO

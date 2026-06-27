@@ -2,7 +2,7 @@ import Foundation
 import XcodeMCPRuntime
 import XcodeMCPTestSupport
 
-@testable import ProxySession
+@testable import XcodeMCPProxyKit
 
 actor TestUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>

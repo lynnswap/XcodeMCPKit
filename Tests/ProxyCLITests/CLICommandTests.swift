@@ -1,7 +1,6 @@
-import ProxySession
+import XcodeMCPProxyKit
 import Foundation
 import Testing
-import XcodeMCPProxyKit
 
 @Suite
 struct CLICommandTests {

@@ -1,6 +1,5 @@
 import Foundation
 import NIO
-import ProxySession
 
 package final class HTTPControlService: Sendable {
     package struct DebugSnapshot: Codable, Sendable {

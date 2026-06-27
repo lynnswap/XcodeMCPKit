@@ -28,7 +28,7 @@ External embedders configure the server through
 `XcodeMCPProxyStdioAdapter.Configuration`, and compose installs through
 `XcodeMCPProxyInstaller.Configuration`. Lower-level session routing, upstream
 process management, Xcode support, MCP HTTP behavior, and STDIO transport
-details stay in their own internal targets behind this kit boundary.
+details stay in internal implementation folders behind this kit boundary.
 
 This target intentionally does not expose the executable CLI parsers, per-tool
 typed wrappers, a public stream API, or direct access to the internal session

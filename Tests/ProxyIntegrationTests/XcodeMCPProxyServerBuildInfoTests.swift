@@ -1,4 +1,3 @@
-import ProxySession
 import Testing
 import XcodeMCPRuntime
 

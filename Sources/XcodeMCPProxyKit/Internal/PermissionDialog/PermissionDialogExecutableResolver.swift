@@ -1,5 +1,4 @@
 import Foundation
-import ProxySession
 
 package enum PermissionDialogExecutableResolver {
     package static func additionalExecutableCandidates(

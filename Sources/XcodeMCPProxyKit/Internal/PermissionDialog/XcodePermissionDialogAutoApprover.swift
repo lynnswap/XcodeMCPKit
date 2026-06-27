@@ -2,7 +2,6 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Logging
-import ProxySession
 
 extension XcodePermissionDialog {
     package final class AutoApprover: @unchecked Sendable {
