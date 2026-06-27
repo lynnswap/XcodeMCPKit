@@ -5,7 +5,7 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOHTTP1
 import Testing
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)
 struct CLICommandIntegrationTests {

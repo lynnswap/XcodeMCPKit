@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import Testing
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 
 @testable import XcodeMCPRuntime
 
