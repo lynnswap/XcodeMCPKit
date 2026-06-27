@@ -169,7 +169,7 @@ public actor StdioAdapter {
         if stopped { return }
         let envelope = inspectRequest(data)
         do {
-            let messageCount = try await sendRequest(data)
+            let messageCount = try await sendRequest(data, envelope: envelope)
             if messageCount == 0, envelope.expectsResponse {
                 await emitError(for: envelope, message: "upstream returned empty response")
             }
@@ -190,13 +190,18 @@ public actor StdioAdapter {
         }
     }
 
-    private func sendRequest(_ data: Data) async throws -> Int {
+    private func sendRequest(_ data: Data, envelope: RequestEnvelope) async throws -> Int {
+        let responseCompletion = StdioStreamedResponseCompletion(ids: envelope.ids)
         do {
             let result = try await client.send(data) { payload in
                 guard isValidJSONPayload(payload) else {
                     throw AdapterError.invalidResponse
                 }
                 await outputWriter.send(payload)
+                if await responseCompletion.record(payload) {
+                    return .stop
+                }
+                return .continue
             }
             return result.messageCount
         } catch let error as StreamableHTTPMCPClientError {
@@ -392,5 +397,53 @@ public actor StdioAdapter {
         }
         guard !responses.isEmpty else { return nil }
         return try? JSONSerialization.data(withJSONObject: responses, options: [])
+    }
+}
+
+private actor StdioStreamedResponseCompletion {
+    private var remainingIDKeys: Set<String>
+
+    init(ids: [JSONValue]) {
+        self.remainingIDKeys = Set(ids.compactMap(Self.idKey))
+    }
+
+    func record(_ payload: Data) -> Bool {
+        guard remainingIDKeys.isEmpty == false,
+              let json = try? JSONSerialization.jsonObject(with: payload, options: [])
+        else {
+            return false
+        }
+
+        if let object = json as? [String: Any] {
+            recordResponseObject(object)
+        } else if let array = json as? [Any] {
+            for item in array {
+                guard let object = item as? [String: Any] else { continue }
+                recordResponseObject(object)
+            }
+        }
+        return remainingIDKeys.isEmpty
+    }
+
+    private func recordResponseObject(_ object: [String: Any]) {
+        guard object["method"] == nil,
+              object["result"] != nil || object["error"] != nil,
+              let id = JSONRPC.Message.Inspector.responseID(from: object),
+              let idKey = Self.idKey(id.value)
+        else {
+            return
+        }
+        remainingIDKeys.remove(idKey)
+    }
+
+    private static func idKey(_ value: JSONValue) -> String? {
+        switch value {
+        case .string(let value):
+            return value
+        case .number(let value):
+            return value.stringValue
+        case .object, .array, .bool, .null:
+            return nil
+        }
     }
 }

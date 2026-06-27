@@ -6,6 +6,11 @@ package struct StreamableHTTPMCPClientSendResult: Sendable {
     package let messageCount: Int
 }
 
+package enum StreamableHTTPMCPClientMessageDisposition: Sendable {
+    case `continue`
+    case stop
+}
+
 package enum StreamableHTTPMCPClientError: Error, Sendable {
     case httpStatus(Int, body: String, payloads: [Data])
 }
@@ -57,7 +62,7 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
 
     package func send(
         _ data: Data,
-        onMessage: @Sendable (Data) async throws -> Void
+        onMessage: @Sendable (Data) async throws -> StreamableHTTPMCPClientMessageDisposition
     ) async throws -> StreamableHTTPMCPClientSendResult {
         try await state.ensureOpen()
         let requestInfo = try StreamableHTTPMCPRequestInfo(data: data)
@@ -87,7 +92,7 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
             return StreamableHTTPMCPClientSendResult(messageCount: 0)
         }
         await recordInitializeResponseIfNeeded(responseData, requestInfo: requestInfo)
-        try await onMessage(responseData)
+        _ = try await onMessage(responseData)
         return StreamableHTTPMCPClientSendResult(messageCount: 1)
     }
 
@@ -245,7 +250,7 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
     private func emitResponseEventStreamMessages(
         _ bytes: URLSession.AsyncBytes,
         requestInfo: StreamableHTTPMCPRequestInfo,
-        onMessage: @Sendable (Data) async throws -> Void
+        onMessage: @Sendable (Data) async throws -> StreamableHTTPMCPClientMessageDisposition
     ) async throws -> Int {
         var decoder = SSEDecoder()
         var lineBuffer = Data()
@@ -261,21 +266,27 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
                 continue
             }
             await recordInitializeResponseIfNeeded(data, requestInfo: requestInfo)
-            try await onMessage(data)
             messageCount += 1
+            if try await onMessage(data) == .stop {
+                return messageCount
+            }
         }
         if lineBuffer.isEmpty == false {
             let line = String(data: lineBuffer, encoding: .utf8) ?? ""
             if let data = decoder.feed(line: line) {
                 await recordInitializeResponseIfNeeded(data, requestInfo: requestInfo)
-                try await onMessage(data)
                 messageCount += 1
+                if try await onMessage(data) == .stop {
+                    return messageCount
+                }
             }
         }
         if let data = decoder.flushIfNeeded() {
             await recordInitializeResponseIfNeeded(data, requestInfo: requestInfo)
-            try await onMessage(data)
             messageCount += 1
+            if try await onMessage(data) == .stop {
+                return messageCount
+            }
         }
         return messageCount
     }

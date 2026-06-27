@@ -68,6 +68,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         do {
             _ = try await client.send(data) { [streamContinuation] message in
                 streamContinuation.yield(.message(message))
+                return .continue
             }
         } catch let error as StreamableHTTPMCPClientError {
             throw Self.runtimeError(from: error)
