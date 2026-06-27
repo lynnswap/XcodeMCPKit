@@ -1,6 +1,5 @@
 import Foundation
 import Logging
-import ProxyCLICommon
 import ProxyCore
 
 /// Resolved upstream endpoint for the STDIO compatibility adapter.

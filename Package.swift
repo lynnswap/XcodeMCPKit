@@ -157,7 +157,6 @@ let package = Package(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "ProxyBuildInfo",
-                "ProxyCLICommon",
                 "ProxyCore",
                 "ProxySession",
                 "XcodeMCPRuntime",
@@ -169,40 +168,6 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             exclude: ["README.md"],
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyCLICommon",
-            dependencies: [],
-            path: "Sources/ProxyCLI/Common",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyAdapterCLI",
-            dependencies: [
-                "ProxyCLICommon",
-                "XcodeMCPProxyKit",
-                .product(name: "Logging", package: "swift-log"),
-            ],
-            path: "Sources/ProxyCLI/Adapter",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyServerCLI",
-            dependencies: [
-                "ProxyCLICommon",
-                "XcodeMCPProxyKit",
-            ],
-            path: "Sources/ProxyCLI/Server",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
-            name: "ProxyInstallCLI",
-            dependencies: [
-                "ProxyCLICommon",
-                "XcodeMCPProxyKit",
-            ],
-            path: "Sources/ProxyCLI/Install",
             swiftSettings: strictSwiftSettings
         ),
         .target(
@@ -219,18 +184,18 @@ let package = Package(
         .executableTarget(
             name: "XcodeMCPProxyCLI",
             dependencies: [
-                "ProxyAdapterCLI"
+                "XcodeMCPProxyKit"
             ],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPProxyServer",
-            dependencies: ["ProxyServerCLI"],
+            dependencies: ["XcodeMCPProxyKit"],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPProxyInstall",
-            dependencies: ["ProxyInstallCLI"],
+            dependencies: ["XcodeMCPProxyKit"],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
@@ -277,8 +242,6 @@ let package = Package(
                 "ProxyXcodeSupport",
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
-                "ProxyAdapterCLI",
-                "ProxyServerCLI",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
@@ -364,10 +327,6 @@ let package = Package(
                 "ProxyXcodeFeatures",
                 "ProxyHTTPGateway",
                 "ProxyBuildInfo",
-                "ProxyAdapterCLI",
-                "ProxyCLICommon",
-                "ProxyInstallCLI",
-                "ProxyServerCLI",
                 "XcodeMCPTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),

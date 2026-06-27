@@ -1,6 +1,5 @@
 import Foundation
 import Testing
-import ProxyServerCLI
 import XcodeMCPProxyKit
 
 @Suite
