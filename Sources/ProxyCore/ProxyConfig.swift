@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPRuntime
 
 package struct ProxyConfig: Sendable {
     package enum Transport: String, CaseIterable, Sendable {

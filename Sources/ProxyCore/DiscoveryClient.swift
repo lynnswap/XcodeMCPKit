@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPRuntime
 
 package struct DiscoveryClient: DependencyClient {
     package var defaultFileURL: @Sendable () -> URL

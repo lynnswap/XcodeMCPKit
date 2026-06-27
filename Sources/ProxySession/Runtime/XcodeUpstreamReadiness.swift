@@ -1,5 +1,6 @@
 import Foundation
 import ProxyCore
+import XcodeMCPRuntime
 
 extension UpstreamReadinessGate {
     /// The live gate for the stock xcrun mcpbridge upstream: hold

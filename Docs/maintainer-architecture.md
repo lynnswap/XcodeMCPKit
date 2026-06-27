@@ -4,6 +4,8 @@
 
 - `ProxyCore`
   - CLI/config parsing, discovery file handling, logging, small shared helpers.
+  - Does not re-export runtime primitives; consumers import `XcodeMCPRuntime`
+    directly for runtime-owned contracts.
 - `XcodeMCPRuntime`
   - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request inspection.
 - `ProxySession`
@@ -23,6 +25,8 @@
 ## Dependency Direction
 
 - `ProxyCore` must not depend on gateway/session/Xcode modules.
+- `ProxyCore` may refer to `XcodeMCPRuntime` for runtime contract validation,
+  but it must not add proxy-facing aliases for runtime-owned primitives.
 - `XcodeMCPRuntime` owns shared protocol/runtime primitives and must not depend on proxy-only modules.
   Avoid introducing gateway/session/Xcode knowledge here.
 - `ProxySession` depends on `ProxyCore` and `XcodeMCPRuntime`.

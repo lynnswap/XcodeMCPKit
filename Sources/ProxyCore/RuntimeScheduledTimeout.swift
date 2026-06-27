@@ -1,3 +1,0 @@
-import XcodeMCPRuntime
-
-package typealias RuntimeScheduledTimeout = XcodeMCPRuntime.RuntimeScheduledTimeout
