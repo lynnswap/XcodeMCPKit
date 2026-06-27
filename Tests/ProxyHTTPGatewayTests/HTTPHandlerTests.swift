@@ -11,7 +11,7 @@ import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct HTTPHandlerTests {
@@ -1085,7 +1085,7 @@ struct HTTPHandlerTests {
         let routingGate = AsyncGate()
         sessionManager.setToolRoutingGate(started: routingStarted, gate: routingGate)
         let clock = ManualDateClock()
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -1408,7 +1408,7 @@ struct HTTPHandlerTests {
                 forceBatchArray: true
             )
         )
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -1432,7 +1432,7 @@ struct HTTPHandlerTests {
             ]
             let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
             let operation = service.makeForwardingOperation(
-                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                filteredRequest: ClientMCPRequestExecutor.FilteredToolCallRequest(
                     bodyData: bodyData,
                     localResponseData: nil,
                     forwardedResponseIDs: [toolRequestID, resourceRequestID],
@@ -1504,7 +1504,7 @@ struct HTTPHandlerTests {
         sessionManager.setInitialized(true)
         sessionManager.setAvailableUpstreamIndices([1])
         sessionManager.setToolRoutingDecision(.localXcodeListWindows)
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -1522,7 +1522,7 @@ struct HTTPHandlerTests {
             )
             let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
             let operation = service.makeForwardingOperation(
-                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                filteredRequest: ClientMCPRequestExecutor.FilteredToolCallRequest(
                     bodyData: bodyData,
                     localResponseData: nil,
                     forwardedResponseIDs: [requestID],

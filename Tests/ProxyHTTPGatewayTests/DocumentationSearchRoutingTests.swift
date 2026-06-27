@@ -11,7 +11,7 @@ import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import XcodeMCPTestSupport
 
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 extension HTTPHandlerTests {
     @Test func httpDocumentationSearchFallsThroughWhenNoDocumentationProviderExists() async throws {
@@ -797,7 +797,7 @@ extension HTTPHandlerTests {
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         do {
-            let service = HTTPPostService(
+            let service = ClientMCPRequestExecutor(
                 config: config,
                 sessionManager: sessionManager,
                 refreshCodeIssuesCoordinator: .makeDefault(),
@@ -882,7 +882,7 @@ extension HTTPHandlerTests {
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         do {
-            let service = HTTPPostService(
+            let service = ClientMCPRequestExecutor(
                 config: config,
                 sessionManager: sessionManager,
                 refreshCodeIssuesCoordinator: .makeDefault(),

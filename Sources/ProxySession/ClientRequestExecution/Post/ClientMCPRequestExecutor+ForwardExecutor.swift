@@ -3,14 +3,12 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import NIOHTTP1
 import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
-import ProxySession
 
-extension HTTPPostService {
+extension ClientMCPRequestExecutor {
     package func makeTopLevelRequestFuture(
         filteredRequest: FilteredToolCallRequest,
         sessionID: String,
@@ -21,9 +19,9 @@ extension HTTPPostService {
         session: SessionContext,
         leaseID: LeaseManager.ID,
         upstreamIndex: Int,
-        cancellationHandle: HTTPPostService.CancellationHandle?,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
         requestTimeoutOverride: TimeAmount?
-    ) -> EventLoopFuture<HTTPPostService.Resolution> {
+    ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         guard let forwardedBodyData = filteredRequest.bodyData
         else {
             return makeImmediateLeaseResolution(
@@ -81,7 +79,7 @@ extension HTTPPostService {
                 refreshRouting.remainingLocalResponseData == nil,
                 let route = refreshRouting.refreshRoutes.first
             {
-                let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+                let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
                 let refreshTask = Task { [self] in
                     let result = await forwardRefreshCodeIssuesRequest(
                         route.request,
@@ -132,7 +130,7 @@ extension HTTPPostService {
                 return promise.futureResult
             }
 
-            let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+            let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
             let refreshTask = Task { [self] in
                 var payloads: [Data?] = []
                 let splitDeadline = timeoutDeadline(
@@ -362,7 +360,7 @@ extension HTTPPostService {
                 )
             }
 
-            let promise = eventLoop.makePromise(of: HTTPPostService.Resolution.self)
+            let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
             started.future.whenComplete { result in
                 let resolution = self.forwardingService.resolveResponse(
                     result,

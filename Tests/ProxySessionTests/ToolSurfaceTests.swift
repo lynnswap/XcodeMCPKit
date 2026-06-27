@@ -6,7 +6,7 @@ import XcodeMCPRuntime
 import ProxySession
 import ProxyXcodeFeatures
 
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct ToolSurfaceTests {

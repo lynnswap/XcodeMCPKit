@@ -26,14 +26,14 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         package var isSSE = false
         package var sseSessionID: String?
         package var bodyTooLarge = false
-        package var activePostRequestHandles: [String: HTTPPostService.CancellationHandle] = [:]
+        package var activePostRequestHandles: [String: ClientMCPRequestExecutor.CancellationHandle] = [:]
         package var responseWriteTail: EventLoopFuture<Void>?
     }
 
     package let state = NIOLockedValueBox(State())
     package let config: ProxyConfig
     package let controlService: HTTPControlService
-    package let postService: HTTPPostService
+    package let postService: ClientMCPRequestExecutor
     package let responseWriter: HTTPResponseWriter
     package let logger: Logger = ProxyLogging.make("http")
 
@@ -60,7 +60,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
             refreshCodeIssuesCoordinator: refreshCoordinator,
             refreshCodeIssuesDebugState: refreshDebugState
         )
-        self.postService = HTTPPostService(
+        self.postService = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: refreshCoordinator,

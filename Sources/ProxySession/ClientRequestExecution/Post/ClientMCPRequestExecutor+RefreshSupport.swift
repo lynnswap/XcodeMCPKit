@@ -3,18 +3,16 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import NIOHTTP1
 import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
-import ProxySession
 
-extension HTTPPostService {
+extension ClientMCPRequestExecutor {
     package func listXcodeWindows(
         sessionID: String,
         eventLoop: EventLoop,
-        cancellationHandle: HTTPPostService.CancellationHandle? = nil,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil,
         upstreamIndexOverride: Int? = nil,
         requestTimeoutOverride: TimeAmount? = nil
     ) async throws -> [XcodeWindowInfo]? {
@@ -48,7 +46,7 @@ extension HTTPPostService {
         shouldRequeueLeaseOnRetryableFailure: @Sendable () -> Bool,
         eventLoop: EventLoop,
         leaseID: LeaseManager.ID,
-        cancellationHandle: HTTPPostService.CancellationHandle?,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
         requestTimeoutOverride: TimeAmount? = nil
     ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
         let parsedRequestJSON: Any
@@ -291,7 +289,7 @@ extension HTTPPostService {
         requestTimeoutOverride: TimeAmount? = nil,
         eventLoop: EventLoop,
         leaseID: LeaseManager.ID,
-        cancellationHandle: HTTPPostService.CancellationHandle?
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
     ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
         await refreshWorkflow.run(
             refreshRequest: refreshRequest,
@@ -348,13 +346,13 @@ extension HTTPPostService {
     /// are no-ops; this performs exactly the lease/cancellation choreography
     /// the re-entry used to produce.
     package func executeRefreshRoute(
-        _ route: HTTPPostService.RefreshRoute,
+        _ route: ClientMCPRequestExecutor.RefreshRoute,
         sessionID: String,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
-        parentCancellationHandle: HTTPPostService.CancellationHandle?
-    ) async -> HTTPPostService.Resolution {
+        parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+    ) async -> ClientMCPRequestExecutor.Resolution {
         let parsedRoutePayload =
             (try? JSONSerialization.jsonObject(with: route.bodyData, options: []))
             ?? [String: Any]()
@@ -365,7 +363,7 @@ extension HTTPPostService {
             requestIDs: route.requestIDs
         )
         let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = HTTPPostService.CancellationHandle(
+        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
             leaseID: leaseID,
             sessionID: sessionID,
             requestIDKeys: route.requestIDs.map(\.key)
@@ -414,7 +412,7 @@ extension HTTPPostService {
         from result: RefreshCodeIssues.Workflow.ForwardAttemptResult,
         sessionID: String,
         prefersEventStream: Bool
-    ) -> HTTPPostService.Resolution {
+    ) -> ClientMCPRequestExecutor.Resolution {
         switch result {
         case .success(let responseData):
             return .responseData(
@@ -479,19 +477,19 @@ extension HTTPPostService {
     }
 
     package func makeImmediateLeaseResolution(
-        _ resolution: HTTPPostService.Resolution,
+        _ resolution: ClientMCPRequestExecutor.Resolution,
         leaseID: LeaseManager.ID,
         eventLoop: EventLoop,
-        cancellationHandle: HTTPPostService.CancellationHandle?
-    ) -> EventLoopFuture<HTTPPostService.Resolution> {
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+    ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         cancellationHandle?.markCompleted()
         sessionManager.completeRequestLease(leaseID)
         return eventLoop.makeSucceededFuture(resolution)
     }
 
     package func cancel(
-        _ handle: HTTPPostService.CancellationHandle,
-        source: HTTPPostService.CancellationSource = .channelInactive
+        _ handle: ClientMCPRequestExecutor.CancellationHandle,
+        source: ClientMCPRequestExecutor.CancellationSource = .channelInactive
     ) {
         logger.debug(
             "Cancelling top-level upstream request",

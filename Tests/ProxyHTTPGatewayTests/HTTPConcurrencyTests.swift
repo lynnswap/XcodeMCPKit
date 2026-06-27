@@ -9,7 +9,7 @@ import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import XcodeMCPTestSupport
 @testable import ProxySession
-@testable import ProxyHTTPGateway
+@testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct HTTPConcurrencyTests {
@@ -159,7 +159,7 @@ struct HTTPConcurrencyTests {
 
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let deadlineClock = ManualDateClock()
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -175,7 +175,7 @@ struct HTTPConcurrencyTests {
             try JSONSerialization.data(withJSONObject: payload, options: [])
         }
 
-        func handlePost(_ payload: [String: Any]) throws -> HTTPPostService.Operation {
+        func handlePost(_ payload: [String: Any]) throws -> ClientMCPRequestExecutor.Operation {
             service.handle(
                 bodyData: try makeBodyData(payload),
                 headerSessionID: sessionID,
@@ -186,7 +186,7 @@ struct HTTPConcurrencyTests {
         }
 
         func responseObject(
-            from resolution: HTTPPostService.Resolution
+            from resolution: ClientMCPRequestExecutor.Resolution
         ) throws -> [String: Any] {
             guard case .responseData(let data, _, _) = resolution else {
                 throw ConcurrencyTestError.invalidResponse

@@ -4,7 +4,6 @@ import NIO
 import NIOHTTP1
 import ProxyCore
 import ProxySession
-import ProxyHTTPGateway
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 

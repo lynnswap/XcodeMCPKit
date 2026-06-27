@@ -2,7 +2,6 @@ import Logging
 import NIO
 import NIOHTTP1
 import ProxyCore
-import ProxyHTTPGateway
 import ProxySession
 import ProxyXcodeFeatures
 

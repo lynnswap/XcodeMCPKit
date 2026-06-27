@@ -2,8 +2,8 @@ import Foundation
 import ProxyCore
 import XcodeMCPRuntime
 
-enum MCPErrorResponder {
-    static func errorResponseData(
+package enum MCPErrorResponder {
+    package static func errorResponseData(
         id: JSONRPC.ID?,
         code: Int,
         message: String,
@@ -19,7 +19,7 @@ enum MCPErrorResponder {
         )
     }
 
-    static func errorResponseData(
+    package static func errorResponseData(
         ids: [JSONRPC.ID],
         code: Int,
         message: String,
@@ -53,11 +53,11 @@ enum MCPErrorResponder {
         )
     }
 
-    static func requestMetadata(from data: Data) -> (ids: [JSONRPC.ID], isBatch: Bool) {
+    package static func requestMetadata(from data: Data) -> (ids: [JSONRPC.ID], isBatch: Bool) {
         requestMetadata(fromParsed: try? JSONSerialization.jsonObject(with: data, options: []))
     }
 
-    static func requestMetadata(fromParsed json: Any?) -> (ids: [JSONRPC.ID], isBatch: Bool) {
+    package static func requestMetadata(fromParsed json: Any?) -> (ids: [JSONRPC.ID], isBatch: Bool) {
         let metadata = JSONRPC.Message.Inspector.requestMetadata(fromParsed: json)
         return (metadata.ids, metadata.isBatch)
     }
