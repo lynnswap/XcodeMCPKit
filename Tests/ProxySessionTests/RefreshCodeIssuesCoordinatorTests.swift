@@ -1,6 +1,6 @@
 import NIO
 import Testing
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 
 @testable import XcodeMCPProxyKit
 

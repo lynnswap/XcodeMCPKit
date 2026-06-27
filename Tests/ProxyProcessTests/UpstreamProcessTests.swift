@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 
 @testable import XcodeMCPProxyKit
 @testable import XcodeMCPRuntime

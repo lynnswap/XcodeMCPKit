@@ -4,7 +4,7 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyKit
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
@@ -2060,7 +2060,7 @@ struct RuntimeCoordinatorFixture {
 
     func shutdownAndWait() {
         manager.shutdownAndWait()
-        XcodeMCPTestSupport.shutdownAndWait(group)
+        XcodeMCPProxyTestSupport.shutdownAndWait(group)
     }
 
     func registerInitialize(

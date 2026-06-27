@@ -4,7 +4,7 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyKit
 
 extension RuntimeCoordinatorTests {

@@ -5,7 +5,7 @@ import NIOEmbedded
 import NIOHTTP1
 import XcodeMCPRuntime
 import Testing
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 
 @testable import XcodeMCPProxyKit
 
