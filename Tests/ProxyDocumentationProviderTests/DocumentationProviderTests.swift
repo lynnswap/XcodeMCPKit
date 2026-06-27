@@ -5,9 +5,11 @@ import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
 import XcodeMCPProxyTestSupport
+@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPProxyKit
 
-extension RuntimeCoordinatorTests {
+@Suite(.serialized)
+struct DocumentationProviderTests {
     @Test func documentationProviderConnectionCancelsEventReaderOnDeinit() async throws {
         let terminated = TestSignal()
         var connection: DocumentationProviderConnection? = DocumentationProviderConnection(
@@ -3036,6 +3038,7 @@ extension RuntimeCoordinatorTests {
 
     @Test func documentationSearchDoesNotCallCandidateWhileDescriptorFetchIsHanging() async throws {
         let target = xcodeProcessTarget(processID: 114, xcodeVersion: "27.0")
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 target.processID: [
@@ -3051,7 +3054,8 @@ extension RuntimeCoordinatorTests {
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [target]),
-            sessionFactory: factory
+            sessionFactory: factory,
+            clock: clocks.clock
         )
 
         let discoveryTask = Task {
@@ -3066,10 +3070,19 @@ extension RuntimeCoordinatorTests {
             )
         }
 
-        let outcome = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 70, query: "UIView"),
-            requestTimeoutOverride: .seconds(1)
+        let outcomeTask = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 70, query: "UIView"),
+                requestTimeoutOverride: .seconds(1)
+            )
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: clocks.timeoutClock,
+            uptimeClock: clocks.uptimeClock,
+            by: .seconds(1),
+            suspendedSleepers: 2
         )
+        let outcome = try await outcomeTask.value
 
         guard case .failed(let error, _) = outcome, error is TimeoutError else {
             Issue.record("expected timeout outcome, got \(outcome)")
