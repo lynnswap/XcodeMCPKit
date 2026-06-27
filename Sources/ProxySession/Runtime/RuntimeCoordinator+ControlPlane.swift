@@ -185,8 +185,14 @@ extension RuntimeCoordinator {
             of: AvailableToolsCatalogOutcome.self,
             returning: CanonicalToolsCatalogLoadResult.self
         ) { group in
+            let completedRouteCount = NIOLockedValueBox(0)
             for route in routes {
                 group.addTask {
+                    defer {
+                        completedRouteCount.withLockedValue { count in
+                            count += 1
+                        }
+                    }
                     do {
                         try Task.checkCancellation()
                         let result = try await self.loadToolsCatalogFromAvailableProcessRoute(
@@ -195,10 +201,19 @@ extension RuntimeCoordinator {
                             deadlineUptimeNs: deadlineUptimeNs,
                             startedAt: startedAt
                         )
-                        return .success(route: route, result: result)
+                        return .success(
+                            route: route,
+                            result: self.recordAvailableToolsCatalog(
+                                target: route.target,
+                                result: result,
+                                startedAt: startedAt,
+                                exposedProcessIDs: exposedProcessIDs
+                            )
+                        )
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
+                        self.processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
                         return .failure(
                             route: route,
                             upstreamIndex: route.upstreamIndices.last ?? -1,
@@ -209,20 +224,42 @@ extension RuntimeCoordinator {
             }
 
             var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
+            var firstSuccess: CanonicalToolsCatalogLoadResult?
+            var processedOutcomes = 0
             while let outcome = try await group.next() {
+                processedOutcomes += 1
                 switch outcome {
-                case .success(let route, let result):
-                    group.cancelAll()
-                    return recordAvailableToolsCatalog(
-                        target: route.target,
-                        result: result,
-                        startedAt: startedAt,
-                        exposedProcessIDs: exposedProcessIDs
-                    )
+                case .success(_, let result):
+                    if firstSuccess == nil {
+                        firstSuccess = result
+                    }
                 case .failure(let route, let upstreamIndex, let error):
-                    processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
                     failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
                 }
+
+                if let firstSuccess {
+                    let completed = completedRouteCount.withLockedValue { $0 }
+                    if completed <= processedOutcomes {
+                        await drainControlPlaneCompletions()
+                        let completedAfterDrain = completedRouteCount.withLockedValue { $0 }
+                        if completedAfterDrain > processedOutcomes {
+                            continue
+                        }
+                        group.cancelAll()
+                        return availableToolsCatalogSurfaceResult(
+                            startedAt: startedAt,
+                            exposedProcessIDs: exposedProcessIDs,
+                            fallback: firstSuccess
+                        )
+                    }
+                }
+            }
+            if let firstSuccess {
+                return availableToolsCatalogSurfaceResult(
+                    startedAt: startedAt,
+                    exposedProcessIDs: exposedProcessIDs,
+                    fallback: firstSuccess
+                )
             }
             if let lastFailure = failures.last {
                 throw ControlPlane.RequestError(
@@ -233,6 +270,27 @@ extension RuntimeCoordinator {
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+    }
+
+    private func drainControlPlaneCompletions() async {
+        _ = try? await eventLoop.submit {}.get()
+    }
+
+    private func availableToolsCatalogSurfaceResult(
+        startedAt: UInt64,
+        exposedProcessIDs: Set<pid_t>,
+        fallback: CanonicalToolsCatalogLoadResult
+    ) -> CanonicalToolsCatalogLoadResult {
+        guard let surface = processToolCatalogRegistry.availableToolCatalogSurface(
+            processIDs: exposedProcessIDs
+        ) else {
+            return fallback
+        }
+        return CanonicalToolsCatalogLoadResult(
+            rawResult: surface.rawResult,
+            sourceUpstream: surface.sourceUpstream ?? fallback.sourceUpstream,
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+        )
     }
 
     private func recordAvailableToolsCatalog(

@@ -2271,6 +2271,59 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func sessionManagerToolsListUnionsColdProcessCatalogsThatCompleteTogether()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let responseGate = CoordinatedToolsListResponseGate(expectedResponseCount: 2)
+        let olderUpstream = CoordinatedToolsListUpstreamClient(
+            gate: responseGate,
+            tools: [
+                try #require(JSONValue(any: toolDescriptor(name: "OlderRouteOnly"))),
+            ]
+        )
+        let latestUpstream = CoordinatedToolsListUpstreamClient(
+            gate: responseGate,
+            tools: [
+                try #require(JSONValue(any: toolDescriptor(name: "LatestRouteOnly"))),
+            ]
+        )
+        let olderTarget = xcodeProcessTarget(processID: 66339, xcodeVersion: "26.6")
+        let latestTarget = xcodeProcessTarget(processID: 80426, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [olderUpstream, latestUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: latestTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let result = try await waitWithTimeout("waiting for cold process catalog union") {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-cold-union",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        #expect(Set(toolNames(in: result)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
+        #expect(await olderUpstream.sentCount() == 1)
+        #expect(await latestUpstream.sentCount() == 1)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        let catalogs = manager.debugSnapshot().processToolCatalogs
+        #expect(catalogs.count == 2)
+        #expect(try #require(catalogs.first { $0.processID == olderTarget.processID }).toolCount == 1)
+        #expect(try #require(catalogs.first { $0.processID == latestTarget.processID }).toolCount == 1)
+    }
+
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
