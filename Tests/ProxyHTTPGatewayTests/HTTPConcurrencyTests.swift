@@ -145,53 +145,115 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
-        let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(
-            upstream: upstream,
-            requestTimeout: 0.15
+        let upstream = EmbeddedControlledUpstreamClient()
+        let config = makeEmbeddedConfig(requestTimeout: 0.15)
+        let eventLoop = EmbeddedEventLoop()
+        let sessionManager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            startImmediately: false
         )
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
-
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 300)
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 301)
-            )
-
-            let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
-            #expect(labels == ["tools/list"])
-            #expect(await upstream.respondNext(label: "tools/list"))
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect(secondResult.0.statusCode == 200)
-            #expect((firstResult.1["id"] as? NSNumber)?.intValue == 300)
-            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 301)
-            #expect(firstResult.1["error"] == nil)
-            #expect(secondResult.1["error"] == nil)
-        } catch {
-            try? await server.shutdown()
-            throw error
+        defer {
+            sessionManager.shutdownAndWait()
         }
-        try await server.shutdown()
+
+        ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
+        let deadlineClock = ManualDateClock()
+        let service = HTTPPostService(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            ),
+            deadlineClock: deadlineClock.client,
+            usesSynchronousLocalResolution: true
+        )
+        let sessionID = "session-queued-timeout-budget"
+
+        func makeBodyData(_ payload: [String: Any]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: payload, options: [])
+        }
+
+        func handlePost(_ payload: [String: Any]) throws -> HTTPPostService.Operation {
+            service.handle(
+                bodyData: try makeBodyData(payload),
+                headerSessionID: sessionID,
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: eventLoop
+            )
+        }
+
+        func responseObject(
+            from resolution: HTTPPostService.Resolution
+        ) throws -> [String: Any] {
+            guard case .responseData(let data, _, _) = resolution else {
+                throw ConcurrencyTestError.invalidResponse
+            }
+            return try #require(
+                JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+            )
+        }
+
+        _ = sessionManager.session(id: sessionID)
+        sessionManager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current
+        )
+        sessionManager.markUpstreamInitialized(upstreamIndex: 0)
+        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
+            try #require(
+                JSONValue(any: [
+                    "protocolVersion": MCP.ProtocolVersion.current,
+                    "capabilities": [String: Any](),
+                ])
+            ),
+            sourceUpstream: 0
+        )
+        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        upstream.clearRecordedRequests()
+
+        let firstOperation = try handlePost(
+            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
+        )
+        eventLoop.run()
+        #expect(try upstream.waitForRequestCount(1) == ["tools/call:ExecuteSnippet"])
+
+        let secondOperation = try handlePost(
+            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2")
+        )
+        eventLoop.run()
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        deadlineClock.advance(by: config.requestTimeout)
+        eventLoop.run()
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        let firstResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(firstResponseData, upstreamIndex: 0)
+        eventLoop.run()
+        let firstObject = try responseObject(from: try await firstOperation.future.get())
+        #expect((firstObject["id"] as? NSNumber)?.intValue == 300)
+        #expect(firstObject["error"] == nil)
+
+        eventLoop.run()
+        #expect(try upstream.waitForRequestCount(2) == [
+            "tools/call:ExecuteSnippet",
+            "tools/call:ExecuteSnippet",
+        ])
+        let secondResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
+        eventLoop.run()
+
+        let secondObject = try responseObject(from: try await secondOperation.future.get())
+        #expect((secondObject["id"] as? NSNumber)?.intValue == 301)
+        #expect(secondObject["error"] == nil)
     }
 
     @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() throws {

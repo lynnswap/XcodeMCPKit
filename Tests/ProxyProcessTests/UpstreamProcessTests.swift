@@ -74,8 +74,18 @@ struct UpstreamProcessTests {
 
     @Test func upstreamSessionFlushesLargeStderrChunkWithoutWaitingForEOF() async throws {
         let config = UpstreamProcess.Config(
-            command: "/bin/sh",
-            args: ["-c", "head -c 20000 /dev/zero | tr '\\0' 'x' >&2; sleep 1"],
+            command: "/usr/bin/python3",
+            args: [
+                "-c",
+                """
+                import signal
+                import sys
+
+                sys.stderr.write("x" * 20000)
+                sys.stderr.flush()
+                signal.pause()
+                """,
+            ],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024
         )

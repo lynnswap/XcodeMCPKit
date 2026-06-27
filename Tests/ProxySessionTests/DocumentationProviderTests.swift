@@ -4211,6 +4211,7 @@ extension RuntimeCoordinatorTests {
 
     @Test func documentationProviderManagerDoesNotRetryAfterRequestTimeoutExpires() async throws {
         let xcode = xcodeProcessTarget(processID: 490, xcodeVersion: "27.0")
+        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode.processID: [
@@ -4231,13 +4232,33 @@ extension RuntimeCoordinatorTests {
         )
         let manager = DocumentationProviderManager(
             discovery: StubXcodeTargetDiscovery(targets: [xcode]),
-            sessionFactory: factory
+            sessionFactory: factory,
+            clock: clock
         )
 
-        let outcome = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
-            requestTimeoutOverride: .milliseconds(1)
+        let outcomeTask = Task {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
+                requestTimeoutOverride: .milliseconds(1)
+            )
+        }
+        try await waitWithTimeout("waiting for hanging documentation search request") {
+            try await factory.waitForRequestCount(
+                1,
+                processID: xcode.processID,
+                method: "tools/call"
+            )
+        }
+        await advanceRuntimeCoordinatorTimeout(
+            timeoutClock: timeoutClock,
+            uptimeClock: uptimeClock,
+            by: .milliseconds(1)
         )
+        let outcome = try await waitWithTimeout(
+            "documentation search should fail when its deterministic timeout expires"
+        ) {
+            try await outcomeTask.value
+        }
         guard case .failed(let error, _) = outcome else {
             Issue.record("expected failed outcome, got \(outcome)")
             return
