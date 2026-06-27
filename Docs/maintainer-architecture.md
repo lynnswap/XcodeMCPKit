@@ -4,22 +4,20 @@
 
 - `ProxyCore`
   - CLI/config parsing, discovery file handling, logging, small shared helpers.
-- `ProxyMCP`
+- `XcodeMCPRuntime`
   - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request inspection.
 - `ProxySession`
   - Session lifecycle, initialize handshake, upstream process pool, leases, routing, and `XcodeRefreshCodeIssuesInFile` workflow.
 - `ProxyXcodeSupport`
   - Xcode window inspection and permission-dialog auto approval.
-- `ProxyHTTPGateway`
-  - Streamable HTTP request handling, transport validation, local MCP responses, forwarding.
 - `XcodeMCPProxyKit`
-  - Public proxy facades plus internal STDIO adapter, process restart, and install-product helpers.
+  - Public proxy facades plus internal HTTP gateway, STDIO adapter, process restart, and install-product helpers.
 
 ## Ownership Boundaries
 
 - `ProxySession`
   - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, lease cleanup, and refresh-code-issues feature workflow.
-- `ProxyHTTPGateway`
+- `XcodeMCPProxyKit` HTTP gateway internals
   - Owns HTTP transport validation, server-issued session ids, protocol-version enforcement, and request/response transport concerns.
   - Rejects JSON-RPC batch arrays at the HTTP boundary.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
@@ -27,12 +25,12 @@
 ## Dependency Direction
 
 - `ProxyCore` must not depend on gateway/session/Xcode modules.
-- `ProxyMCP` depends on `ProxyCore` for shared protocol primitives and extends the `MCP` namespace for JSON-RPC / MCP helpers.
+- `XcodeMCPRuntime` owns shared protocol/runtime primitives and must not depend on proxy-only modules.
   Avoid introducing gateway/session/Xcode knowledge here.
-- `ProxySession` depends on `ProxyCore`, `ProxyMCP`, and `ProxyXcodeSupport`.
+- `ProxySession` depends on `ProxyCore`, `XcodeMCPRuntime`, and `ProxyXcodeSupport`.
 - `ProxyXcodeSupport` depends on `ProxyCore`.
-- `ProxyHTTPGateway` is the highest-level internal target and may depend on the lower-level targets above.
-- `ProxyCLI` depends on `XcodeMCPProxy` only.
+- `XcodeMCPProxyKit` is the highest-level proxy library target and may depend on the lower-level targets above.
+- Executable targets depend on `XcodeMCPProxyKit` only.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
 the default suite includes public product compile contract tests and proxy
