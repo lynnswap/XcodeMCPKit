@@ -3,7 +3,6 @@ import Logging
 import NIO
 import ProxyCore
 import XcodeMCPRuntime
-import ProxyXcodeSupport
 
 extension RefreshCodeIssues.Workflow {
     /// Every proxy-mode bail-out funnels through here: record the debug

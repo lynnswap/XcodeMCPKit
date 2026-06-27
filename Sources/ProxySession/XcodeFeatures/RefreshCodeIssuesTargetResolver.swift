@@ -1,7 +1,6 @@
 import Foundation
 import NIO
 import ProxyCore
-import ProxyXcodeSupport
 
 extension RefreshCodeIssues {
     package struct ResolvedTarget: Sendable, Equatable {

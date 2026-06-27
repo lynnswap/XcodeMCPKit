@@ -391,8 +391,8 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     private let lifecycleStartedBox = NIOLockedValueBox(false)
 
     /// Composition-root entry point: the Xcode-specific readiness gate and
-    /// target discovery are injected because their live implementations
-    /// live above this module (ProxyXcodeSupport).
+    /// target discovery default to this module's live session-owned
+    /// implementations.
     package convenience init(
         config: ProxyConfig,
         eventLoop: EventLoop,
