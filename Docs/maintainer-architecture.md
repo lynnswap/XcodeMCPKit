@@ -8,10 +8,8 @@
   - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request inspection.
 - `ProxySession`
   - Session lifecycle, initialize handshake, upstream process pool, leases, routing, Xcode target discovery/window query/readiness, and `XcodeRefreshCodeIssuesInFile` workflow.
-- `ProxyXcodeSupport`
-  - Permission-dialog auto approval for proxy server lifecycle.
 - `XcodeMCPProxyKit`
-  - Public proxy facades plus internal HTTP gateway, STDIO adapter, process restart, and install-product helpers.
+  - Public proxy facades plus internal HTTP gateway, STDIO adapter, permission-dialog auto approval, process restart, and install-product helpers.
 
 ## Ownership Boundaries
 
@@ -28,7 +26,6 @@
 - `XcodeMCPRuntime` owns shared protocol/runtime primitives and must not depend on proxy-only modules.
   Avoid introducing gateway/session/Xcode knowledge here.
 - `ProxySession` depends on `ProxyCore` and `XcodeMCPRuntime`.
-- `ProxyXcodeSupport` depends on `ProxyCore`.
 - `XcodeMCPProxyKit` is the highest-level proxy library target and may depend on the lower-level targets above.
 - Executable targets depend on `XcodeMCPProxyKit` only.
 
