@@ -1,4 +1,6 @@
 
+import XcodeMCPRuntime
+
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.
     ///

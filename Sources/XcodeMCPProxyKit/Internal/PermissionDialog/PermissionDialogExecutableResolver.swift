@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPRuntime
 
 package enum PermissionDialogExecutableResolver {
     package static func additionalExecutableCandidates(

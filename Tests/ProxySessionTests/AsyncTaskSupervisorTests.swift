@@ -1,4 +1,5 @@
 import Testing
+import XcodeMCPRuntime
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyKit
 
