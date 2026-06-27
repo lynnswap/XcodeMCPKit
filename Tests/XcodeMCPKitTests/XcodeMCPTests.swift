@@ -489,6 +489,37 @@ struct XcodeMCPTests {
         await xcode.close()
     }
 
+    @Test func streamableHTTPInitializeSSEStartsGETBeforePOSTEOF() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            initializeUsesSSE: true,
+            initializeFinishesLoading: false
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
+        let xcode = try await waitWithTimeout("SSE initialize response was not delivered") {
+            try await XcodeMCP(
+                config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                transport: transport
+            )
+        }
+
+        _ = try await waitWithTimeout("event stream GET was not opened after SSE initialize") {
+            try await server.nextRequest { $0.httpMethod == "GET" }
+        }
+        await xcode.close()
+    }
+
     @Test func streamableHTTPGetSSERoutesProgressWhilePOSTReturnsJSONResult() async throws {
         let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
         let server = FakeStreamableHTTPServer(progressDelivery: .getSSE)
@@ -1098,6 +1129,8 @@ private actor FakeStreamableHTTPServer {
     private let eventStreamFinishesImmediately: Bool
     private let initializeError: Bool
     private let postSSEFinishesLoading: Bool
+    private let initializeUsesSSE: Bool
+    private let initializeFinishesLoading: Bool
     private let requestValues = RecordedValues<RecordedHTTPRequest>()
     private var requests: [RecordedHTTPRequest] = []
     private var eventConnection: ActiveHTTPConnection?
@@ -1107,13 +1140,17 @@ private actor FakeStreamableHTTPServer {
         sessionID: String? = "session-http-1",
         eventStreamFinishesImmediately: Bool = false,
         initializeError: Bool = false,
-        postSSEFinishesLoading: Bool = true
+        postSSEFinishesLoading: Bool = true,
+        initializeUsesSSE: Bool = false,
+        initializeFinishesLoading: Bool = true
     ) {
         self.progressDelivery = progressDelivery
         self.sessionID = sessionID
         self.eventStreamFinishesImmediately = eventStreamFinishesImmediately
         self.initializeError = initializeError
         self.postSSEFinishesLoading = postSSEFinishesLoading
+        self.initializeUsesSSE = initializeUsesSSE
+        self.initializeFinishesLoading = initializeFinishesLoading
     }
 
     func response(
@@ -1186,16 +1223,29 @@ private actor FakeStreamableHTTPServer {
                 )
             }
             let headers = sessionID.map { ["Mcp-Session-Id": $0] } ?? [:]
+            let result: MCPJSONValue = [
+                "protocolVersion": "2025-06-18",
+                "serverInfo": [
+                    "name": "fake-http-proxy",
+                    "version": "test",
+                ],
+                "capabilities": [:],
+            ]
+            if initializeUsesSSE {
+                return FakeURLProtocolResponse(
+                    headers: ["Content-Type": "text/event-stream"].merging(headers) { _, new in new },
+                    chunks: [
+                        sseEventData(jsonResponseData(
+                            id: request.body?.objectValue?["id"],
+                            result: result
+                        ))
+                    ],
+                    finishesLoading: initializeFinishesLoading
+                )
+            }
             return jsonResponse(
                 id: request.body?.objectValue?["id"],
-                result: [
-                    "protocolVersion": "2025-06-18",
-                    "serverInfo": [
-                        "name": "fake-http-proxy",
-                        "version": "test",
-                    ],
-                    "capabilities": [:],
-                ],
+                result: result,
                 headers: headers
             )
         case "notifications/initialized":

@@ -191,6 +191,28 @@ struct CLICommandIntegrationTests {
         #expect(errorObject["message"] as? String == "tool denied")
     }
 
+    @Test func cliCommandReportsHTTPStatusForNonJSONErrorBody() async throws {
+        let result = try await CLICommandHarness.run(
+            responseMode: .json,
+            httpErrorResponsesByMethod: [
+                "tools/list": StubMCPHTTPErrorResponse(
+                    status: .internalServerError,
+                    bodyData: Data("plain failure".utf8),
+                    contentType: "text/plain"
+                )
+            ],
+            stdinLines: [initializeRequest, toolsListRequest],
+            timeoutDescription: "CLI command should report HTTP status for non-JSON errors"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 2)
+        let errorObject = try #require(result.outputObjects.last?["error"] as? [String: Any])
+        #expect((errorObject["code"] as? NSNumber)?.intValue == -32000)
+        #expect(errorObject["message"] as? String == "upstream HTTP 500")
+    }
+
     @Test func cliCommandSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
         let shutdownClocks = makeStdioAdapterShutdownClocks()
         let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
@@ -592,11 +614,19 @@ private enum StubMCPHTTPResponseMode: Sendable {
 private struct StubMCPHTTPErrorResponse: @unchecked Sendable {
     let status: HTTPResponseStatus
     let bodyData: Data
+    let contentType: String
 
     init(status: HTTPResponseStatus, body: [String: Any]) {
         self.status = status
         self.bodyData =
             (try? JSONSerialization.data(withJSONObject: body, options: [])) ?? Data("{}".utf8)
+        self.contentType = "application/json"
+    }
+
+    init(status: HTTPResponseStatus, bodyData: Data, contentType: String) {
+        self.status = status
+        self.bodyData = bodyData
+        self.contentType = contentType
     }
 }
 
@@ -1022,7 +1052,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
     ) {
         let responseBody = errorResponse.bodyData
         var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "application/json")
+        headers.add(name: "Content-Type", value: errorResponse.contentType)
         headers.add(name: "Content-Length", value: "\(responseBody.count)")
         let responseHead = HTTPResponseHead(
             version: requestHead.version,

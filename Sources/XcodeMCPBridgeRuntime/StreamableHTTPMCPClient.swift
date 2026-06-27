@@ -21,6 +21,7 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
     private let endpoint: URL
     private let urlSession: URLSession
     private let requestTimeout: Duration?
+    private let automaticallyStartsEventStream: Bool
     private let eventStreamReconnectSleep: @Sendable (Duration) async throws -> Void
     private let eventContinuation: AsyncStream<Data>.Continuation
     private let state = StreamableHTTPMCPClientState()
@@ -29,6 +30,7 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
         endpoint: URL,
         urlSession: URLSession,
         requestTimeout: Duration? = nil,
+        automaticallyStartsEventStream: Bool = true,
         eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
         }
@@ -37,6 +39,7 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
         self.endpoint = endpoint
         self.urlSession = urlSession
         self.requestTimeout = requestTimeout
+        self.automaticallyStartsEventStream = automaticallyStartsEventStream
         self.eventStreamReconnectSleep = eventStreamReconnectSleep
         self.events = stream.stream
         self.eventContinuation = stream.continuation
@@ -234,6 +237,9 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
             return
         }
         await state.completeInitialize(protocolVersion: protocolVersion)
+        if automaticallyStartsEventStream {
+            await startEventStreamIfReady()
+        }
     }
 
     private func emitResponseEventStreamMessages(

@@ -86,7 +86,8 @@ public actor StdioAdapter {
         self.client = StreamableHTTPMCPClient(
             endpoint: upstreamURL,
             urlSession: URLSession(configuration: configuration),
-            requestTimeout: Self.duration(fromRequestTimeout: requestTimeout)
+            requestTimeout: Self.duration(fromRequestTimeout: requestTimeout),
+            automaticallyStartsEventStream: false
         )
     }
 
@@ -210,7 +211,7 @@ public actor StdioAdapter {
                 throw AdapterError.httpStatus(statusCode)
             }
             guard payloads.allSatisfy({ isValidJSONPayload($0) }) else {
-                throw AdapterError.invalidResponse
+                throw AdapterError.httpStatus(statusCode)
             }
             for payload in payloads {
                 await outputWriter.send(payload)
