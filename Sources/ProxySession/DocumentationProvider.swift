@@ -1,7 +1,6 @@
 import Foundation
 import Logging
 import NIO
-import ProxySessionControlPlane
 import XcodeMCPRuntime
 import ProxyCore
 

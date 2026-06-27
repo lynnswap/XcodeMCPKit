@@ -9,7 +9,6 @@ import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxyXcodeSupport
 import ProxySession
-import ProxySessionControlPlane
 
 extension HTTPPostService {
     package func listXcodeWindows(

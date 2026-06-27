@@ -6,7 +6,6 @@ import ProxyCore
 import XcodeMCPRuntime
 import ProxyXcodeFeatures
 import ProxySession
-import ProxySessionControlPlane
 
 package enum LocalPostHandling {
     case pendingResponse(

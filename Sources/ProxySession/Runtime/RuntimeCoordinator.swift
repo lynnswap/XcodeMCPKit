@@ -3,7 +3,6 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import ProxySessionControlPlane
 import XcodeMCPRuntime
 import ProxyCore
 
