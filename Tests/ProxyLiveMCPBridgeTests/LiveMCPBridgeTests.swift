@@ -6,7 +6,6 @@ import Testing
 import XcodeMCPRuntime
 
 @testable import XcodeMCPProxyKit
-@testable import ProxyXcodeSupport
 
 @Suite(.serialized, .enabled(if: LiveMCPBridgeTestEnvironment.isEnabled))
 struct LiveMCPBridgeTests {

@@ -538,11 +538,3 @@ private struct NoopXcodePermissionDialogAXClient: XcodePermissionDialog.AXAccess
 
     func pressDefaultButton(in _: XcodePermissionDialog.AXWindow) throws {}
 }
-
-extension NSLock {
-    fileprivate func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        lock()
-        defer { unlock() }
-        return try body()
-    }
-}

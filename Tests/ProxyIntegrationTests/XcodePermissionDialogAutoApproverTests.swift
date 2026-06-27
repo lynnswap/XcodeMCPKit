@@ -3,7 +3,7 @@ import Foundation
 import Testing
 
 @testable import ProxyCore
-@testable import ProxyXcodeSupport
+@testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct XcodePermissionDialogAutoApproverTests {
