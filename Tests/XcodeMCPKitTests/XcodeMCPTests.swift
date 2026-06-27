@@ -223,6 +223,40 @@ struct XcodeMCPTests {
         #expect(response.error?.objectValue?["code"] == .integer(-32601))
     }
 
+    @Test func runtimeSessionDoesNotRetainProgressHandlerForInvalidParams() async throws {
+        let transport = FakeXcodeMCPTransport()
+        let session = try await InitializedMCPClientSession(
+            transport: transport,
+            configuration: .init(
+                clientName: "RuntimeSessionTest",
+                clientVersion: "1.0",
+                capabilities: [:],
+                requestTimeout: .seconds(2)
+            )
+        )
+        defer {
+            Task { await session.close() }
+        }
+
+        weak var weakProbe: DeinitProbe?
+        do {
+            var probe: DeinitProbe? = DeinitProbe()
+            weakProbe = probe
+            let capturedProbe = probe
+
+            await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
+                "progress requests require object params"
+            )) {
+                _ = try await session.request("tools/call", params: .string("invalid")) { _ in
+                    _ = capturedProbe
+                }
+            }
+            probe = nil
+        }
+
+        #expect(weakProbe == nil)
+    }
+
     @Test func closeIsIdempotentAndRejectsFuturePublicCalls() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
@@ -730,6 +764,8 @@ struct XcodeMCPTests {
         }
     }
 }
+
+private final class DeinitProbe: @unchecked Sendable {}
 
 private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>

@@ -131,8 +131,8 @@ package actor InitializedMCPClientSession {
         if let onProgress {
             let token = "xcode-mcp-\(UUID().uuidString)"
             progressToken = token
-            progressHandlers[token] = onProgress
             requestParams = try paramsByAddingProgressToken(token, to: params)
+            progressHandlers[token] = onProgress
         } else {
             progressToken = nil
             requestParams = params
