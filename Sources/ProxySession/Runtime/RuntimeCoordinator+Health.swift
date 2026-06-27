@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOFoundationCompat
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import ProxyCore
 import ProxyMCP
 

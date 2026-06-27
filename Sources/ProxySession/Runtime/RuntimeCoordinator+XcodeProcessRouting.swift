@@ -4,7 +4,7 @@ import NIOCore
 import ProxyCore
 import ProxyMCP
 import ProxySessionControlPlane
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
@@ -199,19 +199,22 @@ extension RuntimeCoordinator {
             return nil
         }
         let unavailable = unavailableXcodeProcessIDs()
+        let candidateRoutes = xcodeProcessRoutes.filter { route in
+            unavailable.contains(route.target.processID) == false
+                && firstUsableInitializedUpstreamIndex(in: route) != nil
+        }
+        let candidateProcessIDSet = Set(candidateRoutes.map(\.target.processID))
         let workspaceOwnerProcesses = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
         let tabOwnerProcesses = Set(tabOwnerProcessIDs.withLockedValue(\.values))
         let ownerProcesses = workspaceOwnerProcesses.union(tabOwnerProcesses)
         let ownerProcessIDs = orderedProcessIDs(
-            Array(ownerProcesses),
+            Array(ownerProcesses).filter { candidateProcessIDSet.contains($0) },
             unavailable: unavailable
         )
 
         let nonOwnerProcessIDs = orderedProcessIDs(
-            xcodeProcessRoutes.compactMap { route -> pid_t? in
-                guard unavailable.contains(route.target.processID) == false,
-                      ownerProcessIDs.contains(route.target.processID) == false
-                else {
+            candidateRoutes.compactMap { route -> pid_t? in
+                guard ownerProcessIDs.contains(route.target.processID) == false else {
                     return nil
                 }
                 return route.target.processID

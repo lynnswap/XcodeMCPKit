@@ -7,7 +7,7 @@ import Testing
 import ProxyCore
 import ProxyMCP
 import ProxySessionControlPlane
-import XcodeMCPKit
+import XcodeMCPBridgeRuntime
 import XcodeMCPTestSupport
 @testable import ProxySession
 
@@ -2665,6 +2665,8 @@ struct RuntimeCoordinatorTests {
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
 
         let result = try jsonValue([
             "structuredContent": [
@@ -2704,6 +2706,8 @@ struct RuntimeCoordinatorTests {
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
 
         let result = try jsonValue([
             "structuredContent": [
@@ -2717,6 +2721,56 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(manager.documentationCandidateProcessOrder() == [badTarget.processID])
+    }
+
+    @Test func documentationCandidatesSkipUninitializedProcessRoutesButKeepInitializedWindowlessFallbacks()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let ownerTarget = xcodeProcessTarget(processID: 80428, xcodeVersion: "27.0")
+        let fallbackTarget = xcodeProcessTarget(processID: 80429, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: ownerTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: fallbackTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let result = try jsonValue([
+            "structuredContent": [
+                "message": "* tabIdentifier: tab-owner, workspacePath: /tmp/Owner.xcworkspace",
+            ],
+        ])
+        #expect(manager.recordXcodeWindowOwners(from: result, upstreamIndex: 0))
+
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        runtimeBox.value = manager
+        let discovery = RuntimeDocumentationTargetDiscovery(
+            base: StubXcodeTargetDiscovery(targets: [ownerTarget, fallbackTarget]),
+            runtimeBox: runtimeBox
+        )
+
+        #expect(manager.documentationCandidateProcessOrder() == [ownerTarget.processID])
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [ownerTarget.processID])
+
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        #expect(manager.documentationCandidateProcessOrder() == [
+            ownerTarget.processID,
+            fallbackTarget.processID,
+        ])
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [
+            ownerTarget.processID,
+            fallbackTarget.processID,
+        ])
     }
 
     @Test func runtimeDocumentationDiscoveryKeepsLiveTargetsOutsideRuntimeRoutes()

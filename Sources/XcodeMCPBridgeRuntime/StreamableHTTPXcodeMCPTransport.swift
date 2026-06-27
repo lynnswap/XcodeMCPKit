@@ -36,7 +36,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         guard let record = Discovery.read(overrideURL: discoveryFile),
               let endpoint = URL(string: record.url)
         else {
-            throw XcodeMCPError.invalidRequest(
+            throw MCPBridgeRuntimeError.invalidRequest(
                 "Streamable HTTP discovery file is missing, stale, or invalid: \(discoveryFile.path)"
             )
         }
@@ -66,7 +66,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         let request = await makePostRequest(body: data)
         let (responseBytes, response) = try await urlSession.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw XcodeMCPError.transportUnavailable("Streamable HTTP response was not HTTP")
+            throw MCPBridgeRuntimeError.transportUnavailable("Streamable HTTP response was not HTTP")
         }
 
         try await validateSuccess(httpResponse, body: responseBytes)
@@ -111,7 +111,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         guard let scheme = endpoint.scheme?.lowercased(),
               scheme == "http" || scheme == "https"
         else {
-            throw XcodeMCPError.invalidRequest(
+            throw MCPBridgeRuntimeError.invalidRequest(
                 "Streamable HTTP endpoint must use http or https: \(endpoint.absoluteString)"
             )
         }
@@ -143,7 +143,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
             let responseData = (try? await Self.collect(responseBytes)) ?? Data()
             let body = String(data: responseData, encoding: .utf8) ?? ""
             let suffix = body.isEmpty ? "" : ": \(body)"
-            throw XcodeMCPError.transportUnavailable(
+            throw MCPBridgeRuntimeError.transportUnavailable(
                 "Streamable HTTP request failed with status \(response.statusCode)\(suffix)"
             )
         }
@@ -179,7 +179,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
             return
         }
         guard let protocolVersion = Self.initializeProtocolVersion(from: object) else {
-            throw XcodeMCPError.invalidResponse(
+            throw MCPBridgeRuntimeError.invalidResponse(
                 "initialize response is missing protocolVersion"
             )
         }
@@ -210,7 +210,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                     )
                     let (bytes, response) = try await urlSession.bytes(for: request)
                     guard let httpResponse = response as? HTTPURLResponse else {
-                        throw XcodeMCPError.transportUnavailable("Streamable HTTP event stream response was not HTTP")
+                        throw MCPBridgeRuntimeError.transportUnavailable("Streamable HTTP event stream response was not HTTP")
                     }
                     guard (200..<300).contains(httpResponse.statusCode) else {
                         if Self.isTerminalEventStreamStatus(httpResponse.statusCode) {
@@ -219,7 +219,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                         let bodyData = (try? await Self.collect(bytes)) ?? Data()
                         let body = String(data: bodyData, encoding: .utf8) ?? ""
                         let suffix = body.isEmpty ? "" : ": \(body)"
-                        throw XcodeMCPError.transportUnavailable(
+                        throw MCPBridgeRuntimeError.transportUnavailable(
                             "Streamable HTTP event stream failed with status \(httpResponse.statusCode)\(suffix)"
                         )
                     }
@@ -360,19 +360,21 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         return seconds + fractional
     }
 
-    private static func jsonObject(from data: Data) -> [String: MCPJSONValue]? {
+    private static func jsonObject(from data: Data) -> [String: JSONValue]? {
         guard let raw = try? JSONSerialization.jsonObject(with: data),
-              let value = MCPJSONValue(foundationObject: raw),
-              let object = value.objectValue
+              let value = JSONValue(any: raw)
         else {
+            return nil
+        }
+        guard case .object(let object) = value else {
             return nil
         }
         return object
     }
 
-    private static func initializeProtocolVersion(from object: [String: MCPJSONValue]) -> String? {
-        guard let result = object["result"]?.objectValue,
-              let protocolVersion = result["protocolVersion"]?.stringValue,
+    private static func initializeProtocolVersion(from object: [String: JSONValue]) -> String? {
+        guard case .object(let result)? = object["result"],
+              case .string(let protocolVersion)? = result["protocolVersion"],
               protocolVersion.isEmpty == false
         else {
             return nil
@@ -380,14 +382,12 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         return protocolVersion
     }
 
-    private static func jsonRPCIDKey(_ value: MCPJSONValue?) -> String? {
+    private static func jsonRPCIDKey(_ value: JSONValue?) -> String? {
         switch value {
         case .string(let value):
             return value
-        case .integer(let value):
-            return String(value)
-        case .double(let value):
-            return String(value)
+        case .number(let value):
+            return value.stringValue
         case .object, .array, .bool, .null, .none:
             return nil
         }
@@ -406,7 +406,7 @@ private actor StreamableHTTPTransportState {
 
     func ensureOpen() throws {
         if closed {
-            throw XcodeMCPError.closed
+            throw MCPBridgeRuntimeError.closed
         }
     }
 
@@ -461,17 +461,21 @@ private actor StreamableHTTPTransportState {
 }
 
 private struct OutgoingHTTPRequestInfo: Sendable {
-    var id: MCPJSONValue?
+    var id: JSONValue?
     var method: String?
 
     init(data: Data) throws {
         let raw = try JSONSerialization.jsonObject(with: data)
-        guard let value = MCPJSONValue(foundationObject: raw),
-              let object = value.objectValue
+        guard let value = JSONValue(any: raw),
+              case .object(let object) = value
         else {
-            throw XcodeMCPError.invalidRequest("JSON-RPC message is not an object")
+            throw MCPBridgeRuntimeError.invalidRequest("JSON-RPC message is not an object")
         }
         self.id = object["id"]
-        self.method = object["method"]?.stringValue
+        if case .string(let method)? = object["method"] {
+            self.method = method
+        } else {
+            self.method = nil
+        }
     }
 }

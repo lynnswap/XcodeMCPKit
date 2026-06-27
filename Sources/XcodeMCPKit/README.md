@@ -21,6 +21,11 @@ It intentionally does not expose tool-specific Swift wrappers, JSON-RPC framing,
 transport streams, or server-to-client handlers such as roots, sampling, and
 elicitation.
 
+Bridge process, session, runtime topology, and transport implementations live
+in the internal `XcodeMCPBridgeRuntime` target. `XcodeMCPKit` uses that target
+to provide its configured transports without making those runtime types part of
+the public library product surface.
+
 Use the separate `XcodeMCPKitTesting` product when tests need deterministic
 tool catalogs, progress notifications, and tool results through the same
 `XcodeMCP` public API without launching `mcpbridge`.

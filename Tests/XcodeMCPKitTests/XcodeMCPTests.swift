@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+@testable import XcodeMCPBridgeRuntime
 @testable import XcodeMCPKit
 
 @Suite(.serialized)
@@ -71,6 +72,18 @@ struct XcodeMCPTests {
         let sent = await transport.sentMessages()
         #expect(sent.compactMap(\.method) == ["initialize"])
         #expect(await transport.closeCount() == 1)
+    }
+
+    @Test func asyncInitializerMapsRuntimeTransportErrorsToPublicError() async throws {
+        let transport = RuntimeFailingXcodeMCPTransport(
+            error: .transportUnavailable("mcpbridge write queue is full")
+        )
+
+        await #expect(throws: XcodeMCPError.transportUnavailable(
+            "mcpbridge write queue is full"
+        )) {
+            _ = try await XcodeMCP(transport: transport)
+        }
     }
 
     @Test func listToolsDecodesDescriptorAndPreservesDynamicFields() async throws {
@@ -228,6 +241,40 @@ struct XcodeMCPTests {
 
         let tools = try await xcode.listTools()
         #expect(tools.first?.name == "DocumentationSearch")
+    }
+
+    @Test func unsupportedServerRequestSendFailureMapsRuntimeErrorForPendingRequests()
+        async throws
+    {
+        let transport = UnsupportedResponseFailingXcodeMCPTransport(
+            error: .transportUnavailable("mcpbridge write queue is full")
+        )
+        let xcode = try await XcodeMCP(transport: transport)
+        defer {
+            Task { await xcode.close() }
+        }
+
+        let listTask = Task {
+            try await xcode.listTools()
+        }
+        defer {
+            listTask.cancel()
+        }
+        _ = try await waitWithTimeout("tools/list send did not start") {
+            try await transport.nextSentMessage { message in
+                message.method == "tools/list"
+            }
+        }
+
+        await transport.emitServerRequest(method: "sampling/createMessage", id: .integer(99))
+
+        await #expect(throws: XcodeMCPError.transportUnavailable(
+            "mcpbridge write queue is full"
+        )) {
+            _ = try await waitWithTimeout("pending tools/list did not fail") {
+                try await listTask.value
+            }
+        }
     }
 
     @Test func domainTypesCodeToProtocolShapeWithoutRawWrapper() throws {
@@ -640,6 +687,123 @@ private struct SentMessage: Sendable, Equatable {
     var params: MCPJSONValue?
     var result: MCPJSONValue?
     var error: MCPJSONValue?
+}
+
+private actor RuntimeFailingXcodeMCPTransport: XcodeMCPTransport {
+    nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
+
+    private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
+    private let error: MCPBridgeRuntimeError
+
+    init(error: MCPBridgeRuntimeError) {
+        let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
+        self.events = stream.stream
+        self.continuation = stream.continuation
+        self.error = error
+    }
+
+    func send(_ data: Data) async throws {
+        throw error
+    }
+
+    func close() async {
+        continuation.yield(.closed(nil))
+        continuation.finish()
+    }
+}
+
+private actor UnsupportedResponseFailingXcodeMCPTransport: XcodeMCPTransport {
+    nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
+
+    private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
+    private let sentMessageValues = RecordedValues<SentMessage>()
+    private let error: MCPBridgeRuntimeError
+    private var closed = false
+
+    init(error: MCPBridgeRuntimeError) {
+        let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
+        self.events = stream.stream
+        self.continuation = stream.continuation
+        self.error = error
+    }
+
+    func send(_ data: Data) async throws {
+        guard closed == false else {
+            throw MCPBridgeRuntimeError.closed
+        }
+        let object = try parse(data)
+        let sent = SentMessage(
+            id: object["id"],
+            method: object["method"]?.stringValue,
+            params: object["params"],
+            result: object["result"],
+            error: object["error"]
+        )
+        await sentMessageValues.append(sent)
+
+        if sent.method == nil, sent.error != nil {
+            throw error
+        }
+
+        guard sent.method == "initialize",
+              let id = sent.id
+        else {
+            return
+        }
+        try yieldMessage([
+            "jsonrpc": .string("2.0"),
+            "id": id,
+            "result": .object([
+                "protocolVersion": .string("2025-06-18"),
+                "serverInfo": .object([
+                    "name": .string("fake-mcpbridge"),
+                    "version": .string("test"),
+                ]),
+                "capabilities": .object([:]),
+            ]),
+        ])
+    }
+
+    func close() async {
+        guard closed == false else {
+            return
+        }
+        closed = true
+        continuation.yield(.closed(nil))
+        continuation.finish()
+    }
+
+    func emitServerRequest(method: String, id: MCPJSONValue) {
+        try? yieldMessage([
+            "jsonrpc": .string("2.0"),
+            "id": id,
+            "method": .string(method),
+            "params": .object([:]),
+        ])
+    }
+
+    func nextSentMessage(
+        matching predicate: @escaping @Sendable (SentMessage) -> Bool
+    ) async throws -> SentMessage {
+        try await sentMessageValues.nextValue(matching: predicate)
+    }
+
+    private func yieldMessage(_ object: [String: MCPJSONValue]) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: MCPJSONValue.object(object).foundationObject
+        )
+        continuation.yield(.message(data))
+    }
+
+    private func parse(_ data: Data) throws -> [String: MCPJSONValue] {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let value = MCPJSONValue(foundationObject: raw),
+              let object = value.objectValue
+        else {
+            throw XcodeMCPError.invalidRequest("message is not an object")
+        }
+        return object
+    }
 }
 
 private actor FakeXcodeMCPTransport: XcodeMCPTransport {
