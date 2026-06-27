@@ -33,6 +33,35 @@ struct DiscoveryTests {
         #expect(loaded?.pid == record.pid)
     }
 
+    @Test func discoveryRecordShapeRemainsStable() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = directory.appendingPathComponent("endpoint.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let record = DiscoveryRecord(
+            url: "http://127.0.0.1:8765/mcp",
+            host: "127.0.0.1",
+            port: 8765,
+            pid: 4242,
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+        try Discovery.write(record: record, overrideURL: fileURL)
+
+        let payload = try String(contentsOf: fileURL, encoding: .utf8)
+        #expect(
+            payload == """
+            {
+              "host" : "127.0.0.1",
+              "pid" : 4242,
+              "port" : 8765,
+              "updatedAt" : "1970-01-01T00:00:00Z",
+              "url" : "http:\\/\\/127.0.0.1:8765\\/mcp"
+            }
+            """
+        )
+    }
+
     @Test func discoveryIgnoresInvalidJSON() async throws {
         let url = makeTempDiscoveryURL()
         defer { cleanupTempDiscoveryURL(url) }

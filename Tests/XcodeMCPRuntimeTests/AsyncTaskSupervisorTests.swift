@@ -1,19 +1,20 @@
 import Testing
 import XcodeMCPRuntime
-import XcodeMCPProxyTestSupport
-@testable import XcodeMCPProxyKit
+@testable import XcodeMCPRuntimeTestSupport
 
 @Suite struct AsyncTaskSupervisorTests {
     @Test func runReportsAcceptedBeforeShutdown() async throws {
         let supervisor = AsyncTaskSupervisor()
-        let ran = TestSignal()
+        let ran = RecordedValues<Bool>()
 
         let scheduled = supervisor.run {
-            ran.signal()
+            await ran.append(true)
         }
 
         #expect(scheduled)
-        try await ran.wait(description: "waiting for scheduled task to run")
+        _ = try await waitWithTimeout("waiting for scheduled task to run") {
+            try await ran.nextValue(at: 0)
+        }
         await supervisor.shutdown()
     }
 

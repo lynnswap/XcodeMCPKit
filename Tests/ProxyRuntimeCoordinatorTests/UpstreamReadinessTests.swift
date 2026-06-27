@@ -5,6 +5,7 @@ import NIOEmbedded
 import Testing
 import XcodeMCPRuntime
 import XcodeMCPProxyTestSupport
+@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPProxyKit
 
 extension RuntimeCoordinatorTests {
