@@ -1,63 +1,6 @@
 import Foundation
 import XcodeMCPRuntime
 
-private final class XcodeMCPPendingRequests: @unchecked Sendable {
-    private struct PendingRequest {
-        let continuation: CheckedContinuation<MCPJSONValue, Error>
-        var sendTask: Task<Void, Never>?
-    }
-
-    private let lock = NSLock()
-    private var requests: [String: PendingRequest] = [:]
-
-    func add(
-        idKey: String,
-        continuation: CheckedContinuation<MCPJSONValue, Error>
-    ) {
-        lock.withLock {
-            requests[idKey] = PendingRequest(continuation: continuation)
-        }
-    }
-
-    func setSendTask(idKey: String, task: Task<Void, Never>) -> Bool {
-        lock.withLock {
-            guard requests[idKey] != nil else {
-                return false
-            }
-            requests[idKey]?.sendTask = task
-            return true
-        }
-    }
-
-    func complete(idKey: String, result: MCPJSONValue) {
-        let request = lock.withLock {
-            requests.removeValue(forKey: idKey)
-        }
-        request?.sendTask?.cancel()
-        request?.continuation.resume(returning: result)
-    }
-
-    func fail(idKey: String, error: Error) {
-        let request = lock.withLock {
-            requests.removeValue(forKey: idKey)
-        }
-        request?.sendTask?.cancel()
-        request?.continuation.resume(throwing: error)
-    }
-
-    func failAll(error: Error) {
-        let pending = lock.withLock {
-            let current = requests
-            requests.removeAll()
-            return current
-        }
-        for request in pending.values {
-            request.sendTask?.cancel()
-            request.continuation.resume(throwing: error)
-        }
-    }
-}
-
 /// A high-level client for Xcode MCP.
 ///
 /// `XcodeMCP` connects through the configured transport, performs the MCP
@@ -256,13 +199,7 @@ public actor XcodeMCP {
         }
     }
 
-    private let config: Configuration
-    private let transport: any XcodeMCPTransport
-    private let pendingRequests = XcodeMCPPendingRequests()
-    private var nextRequestID: Int64 = 1
-    private var isClosed = false
-    private var eventTask: Task<Void, Never>?
-    private var progressHandlers: [String: @Sendable (MCPProgress) async -> Void] = [:]
+    private let session: InitializedMCPClientSession
 
     /// Connects to the configured MCP transport and returns an initialized
     /// client.
@@ -305,29 +242,25 @@ public actor XcodeMCP {
     }
 
     package init(config: Configuration = Configuration(), transport: any XcodeMCPTransport) async throws {
-        self.config = config
-        self.transport = transport
-        self.eventTask = nil
-        self.eventTask = Task { [weak self, transport] in
-            for await event in transport.events {
-                await self?.handle(event)
-            }
-        }
-
         do {
-            try await initialize()
+            self.session = try await InitializedMCPClientSession(
+                transport: transport,
+                configuration: InitializedMCPClientSession.Configuration(
+                    clientName: config.clientName,
+                    clientVersion: config.clientVersion,
+                    capabilities: config.capabilities.mapValues(\.jsonValue),
+                    requestTimeout: config.requestTimeout
+                )
+            )
         } catch {
-            eventTask?.cancel()
-            await transport.close()
-            throw error
+            throw Self.publicError(from: error)
         }
     }
 
     isolated deinit {
-        eventTask?.cancel()
-        let transport = transport
+        let session = session
         Task {
-            await transport.close()
+            await session.close()
         }
     }
 
@@ -368,29 +301,27 @@ public actor XcodeMCP {
             throw XcodeMCPError.invalidRequest("tool name must not be empty")
         }
 
-        var params: [String: MCPJSONValue] = [
+        let params: [String: MCPJSONValue] = [
             "name": .string(name),
             "arguments": .object(arguments),
         ]
-        let progressToken: String?
+        let progressHandler: InitializedMCPClientSession.ProgressHandler?
         if let onProgress {
-            let token = "xcode-mcp-\(UUID().uuidString)"
-            progressToken = token
-            progressHandlers[token] = onProgress
-            params["_meta"] = .object([
-                "progressToken": .string(token)
-            ])
-        } else {
-            progressToken = nil
-        }
-
-        defer {
-            if let progressToken {
-                progressHandlers.removeValue(forKey: progressToken)
+            progressHandler = { rawProgress in
+                guard let progress = MCPProgress(json: MCPJSONValue(rawProgress)) else {
+                    return
+                }
+                await onProgress(progress)
             }
+        } else {
+            progressHandler = nil
         }
 
-        let result = try await request("tools/call", params: .object(params))
+        let result = try await request(
+            "tools/call",
+            params: .object(params),
+            onProgress: progressHandler
+        )
         return try MCPToolResult(json: result)
     }
 
@@ -400,63 +331,31 @@ public actor XcodeMCP {
     /// registered progress callbacks are discarded, and no further requests may
     /// be sent through this client.
     public func close() async {
-        guard isClosed == false else {
-            return
-        }
-        isClosed = true
-        eventTask?.cancel()
-        eventTask = nil
-        progressHandlers.removeAll()
-        pendingRequests.failAll(error: XcodeMCPError.closed)
-        await transport.close()
+        await session.close()
     }
 }
 
 extension XcodeMCP {
-    package func request(_ method: String, params: MCPJSONValue? = nil) async throws -> MCPJSONValue {
-        guard method.isEmpty == false else {
-            throw XcodeMCPError.invalidRequest("method must not be empty")
-        }
-        try ensureOpen()
-
-        let requestID = nextRequestID
-        nextRequestID += 1
-        let id = JSONRPC.ID(any: NSNumber(value: requestID))!
-        let idKey = id.key
-        let payload = try makeJSONRPCPayload(id: id, method: method, params: params)
-
-        return try await withRequestTimeout(method: method) { [self] in
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { continuation in
-                    self.pendingRequests.add(idKey: idKey, continuation: continuation)
-                    let sendTask = Task {
-                        do {
-                            try await self.transport.send(payload)
-                        } catch {
-                            self.pendingRequests.fail(
-                                idKey: idKey,
-                                error: Self.publicError(from: error)
-                            )
-                        }
-                    }
-                    if self.pendingRequests.setSendTask(idKey: idKey, task: sendTask) == false {
-                        sendTask.cancel()
-                    }
-                }
-            } onCancel: {
-                self.pendingRequests.fail(idKey: idKey, error: CancellationError())
-            }
+    package func request(
+        _ method: String,
+        params: MCPJSONValue? = nil,
+        onProgress: InitializedMCPClientSession.ProgressHandler? = nil
+    ) async throws -> MCPJSONValue {
+        do {
+            let result = try await session.request(
+                method,
+                params: params?.jsonValue,
+                onProgress: onProgress
+            )
+            return MCPJSONValue(result)
+        } catch {
+            throw Self.publicError(from: error)
         }
     }
 
     package func notify(_ method: String, params: MCPJSONValue? = nil) async throws {
-        guard method.isEmpty == false else {
-            throw XcodeMCPError.invalidRequest("method must not be empty")
-        }
-        try ensureOpen()
-        let payload = try makeJSONRPCPayload(id: nil, method: method, params: params)
         do {
-            try await transport.send(payload)
+            try await session.notify(method, params: params?.jsonValue)
         } catch {
             throw Self.publicError(from: error)
         }
@@ -481,6 +380,14 @@ private extension XcodeMCP {
             return XcodeMCPError.invalidRequest(message)
         case .invalidResponse(let message):
             return XcodeMCPError.invalidResponse(message)
+        case .requestTimedOut(let method):
+            return XcodeMCPError.requestTimedOut(method: method)
+        case .serverError(let code, let message, let data):
+            return XcodeMCPError.serverError(
+                code: code,
+                message: message,
+                data: data.map(MCPJSONValue.init)
+            )
         case .transportUnavailable(let reason):
             return XcodeMCPError.transportUnavailable(reason)
         }
@@ -492,194 +399,5 @@ private extension XcodeMCP {
             return nsError.localizedDescription
         }
         return String(describing: error)
-    }
-
-    func initialize() async throws {
-        let result = try await request(
-            "initialize",
-            params: .object([
-                "protocolVersion": .string(MCP.ProtocolVersion.current),
-                "clientInfo": .object([
-                    "name": .string(config.clientName),
-                    "version": .string(config.clientVersion),
-                ]),
-                "capabilities": .object(initializeCapabilities()),
-            ])
-        )
-        try validateInitializeResult(result)
-        try await notify("notifications/initialized")
-    }
-
-    func validateInitializeResult(_ result: MCPJSONValue) throws {
-        guard let object = result.objectValue else {
-            throw XcodeMCPError.invalidResponse("initialize result is not an object")
-        }
-        guard let protocolVersion = object["protocolVersion"]?.stringValue,
-              protocolVersion.isEmpty == false else {
-            throw XcodeMCPError.invalidResponse("initialize result is missing protocolVersion")
-        }
-        guard MCP.ProtocolVersion.isSupported(protocolVersion) else {
-            throw XcodeMCPError.invalidResponse(
-                "initialize result has unsupported protocolVersion \(protocolVersion)"
-            )
-        }
-    }
-
-    func initializeCapabilities() -> [String: MCPJSONValue] {
-        var capabilities = config.capabilities
-        capabilities.removeValue(forKey: "roots")
-        capabilities.removeValue(forKey: "sampling")
-        capabilities.removeValue(forKey: "elicitation")
-        return capabilities
-    }
-
-    func withRequestTimeout<T: Sendable>(
-        method: String,
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        guard let requestTimeout = config.requestTimeout else {
-            return try await operation()
-        }
-        return try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                try await operation()
-            }
-            group.addTask {
-                try await Task.sleep(for: requestTimeout)
-                throw XcodeMCPError.requestTimedOut(method: method)
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
-    }
-
-    func ensureOpen() throws {
-        if isClosed {
-            throw XcodeMCPError.closed
-        }
-    }
-
-    func handle(_ event: XcodeMCPTransportEvent) async {
-        switch event {
-        case .message(let data):
-            await handleMessage(data)
-        case .closed(let reason):
-            isClosed = true
-            progressHandlers.removeAll()
-            pendingRequests.failAll(
-                error: XcodeMCPError.transportUnavailable(reason ?? "mcpbridge closed")
-            )
-        }
-    }
-
-    func handleMessage(_ data: Data) async {
-        do {
-            let object = try parseJSONObject(data)
-            if let id = object["id"], let idKey = jsonRPCIDKey(id) {
-                if let method = object["method"]?.stringValue {
-                    try await respondToUnsupportedServerRequest(id: id, method: method)
-                    return
-                }
-                if let errorValue = object["error"] {
-                    pendingRequests.fail(idKey: idKey, error: parseServerError(errorValue))
-                    return
-                }
-                let result = object["result"] ?? .null
-                pendingRequests.complete(idKey: idKey, result: result)
-                return
-            }
-
-            if object["method"]?.stringValue == "notifications/progress",
-               let params = object["params"],
-               let progress = MCPProgress(json: params),
-               let handler = progressHandlers[progress.progressToken]
-            {
-                Task {
-                    await handler(progress)
-                }
-            }
-        } catch {
-            pendingRequests.failAll(error: Self.publicError(from: error))
-        }
-    }
-
-    func respondToUnsupportedServerRequest(id: MCPJSONValue, method _: String) async throws {
-        let payload = try JSONRPC.Wire.errorResponseData(
-            idValue: id.jsonValue,
-            code: -32601,
-            message: "Unsupported server request"
-        )
-        try await transport.send(payload)
-    }
-
-    func makeJSONRPCPayload(
-        id: JSONRPC.ID?,
-        method: String,
-        params: MCPJSONValue?
-    ) throws -> Data {
-        let object: [String: Any]
-        if let id {
-            object = JSONRPC.Wire.requestObject(
-                id: id,
-                method: method,
-                params: params?.jsonValue
-            )
-        } else {
-            object = JSONRPC.Wire.notificationObject(
-                method: method,
-                params: params?.jsonValue
-            )
-        }
-        return try JSONRPC.Wire.data(from: object)
-    }
-
-    func parseJSONObject(_ data: Data) throws -> [String: MCPJSONValue] {
-        let raw: [String: Any]
-        do {
-            raw = try JSONRPC.Wire.object(fromData: data)
-        } catch JSONRPC.Wire.DecodingFailure.messageWasNotObject {
-            throw XcodeMCPError.invalidResponse("JSON-RPC message is not an object")
-        } catch {
-            throw XcodeMCPError.invalidResponse(
-                "invalid JSON-RPC message: \(Self.errorDescription(error))"
-            )
-        }
-        guard let value = MCPJSONValue(foundationObject: raw),
-              let object = value.objectValue
-        else {
-            throw XcodeMCPError.invalidResponse("JSON-RPC message is not an object")
-        }
-        return object
-    }
-
-    func jsonRPCIDKey(_ value: MCPJSONValue) -> String? {
-        switch value {
-        case .string(let value):
-            return value
-        case .integer(let value):
-            return String(value)
-        case .double(let value):
-            return String(value)
-        case .object, .array, .bool, .null:
-            return nil
-        }
-    }
-
-    func parseServerError(_ value: MCPJSONValue) -> XcodeMCPError {
-        guard let object = value.objectValue else {
-            return .invalidResponse("JSON-RPC error is not an object")
-        }
-        let code: Int
-        switch object["code"] {
-        case .integer(let value):
-            code = Int(value)
-        case .double(let value):
-            code = Int(value)
-        default:
-            code = 0
-        }
-        let message = object["message"]?.stringValue ?? "MCP server error"
-        return .serverError(code: code, message: message, data: object["data"])
     }
 }

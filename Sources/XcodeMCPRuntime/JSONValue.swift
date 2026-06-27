@@ -2,8 +2,8 @@ import Foundation
 
 package enum JSONRPC {}
 
-package enum JSONValue: Sendable {
-    package enum Number: Sendable {
+package enum JSONValue: Equatable, Sendable {
+    package enum Number: Equatable, Sendable {
         case int(Int64)
         case double(Double)
 

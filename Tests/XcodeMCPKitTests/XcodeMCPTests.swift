@@ -174,6 +174,89 @@ struct XcodeMCPTests {
         #expect(progress.message == "halfway")
     }
 
+    @Test func runtimeSessionRoutesProgressAndAnswersUnsupportedServerRequests() async throws {
+        let transport = FakeXcodeMCPTransport()
+        let session = try await InitializedMCPClientSession(
+            transport: transport,
+            configuration: .init(
+                clientName: "RuntimeSessionTest",
+                clientVersion: "1.0",
+                capabilities: [:],
+                requestTimeout: .seconds(2)
+            )
+        )
+        defer {
+            Task { await session.close() }
+        }
+
+        let progressValues = RecordedValues<JSONValue>()
+        let result = try await session.request(
+            "tools/call",
+            params: .object([
+                "name": .string("DocumentationSearch"),
+                "arguments": .object([
+                    "query": .string("Runtime"),
+                ]),
+            ])
+        ) { progress in
+            await progressValues.append(progress)
+        }
+
+        #expect(MCPJSONValue(result).objectValue?["x-result"] == .string("dynamic"))
+
+        let call = try #require(await transport.sentMessages().last { $0.method == "tools/call" })
+        let progressToken = try #require(
+            call.params?.objectValue?["_meta"]?.objectValue?["progressToken"]?.stringValue
+        )
+        let progress = try await waitWithTimeout("runtime progress was not routed") {
+            try await progressValues.nextValue()
+        }
+        #expect(MCPJSONValue(progress).objectValue?["progressToken"] == .string(progressToken))
+
+        await transport.emitServerRequest(method: "sampling/createMessage", id: .integer(99))
+        let response = try await waitWithTimeout("runtime unsupported response was not sent") {
+            try await transport.nextSentMessage { message in
+                message.method == nil && message.error != nil
+            }
+        }
+        #expect(response.id == .integer(99))
+        #expect(response.error?.objectValue?["code"] == .integer(-32601))
+    }
+
+    @Test func runtimeSessionDoesNotRetainProgressHandlerForInvalidParams() async throws {
+        let transport = FakeXcodeMCPTransport()
+        let session = try await InitializedMCPClientSession(
+            transport: transport,
+            configuration: .init(
+                clientName: "RuntimeSessionTest",
+                clientVersion: "1.0",
+                capabilities: [:],
+                requestTimeout: .seconds(2)
+            )
+        )
+        defer {
+            Task { await session.close() }
+        }
+
+        weak var weakProbe: DeinitProbe?
+        do {
+            var probe: DeinitProbe? = DeinitProbe()
+            weakProbe = probe
+            let capturedProbe = probe
+
+            await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
+                "progress requests require object params"
+            )) {
+                _ = try await session.request("tools/call", params: .string("invalid")) { _ in
+                    _ = capturedProbe
+                }
+            }
+            probe = nil
+        }
+
+        #expect(weakProbe == nil)
+    }
+
     @Test func closeIsIdempotentAndRejectsFuturePublicCalls() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
@@ -681,6 +764,8 @@ struct XcodeMCPTests {
         }
     }
 }
+
+private final class DeinitProbe: @unchecked Sendable {}
 
 private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
