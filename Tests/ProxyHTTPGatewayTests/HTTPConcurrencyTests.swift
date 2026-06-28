@@ -752,8 +752,8 @@ private struct TestHTTPServer {
             var config = ProxyConfig(
                 listenHost: "127.0.0.1",
                 listenPort: 0,
-                upstreamCommand: "xcrun",
-                upstreamArgs: ["mcpbridge"],
+                upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+                upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
                 upstreamSessionID: nil,
                 maxBodyBytes: 1_048_576,
                 requestTimeout: requestTimeout
@@ -1777,8 +1777,8 @@ private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyConfig {
     var config = ProxyConfig(
         listenHost: "127.0.0.1",
         listenPort: 0,
-        upstreamCommand: "xcrun",
-        upstreamArgs: ["mcpbridge"],
+        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
         upstreamSessionID: nil,
         maxBodyBytes: 1_048_576,
         requestTimeout: requestTimeout

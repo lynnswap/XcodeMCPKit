@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPProcessRuntime
 
 enum CLIError: Error, CustomStringConvertible {
     case message(String)
@@ -38,8 +39,9 @@ struct CLIParser {
     ) throws -> ProxyConfig {
         var listenHost = "localhost"
         var listenPort = 0
-        var upstreamCommand = "xcrun"
-        var upstreamArgs = ["mcpbridge"]
+        let defaultBridgeInvocation = MCPBridgeInvocation.defaultMCPBridge
+        var upstreamCommand = defaultBridgeInvocation.command
+        var upstreamArgs = defaultBridgeInvocation.arguments
         var upstreamProcessCount = 1
         var upstreamSessionID: String?
         var maxBodyBytes = 1_048_576

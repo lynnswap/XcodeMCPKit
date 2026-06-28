@@ -12,6 +12,6 @@ extension XcrunArguments {
         else {
             return false
         }
-        return URL(fileURLWithPath: toolName).lastPathComponent == "mcpbridge"
+        return URL(fileURLWithPath: toolName).lastPathComponent == MCPBridgeInvocation.mcpBridgeToolName
     }
 }

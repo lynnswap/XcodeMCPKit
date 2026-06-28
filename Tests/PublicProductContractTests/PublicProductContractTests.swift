@@ -190,11 +190,7 @@ func compileOnlyClientDomainSurface() throws {
     ]
 
     let config = XcodeMCP.Configuration(
-        bridge: .custom(
-            command: "/usr/bin/xcrun",
-            arguments: ["mcpbridge"],
-            environment: ["PUBLIC_CONTRACT": "1"]
-        ),
+        bridge: .defaultMCPBridge,
         clientName: "PublicContractClient",
         clientVersion: "1.0",
         capabilities: [
@@ -203,6 +199,13 @@ func compileOnlyClientDomainSurface() throws {
             ]
         ],
         requestTimeout: .seconds(1)
+    )
+    let customBridgeConfig = XcodeMCP.Configuration(
+        bridge: .custom(
+            command: "/usr/bin/env",
+            arguments: ["printf"],
+            environment: ["PUBLIC_CONTRACT": "1"]
+        )
     )
 
     let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
@@ -301,6 +304,7 @@ func compileOnlyClientDomainSurface() throws {
     _ = (
         arguments,
         config,
+        customBridgeConfig,
         httpConfig,
         discoveryConfig,
         tags,
@@ -410,9 +414,7 @@ import XcodeMCPProxyKit
 func compileOnlyProxyConfigurationSurface() {
     let config = XcodeMCPProxyServer.Configuration(
         bind: .init(host: "127.0.0.1", port: 0),
-        upstream: .custom(
-            command: "/usr/bin/xcrun",
-            arguments: ["mcpbridge"],
+        upstream: .defaultMCPBridge(
             processesPerXcode: 1,
             sessionID: "session-1"
         ),
@@ -423,6 +425,14 @@ func compileOnlyProxyConfigurationSurface() {
         features: .init(
             prewarmToolsList: false,
             refreshCodeIssuesMode: .proxy
+        )
+    )
+    let customUpstreamConfig = XcodeMCPProxyServer.Configuration(
+        upstream: .custom(
+            command: "/usr/bin/env",
+            arguments: ["printf"],
+            processesPerXcode: 1,
+            sessionID: "session-1"
         )
     )
 
@@ -447,7 +457,7 @@ func compileOnlyProxyConfigurationSurface() {
         XcodeMCPProxyStdioAdapter(endpoint: $0, requestTimeout: 30)
     }
 
-    _ = (config, upstreamMode, server, adapterConfig, endpoint, adapter, plan)
+    _ = (config, customUpstreamConfig, upstreamMode, server, adapterConfig, endpoint, adapter, plan)
     _ = XcodeMCPProxyInstaller.binaryNames
 }
 

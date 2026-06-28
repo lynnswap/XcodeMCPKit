@@ -11,7 +11,10 @@ import XcodeMCPProcessRuntime
 struct LiveMCPBridgeTests {
     @Test(.enabled(if: DirectMCPBridgeTestEnvironment.isEnabled))
     func directMCPBridgeToolsListCanAutoApprovePermissionDialog() async throws {
-        let xcrunResult = try runProcess("/usr/bin/xcrun", ["--find", "mcpbridge"])
+        let xcrunResult = try runProcess(
+            MCPBridgeInvocation.xcrunCommand,
+            ["--find", MCPBridgeInvocation.mcpBridgeToolName]
+        )
         guard xcrunResult.terminationStatus == 0 else {
             Issue.record("mcpbridge is not available in the selected Xcode toolchain")
             throw LiveMCPBridgeTestError.mcpbridgeNotFound
@@ -82,7 +85,10 @@ struct LiveMCPBridgeTests {
     }
 
     @Test func proxyServerTalksToLiveMCPBridge() async throws {
-        let xcrunResult = try runProcess("/usr/bin/xcrun", ["--find", "mcpbridge"])
+        let xcrunResult = try runProcess(
+            MCPBridgeInvocation.xcrunCommand,
+            ["--find", MCPBridgeInvocation.mcpBridgeToolName]
+        )
         guard xcrunResult.terminationStatus == 0,
               xcrunResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
@@ -118,8 +124,8 @@ struct LiveMCPBridgeTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
-            upstreamCommand: "/usr/bin/xcrun",
-            upstreamArgs: ["mcpbridge"],
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
             maxBodyBytes: 1_048_576,
             requestTimeout: 20,
             discoveryFileURL: discoveryFile,

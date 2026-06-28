@@ -268,8 +268,8 @@ struct XcodeMCPProxyServerTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: blockedPort,
-            upstreamCommand: "xcrun",
-            upstreamArgs: ["mcpbridge"],
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true
@@ -308,8 +308,8 @@ struct XcodeMCPProxyServerTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
-            upstreamCommand: "xcrun",
-            upstreamArgs: ["mcpbridge"],
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true

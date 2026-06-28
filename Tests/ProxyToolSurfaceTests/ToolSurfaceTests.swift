@@ -463,8 +463,8 @@ private func makeToolSurfaceConfig() -> ProxyConfig {
     ProxyConfig(
         listenHost: "localhost",
         listenPort: 8765,
-        upstreamCommand: "xcrun",
-        upstreamArgs: ["mcpbridge"],
+        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
         maxBodyBytes: 1_048_576,
         requestTimeout: 300
     )

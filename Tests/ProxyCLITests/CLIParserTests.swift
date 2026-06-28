@@ -13,6 +13,16 @@ private func makeTempDiscoveryURL() -> URL {
 
 @Suite
 struct CLIParserTests {
+    @Test func cliUsesCanonicalDefaultMCPBridgeInvocation() async throws {
+        let config = try CLIParser.parse(
+            args: ["xcode-mcp-proxy"],
+            environment: [:]
+        )
+
+        #expect(config.upstreamCommand == MCPBridgeInvocation.defaultMCPBridge.command)
+        #expect(config.upstreamArgs == MCPBridgeInvocation.defaultMCPBridge.arguments)
+    }
+
     @Test func cliParsesListenAddress() async throws {
         let config = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--listen", "0.0.0.0:9999"],
@@ -171,8 +181,8 @@ struct CLIParserTests {
         let config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 0,
-            upstreamCommand: "xcrun",
-            upstreamArgs: ["mcpbridge"],
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             configPath: configPath,
@@ -195,8 +205,8 @@ struct CLIParserTests {
         let config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 0,
-            upstreamCommand: "xcrun",
-            upstreamArgs: ["mcpbridge"],
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             configPath: configPath
