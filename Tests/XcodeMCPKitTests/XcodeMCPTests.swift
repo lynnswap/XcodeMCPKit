@@ -506,6 +506,9 @@ struct XcodeMCPTests {
             var limit: Int
             var flags: [String: Bool]
         }
+        struct LargeUnsignedPayload: Encodable {
+            var value: UInt64
+        }
 
         let foundationValue = try MCPJSONValue(jsonObject: [
             "query": "SwiftUI",
@@ -548,6 +551,14 @@ struct XcodeMCPTests {
             "value is not a JSON-compatible Foundation object"
         )) {
             _ = try MCPJSONValue(jsonObject: NSNumber(value: UInt64(Int64.max) + 1))
+        }
+
+        #expect(throws: XcodeMCPError.invalidRequest(
+            "value is not a JSON-compatible Foundation object"
+        )) {
+            _ = try MCPJSONValue(encoding: LargeUnsignedPayload(
+                value: UInt64(Int64.max) + 1
+            ))
         }
 
         #expect(throws: XcodeMCPError.invalidRequest(

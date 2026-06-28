@@ -104,14 +104,17 @@ extension MCPJSONValue {
     /// Creates an MCP JSON value by encoding an `Encodable` value with
     /// `JSONEncoder`.
     ///
-    /// Encoding errors from the value are rethrown. This initializer is useful
-    /// for building dynamic MCP params from local request structs without
-    /// writing a tool-specific wrapper.
+    /// Encoding errors from the value are rethrown. Encoded JSON numbers that
+    /// cannot be represented by ``MCPJSONValue`` throw
+    /// ``XcodeMCPError/invalidRequest(_:)``. This initializer is useful for
+    /// building dynamic MCP params from local request structs without writing a
+    /// tool-specific wrapper.
     ///
     /// - Parameter value: The value to encode into MCP JSON.
     public init<T: Encodable>(encoding value: T) throws {
         let data = try JSONEncoder().encode(value)
-        self = try JSONDecoder().decode(MCPJSONValue.self, from: data)
+        let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        try self.init(jsonObject: object)
     }
 
     /// A Foundation JSON object suitable for `JSONSerialization`.
