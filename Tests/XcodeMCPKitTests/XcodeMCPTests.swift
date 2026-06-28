@@ -367,6 +367,42 @@ struct XcodeMCPTests {
         await xcode.close()
     }
 
+    @Test func runtimeSessionRequestTimeoutUsesInjectedClock() async throws {
+        let transport = HangingSendXcodeMCPTransport()
+        let timeoutClock = ManualSessionTimeoutClock()
+        let session = try await InitializedMCPClientSession(
+            transport: transport,
+            configuration: .init(
+                clientName: "RuntimeSessionTest",
+                clientVersion: "1.0",
+                capabilities: [:],
+                requestTimeout: .seconds(2),
+                clock: await timeoutClock.client()
+            )
+        )
+        defer {
+            Task { await session.close() }
+        }
+
+        let sleepBaseline = await timeoutClock.requestedSleepCount()
+        let requestTask = Task {
+            try await session.request("tools/list")
+        }
+        defer {
+            requestTask.cancel()
+        }
+
+        _ = try await transport.nextStarted(method: "tools/list")
+        let requestedTimeout = try await timeoutClock.nextRequestedSleep(at: sleepBaseline)
+        #expect(requestedTimeout == .seconds(2))
+
+        await timeoutClock.resumeSleep(at: sleepBaseline)
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(method: "tools/list")) {
+            _ = try await requestTask.value
+        }
+        _ = try await transport.nextCancelled(method: "tools/list")
+    }
+
     @Test func unsupportedServerRequestGetsInternalErrorResponse() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
@@ -1887,6 +1923,122 @@ private actor RecordedValues<Value: Sendable> {
             return values[index]
         }
         return nil
+    }
+}
+
+private actor ManualSessionTimeoutClock {
+    private struct SleepRequest {
+        let id: UUID
+        let index: Int
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private struct DurationWaiter {
+        let id: UUID
+        let index: Int
+        let continuation: CheckedContinuation<Duration, Error>
+    }
+
+    private var requestedDurations: [Duration] = []
+    private var sleepRequests: [SleepRequest] = []
+    private var cancelledSleepRequestIDs: Set<UUID> = []
+    private var durationWaiters: [DurationWaiter] = []
+
+    func client() -> ClockClient {
+        ClockClient(
+            now: { Date(timeIntervalSince1970: 0) },
+            uptimeNanoseconds: { 0 },
+            sleep: { duration in
+                await self.sleep(for: duration)
+            },
+            sleepForTimeInterval: { _ in }
+        )
+    }
+
+    func requestedSleepCount() -> Int {
+        requestedDurations.count
+    }
+
+    func nextRequestedSleep(at index: Int) async throws -> Duration {
+        if requestedDurations.indices.contains(index) {
+            return requestedDurations[index]
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if requestedDurations.indices.contains(index) {
+                    continuation.resume(returning: requestedDurations[index])
+                    return
+                }
+                durationWaiters.append(
+                    DurationWaiter(id: waiterID, index: index, continuation: continuation)
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelDurationWaiter(id: waiterID) }
+        }
+    }
+
+    func resumeSleep(at index: Int) {
+        guard let requestIndex = sleepRequests.firstIndex(where: { $0.index == index }) else {
+            return
+        }
+        let request = sleepRequests.remove(at: requestIndex)
+        request.continuation.resume()
+    }
+
+    private func sleep(for duration: Duration) async {
+        let requestID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if cancelledSleepRequestIDs.remove(requestID) != nil {
+                    continuation.resume()
+                    return
+                }
+                let index = requestedDurations.count
+                requestedDurations.append(duration)
+                sleepRequests.append(
+                    SleepRequest(
+                        id: requestID,
+                        index: index,
+                        continuation: continuation
+                    )
+                )
+                resumeReadyDurationWaiters()
+            }
+        } onCancel: {
+            Task { await self.cancelSleepRequest(id: requestID) }
+        }
+    }
+
+    private func cancelSleepRequest(id: UUID) {
+        guard let index = sleepRequests.firstIndex(where: { $0.id == id }) else {
+            cancelledSleepRequestIDs.insert(id)
+            return
+        }
+        let request = sleepRequests.remove(at: index)
+        request.continuation.resume()
+    }
+
+    private func cancelDurationWaiter(id: UUID) {
+        guard let index = durationWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = durationWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumeReadyDurationWaiters() {
+        var remaining: [DurationWaiter] = []
+        for waiter in durationWaiters {
+            if requestedDurations.indices.contains(waiter.index) {
+                waiter.continuation.resume(returning: requestedDurations[waiter.index])
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        durationWaiters = remaining
     }
 }
 

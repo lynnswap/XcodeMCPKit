@@ -51,7 +51,7 @@ extension XcodePermissionDialog {
                     assistantNameCandidates: assistantNameCandidates,
                     serverProcessIDCandidates: serverProcessIDCandidates,
                     sleep: { duration in
-                        try? await Task.sleep(for: duration)
+                        await ClockClient.liveValue.sleep(duration)
                     },
                     pollInterval: .milliseconds(250),
                     logger: ProxyLogging.make("xcode.permission")
@@ -68,7 +68,7 @@ extension XcodePermissionDialog {
                 assistantNameCandidates: { [] },
                 serverProcessIDCandidates: { [] },
                 sleep: { _ in
-                    try? await Task.sleep(for: .milliseconds(1))
+                    await ClockClient.liveValue.sleep(.milliseconds(1))
                 },
                 pollInterval: .milliseconds(1),
                 logger: ProxyLogging.make("xcode.permission.test")

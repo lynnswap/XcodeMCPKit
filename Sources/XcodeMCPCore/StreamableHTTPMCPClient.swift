@@ -35,7 +35,8 @@ package final class StreamableHTTPMCPClient: @unchecked Sendable {
         requestTimeout: Duration? = nil,
         automaticallyStartsEventStream: Bool = true,
         eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
-            try await Task.sleep(for: duration)
+            await ClockClient.liveValue.sleep(duration)
+            try Task.checkCancellation()
         }
     ) {
         let stream = AsyncStream<Data>.makeStream()

@@ -57,22 +57,25 @@ private final class MCPClientPendingRequests: @unchecked Sendable {
 }
 
 package actor InitializedMCPClientSession {
-    package struct Configuration: Equatable, Sendable {
+    package struct Configuration: Sendable {
         package var clientName: String
         package var clientVersion: String
         package var capabilities: [String: JSONValue]
         package var requestTimeout: Duration?
+        package var clock: ClockClient
 
         package init(
             clientName: String,
             clientVersion: String,
             capabilities: [String: JSONValue],
-            requestTimeout: Duration?
+            requestTimeout: Duration?,
+            clock: ClockClient = .liveValue
         ) {
             self.clientName = clientName
             self.clientVersion = clientVersion
             self.capabilities = capabilities
             self.requestTimeout = requestTimeout
+            self.clock = clock
         }
     }
 
@@ -266,12 +269,14 @@ private extension InitializedMCPClientSession {
         guard let requestTimeout = configuration.requestTimeout else {
             return try await operation()
         }
+        let clock = configuration.clock
         return try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask {
                 try await operation()
             }
             group.addTask {
-                try await Task.sleep(for: requestTimeout)
+                await clock.sleep(requestTimeout)
+                try Task.checkCancellation()
                 throw MCPBridgeRuntimeError.requestTimedOut(method: method)
             }
             let result = try await group.next()!

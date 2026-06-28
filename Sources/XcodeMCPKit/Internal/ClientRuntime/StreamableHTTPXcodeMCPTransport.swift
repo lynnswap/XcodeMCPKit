@@ -40,7 +40,8 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
         urlSession: URLSession,
         requestTimeout: Duration? = nil,
         eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
-            try await Task.sleep(for: duration)
+            await ClockClient.liveValue.sleep(duration)
+            try Task.checkCancellation()
         }
     ) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
