@@ -6,6 +6,7 @@ import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
 @testable import XcodeMCPProxyKit
+@testable import XcodeMCPProxyInternalTestSupport
 import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)

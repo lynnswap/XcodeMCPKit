@@ -299,6 +299,7 @@ let package = Package(
                 "XcodeMCPProcessRuntime",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyTestSupport",
+                "XcodeMCPProxyInternalTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
