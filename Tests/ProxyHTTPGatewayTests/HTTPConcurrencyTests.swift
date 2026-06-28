@@ -1,5 +1,4 @@
 import Foundation
-import Dispatch
 import NIO
 import NIOEmbedded
 import NIOHTTP1
@@ -218,7 +217,9 @@ struct HTTPConcurrencyTests {
             executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
         )
         eventLoop.run()
-        #expect(try upstream.waitForRequestCount(1) == ["tools/call:ExecuteSnippet"])
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         let secondOperation = try handlePost(
             executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2")
@@ -240,7 +241,9 @@ struct HTTPConcurrencyTests {
         #expect(firstObject["error"] == nil)
 
         eventLoop.run()
-        #expect(try upstream.waitForRequestCount(2) == [
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
             "tools/call:ExecuteSnippet",
         ])
@@ -309,7 +312,9 @@ struct HTTPConcurrencyTests {
             to: firstChannel
         )
         firstChannel.embeddedEventLoop.run()
-        #expect(try upstream.waitForRequestCount(1) == ["tools/call:ExecuteSnippet"])
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         try postEmbeddedJSON(
             executeSnippetPayload(id: 701, tabIdentifier: "windowtab-timeout-2"),
@@ -327,7 +332,9 @@ struct HTTPConcurrencyTests {
         #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
 
         secondChannel.embeddedEventLoop.run()
-        #expect(try upstream.waitForRequestCount(2) == [
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
             "tools/call:ExecuteSnippet",
         ])
@@ -872,15 +879,6 @@ private actor EchoUpstreamClient: UpstreamSlotControlling {
     }
 }
 
-private func waitForSemaphore(
-    _ semaphore: DispatchSemaphore,
-    description: String
-) throws {
-    guard semaphore.wait(timeout: .now() + .seconds(2)) == .success else {
-        throw AsyncTestTimeoutError(description: description)
-    }
-}
-
 private func waitForUpstreamRequest(
     _ upstream: ControlledUpstreamClient,
     label: String
@@ -913,7 +911,6 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let lock = NSLock()
-    private let requestSemaphore = DispatchSemaphore(value: 0)
     private var state = State()
 
     init() {
@@ -953,18 +950,10 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
         }
     }
 
-    func waitForRequestCount(_ count: Int) throws -> [String] {
+    func recordedRequestLabels(count: Int) -> [String] {
         guard count > 0 else { return [] }
-        while true {
-            let labels = withLock { $0.requestHistory }
-            if labels.count >= count {
-                return Array(labels.prefix(count))
-            }
-            try waitForSemaphore(
-                requestSemaphore,
-                description: "waiting for \(count) embedded upstream request(s)"
-            )
-        }
+
+        return withLock { Array($0.requestHistory.prefix(count)) }
     }
 
     @discardableResult
@@ -1011,7 +1000,6 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
             $0.sentRequests.append(SentRequest(label: label, responseData: responseData))
             $0.requestHistory.append(label)
         }
-        requestSemaphore.signal()
     }
 
     private func withLock<T>(_ body: (inout State) -> T) -> T {

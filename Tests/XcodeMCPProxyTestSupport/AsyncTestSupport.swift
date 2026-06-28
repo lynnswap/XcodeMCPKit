@@ -416,30 +416,6 @@ package func waitWithTimeout<T: Sendable>(
     }
 }
 
-package func waitUntil(
-    timeout: Duration = .seconds(5),
-    pollInterval: Duration = .milliseconds(10),
-    _ condition: @escaping @Sendable () async -> Bool
-) async -> Bool {
-    // Use this only as a guard around external I/O or OS-driven eventual state.
-    // Intra-process concurrency tests should prefer RecordedValues, OperationGate,
-    // or TestClock so the awaited synchronization point is explicit.
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
-
-    while clock.now < deadline {
-        if Task.isCancelled {
-            return false
-        }
-        if await condition() {
-            return true
-        }
-        try? await clock.sleep(until: clock.now.advanced(by: pollInterval))
-    }
-
-    return await condition()
-}
-
 package func shutdown(_ group: EventLoopGroup) async {
     await withCheckedContinuation { continuation in
         group.shutdownGracefully { _ in
@@ -455,6 +431,16 @@ extension RuntimeCoordinator {
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached(priority: .userInitiated) { [self] in
             await shutdown()
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+
+    package func drainRuntimeTasksAndWaitForTesting() {
+        let drain = runtimeTasks.drainCurrentTasks()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            await drain.wait()
             semaphore.signal()
         }
         semaphore.wait()
