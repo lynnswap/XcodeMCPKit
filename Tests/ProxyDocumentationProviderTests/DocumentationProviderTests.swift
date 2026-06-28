@@ -1368,18 +1368,18 @@ struct DocumentationProviderTests {
                 ],
             ]
         )
-        let manager = DocumentationProviderManager(
-            discovery: RuntimeDocumentationTargetDiscovery(
-                base: StubXcodeTargetDiscovery(targets: [ownerTarget, stableTarget]),
-                runtimeBox: runtimeBox
-            ),
-            sessionFactory: factory
+        let discovery = RuntimeDocumentationTargetDiscovery(
+            base: StubXcodeTargetDiscovery(targets: [ownerTarget, stableTarget]),
+            runtimeBox: runtimeBox
         )
-
-        #expect(runtime.documentationCandidateProcessOrder() == [
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [
             ownerTarget.processID,
             stableTarget.processID,
         ])
+        let manager = DocumentationProviderManager(
+            discovery: discovery,
+            sessionFactory: factory
+        )
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 98, query: "SwiftUI"),
@@ -2399,6 +2399,75 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedCallPIDs() == [target.processID])
         #expect(await localProvider.requestedQueries() == ["UIView"])
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+    }
+
+    @Test func documentationProviderUsesSameTargetAssetFallbackWhenRepairReopenIsUnavailable()
+        async throws
+    {
+        let older = xcodeProcessTarget(processID: 120, xcodeVersion: "26.6")
+        let newest = xcodeProcessTarget(processID: 121, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                older.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 20,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+                newest.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 20,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let repairer = StubDocumentationSearchServiceRepairer(
+            result: .repaired(
+                DocumentationSearchServiceRepairReport(
+                    configURL: "/docs/config.json",
+                    xcodeVersion: "27.0",
+                    osVersion: "26.2",
+                    documentationRelease: 900340,
+                    changedDefault: true
+                )
+            )
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 121,
+                text: "{\"answer\":\"asset-newest\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [older, newest]),
+            sessionFactory: factory,
+            serviceRepairer: repairer,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 121, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset-newest\"}")
+        #expect(await repairer.repairedPIDs() == [newest.processID])
+        #expect(await factory.startAttempts() == [newest.processID, newest.processID])
+        #expect(await factory.startedPIDs() == [newest.processID])
+        #expect(await factory.documentationQueries(for: older.processID).isEmpty)
+        #expect(await localProvider.requestedDescriptorPIDs() == [newest.processID])
+        #expect(await localProvider.requestedCallPIDs() == [newest.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
     }
 
     @Test func documentationProviderRejectsRepairedRouteWhenDescriptorIsStillMissing()

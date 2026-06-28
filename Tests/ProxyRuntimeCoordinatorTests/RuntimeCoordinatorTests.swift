@@ -206,10 +206,10 @@ struct RuntimeCoordinatorTests {
         let recoveryUpstreamID = try extractUpstreamID(from: recoveryInitialize)
         await upstream0.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
         _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        let expectedCandidateProcessOrder = [
+        let expectedCandidateProcessIDs = Set([
             newerTarget.processID,
             olderTarget.processID,
-        ]
+        ])
         let recoveredUpstreamIndex = try await waitWithTimeout(
             "waiting for recovered primary upstream initialization"
         ) {
@@ -218,7 +218,7 @@ struct RuntimeCoordinatorTests {
         #expect(recoveredUpstreamIndex == 0)
         #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
         #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
-        #expect(manager.documentationCandidateProcessOrder() == expectedCandidateProcessOrder)
+        #expect(manager.documentationCandidateProcessIDs() == expectedCandidateProcessIDs)
     }
 
     @Test func sessionManagerRoutesInitializeHandshakeNotificationsFromRetriedPrimaryProcess()
@@ -306,7 +306,7 @@ struct RuntimeCoordinatorTests {
         #expect(response["result"] != nil)
         #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
         #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
-        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+        #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
     }
 
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterExit()
@@ -2089,7 +2089,9 @@ struct RuntimeCoordinatorTests {
             methodName(from: $0) == "tools/list"
         }
         #expect(methodName(from: latestRequest) == "tools/list")
-        #expect(await olderUpstream.sentCount() == 0)
+        let olderRequest = try await olderUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
         await latestUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2101,29 +2103,44 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
+        await olderUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: olderRequest),
+                    tools: [
+                        toolDescriptor(name: "SharedTool", description: "from-26"),
+                        toolDescriptor(name: "Only26", description: "old-only"),
+                    ],
+                )
+            )
+        )
 
         let result = try await waitWithTimeout("waiting for process-routed tools/list") {
             try await task.value
         }
-        #expect(toolNames(in: result) == ["Only27", "SharedTool"])
+        #expect(toolNames(in: result) == ["Only26", "Only27", "SharedTool"])
         #expect(toolDescription(in: result, name: "SharedTool") == "from-27")
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["Only27", "SharedTool"])
-        #expect(await olderUpstream.sentCount() == 0)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "Only26",
+            "Only27",
+            "SharedTool",
+        ])
+        #expect(await olderUpstream.sentCount() == 1)
 
         let catalogs = manager.debugSnapshot().processToolCatalogs
-        #expect(catalogs.count == 1)
+        #expect(catalogs.count == 2)
         let latestCatalog = try #require(catalogs.first { $0.processID == latestTarget.processID })
         #expect(latestCatalog.toolCount == 2)
         #expect(latestCatalog.tabOwnerCount == 1)
         #expect(latestCatalog.workspaceOwnerCount == 1)
         #expect(latestCatalog.isCanonicalSource)
         #expect(latestCatalog.exposurePolicy == "available_route_catalog_surface")
-        #expect(latestCatalog.extraBeyondExposedCatalog == [])
-        #expect(latestCatalog.schemaConflicts == [])
+        #expect(latestCatalog.extraBeyondExposedCatalog == ["Only26"])
+        #expect(latestCatalog.schemaConflicts == ["SharedTool"])
     }
 
-    @Test func sessionManagerToolsListRefreshesFallbackCatalogAfterOwnerIsLearned()
+    @Test func sessionManagerToolsListUnionsFallbackCatalogAfterOwnerIsLearned()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2194,7 +2211,8 @@ struct RuntimeCoordinatorTests {
         let ownerRequest = try await ownerUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        #expect(await fallbackUpstream.sentCount() == 1)
+        try await waitForSentCount(fallbackUpstream, count: 2, timeoutSeconds: 2)
+        #expect(await fallbackUpstream.sentCount() == 2)
         await ownerUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2208,9 +2226,12 @@ struct RuntimeCoordinatorTests {
         let ownerResult = try await waitWithTimeout("waiting for owner tools/list") {
             try await ownerTask.value
         }
-        #expect(toolNames(in: ownerResult) == ["OwnerOnly"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["OwnerOnly"])
-        #expect(await fallbackUpstream.sentCount() == 1)
+        #expect(toolNames(in: ownerResult) == ["FallbackOnly", "OwnerOnly"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "FallbackOnly",
+            "OwnerOnly",
+        ])
+        #expect(await fallbackUpstream.sentCount() == 2)
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
@@ -2456,7 +2477,7 @@ struct RuntimeCoordinatorTests {
             target.processID,
         ])
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
-        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+        #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
     }
 
     @Test func sessionManagerToolsListSiblingRetryUsesSharedDeadline()
@@ -2793,7 +2814,7 @@ struct RuntimeCoordinatorTests {
         #expect(await olderUpstream.sentCount() == 0)
     }
 
-    @Test func documentationCandidatesPreferWorkspaceOwnersButKeepFallbackProcesses()
+    @Test func documentationCandidatesIgnoreWorkspaceOwnersAndKeepUsableProcesses()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2823,12 +2844,6 @@ struct RuntimeCoordinatorTests {
         #expect(manager.recordXcodeWindowOwners(from: result, upstreamIndex: 1))
 
         #expect(
-            manager.documentationCandidateProcessOrder() == [
-                goodTarget.processID,
-                badTarget.processID,
-            ]
-        )
-        #expect(
             manager.documentationCandidateProcessIDs() == Set([
                 badTarget.processID,
                 goodTarget.processID,
@@ -2836,88 +2851,56 @@ struct RuntimeCoordinatorTests {
         )
     }
 
-    @Test func documentationCandidatesPreserveRouteOrderWithinOwnersBeforeFallbacks()
+    @Test func runtimeDocumentationDiscoveryPreservesDiscoveryOrderExceptUnavailableProcessIDs()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let fallbackTarget0 = xcodeProcessTarget(processID: 80430, xcodeVersion: "27.0")
-        let ownerTarget0 = xcodeProcessTarget(processID: 80431, xcodeVersion: "27.0")
-        let fallbackTarget1 = xcodeProcessTarget(processID: 80432, xcodeVersion: "26.6")
-        let ownerTarget1 = xcodeProcessTarget(processID: 80433, xcodeVersion: "26.6")
-
-        func candidateOrder(routeTargets: [XcodeProcessTarget]) throws -> [pid_t]? {
-            let manager = RuntimeCoordinator(
-                config: makeConfig(requestTimeout: 5),
-                eventLoop: eventLoop,
-                upstreams: routeTargets.map { _ in TestUpstreamClient() },
-                xcodeProcessRoutes: routeTargets.enumerated().map { index, target in
-                    XcodeProcessRoute(target: target, upstreamIndices: [index])
-                },
-                startImmediately: false
-            )
-            defer { manager.shutdownAndWait() }
-            for index in routeTargets.indices {
-                manager.markUpstreamInitialized(upstreamIndex: index)
-            }
-
-            func upstreamIndex(for target: XcodeProcessTarget) throws -> Int {
-                try #require(routeTargets.firstIndex {
-                    $0.processID == target.processID
-                })
-            }
-
-            #expect(
-                manager.recordXcodeWindowOwners(
-                    from: try jsonValue([
-                        "structuredContent": [
-                            "message": "* tabIdentifier: tab-owner-1, workspacePath: /tmp/Owner1.xcworkspace",
-                        ],
-                    ]),
-                    upstreamIndex: try upstreamIndex(for: ownerTarget1)
-                )
-            )
-            #expect(
-                manager.recordXcodeWindowOwners(
-                    from: try jsonValue([
-                        "structuredContent": [
-                            "message": "* tabIdentifier: tab-owner-0, workspacePath: /tmp/Owner0.xcworkspace",
-                        ],
-                    ]),
-                    upstreamIndex: try upstreamIndex(for: ownerTarget0)
-                )
-            )
-
-            return manager.documentationCandidateProcessOrder()
-        }
-
-        #expect(
-            try candidateOrder(routeTargets: [
-                fallbackTarget0,
-                ownerTarget0,
-                fallbackTarget1,
-                ownerTarget1,
-            ]) == [
-                ownerTarget0.processID,
-                ownerTarget1.processID,
-                fallbackTarget0.processID,
-                fallbackTarget1.processID,
-            ]
+        let routeFirst = xcodeProcessTarget(processID: 80430, xcodeVersion: "26.6")
+        let unavailable = xcodeProcessTarget(processID: 80431, xcodeVersion: "27.0")
+        let routeLast = xcodeProcessTarget(processID: 80432, xcodeVersion: "25.4")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: routeFirst, upstreamIndices: [0]),
+                XcodeProcessRoute(target: unavailable, upstreamIndices: [1]),
+                XcodeProcessRoute(target: routeLast, upstreamIndices: [2]),
+            ],
+            startImmediately: false
         )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.markUpstreamInitialized(upstreamIndex: 2)
         #expect(
-            try candidateOrder(routeTargets: [
-                fallbackTarget0,
-                ownerTarget1,
-                fallbackTarget1,
-                ownerTarget0,
-            ]) == [
-                ownerTarget1.processID,
-                ownerTarget0.processID,
-                fallbackTarget0.processID,
-                fallbackTarget1.processID,
-            ]
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-route-last, workspacePath: /tmp/RouteLast.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 2
+            )
         )
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 1,
+            reason: "test_discovery_filter"
+        )
+
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        runtimeBox.value = manager
+        let discovery = RuntimeDocumentationTargetDiscovery(
+            base: StubXcodeTargetDiscovery(targets: [routeLast, unavailable, routeFirst]),
+            runtimeBox: runtimeBox
+        )
+
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [
+            routeLast.processID,
+            routeFirst.processID,
+        ])
     }
 
     @Test func documentationCandidatesSkipUnavailableWorkspaceOwner() async throws {
@@ -2951,7 +2934,7 @@ struct RuntimeCoordinatorTests {
             reason: "test_owner_terminated"
         )
 
-        #expect(manager.documentationCandidateProcessOrder() == [badTarget.processID])
+        #expect(manager.documentationCandidateProcessIDs() == Set([badTarget.processID]))
     }
 
     @Test func runtimeDocumentationDiscoveryKeepsLiveTargetsOutsideUsableRouteCandidates()
@@ -2985,25 +2968,20 @@ struct RuntimeCoordinatorTests {
         let runtimeBox = WeakRuntimeCoordinatorBox()
         runtimeBox.value = manager
         let discovery = RuntimeDocumentationTargetDiscovery(
-            base: StubXcodeTargetDiscovery(targets: [ownerTarget, fallbackTarget]),
+            base: StubXcodeTargetDiscovery(targets: [fallbackTarget, ownerTarget]),
             runtimeBox: runtimeBox
         )
 
-        #expect(manager.documentationCandidateProcessOrder() == [ownerTarget.processID])
         #expect(discovery.runningXcodeTargets().map(\.processID) == [
-            ownerTarget.processID,
             fallbackTarget.processID,
+            ownerTarget.processID,
         ])
 
         manager.markUpstreamInitialized(upstreamIndex: 1)
 
-        #expect(manager.documentationCandidateProcessOrder() == [
-            ownerTarget.processID,
-            fallbackTarget.processID,
-        ])
         #expect(discovery.runningXcodeTargets().map(\.processID) == [
-            ownerTarget.processID,
             fallbackTarget.processID,
+            ownerTarget.processID,
         ])
     }
 
@@ -3159,6 +3137,30 @@ struct RuntimeCoordinatorTests {
         }
         #expect(mergedMessage == "\(message0)\n\(message1)")
 
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "XcodeListNavigatorIssues"),
+                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
+                        toolDescriptor(name: "XcodeRead"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "XcodeListNavigatorIssues"),
+                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
+                        toolDescriptor(name: "XcodeRead"),
+                    ]
+                ),
+            ]
+        )
+
         let tabARequest: [String: Any] = [
             "method": "tools/call",
             "params": [
@@ -3186,9 +3188,29 @@ struct RuntimeCoordinatorTests {
                 ],
             ],
         ]
+        let genericTabARequest: [String: Any] = [
+            "method": "tools/call",
+            "params": [
+                "name": "XcodeRead",
+                "arguments": [
+                    "tabIdentifier": "tab-a",
+                ],
+            ],
+        ]
+        let genericWorkspaceBRequest: [String: Any] = [
+            "method": "tools/call",
+            "params": [
+                "name": "XcodeRead",
+                "arguments": [
+                    "workspacePath": "/Work/B.xcworkspace",
+                ],
+            ],
+        ]
         #expect(manager.preferredUpstreamIndex(for: tabARequest) == 0)
         #expect(manager.preferredUpstreamIndex(for: tabBRequest) == 1)
         #expect(manager.preferredUpstreamIndex(for: workspaceBRequest) == 1)
+        #expect(manager.preferredUpstreamIndex(for: genericTabARequest) == nil)
+        #expect(manager.preferredUpstreamIndex(for: genericWorkspaceBRequest) == nil)
         #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
     }
 
@@ -3242,7 +3264,13 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(resultMessage == message)
-        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+        #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 1, [ownerBoundToolDescriptor(name: "XcodeListNavigatorIssues")]),
+            ]
+        )
         #expect(manager.preferredUpstreamIndex(for: [
             "method": "tools/call",
             "params": [
@@ -3314,7 +3342,13 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(resultMessage == message)
-        #expect(manager.documentationCandidateProcessOrder() == [target.processID])
+        #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 1, [ownerBoundToolDescriptor(name: "XcodeListNavigatorIssues")]),
+            ]
+        )
         #expect(manager.preferredUpstreamIndex(for: [
             "method": "tools/call",
             "params": [
@@ -3400,6 +3434,22 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(mergedMessage == "\(message0)\n\(message1)")
+
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target0,
+                    0,
+                    [ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool")]
+                ),
+                (
+                    target1,
+                    1,
+                    [ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool")]
+                ),
+            ]
+        )
 
         let workspaceRequest: [String: Any] = [
             "method": "tools/call",
@@ -8162,6 +8212,12 @@ struct RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
         #expect(
             manager.recordXcodeWindowOwners(
                 from: try jsonValue([

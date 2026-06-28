@@ -174,7 +174,16 @@ extension RuntimeCoordinator {
     }
 
     func documentationCandidateProcessIDs() -> Set<pid_t>? {
-        documentationCandidateProcessOrder().map(Set.init)
+        guard xcodeProcessRoutes.isEmpty == false else {
+            return nil
+        }
+        let unavailable = unavailableXcodeProcessIDs()
+        return Set(xcodeProcessRoutes.compactMap { route in
+            unavailable.contains(route.target.processID) == false
+                && firstUsableInitializedUpstreamIndex(in: route) != nil
+                ? route.target.processID
+                : nil
+        })
     }
 
     func catalogEligibleConfiguredProcessIDs() -> Set<pid_t> {
@@ -182,50 +191,6 @@ extension RuntimeCoordinator {
         return Set(xcodeProcessRoutes.compactMap { route in
             unavailable.contains(route.target.processID) ? nil : route.target.processID
         })
-    }
-
-    func documentationCandidateProcessOrder() -> [pid_t]? {
-        guard xcodeProcessRoutes.isEmpty == false else {
-            return nil
-        }
-        let unavailable = unavailableXcodeProcessIDs()
-        let candidateRoutes = xcodeProcessRoutes.filter { route in
-            unavailable.contains(route.target.processID) == false
-                && firstUsableInitializedUpstreamIndex(in: route) != nil
-        }
-        let candidateProcessIDsInRouteOrder = candidateRoutes.map(\.target.processID)
-        let workspaceOwnerProcesses = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
-        let tabOwnerProcesses = Set(tabOwnerProcessIDs.withLockedValue(\.values))
-        let ownerProcesses = workspaceOwnerProcesses.union(tabOwnerProcesses)
-        let ownerProcessIDs = orderedProcessIDs(
-            candidateProcessIDsInRouteOrder.filter { ownerProcesses.contains($0) },
-            unavailable: unavailable
-        )
-        let ownerProcessIDSet = Set(ownerProcessIDs)
-
-        let nonOwnerProcessIDs = orderedProcessIDs(
-            candidateProcessIDsInRouteOrder.filter { ownerProcessIDSet.contains($0) == false },
-            unavailable: unavailable
-        )
-        let candidateProcessIDs = ownerProcessIDs + nonOwnerProcessIDs
-        if candidateProcessIDs.isEmpty == false {
-            return candidateProcessIDs
-        }
-        return []
-    }
-
-    private func orderedProcessIDs(
-        _ processIDs: [pid_t],
-        unavailable: Set<pid_t>
-    ) -> [pid_t] {
-        var seen = Set<pid_t>()
-        return processIDs.compactMap { processID -> pid_t? in
-            guard unavailable.contains(processID) == false,
-                  seen.insert(processID).inserted else {
-                return nil
-            }
-            return processID
-        }
     }
 
     func unavailableXcodeProcessIDs() -> Set<pid_t> {
@@ -761,7 +726,12 @@ extension RuntimeCoordinator {
     private func preferredUpstreamIndex(in object: [String: Any]) -> Int? {
         guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
               let params = object["params"] as? [String: Any],
+              let toolName = params["name"] as? String,
               let arguments = params["arguments"] as? [String: Any] else {
+            return nil
+        }
+        guard processToolCatalogRegistry.isOwnerBoundTool(toolName)
+            || cachedOwnerBoundToolNames().contains(toolName) else {
             return nil
         }
         if let tabIdentifier = arguments["tabIdentifier"] as? String,

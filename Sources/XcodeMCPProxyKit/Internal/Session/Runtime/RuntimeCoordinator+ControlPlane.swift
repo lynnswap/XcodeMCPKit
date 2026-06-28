@@ -102,14 +102,11 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        let candidateProcessOrder = documentationCandidateProcessOrder()
-        let processRoutes =
-            candidateProcessOrder.map { order in
-                order.compactMap { processID in
-                    xcodeProcessRoutes.first { $0.target.processID == processID }
-                }
-            } ?? xcodeProcessRoutes
-        let routes = processRoutes.compactMap { route -> AvailableToolsCatalogRoute? in
+        let unavailable = unavailableXcodeProcessIDs()
+        let routes = xcodeProcessRoutes.compactMap { route -> AvailableToolsCatalogRoute? in
+            guard unavailable.contains(route.target.processID) == false else {
+                return nil
+            }
             let upstreamIndices = usableInitializedUpstreamIndices(in: route)
             guard upstreamIndices.isEmpty == false else {
                 return nil
@@ -120,14 +117,12 @@ extension RuntimeCoordinator {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
-        let routeBatches = availableToolsCatalogRouteBatches(routes)
-        let highestPriorityProcessIDs = Set(routeBatches.first?.map { $0.target.processID } ?? [])
+        let exposedProcessIDs = Set(routes.map { $0.target.processID })
         if let surface = processToolCatalogRegistry.availableToolCatalogSurface(
-            processIDs: highestPriorityProcessIDs
+            processIDs: exposedProcessIDs
         ),
            let sourceUpstream = surface.sourceUpstream,
-           let highestPriorityProcessID = routeBatches.first?.first?.target.processID,
-           surface.processIDs.contains(highestPriorityProcessID) {
+           surface.processIDs == exposedProcessIDs {
             return CanonicalToolsCatalogLoadResult(
                 rawResult: surface.rawResult,
                 sourceUpstream: sourceUpstream,
@@ -135,42 +130,13 @@ extension RuntimeCoordinator {
             )
         }
 
-        var lastFailure: (any Error)?
-        for routeBatch in routeBatches {
-            do {
-                return try await loadFirstAvailableToolsCatalogInBatch(
-                    routeBatch,
-                    requestTimeout: requestTimeout,
-                    deadlineUptimeNs: deadlineUptimeNs,
-                    startedAt: startedAt,
-                    exposedProcessIDs: Set(routeBatch.map { $0.target.processID })
-                )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastFailure = error
-            }
-        }
-        if let lastFailure {
-            throw lastFailure
-        }
-        throw UpstreamSlotScheduler.AcquisitionError.unavailable
-    }
-
-    private func availableToolsCatalogRouteBatches(
-        _ routes: [AvailableToolsCatalogRoute]
-    ) -> [[AvailableToolsCatalogRoute]] {
-        let ownerProcessIDs = Set(workspaceOwnerProcessIDs.withLockedValue(\.values))
-            .union(Set(tabOwnerProcessIDs.withLockedValue(\.values)))
-        guard ownerProcessIDs.isEmpty == false else {
-            return [routes]
-        }
-        let ownerRoutes = routes.filter { ownerProcessIDs.contains($0.target.processID) }
-        guard ownerRoutes.isEmpty == false else {
-            return [routes]
-        }
-        let fallbackRoutes = routes.filter { ownerProcessIDs.contains($0.target.processID) == false }
-        return fallbackRoutes.isEmpty ? [ownerRoutes] : [ownerRoutes, fallbackRoutes]
+        return try await loadFirstAvailableToolsCatalogInBatch(
+            routes,
+            requestTimeout: requestTimeout,
+            deadlineUptimeNs: deadlineUptimeNs,
+            startedAt: startedAt,
+            exposedProcessIDs: exposedProcessIDs
+        )
     }
 
     private func loadFirstAvailableToolsCatalogInBatch(

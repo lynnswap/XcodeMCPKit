@@ -3174,7 +3174,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 "Xcode documentation service repair could not reopen provider route",
                 metadata: candidateLogMetadata(target: profile.target, error: error)
             )
-            return profile
+            return await profileByAddingInstalledDocumentationAssetFallback(profile)
         }
     }
 
