@@ -341,7 +341,6 @@ extension ClientMCPRequestExecutor {
                         )
                     }
                 )
-                cancellationHandle?.bindRouterPendingToken(started.routerPendingToken)
             } catch {
                 return makeImmediateLeaseResolution(
                     .mcpError(

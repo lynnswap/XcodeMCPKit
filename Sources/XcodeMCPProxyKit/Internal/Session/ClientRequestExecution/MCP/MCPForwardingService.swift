@@ -5,37 +5,8 @@ import XcodeMCPProcessRuntime
 import XcodeMCPProxyRuntime
 
 package struct MCPForwardingService: Sendable {
-    package struct PreparedRequest: Sendable {
-        package let transform: RequestTransform
-        package let upstreamIndex: Int
-
-        package init(transform: RequestTransform, upstreamIndex: Int) {
-            self.transform = transform
-            self.upstreamIndex = upstreamIndex
-        }
-    }
-
-    package struct StartedRequest: Sendable {
-        package let transform: RequestTransform
-        package let upstreamIndex: Int
-        package let requestTimeout: TimeAmount?
-        package let routerPendingToken: UUID
-        package let future: EventLoopFuture<ByteBuffer>
-
-        package init(
-            transform: RequestTransform,
-            upstreamIndex: Int,
-            requestTimeout: TimeAmount?,
-            routerPendingToken: UUID,
-            future: EventLoopFuture<ByteBuffer>
-        ) {
-            self.transform = transform
-            self.upstreamIndex = upstreamIndex
-            self.requestTimeout = requestTimeout
-            self.routerPendingToken = routerPendingToken
-            self.future = future
-        }
-    }
+    package typealias PreparedRequest = ProxyUpstreamRequestRuntime.PreparedRequest
+    package typealias StartedRequest = ProxyUpstreamRequestRuntime.StartedRequest
 
     package enum ResponseResolution: Sendable {
         case success(Data)
@@ -45,11 +16,13 @@ package struct MCPForwardingService: Sendable {
 
     private let config: ProxyConfig
     private let sessionManager: any RuntimeMCPForwardingPort
+    private let upstreamRuntime: ProxyUpstreamRequestRuntime
     private let toolSurface: ToolSurface
 
     package init(config: ProxyConfig, sessionManager: any RuntimeMCPForwardingPort) {
         self.config = config
         self.sessionManager = sessionManager
+        self.upstreamRuntime = ProxyUpstreamRequestRuntime(port: sessionManager)
         self.toolSurface = ToolSurface(config: config, sessionManager: sessionManager)
     }
 
@@ -59,29 +32,12 @@ package struct MCPForwardingService: Sendable {
         sessionID: String,
         upstreamIndexOverride: Int? = nil
     ) throws -> PreparedRequest? {
-        let upstreamIndex: Int
-        if let upstreamIndexOverride {
-            upstreamIndex = upstreamIndexOverride
-        } else {
-            guard let chosen = sessionManager.chooseUpstreamIndex() else {
-                return nil
-            }
-            upstreamIndex = chosen
-        }
-
-        let transform = try RequestInspector.transform(
-            bodyData,
-            parsedJSON: parsedRequestJSON,
+        try upstreamRuntime.prepareRequest(
+            bodyData: bodyData,
+            parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
-            mapID: { sessionID, originalID in
-                sessionManager.assignUpstreamID(
-                    sessionID: sessionID,
-                    originalID: originalID,
-                    upstreamIndex: upstreamIndex
-                )
-            }
+            upstreamIndexOverride: upstreamIndexOverride
         )
-        return PreparedRequest(transform: transform, upstreamIndex: upstreamIndex)
     }
 
     package func startRequest(
@@ -99,52 +55,17 @@ package struct MCPForwardingService: Sendable {
                 prepared.transform.method,
                 defaultSeconds: config.requestTimeout
             )
-        struct MissingRequestIDError: Error {}
-        let registration: JSONRPCResponseRouter.PendingRegistration
-        if prepared.transform.isBatch {
-            let responseIDKeys = prepared.transform.responseIDs.map(\.key)
-            guard responseIDKeys.isEmpty == false else {
-                throw MissingRequestIDError()
-            }
-            registration = session.router.registerBatchPending(
-                on: eventLoop,
-                timeout: requestTimeout,
-                responseIDKeys: responseIDKeys,
-                onTimeout: onTimeout
-            )
-        } else if let idKey = prepared.transform.idKey {
-            registration = session.router.registerRequestPending(
-                idKey: idKey,
-                on: eventLoop,
-                timeout: requestTimeout,
-                onTimeout: onTimeout
-            )
-        } else {
-            throw MissingRequestIDError()
-        }
-
-        if let leaseID {
-            sessionManager.activateRequestLease(
-                leaseID,
-                requestIDKey: prepared.transform.responseIDs.first?.key,
-                upstreamIndex: prepared.upstreamIndex,
-                timeout: requestTimeout
-            )
-        }
-        cancellationHandle?.activate(upstreamIndex: prepared.upstreamIndex)
-        cancellationHandle?.bindRouterPendingToken(registration.token)
-
-        sessionManager.sendUpstream(
-            prepared.transform.upstreamData,
-            upstreamIndex: prepared.upstreamIndex,
-            ensureRunning: false
-        )
-        return StartedRequest(
-            transform: prepared.transform,
-            upstreamIndex: prepared.upstreamIndex,
+        return try upstreamRuntime.startRequest(
+            prepared,
+            router: session.router,
+            on: eventLoop,
             requestTimeout: requestTimeout,
-            routerPendingToken: registration.token,
-            future: registration.future
+            leaseID: leaseID,
+            onRegistered: { registration in
+                cancellationHandle?.activate(upstreamIndex: registration.upstreamIndex)
+                cancellationHandle?.bindRouterPendingToken(registration.routerPendingToken)
+            },
+            onTimeout: onTimeout
         )
     }
 
@@ -181,39 +102,19 @@ package struct MCPForwardingService: Sendable {
                 )
             }
             if accountSuccess, toolSurface.shouldNotifyUpstreamSuccess(for: responseData) {
-                for responseID in started.transform.responseIDs {
-                    sessionManager.onRequestSucceeded(
-                        sessionID: sessionID,
-                        requestIDKey: responseID.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                }
+                upstreamRuntime.recordRequestSucceeded(
+                    sessionID: sessionID,
+                    started: started
+                )
             }
             return .success(responseData)
 
         case .failure:
-            if let firstResponseID = started.transform.responseIDs.first {
-                if accountTimeout {
-                    sessionManager.onRequestTimeout(
-                        sessionID: sessionID,
-                        requestIDKey: firstResponseID.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                } else {
-                    sessionManager.removeUpstreamIDMapping(
-                        sessionID: sessionID,
-                        requestIDKey: firstResponseID.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                }
-                for responseID in started.transform.responseIDs.dropFirst() {
-                    sessionManager.removeUpstreamIDMapping(
-                        sessionID: sessionID,
-                        requestIDKey: responseID.key,
-                        upstreamIndex: started.upstreamIndex
-                    )
-                }
-            }
+            upstreamRuntime.recordRequestTimedOut(
+                sessionID: sessionID,
+                started: started,
+                accountTimeout: accountTimeout
+            )
             return .timeout
         }
     }
@@ -314,12 +215,6 @@ package struct MCPForwardingService: Sendable {
                 preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedUpstreamIndex in
                 internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
-                self.sessionManager.activateRequestLease(
-                    leaseID,
-                    requestIDKey: nil,
-                    upstreamIndex: selectedUpstreamIndex,
-                    timeout: nil
-                )
                 let parsedRequestJSON = parsedRequestJSONValue.foundationObject
                 let prepared: PreparedRequest
                 do {
