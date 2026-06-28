@@ -1045,22 +1045,6 @@ final class ManualDateClock: @unchecked Sendable {
     }
 }
 
-func waitForHTTPTestSemaphore(
-    _ semaphore: DispatchSemaphore,
-    timeoutSeconds: TimeInterval
-) async -> DispatchTimeoutResult {
-    await withCheckedContinuation { continuation in
-        DispatchQueue.global().async {
-            let timeoutMilliseconds = Int((timeoutSeconds * 1000).rounded(.up))
-            continuation.resume(
-                returning: semaphore.wait(
-                    timeout: .now() + .milliseconds(timeoutMilliseconds)
-                )
-            )
-        }
-    }
-}
-
 func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: ProxyConfig,
