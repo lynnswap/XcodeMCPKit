@@ -187,8 +187,6 @@ let package = Package(
             name: "XcodeMCPRuntimeTests",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPProcessRuntime",
-                "XcodeMCPProxyKit",
                 "XcodeMCPRuntimeTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
