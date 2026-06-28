@@ -191,6 +191,31 @@ if plan.action == .start, let config = plan.configuration {
 }
 ```
 
+Embedded apps can configure proxy-only behavior directly without knowing the
+TOML file schema:
+
+```swift
+let config = XcodeMCPProxyServer.Configuration(
+    toolPolicy: .init(
+        disabledToolNames: ["RunAllTests", "RunSomeTests"]
+    ),
+    initializeHandshake: .init(
+        clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
+        capabilities: [
+            "roots": [
+                "listChanged": true,
+            ],
+        ]
+    )
+)
+
+let server = XcodeMCPProxyServer(config: config)
+```
+
+When both typed configuration and `configurationFilePath` are set, the typed
+values override the matching file-backed disabled-tools and initialize
+handshake fields.
+
 `LaunchPlan` also carries help/version text, `--dry-run` output,
 `--force-restart`, and product metadata so launchers do not need to compose the
 lower-level parser or config types directly.

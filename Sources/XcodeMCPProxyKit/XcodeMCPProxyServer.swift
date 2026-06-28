@@ -222,6 +222,129 @@ public final class XcodeMCPProxyServer {
             public static let `default` = Self()
         }
 
+        /// Tool visibility policy applied by the proxy.
+        public struct ToolPolicy: Equatable, Sendable {
+            /// Tool names hidden from `tools/list` results and rejected for
+            /// `tools/call` requests.
+            ///
+            /// Names are normalized when the server builds its runtime config:
+            /// surrounding whitespace is trimmed and empty names are ignored.
+            public var disabledToolNames: Set<String>
+
+            /// Creates a tool policy.
+            public init(disabledToolNames: Set<String> = []) {
+                self.disabledToolNames = disabledToolNames
+            }
+
+            /// Default tool policy.
+            public static let `default` = Self()
+        }
+
+        /// Initialize handshake overrides sent from the proxy to upstream
+        /// `mcpbridge` processes.
+        ///
+        /// Non-`nil` properties override the matching values loaded from
+        /// ``configurationFilePath``. Properties left as `nil` keep the file
+        /// value when present, otherwise the proxy's built-in default is used.
+        public struct InitializeHandshake: Equatable, Sendable {
+            /// Upstream client information for the initialize handshake.
+            public struct ClientInfo: Equatable, Sendable {
+                /// Client name to advertise to the upstream MCP bridge.
+                public var name: String?
+
+                /// Client version to advertise to the upstream MCP bridge.
+                public var version: String?
+
+                /// Creates upstream client information.
+                public init(name: String? = nil, version: String? = nil) {
+                    self.name = name
+                    self.version = version
+                }
+            }
+
+            /// JSON-compatible value used inside initialize capabilities.
+            public enum CapabilityValue: Equatable, Sendable,
+                ExpressibleByStringLiteral,
+                ExpressibleByBooleanLiteral,
+                ExpressibleByIntegerLiteral,
+                ExpressibleByFloatLiteral,
+                ExpressibleByArrayLiteral,
+                ExpressibleByDictionaryLiteral
+            {
+                /// A JSON object with string keys.
+                case object([String: CapabilityValue])
+
+                /// A JSON array.
+                case array([CapabilityValue])
+
+                /// A JSON string.
+                case string(String)
+
+                /// A JSON integer number.
+                case integer(Int64)
+
+                /// A JSON floating-point number.
+                case double(Double)
+
+                /// A JSON boolean.
+                case bool(Bool)
+
+                /// A JSON null value.
+                case null
+
+                /// Creates a JSON string from a Swift string literal.
+                public init(stringLiteral value: String) {
+                    self = .string(value)
+                }
+
+                /// Creates a JSON boolean from a Swift boolean literal.
+                public init(booleanLiteral value: Bool) {
+                    self = .bool(value)
+                }
+
+                /// Creates a JSON integer from a Swift integer literal.
+                public init(integerLiteral value: Int64) {
+                    self = .integer(value)
+                }
+
+                /// Creates a JSON floating-point number from a Swift float
+                /// literal.
+                public init(floatLiteral value: Double) {
+                    self = .double(value)
+                }
+
+                /// Creates a JSON array from a Swift array literal.
+                public init(arrayLiteral elements: CapabilityValue...) {
+                    self = .array(elements)
+                }
+
+                /// Creates a JSON object from a Swift dictionary literal.
+                public init(dictionaryLiteral elements: (String, CapabilityValue)...) {
+                    self = .object(Dictionary(elements, uniquingKeysWith: { _, last in last }))
+                }
+            }
+
+            /// Protocol version to send in initialize params.
+            public var protocolVersion: String?
+
+            /// Client info to send in initialize params.
+            public var clientInfo: ClientInfo?
+
+            /// Capability object to send in initialize params.
+            public var capabilities: [String: CapabilityValue]?
+
+            /// Creates initialize handshake overrides.
+            public init(
+                protocolVersion: String? = nil,
+                clientInfo: ClientInfo? = nil,
+                capabilities: [String: CapabilityValue]? = nil
+            ) {
+                self.protocolVersion = protocolVersion
+                self.clientInfo = clientInfo
+                self.capabilities = capabilities
+            }
+        }
+
         /// HTTP bind address.
         public var bind: BindAddress
 
@@ -234,6 +357,19 @@ public final class XcodeMCPProxyServer {
         /// Optional TOML configuration path for initialize overrides and
         /// disabled tools.
         public var configurationFilePath: String?
+
+        /// Explicit tool visibility policy.
+        ///
+        /// `nil` keeps disabled tools loaded from ``configurationFilePath``.
+        /// A non-`nil` policy overrides the file's `[tools].disabled` list.
+        public var toolPolicy: ToolPolicy?
+
+        /// Explicit initialize handshake override.
+        ///
+        /// Non-`nil` fields override the matching file-backed
+        /// `[upstream_handshake]` fields. Fields left `nil` keep the file
+        /// value when present, otherwise the built-in default is used.
+        public var initializeHandshake: InitializeHandshake?
 
         /// Endpoint discovery policy.
         public var discovery: Discovery
@@ -254,6 +390,9 @@ public final class XcodeMCPProxyServer {
         ///   - discovery: Endpoint discovery policy.
         ///   - approval: Permission dialog automation policy.
         ///   - features: Optional proxy feature policy.
+        ///   - toolPolicy: Explicit tool visibility policy.
+        ///   - initializeHandshake: Explicit upstream initialize handshake
+        ///     override.
         public init(
             bind: BindAddress = .localhost(),
             upstream: Upstream = .defaultMCPBridge(),
@@ -261,12 +400,16 @@ public final class XcodeMCPProxyServer {
             configurationFilePath: String? = nil,
             discovery: Discovery = .default,
             approval: ApprovalPolicy = .manual,
-            features: FeaturePolicy = .default
+            features: FeaturePolicy = .default,
+            toolPolicy: ToolPolicy? = nil,
+            initializeHandshake: InitializeHandshake? = nil
         ) {
             self.bind = bind
             self.upstream = upstream
             self.limits = limits
             self.configurationFilePath = configurationFilePath
+            self.toolPolicy = toolPolicy
+            self.initializeHandshake = initializeHandshake
             self.discovery = discovery
             self.approval = approval
             self.features = features
@@ -709,8 +852,44 @@ private extension ProxyConfig {
             discoveryFileURL: config.discoveryFileURL,
             prewarmToolsList: config.prewarmToolsList,
             autoApproveXcodeDialog: config.autoApproveXcodeDialog,
-            refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode(config.refreshCodeIssuesMode)
+            refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode(config.refreshCodeIssuesMode),
+            disabledToolNames: config.toolPolicy?.disabledToolNames,
+            initializeParamsOverride: config.initializeHandshake.map {
+                ProxyConfig.File.InitializeHandshakeOverride($0)
+            }
         )
+    }
+}
+
+private extension ProxyConfig.File.InitializeHandshakeOverride {
+    init(_ handshake: XcodeMCPProxyServer.Configuration.InitializeHandshake) {
+        self.init(
+            protocolVersion: handshake.protocolVersion,
+            clientName: handshake.clientInfo?.name,
+            clientVersion: handshake.clientInfo?.version,
+            capabilities: handshake.capabilities?.mapValues(ProxyConfig.File.Value.init)
+        )
+    }
+}
+
+private extension ProxyConfig.File.Value {
+    init(_ value: XcodeMCPProxyServer.Configuration.InitializeHandshake.CapabilityValue) {
+        switch value {
+        case .object(let object):
+            self = .object(object.mapValues(ProxyConfig.File.Value.init))
+        case .array(let array):
+            self = .array(array.map(ProxyConfig.File.Value.init))
+        case .string(let string):
+            self = .string(string)
+        case .integer(let integer):
+            self = .number(.int(integer))
+        case .double(let double):
+            self = .number(.double(double))
+        case .bool(let bool):
+            self = .bool(bool)
+        case .null:
+            self = .null
+        }
     }
 }
 

@@ -69,7 +69,8 @@ struct ProxyConfig: Sendable {
         prewarmToolsList: Bool = true,
         autoApproveXcodeDialog: Bool = false,
         refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode = .proxy,
-        disabledToolNames: Set<String>? = nil
+        disabledToolNames: Set<String>? = nil,
+        initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride? = nil
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
@@ -87,9 +88,16 @@ struct ProxyConfig: Sendable {
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
-        self.disabledToolNames = disabledToolNames ?? []
+        self.disabledToolNames = []
+        self.initializeParamsOverride = nil
         if configPath != nil {
-            loadFileConfig(preserveDisabledToolNames: disabledToolNames != nil)
+            loadFileConfig()
+        }
+        if let disabledToolNames {
+            self.disabledToolNames = Self.normalizedToolNames(disabledToolNames)
+        }
+        if let initializeParamsOverride {
+            applyInitializeParamsOverride(initializeParamsOverride)
         }
     }
 
@@ -114,6 +122,16 @@ struct ProxyConfig: Sendable {
         )
     }
 
+    mutating func applyInitializeParamsOverride(
+        _ override: ProxyConfig.File.InitializeHandshakeOverride
+    ) {
+        if let current = initializeParamsOverride {
+            initializeParamsOverride = current.merging(overriding: override)
+        } else if override.isEmpty == false {
+            initializeParamsOverride = override
+        }
+    }
+
     func validateModernProtocolConfiguration() throws {
         guard let protocolVersion = initializeParamsOverride?.protocolVersion else {
             return
@@ -121,5 +139,19 @@ struct ProxyConfig: Sendable {
         guard MCPProtocolVersion.isSupported(protocolVersion) else {
             throw ValidationError.unsupportedProtocolVersion(protocolVersion)
         }
+    }
+
+    static func normalizedToolNames<S: Sequence>(_ names: S) -> Set<String>
+        where S.Element == String
+    {
+        var normalized = Set<String>()
+        for rawName in names {
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard name.isEmpty == false else {
+                continue
+            }
+            normalized.insert(name)
+        }
+        return normalized
     }
 }

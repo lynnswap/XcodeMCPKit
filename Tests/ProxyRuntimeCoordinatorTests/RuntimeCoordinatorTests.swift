@@ -5177,6 +5177,60 @@ struct RuntimeCoordinatorTests {
         #expect(capabilities["roots"] as? Bool == true)
     }
 
+    @Test func sessionManagerAppliesPublicInitializeHandshakeOverrideAfterConfigFile()
+        async throws
+    {
+        let configPath = try makeTempProxyConfigFile(
+            """
+            [upstream_handshake]
+            protocolVersion = "2025-06-18"
+            clientName = "file-proxy"
+            clientVersion = "file-version"
+
+            [upstream_handshake.capabilities]
+            roots = true
+            """
+        )
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let publicServer = XcodeMCPProxyServer(
+            config: .init(
+                configurationFilePath: configPath,
+                features: .init(prewarmToolsList: false),
+                initializeHandshake: .init(
+                    clientInfo: .init(name: "typed-proxy"),
+                    capabilities: [
+                        "sampling": [
+                            "enabled": true,
+                        ],
+                    ]
+                )
+            )
+        )
+        let config = publicServer.config
+        try await publicServer.shutdown()
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        defer { manager.shutdownAndWait() }
+
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
+        let params = try #require(object?["params"] as? [String: Any])
+        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+        let capabilities = try #require(params["capabilities"] as? [String: Any])
+        let sampling = try #require(capabilities["sampling"] as? [String: Any])
+
+        #expect(params["protocolVersion"] as? String == "2025-06-18")
+        #expect(clientInfo["name"] as? String == "typed-proxy")
+        #expect(clientInfo["version"] as? String == "file-version")
+        #expect(capabilities["roots"] == nil)
+        #expect(sampling["enabled"] as? Bool == true)
+    }
+
     @Test func sessionManagerAutoResolvesInitializeVersionFromConfiguredClientName() async throws {
         let configPath = try makeTempProxyConfigFile(
             """

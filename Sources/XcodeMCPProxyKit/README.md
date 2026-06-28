@@ -79,9 +79,32 @@ Use `XcodeMCPProxyServer.Configuration` to configure the server:
 - `approval` controls Xcode permission dialog automation.
 - `features.refreshCodeIssuesMode` selects proxy diagnostics or upstream
   forwarding for `XcodeRefreshCodeIssuesInFile`.
+- `toolPolicy.disabledToolNames` hides tools from `tools/list` and rejects
+  matching `tools/call` requests locally.
+- `initializeHandshake` overrides the protocol version, client info, or
+  capabilities sent when the proxy initializes upstream `mcpbridge` processes.
 
 The server can also load TOML-backed initialize overrides and disabled tools
-when `configurationFilePath` is set.
+when `configurationFilePath` is set. If typed configuration and a file are both
+set, typed values override the matching file-backed disabled-tools and
+initialize handshake fields.
+
+```swift
+let config = XcodeMCPProxyServer.Configuration(
+    configurationFilePath: "/etc/xcode-mcp/proxy.toml",
+    toolPolicy: .init(
+        disabledToolNames: ["RunAllTests", "RunSomeTests"]
+    ),
+    initializeHandshake: .init(
+        clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
+        capabilities: [
+            "roots": [
+                "listChanged": true,
+            ],
+        ]
+    )
+)
+```
 
 ## Lifecycle
 

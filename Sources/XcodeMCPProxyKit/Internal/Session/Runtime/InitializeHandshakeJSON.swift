@@ -70,6 +70,8 @@ enum InitializeHandshakeJSON {
             return .number(.double(number))
         case .bool(let bool):
             return .bool(bool)
+        case .null:
+            return .null
         }
     }
 
