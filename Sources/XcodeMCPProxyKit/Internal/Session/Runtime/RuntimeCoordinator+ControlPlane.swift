@@ -144,6 +144,8 @@ extension RuntimeCoordinator {
                 startedAt: startedAt,
                 exposedProcessIDs: exposedProcessIDs
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             guard let surface = currentSurface,
                   let sourceUpstream = surface.sourceUpstream else {
