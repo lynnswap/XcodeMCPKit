@@ -425,6 +425,23 @@ func compileOnlyProxyConfigurationSurface() {
         features: .init(
             prewarmToolsList: false,
             refreshCodeIssuesMode: .proxy
+        ),
+        toolPolicy: .init(
+            disabledToolNames: ["RunAllTests", "RunSomeTests"]
+        ),
+        initializeHandshake: .init(
+            protocolVersion: "2025-06-18",
+            clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
+            capabilities: [
+                "roots": [
+                    "listChanged": true,
+                ],
+                "experimental": [
+                    "priority": 1,
+                    "score": 0.5,
+                    "metadata": .null,
+                ],
+            ]
         )
     )
     let customUpstreamConfig = XcodeMCPProxyServer.Configuration(
@@ -436,6 +453,8 @@ func compileOnlyProxyConfigurationSurface() {
         )
     )
 
+    let typedToolPolicy = config.toolPolicy
+    let typedHandshake = config.initializeHandshake
     let upstreamMode = XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode.upstream
     let server = XcodeMCPProxyServer(config: config)
     let endpointConfig = XcodeMCPProxyAdapterEndpointResolver.Configuration(
@@ -457,7 +476,18 @@ func compileOnlyProxyConfigurationSurface() {
         XcodeMCPProxyStdioAdapter(endpoint: $0, requestTimeout: 30)
     }
 
-    _ = (config, customUpstreamConfig, upstreamMode, server, adapterConfig, endpoint, adapter, plan)
+    _ = (
+        config,
+        customUpstreamConfig,
+        typedToolPolicy,
+        typedHandshake,
+        upstreamMode,
+        server,
+        adapterConfig,
+        endpoint,
+        adapter,
+        plan
+    )
     _ = XcodeMCPProxyInstaller.binaryNames
 }
 

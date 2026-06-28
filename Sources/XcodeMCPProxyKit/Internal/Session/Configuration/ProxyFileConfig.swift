@@ -14,9 +14,12 @@ extension ProxyConfig.File {
         case string(String)
         case number(ProxyConfig.File.Number)
         case bool(Bool)
+        case null
 
         init?(any value: Any) {
             switch value {
+            case is NSNull:
+                self = .null
             case let value as Bool:
                 self = .bool(value)
             case let value as Int:
@@ -62,6 +65,18 @@ extension ProxyConfig.File {
                 && capabilities == nil
         }
 
+        init(
+            protocolVersion: String? = nil,
+            clientName: String? = nil,
+            clientVersion: String? = nil,
+            capabilities: [String: ProxyConfig.File.Value]? = nil
+        ) {
+            self.protocolVersion = protocolVersion
+            self.clientName = clientName
+            self.clientVersion = clientVersion
+            self.capabilities = capabilities
+        }
+
         fileprivate init(fileConfig: ProxyInitializeHandshakeFileConfig) throws {
             protocolVersion = fileConfig.protocolVersion
             clientName = fileConfig.clientName
@@ -86,6 +101,17 @@ extension ProxyConfig.File {
                 values[key] = mapped
             }
             return values
+        }
+
+        func merging(
+            overriding override: ProxyConfig.File.InitializeHandshakeOverride
+        ) -> ProxyConfig.File.InitializeHandshakeOverride {
+            ProxyConfig.File.InitializeHandshakeOverride(
+                protocolVersion: override.protocolVersion ?? protocolVersion,
+                clientName: override.clientName ?? clientName,
+                clientVersion: override.clientVersion ?? clientVersion,
+                capabilities: override.capabilities ?? capabilities
+            )
         }
     }
 }
@@ -222,15 +248,7 @@ extension ProxyConfig.File {
                 guard let disabled = tools.disabled else {
                     return []
                 }
-                var disabledToolNames = Set<String>()
-                for rawName in disabled {
-                    let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard normalizedName.isEmpty == false else {
-                        continue
-                    }
-                    disabledToolNames.insert(normalizedName)
-                }
-                return disabledToolNames
+                return ProxyConfig.normalizedToolNames(disabled)
             }
         }
 

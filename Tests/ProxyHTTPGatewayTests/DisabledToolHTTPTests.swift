@@ -11,6 +11,68 @@ import XcodeMCPProxyTestSupport
 
 
 extension HTTPHandlerTests {
+    @Test func httpDisabledToolPolicyFromPublicConfigurationOverridesConfigFile()
+        async throws
+    {
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("xcode-mcp-public-tool-policy-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        let configURL = directoryURL.appendingPathComponent("proxy.toml")
+        try """
+        [tools]
+        disabled = ["OtherTool"]
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let publicServer = XcodeMCPProxyServer(
+            config: .init(
+                configurationFilePath: configURL.path,
+                toolPolicy: .init(disabledToolNames: [" RunAllTests ", ""])
+            )
+        )
+        let config = publicServer.config
+        try await publicServer.shutdown()
+
+        #expect(config.disabledToolNames == ["RunAllTests"])
+
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: { _, _ in
+                Issue.record("disabled tool call should not reach upstream")
+                return .immediate(Data())
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndex(nil)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-public-disabled-tool",
+                payload: toolsCallPayload(
+                    id: 111,
+                    name: "RunAllTests",
+                    arguments: [:]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let result = body["result"] as? [String: Any]
+            #expect((result?["isError"] as? Bool) == true)
+            #expect(sessionManager.sentToolNames().isEmpty)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpDisabledToolCallReturnsLocalToolErrorWhenNoUpstreamIsAvailable() async throws {
         var config = makeConfig(requestTimeout: 2)
         config.disabledToolNames = ["RunAllTests"]
