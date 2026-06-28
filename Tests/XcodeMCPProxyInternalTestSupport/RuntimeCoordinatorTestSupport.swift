@@ -357,14 +357,6 @@ struct StubXcodeTargetDiscovery: XcodeTargetDiscovering {
     }
 }
 
-struct PriorityOrderedStubXcodeTargetDiscovery: PriorityOrderedXcodeTargetDiscovering {
-    let targets: [XcodeProcessTarget]
-
-    func runningXcodeTargets() -> [XcodeProcessTarget] {
-        targets
-    }
-}
-
 final class CountingXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
     private let lock = NSLock()
     private let targets: [XcodeProcessTarget]

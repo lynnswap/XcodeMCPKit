@@ -2954,7 +2954,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.documentationCandidateProcessOrder() == [badTarget.processID])
     }
 
-    @Test func documentationCandidatesSkipUninitializedProcessRoutesButKeepInitializedWindowlessFallbacks()
+    @Test func runtimeDocumentationDiscoveryKeepsLiveTargetsOutsideUsableRouteCandidates()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2990,7 +2990,10 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(manager.documentationCandidateProcessOrder() == [ownerTarget.processID])
-        #expect(discovery.runningXcodeTargets().map(\.processID) == [ownerTarget.processID])
+        #expect(discovery.runningXcodeTargets().map(\.processID) == [
+            ownerTarget.processID,
+            fallbackTarget.processID,
+        ])
 
         manager.markUpstreamInitialized(upstreamIndex: 1)
 

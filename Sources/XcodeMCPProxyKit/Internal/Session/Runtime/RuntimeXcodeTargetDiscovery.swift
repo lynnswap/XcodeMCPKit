@@ -1,7 +1,7 @@
 import Foundation
 
 final class RuntimeDocumentationTargetDiscovery:
-    PriorityOrderedXcodeTargetDiscovering,
+    XcodeTargetDiscovering,
     Sendable
 {
     private let base: any XcodeTargetDiscovering
@@ -18,17 +18,19 @@ final class RuntimeDocumentationTargetDiscovery:
     func runningXcodeTargets() -> [XcodeProcessTarget] {
         let targets = base.runningXcodeTargets()
         guard let runtime = runtimeBox.value,
-              let routeProcessIDs = runtime.xcodeProcessRouteProcessIDs(),
               let candidateProcessIDs = runtime.documentationCandidateProcessOrder()
         else {
             return targets
         }
+        let unavailableProcessIDs = runtime.unavailableXcodeProcessIDs()
         let targetsByProcessID = Dictionary(
             uniqueKeysWithValues: targets.map { ($0.processID, $0) }
         )
         let orderedRuntimeTargets = candidateProcessIDs.compactMap { targetsByProcessID[$0] }
+        let orderedRuntimeProcessIDs = Set(candidateProcessIDs)
         let remainingLiveTargets = targets.filter {
-            routeProcessIDs.contains($0.processID) == false
+            orderedRuntimeProcessIDs.contains($0.processID) == false
+                && unavailableProcessIDs.contains($0.processID) == false
         }
         return orderedRuntimeTargets + remainingLiveTargets
     }
