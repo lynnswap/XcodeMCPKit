@@ -10,7 +10,7 @@ extension XcodeMCPProxyServer {
         public let version: String
 
         /// Creates product metadata.
-        public init(name: String = "XcodeMCPKit", version: String) {
+        public init(name: String = "XcodeMCPProxyKit", version: String) {
             self.name = name
             self.version = version
         }
