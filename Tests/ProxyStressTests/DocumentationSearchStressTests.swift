@@ -1,7 +1,9 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 import Testing
 import XcodeMCPProxyTestSupport
 

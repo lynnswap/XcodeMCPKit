@@ -1,6 +1,8 @@
 import Foundation
 import NIO
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues {
     package struct ResolvedTarget: Sendable, Equatable {

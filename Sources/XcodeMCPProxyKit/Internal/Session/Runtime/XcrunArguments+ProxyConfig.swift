@@ -1,5 +1,7 @@
 import Foundation
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension XcrunArguments {
     /// Whether the configured upstream is the stock `xcrun ... mcpbridge`

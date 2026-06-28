@@ -1,9 +1,12 @@
 import Darwin
 import Foundation
 import Testing
+import XcodeMCPCore
 import XcodeMCPRuntimeTestSupport
 
-@testable import XcodeMCPRuntime
+@testable import XcodeMCPCore
+@testable import XcodeMCPProcessRuntime
+@testable import XcodeMCPProxyRuntime
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct UpstreamProcessTests {

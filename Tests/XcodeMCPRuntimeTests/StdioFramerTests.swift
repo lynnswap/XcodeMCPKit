@@ -1,6 +1,8 @@
 import Foundation
 import Testing
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 @Suite
 struct StdioFramerTests {

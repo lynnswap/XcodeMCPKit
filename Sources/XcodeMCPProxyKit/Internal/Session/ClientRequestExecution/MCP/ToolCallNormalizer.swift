@@ -1,5 +1,7 @@
 import Foundation
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 package struct ToolCallNormalizer: Sendable {
     private static let structuredContentTools: Set<String> = [

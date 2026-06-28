@@ -1,6 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
+import XcodeMCPCore
 
 package struct AsyncTestTimeoutError: Error, CustomStringConvertible {
     package let description: String

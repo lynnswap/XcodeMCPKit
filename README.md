@@ -21,6 +21,15 @@ endpoint and automated approval flow.
 - `XcodeMCPProxyKit`: embeddable proxy server, STDIO adapter, launch-plan, and
   installer facades used by the command-line products.
 
+## Internal Target Ownership
+
+The public products above are backed by internal production targets split by
+owner boundary. `XcodeMCPCore` owns JSON/MCP wire contracts and low-level
+support. `XcodeMCPProcessRuntime` owns local process IO and process discovery
+helpers. `XcodeMCPClientRuntime` owns the SDK's initialized single-client
+session transports. `XcodeMCPProxyRuntime` owns proxy-only multi-upstream
+broker, health, readiness, and route scheduling primitives.
+
 ## Install
 
 ### From GitHub Releases

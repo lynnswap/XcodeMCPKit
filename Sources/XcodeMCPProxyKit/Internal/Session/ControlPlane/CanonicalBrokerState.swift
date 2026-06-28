@@ -1,6 +1,8 @@
 import Foundation
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 package final class CanonicalBrokerState: Sendable {
     package struct Incompatibility: Codable, Sendable {

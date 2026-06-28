@@ -1,5 +1,7 @@
 
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.

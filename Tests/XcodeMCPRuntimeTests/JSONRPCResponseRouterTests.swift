@@ -3,7 +3,9 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 @Suite
 struct JSONRPCResponseRouterTests {

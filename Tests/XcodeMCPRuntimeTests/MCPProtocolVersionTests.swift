@@ -1,5 +1,5 @@
 import Testing
-import XcodeMCPRuntime
+import XcodeMCPCore
 
 @Suite
 struct MCPProtocolVersionTests {

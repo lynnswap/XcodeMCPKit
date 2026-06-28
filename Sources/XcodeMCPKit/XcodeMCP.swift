@@ -1,5 +1,6 @@
 import Foundation
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPClientRuntime
 
 /// A high-level client for Xcode MCP.
 ///
@@ -217,12 +218,10 @@ public actor XcodeMCP {
             switch config.transport {
             case .localBridge(let bridge):
                 transport = try await UpstreamProcessXcodeMCPTransport.start(
-                    config: UpstreamProcess.Config(
-                        command: bridge.command,
-                        args: bridge.arguments,
-                        environment: bridge.environment,
-                        maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
-                    )
+                    command: bridge.command,
+                    arguments: bridge.arguments,
+                    environment: bridge.environment,
+                    maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
                 )
             case .streamableHTTP(let endpoint):
                 transport = try await StreamableHTTPXcodeMCPTransport.start(

@@ -1,5 +1,7 @@
 import Foundation
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 package struct ProxyConfig: Sendable {
     package enum Transport: String, CaseIterable, Sendable {

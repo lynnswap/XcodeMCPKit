@@ -1,5 +1,7 @@
 import Foundation
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension UpstreamReadinessGate {
     /// The live gate for the stock xcrun mcpbridge upstream: hold

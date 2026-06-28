@@ -1,7 +1,9 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {

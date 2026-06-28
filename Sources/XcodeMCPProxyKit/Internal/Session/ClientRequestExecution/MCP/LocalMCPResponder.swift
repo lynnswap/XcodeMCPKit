@@ -2,7 +2,9 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPRuntime
+import XcodeMCPCore
+import XcodeMCPProcessRuntime
+import XcodeMCPProxyRuntime
 
 package enum LocalPostHandling {
     case pendingResponse(
