@@ -3,6 +3,7 @@ import Logging
 import NIO
 import NIOHTTP1
 import XcodeMCPCore
+import XcodeMCPKit
 import XcodeMCPProcessRuntime
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.
@@ -261,68 +262,6 @@ public final class XcodeMCPProxyServer {
                 }
             }
 
-            /// JSON-compatible value used inside initialize capabilities.
-            public enum CapabilityValue: Equatable, Sendable,
-                ExpressibleByStringLiteral,
-                ExpressibleByBooleanLiteral,
-                ExpressibleByIntegerLiteral,
-                ExpressibleByFloatLiteral,
-                ExpressibleByArrayLiteral,
-                ExpressibleByDictionaryLiteral
-            {
-                /// A JSON object with string keys.
-                case object([String: CapabilityValue])
-
-                /// A JSON array.
-                case array([CapabilityValue])
-
-                /// A JSON string.
-                case string(String)
-
-                /// A JSON integer number.
-                case integer(Int64)
-
-                /// A JSON floating-point number.
-                case double(Double)
-
-                /// A JSON boolean.
-                case bool(Bool)
-
-                /// A JSON null value.
-                case null
-
-                /// Creates a JSON string from a Swift string literal.
-                public init(stringLiteral value: String) {
-                    self = .string(value)
-                }
-
-                /// Creates a JSON boolean from a Swift boolean literal.
-                public init(booleanLiteral value: Bool) {
-                    self = .bool(value)
-                }
-
-                /// Creates a JSON integer from a Swift integer literal.
-                public init(integerLiteral value: Int64) {
-                    self = .integer(value)
-                }
-
-                /// Creates a JSON floating-point number from a Swift float
-                /// literal.
-                public init(floatLiteral value: Double) {
-                    self = .double(value)
-                }
-
-                /// Creates a JSON array from a Swift array literal.
-                public init(arrayLiteral elements: CapabilityValue...) {
-                    self = .array(elements)
-                }
-
-                /// Creates a JSON object from a Swift dictionary literal.
-                public init(dictionaryLiteral elements: (String, CapabilityValue)...) {
-                    self = .object(Dictionary(elements, uniquingKeysWith: { _, last in last }))
-                }
-            }
-
             /// Protocol version to send in initialize params.
             public var protocolVersion: String?
 
@@ -330,13 +269,13 @@ public final class XcodeMCPProxyServer {
             public var clientInfo: ClientInfo?
 
             /// Capability object to send in initialize params.
-            public var capabilities: [String: CapabilityValue]?
+            public var capabilities: [String: MCPJSONValue]?
 
             /// Creates initialize handshake overrides.
             public init(
                 protocolVersion: String? = nil,
                 clientInfo: ClientInfo? = nil,
-                capabilities: [String: CapabilityValue]? = nil
+                capabilities: [String: MCPJSONValue]? = nil
             ) {
                 self.protocolVersion = protocolVersion
                 self.clientInfo = clientInfo
@@ -872,7 +811,7 @@ private extension ProxyConfig.File.InitializeHandshakeOverride {
 }
 
 private extension ProxyConfig.File.Value {
-    init(_ value: XcodeMCPProxyServer.Configuration.InitializeHandshake.CapabilityValue) {
+    init(_ value: MCPJSONValue) {
         switch value {
         case .object(let object):
             self = .object(object.mapValues(ProxyConfig.File.Value.init))

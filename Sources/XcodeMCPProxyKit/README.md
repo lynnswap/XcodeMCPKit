@@ -90,6 +90,9 @@ set, typed values override the matching file-backed disabled-tools and
 initialize handshake fields.
 
 ```swift
+import XcodeMCPKit
+import XcodeMCPProxyKit
+
 let config = XcodeMCPProxyServer.Configuration(
     configurationFilePath: "/etc/xcode-mcp/proxy.toml",
     toolPolicy: .init(
@@ -105,6 +108,10 @@ let config = XcodeMCPProxyServer.Configuration(
     )
 )
 ```
+
+The `capabilities` dictionary uses `MCPJSONValue` from `XcodeMCPKit`, so Swift
+JSON literals remain concise while proxy internals still translate to the
+runtime config format.
 
 ## Lifecycle
 

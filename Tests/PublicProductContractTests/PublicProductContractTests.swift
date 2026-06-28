@@ -102,6 +102,7 @@ struct PublicProductContractTests {
                 .target(
                     name: "XcodeMCPProxyKitClient",
                     dependencies: [
+                        .product(name: "XcodeMCPKit", package: "XcodeMCPKit"),
                         .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
@@ -417,6 +418,7 @@ func compileOnlyTestingRuntimeSurface() async throws {
 
 private let xcodeMCPProxyKitClientSource = """
 import Foundation
+import XcodeMCPKit
 import XcodeMCPProxyKit
 
 func compileOnlyProxyConfigurationSurface() {
@@ -463,6 +465,8 @@ func compileOnlyProxyConfigurationSurface() {
 
     let typedToolPolicy = config.toolPolicy
     let typedHandshake = config.initializeHandshake
+    let typedCapabilities: [String: MCPJSONValue]? = typedHandshake?.capabilities
+    let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
     let upstreamMode = XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode.upstream
     let server = XcodeMCPProxyServer(config: config)
     let endpointConfig = XcodeMCPProxyAdapterEndpointResolver.Configuration(
@@ -489,6 +493,8 @@ func compileOnlyProxyConfigurationSurface() {
         customUpstreamConfig,
         typedToolPolicy,
         typedHandshake,
+        typedCapabilities,
+        metadataIsNull,
         upstreamMode,
         server,
         adapterConfig,

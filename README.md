@@ -201,9 +201,13 @@ if plan.action == .start, let config = plan.configuration {
 ```
 
 Embedded apps can configure proxy-only behavior directly without knowing the
-TOML file schema:
+TOML file schema. The `capabilities` dictionary uses `MCPJSONValue` from
+`XcodeMCPKit`, so Swift JSON literals remain concise:
 
 ```swift
+import XcodeMCPKit
+import XcodeMCPProxyKit
+
 let config = XcodeMCPProxyServer.Configuration(
     toolPolicy: .init(
         disabledToolNames: ["RunAllTests", "RunSomeTests"]
