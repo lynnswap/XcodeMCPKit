@@ -3441,13 +3441,8 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(2)
             )
         }
-        let firstRequest = try await waitWithTimeout(
-            "waiting for first window fanout request on upstream0",
-            timeout: .seconds(2)
-        ) {
-            try await upstream0.nextSent(startingAt: firstUpstream0StartIndex) {
-                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
-            }
+        let firstRequest = try await upstream0.nextSent(startingAt: firstUpstream0StartIndex) {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
         }
         #expect(await upstream1.sentCount() == firstUpstream1StartIndex)
         await upstream0.yield(
@@ -3458,12 +3453,7 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        _ = try await waitWithTimeout(
-            "waiting for first window fanout result",
-            timeout: .seconds(2)
-        ) {
-            try await firstTask.value
-        }
+        _ = try await firstTask.value
         #expect(await upstream1.sentCount() == firstUpstream1StartIndex)
 
         manager.markUpstreamInitialized(upstreamIndex: 1)
@@ -3475,21 +3465,11 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(2)
             )
         }
-        let secondRequest0 = try await waitWithTimeout(
-            "waiting for second window fanout request on upstream0",
-            timeout: .seconds(2)
-        ) {
-            try await upstream0.nextSent(startingAt: secondUpstream0StartIndex) {
-                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
-            }
+        let secondRequest0 = try await upstream0.nextSent(startingAt: secondUpstream0StartIndex) {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
         }
-        let secondRequest1 = try await waitWithTimeout(
-            "waiting for second window fanout request on upstream1",
-            timeout: .seconds(2)
-        ) {
-            try await upstream1.nextSent(startingAt: secondUpstream1StartIndex) {
-                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
-            }
+        let secondRequest1 = try await upstream1.nextSent(startingAt: secondUpstream1StartIndex) {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
         }
         await upstream0.yield(
             .message(
@@ -3507,12 +3487,7 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        _ = try await waitWithTimeout(
-            "waiting for second window fanout result",
-            timeout: .seconds(2)
-        ) {
-            try await secondTask.value
-        }
+        _ = try await secondTask.value
     }
 
     @Test func mergedXcodeListWindowsPreservesToolErrors() throws {

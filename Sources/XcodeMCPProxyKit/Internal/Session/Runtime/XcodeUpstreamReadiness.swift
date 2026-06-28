@@ -18,7 +18,7 @@ extension UpstreamReadinessGate {
         return .xcodeMCPBridge(
             uptimeNanoseconds: clock.uptimeNanoseconds,
             sleepNanoseconds: { nanoseconds in
-                try? await Task.sleep(nanoseconds: nanoseconds)
+                await clock.sleep(.nanoseconds(Int64(clamping: nanoseconds)))
             },
             runProcess: { request in
                 try await processRunner.run(request)
