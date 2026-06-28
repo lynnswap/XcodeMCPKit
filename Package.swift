@@ -89,6 +89,7 @@ let package = Package(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "XcodeMCPCore",
+                "XcodeMCPKit",
                 "XcodeMCPProcessRuntime",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
