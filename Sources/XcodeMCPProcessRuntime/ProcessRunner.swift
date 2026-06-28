@@ -485,6 +485,24 @@ private final class ProcessRunnerRunState: @unchecked Sendable {
     }
 }
 
+private final class ProcessRunnerCleanupState: @unchecked Sendable {
+    private let didCleanup = NIOLockedValueBox(false)
+
+    func cleanupOnce(_ cleanup: () -> Void) {
+        let shouldCleanup = didCleanup.withLockedValue { didCleanup in
+            guard didCleanup == false else {
+                return false
+            }
+            didCleanup = true
+            return true
+        }
+        guard shouldCleanup else {
+            return
+        }
+        cleanup()
+    }
+}
+
 package struct ProcessRunner: ProcessRunning {
     private static let terminationKillFallbackDelayNanoseconds: Int64 = 1_000_000_000
 
@@ -502,6 +520,7 @@ package struct ProcessRunner: ProcessRunning {
     package func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         let cancellationState = ProcessCancellationState()
         let runState = ProcessRunnerRunState()
+        let cleanupState = ProcessRunnerCleanupState()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let driver = processDriverFactory.makeDriver()
@@ -523,15 +542,17 @@ package struct ProcessRunner: ProcessRunning {
                 }
 
                 let cancelResources: @Sendable () -> Void = {
-                    driver.terminate()
-                    delayScheduler.schedule(
-                        .terminationKillFallback,
-                        afterNanoseconds: Self.terminationKillFallbackDelayNanoseconds
-                    ) {
-                        driver.killIfRunning()
+                    cleanupState.cleanupOnce {
+                        driver.terminate()
+                        delayScheduler.schedule(
+                            .terminationKillFallback,
+                            afterNanoseconds: Self.terminationKillFallbackDelayNanoseconds
+                        ) {
+                            driver.killIfRunning()
+                        }
+                        driver.stopOutput()
+                        driver.closeStdin()
                     }
-                    driver.stopOutput()
-                    driver.closeStdin()
                 }
                 timeoutController.configure(timeoutNanoseconds: request.timeoutNanoseconds) {
                     guard runState.reserveResume() else {
