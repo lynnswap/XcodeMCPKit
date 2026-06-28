@@ -2,7 +2,6 @@ import Foundation
 import Testing
 
 @testable import XcodeMCPCore
-@testable import XcodeMCPClientRuntime
 @testable import XcodeMCPKit
 
 @Suite(.serialized)

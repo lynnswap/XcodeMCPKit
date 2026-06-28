@@ -67,15 +67,6 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPClientRuntime",
-            dependencies: [
-                "XcodeMCPCore",
-                "XcodeMCPProcessRuntime",
-            ],
-            path: "Sources/XcodeMCPClientRuntime",
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
                 "XcodeMCPCore",
@@ -91,7 +82,7 @@ let package = Package(
             name: "XcodeMCPKit",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPClientRuntime",
+                "XcodeMCPProcessRuntime",
             ],
             path: "Sources/XcodeMCPKit",
             exclude: ["README.md"],
@@ -100,8 +91,6 @@ let package = Package(
         .target(
             name: "XcodeMCPKitTesting",
             dependencies: [
-                "XcodeMCPCore",
-                "XcodeMCPClientRuntime",
                 "XcodeMCPKit",
             ],
             path: "Sources/XcodeMCPKitTesting",
@@ -195,7 +184,6 @@ let package = Package(
             name: "XcodeMCPKitTests",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPClientRuntime",
                 "XcodeMCPKit",
             ],
             path: "Tests/XcodeMCPKitTests",
