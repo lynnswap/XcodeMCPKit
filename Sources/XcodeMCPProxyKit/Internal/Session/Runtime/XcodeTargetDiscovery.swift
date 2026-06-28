@@ -25,5 +25,3 @@ package struct XcodeProcessTarget: Sendable, Equatable {
 package protocol XcodeTargetDiscovering: Sendable {
     func runningXcodeTargets() -> [XcodeProcessTarget]
 }
-
-package protocol PriorityOrderedXcodeTargetDiscovering: XcodeTargetDiscovering {}

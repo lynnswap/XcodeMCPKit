@@ -1257,7 +1257,7 @@ struct DocumentationProviderTests {
         #expect(await factory.documentationQueries(for: older.processID).isEmpty)
     }
 
-    @Test func documentationProviderPreservesRuntimeCandidateOrderForFallback()
+    @Test func documentationProviderIgnoresPriorityDiscoveryOrderWhenNewerXcodeIsAvailable()
         async throws
     {
         let workspaceOwner = xcodeProcessTarget(processID: 752, xcodeVersion: "26.6")
@@ -1268,7 +1268,7 @@ struct DocumentationProviderTests {
                     .init(
                         serverVersion: "26.6",
                         toolCount: 47,
-                        includesDocumentationSearch: false,
+                        includesDocumentationSearch: true,
                         firstDocumentationResponse: .successText("{\"answer\":\"owner\"}")
                     ),
                 ],
@@ -1283,9 +1283,7 @@ struct DocumentationProviderTests {
             ]
         )
         let manager = DocumentationProviderManager(
-            discovery: PriorityOrderedStubXcodeTargetDiscovery(
-                targets: [workspaceOwner, documentationProvider]
-            ),
+            discovery: StubXcodeTargetDiscovery(targets: [workspaceOwner, documentationProvider]),
             sessionFactory: factory
         )
 
@@ -1299,16 +1297,262 @@ struct DocumentationProviderTests {
             return
         }
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"provider\"}")
-        #expect(await factory.startedPIDs() == [
-            workspaceOwner.processID,
-            documentationProvider.processID,
-        ])
+        #expect(await factory.startedPIDs() == [documentationProvider.processID])
         #expect(await factory.documentationQueries(for: workspaceOwner.processID).isEmpty)
         #expect(await factory.documentationQueries(for: documentationProvider.processID) == ["UIView"])
-        try await waitWithTimeout("waiting for skipped documentation provider stop") {
-            try await factory.waitForStopCount(1)
+        #expect(await factory.stoppedPIDs().isEmpty)
+    }
+
+    @Test func documentationProviderUsesStableSameVersionOrderInsteadOfRuntimeOwnerOrder()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let ownerTarget = XcodeProcessTarget(
+            processID: 761,
+            appPath: "/Applications/Xcode-Z.app",
+            developerDir: "/Applications/Xcode-Z.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode-Z.app/Contents/Developer/usr/bin/mcpbridge",
+            xcodeVersion: "27.0"
+        )
+        let stableTarget = XcodeProcessTarget(
+            processID: 762,
+            appPath: "/Applications/Xcode-A.app",
+            developerDir: "/Applications/Xcode-A.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode-A.app/Contents/Developer/usr/bin/mcpbridge",
+            xcodeVersion: "27.0"
+        )
+        let runtime = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: ownerTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: stableTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { runtime.shutdownAndWait() }
+        runtime.markUpstreamInitialized(upstreamIndex: 0)
+        runtime.markUpstreamInitialized(upstreamIndex: 1)
+        #expect(
+            runtime.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-owner, workspacePath: /tmp/Owner.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        runtimeBox.value = runtime
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                ownerTarget.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"owner\"}")
+                    ),
+                ],
+                stableTarget.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"stable\"}")
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: RuntimeDocumentationTargetDiscovery(
+                base: StubXcodeTargetDiscovery(targets: [ownerTarget, stableTarget]),
+                runtimeBox: runtimeBox
+            ),
+            sessionFactory: factory
+        )
+
+        #expect(runtime.documentationCandidateProcessOrder() == [
+            ownerTarget.processID,
+            stableTarget.processID,
+        ])
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 98, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
         }
-        #expect(await factory.stoppedPIDs() == [workspaceOwner.processID])
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"stable\"}")
+        #expect(await factory.startedPIDs() == [stableTarget.processID])
+        #expect(await factory.documentationQueries(for: ownerTarget.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: stableTarget.processID) == ["SwiftUI"])
+    }
+
+    @Test func documentationProviderUsesNewestAssetFallbackBeforeOlderCandidateWhenRouteUnavailable()
+        async throws
+    {
+        let older = xcodeProcessTarget(processID: 754, xcodeVersion: "26.6")
+        let newest = xcodeProcessTarget(processID: 755, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                older.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-newest"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 95,
+                text: "{\"answer\":\"asset-newest\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [older, newest]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 95, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset-newest\"}")
+        #expect(await factory.startAttempts() == [newest.processID])
+        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.documentationQueries(for: older.processID).isEmpty)
+        #expect(await localProvider.requestedDescriptorPIDs() == [newest.processID])
+        #expect(await localProvider.requestedCallPIDs() == [newest.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
+    }
+
+    @Test func documentationProviderUsesNewestAssetFallbackBeforeOlderCandidateWhenCallFails()
+        async throws
+    {
+        let older = xcodeProcessTarget(processID: 756, xcodeVersion: "26.6")
+        let newest = xcodeProcessTarget(processID: 757, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                older.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+                newest.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .notEnabled
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-newest"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 96,
+                text: "{\"answer\":\"asset-newest\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [older, newest]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 96, query: "SwiftData"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset-newest\"}")
+        #expect(await factory.startedPIDs() == [newest.processID])
+        #expect(await factory.documentationQueries(for: newest.processID) == ["SwiftData"])
+        #expect(await factory.documentationQueries(for: older.processID).isEmpty)
+        #expect(await localProvider.requestedCallPIDs() == [newest.processID])
+        #expect(await localProvider.requestedQueries() == ["SwiftData"])
+    }
+
+    @Test func documentationProviderUsesNewestAssetFallbackBeforeOlderCandidateWhenDescriptorMissing()
+        async throws
+    {
+        let older = xcodeProcessTarget(processID: 758, xcodeVersion: "26.6")
+        let newest = xcodeProcessTarget(processID: 759, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                older.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"older\"}")
+                    ),
+                ],
+                newest.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .successText("{\"answer\":\"unused\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-newest"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 97,
+                text: "{\"answer\":\"asset-newest\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [older, newest]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 97, query: "Observation"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, _) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset-newest\"}")
+        #expect(await factory.startedPIDs() == [newest.processID])
+        #expect(await factory.documentationQueries(for: newest.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: older.processID).isEmpty)
+        #expect(await localProvider.requestedDescriptorPIDs() == [newest.processID])
+        #expect(await localProvider.requestedCallPIDs() == [newest.processID])
+        #expect(await localProvider.requestedQueries() == ["Observation"])
     }
 
     @Test func sharedToolsListAdvertisesProxyOwnedDocumentationSearchDescriptor() async throws {

@@ -1791,11 +1791,21 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             {
                 return localProfile
             }
-            let route = try await transport.openRoute(
-                for: target,
-                requestTimeout: startupTimeout,
-                initializeParams: initializeParams
-            )
+            let route: DocumentationProviderRoute
+            do {
+                route = try await transport.openRoute(
+                    for: target,
+                    requestTimeout: startupTimeout,
+                    initializeParams: initializeParams
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if let localProfile = await installedDocumentationAssetFallbackProfile(for: target) {
+                    return localProfile
+                }
+                throw error
+            }
             do {
                 try Task.checkCancellation()
                 guard !lifecycle.isShutdown else {
@@ -1829,6 +1839,29 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             logger.info(
                 "Using installed documentation asset as primary DocumentationSearch provider",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                ]
+            )
+            return CandidateProfile(
+                id: UUID(),
+                target: target,
+                backend: .installedDocumentationAsset(descriptor: descriptor),
+                serverVersion: "installed-documentation-asset",
+                descriptorLookupCompleted: true
+            )
+        }
+
+        private func installedDocumentationAssetFallbackProfile(
+            for target: XcodeProcessTarget
+        ) async -> CandidateProfile? {
+            guard let descriptor = await localSearchProvider.descriptor(for: target) else {
+                return nil
+            }
+            logger.warning(
+                "Using installed documentation asset fallback for DocumentationSearch",
                 metadata: [
                     "pid": .string("\(target.processID)"),
                     "app_path": .string(target.appPath),
@@ -2080,6 +2113,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             return .unavailable
         }
         if let activeProvider {
+            guard activeProviderIsCurrentBest(activeProvider, excluding: []) else {
+                return .unchanged
+            }
             guard let descriptor = activeProvider.profile.descriptor else {
                 return .unchanged
             }
@@ -2089,10 +2125,11 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         guard targets.isEmpty == false else {
             return .unavailable
         }
-        for target in targets {
-            if let descriptor = preparedProviders[target.processID]?.descriptor {
-                return .available(descriptor)
-            }
+        guard let firstTarget = targets.first else {
+            return .unavailable
+        }
+        if let descriptor = preparedProviders[firstTarget.processID]?.descriptor {
+            return .available(descriptor)
         }
         return .unchanged
     }
@@ -2879,9 +2916,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         let filtered = discovery.runningXcodeTargets().filter {
             excludedProcessIDs.contains($0.processID) == false
         }
-        if discovery is any PriorityOrderedXcodeTargetDiscovering {
-            return filtered
-        }
+        // DocumentationSearch owns provider selection separately from workspace/tab routing.
+        // Discovery order is only target enumeration; version and stable identity choose priority.
         return filtered.sorted { lhs, rhs in
             let versionComparison = Self.compareVersion(lhs.xcodeVersion, rhs.xcodeVersion)
             if versionComparison != .orderedSame {
