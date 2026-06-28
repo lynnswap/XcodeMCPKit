@@ -161,85 +161,64 @@ struct XcodeMCPProxyServerTests {
         #expect(config.refreshCodeIssuesMode == .upstream)
     }
 
-    @Test func existingServerControllerHostMatchingHandlesLoopbackAndWildcard() throws {
-        #expect(
-            ExistingProxyServerProcessController.hostMatches(
-                requestedHost: "localhost",
-                actualHost: "127.0.0.1"
-            )
+    @Test func existingServerControllerDetectsOnlyProxyServerProcesses() throws {
+        let record = DiscoveryRecord(
+            url: "http://localhost:8765/mcp",
+            host: "localhost",
+            port: 8765,
+            pid: 123,
+            updatedAt: Date(timeIntervalSince1970: 1)
         )
-        #expect(
-            ExistingProxyServerProcessController.hostMatches(
-                requestedHost: "::",
-                actualHost: "127.0.0.1"
-            )
+        let discoveryClient = DiscoveryClient.live(
+            defaultFileURL: { URL(fileURLWithPath: "/unused/endpoint.json") },
+            loadRecord: { _ in record },
+            persistRecord: { _, _ in
+                Issue.record("detect should not persist discovery records")
+            },
+            createDirectory: { _ in
+                Issue.record("detect should not create directories")
+            },
+            isProcessAlive: { pid in
+                #expect(pid == record.pid)
+                return true
+            },
+            now: { Date(timeIntervalSince1970: 2) }
         )
-        #expect(
-            ExistingProxyServerProcessController.hostMatches(
-                requestedHost: "127.0.0.1",
-                actualHost: "::1"
-            ) == false
+        let processControl = ProcessControlClient(
+            runCommand: { launchPath, arguments in
+                switch (launchPath, arguments) {
+                case ("/usr/sbin/lsof", ["-nP", "-iTCP:8765", "-sTCP:LISTEN", "-Fpn"]):
+                    return """
+                    p456
+                    f9
+                    n127.0.0.1:8765
+                    p789
+                    f9
+                    n127.0.0.1:8765
+                    """
+                case ("/bin/ps", ["-ww", "-p", "123", "-o", "command="]):
+                    return "/tmp/xcode-mcp-proxy-server --listen localhost:8765\n"
+                case ("/bin/ps", ["-ww", "-p", "456", "-o", "command="]):
+                    return "/usr/local/bin/xcode-mcp-proxy-server --listen localhost:8765\n"
+                case ("/bin/ps", ["-ww", "-p", "789", "-o", "command="]):
+                    return "/usr/bin/python3 other-server.py\n"
+                default:
+                    Issue.record("unexpected process command: \(launchPath) \(arguments)")
+                    return nil
+                }
+            },
+            sendSignal: { _, _ in
+                Issue.record("detect should not send signals")
+                return ProcessSignalResult(result: -1, errnoValue: ESRCH)
+            }
         )
-    }
-
-    @Test func existingServerControllerExtractsListeningPIDsFromLsofFieldOutputForLocalhost() throws {
-        let output = """
-        p51731
-        f9
-        n127.0.0.1:8765
-        f13
-        n[::1]:8765
-        p60000
-        f8
-        n10.0.0.5:8765
-        """
-
-        #expect(
-            ExistingProxyServerProcessController.listeningProcessIDs(
-                fromLsofOutput: output,
-                matchingHost: "localhost"
-            ) == [51731]
+        let controller = ExistingProxyServerProcessController.live(
+            discoveryClient: discoveryClient,
+            currentProcessID: { 999 },
+            processControl: processControl
         )
-    }
 
-    @Test func existingServerControllerExtractsListeningPIDsFromLsofFieldOutputSkipsNonMatchingHosts() throws {
-        let output = """
-        p51731
-        f9
-        n[::1]:8765
-        p60000
-        f8
-        n10.0.0.5:8765
-        """
-
-        #expect(
-            ExistingProxyServerProcessController.listeningProcessIDs(
-                fromLsofOutput: output,
-                matchingHost: "127.0.0.1"
-            )
-            .isEmpty
-        )
-    }
-
-    @Test func existingServerControllerExtractsListeningPIDsFromLegacyTCPNames() throws {
-        let output = """
-        p111
-        f9
-        nTCP 127.0.0.1:8765 (LISTEN)
-        p222
-        f13
-        nTCP [::1]:8765 (LISTEN)
-        p333
-        f8
-        nTCP 10.0.0.5:8765 (LISTEN)
-        """
-
-        #expect(
-            ExistingProxyServerProcessController.listeningProcessIDs(
-                fromLsofOutput: output,
-                matchingHost: "localhost"
-            ) == [111, 222]
-        )
+        #expect(controller.detectExistingServerProcessIDs("localhost", 8765) == [123, 456])
     }
 
     @Test func portInUseDiagnosticFormatsMessage() throws {

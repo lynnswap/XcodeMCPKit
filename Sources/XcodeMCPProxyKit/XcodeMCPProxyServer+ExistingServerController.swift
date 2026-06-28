@@ -5,8 +5,8 @@ import XcodeMCPProcessRuntime
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.
     ///
-    /// Low-level `lsof`/`ps`/signal mechanics stay inside `XcodeMCPProxyKit`
-    /// without becoming part of the public server launcher facade.
+    /// Proxy restart policy stays inside `XcodeMCPProxyKit`; low-level process
+    /// command and signal mechanics are owned by `XcodeMCPProcessRuntime`.
     struct ExistingServerController: DependencyClient {
         var terminateExistingServer:
             @Sendable (_ host: String, _ port: Int, _ emitWarning: (String) -> Void) -> Bool
