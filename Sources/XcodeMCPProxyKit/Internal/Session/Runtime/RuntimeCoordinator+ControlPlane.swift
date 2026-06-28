@@ -179,7 +179,8 @@ extension RuntimeCoordinator {
         requestTimeout: TimeAmount?,
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64,
-        exposedProcessIDs: Set<pid_t>
+        exposedProcessIDs: Set<pid_t>,
+        returnAfterFirstSuccess: Bool = true
     ) async throws -> CanonicalToolsCatalogLoadResult {
         try await withThrowingTaskGroup(
             of: AvailableToolsCatalogOutcome.self,
@@ -218,18 +219,31 @@ extension RuntimeCoordinator {
             }
 
             var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
+            var firstSuccess: CanonicalToolsCatalogLoadResult?
             while let outcome = try await group.next() {
                 switch outcome {
                 case .success(_, let result):
-                    group.cancelAll()
-                    return availableToolsCatalogSurfaceResult(
-                        startedAt: startedAt,
-                        exposedProcessIDs: exposedProcessIDs,
-                        fallback: result
-                    )
+                    if returnAfterFirstSuccess {
+                        group.cancelAll()
+                        return availableToolsCatalogSurfaceResult(
+                            startedAt: startedAt,
+                            exposedProcessIDs: exposedProcessIDs,
+                            fallback: result
+                        )
+                    }
+                    if firstSuccess == nil {
+                        firstSuccess = result
+                    }
                 case .failure(let route, let upstreamIndex, let error):
                     failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
                 }
+            }
+            if let firstSuccess {
+                return availableToolsCatalogSurfaceResult(
+                    startedAt: startedAt,
+                    exposedProcessIDs: exposedProcessIDs,
+                    fallback: firstSuccess
+                )
             }
             if let lastFailure = failures.last {
                 throw ControlPlane.RequestError(
@@ -315,7 +329,8 @@ extension RuntimeCoordinator {
                     requestTimeout: requestTimeout,
                     deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
                     startedAt: startedAt,
-                    exposedProcessIDs: exposedProcessIDs
+                    exposedProcessIDs: exposedProcessIDs,
+                    returnAfterFirstSuccess: false
                 )
                 guard result.cacheableAsCanonical,
                       let sourceUpstream = result.sourceUpstream,

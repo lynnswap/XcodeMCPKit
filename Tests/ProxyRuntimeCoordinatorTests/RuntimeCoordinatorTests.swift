@@ -2332,22 +2332,25 @@ struct RuntimeCoordinatorTests {
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
     }
 
-    @Test func sessionManagerToolsListCompletesCachedProcessCatalogWithFreshRoute()
+    @Test func sessionManagerToolsListCompletesCachedProcessCatalogWithFreshRoutes()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let olderUpstream = TestUpstreamClient()
+        let middleUpstream = TestUpstreamClient()
         let latestUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 66339, xcodeVersion: "26.6")
+        let middleTarget = xcodeProcessTarget(processID: 70339, xcodeVersion: "26.9")
         let latestTarget = xcodeProcessTarget(processID: 80426, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [olderUpstream, latestUpstream],
+            upstreams: [olderUpstream, middleUpstream, latestUpstream],
             xcodeProcessRoutes: [
-                XcodeProcessRoute(target: latestTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: latestTarget, upstreamIndices: [2]),
+                XcodeProcessRoute(target: middleTarget, upstreamIndices: [1]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
             ],
             startImmediately: false
@@ -2355,6 +2358,7 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.markUpstreamInitialized(upstreamIndex: 2)
         let olderCatalog = try jsonValue([
             "tools": [
                 toolDescriptor(name: "OlderRouteOnly"),
@@ -2374,6 +2378,9 @@ struct RuntimeCoordinatorTests {
             )
         }
 
+        let middleRequest = try await middleUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
         let latestRequest = try await latestUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
@@ -2387,6 +2394,16 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
+        await middleUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: middleRequest),
+                    tools: [
+                        toolDescriptor(name: "MiddleRouteOnly"),
+                    ]
+                )
+            )
+        )
 
         let result = try await waitWithTimeout("waiting for cached process catalog surface") {
             try await task.value
@@ -2395,17 +2412,23 @@ struct RuntimeCoordinatorTests {
         #expect(toolNames(in: result) == ["OlderRouteOnly"])
         #expect(manager.cachedToolsListResult() == nil)
         #expect(await olderUpstream.sentCount() == 0)
+        #expect(await middleUpstream.sentCount() == 1)
         #expect(await latestUpstream.sentCount() == 1)
         _ = try await waitWithTimeout("waiting for completed process catalog cache") {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
+                $0.canonicalToolsSourceUpstream == 2
             }
         }
-        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "LatestRouteOnly",
+            "MiddleRouteOnly",
+            "OlderRouteOnly",
+        ]))
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 2)
         let catalogs = manager.debugSnapshot().processToolCatalogs
-        #expect(catalogs.count == 2)
+        #expect(catalogs.count == 3)
         #expect(try #require(catalogs.first { $0.processID == olderTarget.processID }).toolCount == 1)
+        #expect(try #require(catalogs.first { $0.processID == middleTarget.processID }).toolCount == 1)
         #expect(try #require(catalogs.first { $0.processID == latestTarget.processID }).toolCount == 1)
     }
 
