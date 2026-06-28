@@ -34,7 +34,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
         )
 
         #expect(summary == """
-        XcodeMCPKit \(XcodeMCPProxyServer.productMetadata.version)
+        XcodeMCPProxyKit \(XcodeMCPProxyServer.productMetadata.version)
 
         Server
           URL: http://localhost:8765/mcp
