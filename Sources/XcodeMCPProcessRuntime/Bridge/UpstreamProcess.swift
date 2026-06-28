@@ -75,6 +75,207 @@ private final class StdinWriter: @unchecked Sendable {
     }
 }
 
+package struct UpstreamProcessStartedIO: Sendable {
+    package let stdoutChunks: AsyncStream<Data>
+    package let stderrChunks: AsyncStream<Data>
+
+    package init(
+        stdoutChunks: AsyncStream<Data>,
+        stderrChunks: AsyncStream<Data>
+    ) {
+        self.stdoutChunks = stdoutChunks
+        self.stderrChunks = stderrChunks
+    }
+}
+
+package protocol UpstreamProcessDriving: AnyObject, Sendable {
+    func start(
+        command: String,
+        args: [String],
+        environment: [String: String],
+        maxQueuedWriteBytes: Int,
+        onTermination: @escaping @Sendable (Int32) -> Void,
+        onStdinWriteComplete: @escaping @Sendable (Int, Error?) -> Void
+    ) throws -> UpstreamProcessStartedIO
+    func sendStdin(_ payload: Data) -> Upstream.SendResult
+    func closeStdin()
+    func terminate() -> Bool
+    func stopOutput()
+}
+
+package protocol UpstreamProcessDriverMaking: Sendable {
+    func makeDriver() -> any UpstreamProcessDriving
+}
+
+package struct LiveUpstreamProcessDriverFactory: UpstreamProcessDriverMaking {
+    package init() {}
+
+    package func makeDriver() -> any UpstreamProcessDriving {
+        LiveUpstreamProcessDriver()
+    }
+}
+
+private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendable {
+    private struct State {
+        var process: Process?
+        var stdinPipe: Pipe?
+        var stdoutPipe: Pipe?
+        var stderrPipe: Pipe?
+        var stdinWriter: StdinWriter?
+        var stdoutReader: OrderedPipeReader?
+        var stderrReader: OrderedPipeReader?
+    }
+
+    private let logger: Logger = XcodeMCPRuntimeLogging.make("upstream")
+    private let lock = NSLock()
+    private var state = State()
+
+    func start(
+        command: String,
+        args: [String],
+        environment: [String: String],
+        maxQueuedWriteBytes: Int,
+        onTermination: @escaping @Sendable (Int32) -> Void,
+        onStdinWriteComplete: @escaping @Sendable (Int, Error?) -> Void
+    ) throws -> UpstreamProcessStartedIO {
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        configureNoSigPipe(on: stdinPipe.fileHandleForWriting)
+
+        let (executableURL, resolvedArgs) = resolveCommand(command: command, args: args)
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = resolvedArgs
+        process.environment = environment
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.terminationHandler = { [weak self] process in
+            self?.clearProcess()
+            onTermination(process.terminationStatus)
+        }
+
+        let stdoutReader = OrderedPipeReader(
+            fileHandle: stdoutPipe.fileHandleForReading,
+            label: "XcodeMCPProxy.UpstreamSession.stdout"
+        )
+        let stderrReader = OrderedPipeReader(
+            fileHandle: stderrPipe.fileHandleForReading,
+            label: "XcodeMCPProxy.UpstreamSession.stderr"
+        )
+
+        do {
+            try process.run()
+        } catch {
+            stdoutReader.stop()
+            stderrReader.stop()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            try? stdinPipe.fileHandleForWriting.close()
+            throw error
+        }
+
+        let stdinWriter = StdinWriter(
+            fileHandle: stdinPipe.fileHandleForWriting,
+            maxQueuedWriteBytes: maxQueuedWriteBytes,
+            label: "XcodeMCPProxy.UpstreamSession.stdin",
+            onComplete: { [weak self] bytes, error in
+                self?.completeQueuedWrite(bytes: bytes)
+                onStdinWriteComplete(bytes, error)
+            }
+        )
+
+        lock.withLock {
+            state.process = process
+            state.stdinPipe = stdinPipe
+            state.stdoutPipe = stdoutPipe
+            state.stderrPipe = stderrPipe
+            state.stdinWriter = stdinWriter
+            state.stdoutReader = stdoutReader
+            state.stderrReader = stderrReader
+        }
+
+        stdoutReader.start()
+        stderrReader.start()
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+
+        return UpstreamProcessStartedIO(
+            stdoutChunks: stdoutReader.chunks,
+            stderrChunks: stderrReader.chunks
+        )
+    }
+
+    func sendStdin(_ payload: Data) -> Upstream.SendResult {
+        guard let stdinWriter = lock.withLock({ state.stdinWriter }) else {
+            return .unavailable(.notStarted)
+        }
+        return stdinWriter.send(payload)
+    }
+
+    func closeStdin() {
+        let stdinWriter = lock.withLock { state.stdinWriter }
+        stdinWriter?.close()
+    }
+
+    func terminate() -> Bool {
+        guard let process = lock.withLock({ state.process }) else {
+            return false
+        }
+        guard process.isRunning else {
+            return false
+        }
+        process.terminate()
+        return true
+    }
+
+    func stopOutput() {
+        let snapshot = lock.withLock {
+            (
+                stdoutReader: state.stdoutReader,
+                stderrReader: state.stderrReader,
+                stdoutPipe: state.stdoutPipe,
+                stderrPipe: state.stderrPipe
+            )
+        }
+        snapshot.stdoutReader?.stop()
+        snapshot.stderrReader?.stop()
+        try? snapshot.stdoutPipe?.fileHandleForWriting.close()
+        try? snapshot.stderrPipe?.fileHandleForWriting.close()
+    }
+
+    private func completeQueuedWrite(bytes: Int) {
+        let stdinWriter = lock.withLock { state.stdinWriter }
+        stdinWriter?.completeWrite(bytes: bytes)
+    }
+
+    private func clearProcess() {
+        lock.withLock {
+            state.process = nil
+        }
+    }
+
+    private func resolveCommand(command: String, args: [String]) -> (URL, [String]) {
+        if command.contains("/") {
+            return (URL(fileURLWithPath: command), args)
+        }
+        let env = "/usr/bin/env"
+        return (URL(fileURLWithPath: env), [command] + args)
+    }
+
+    private func configureNoSigPipe(on handle: FileHandle) {
+        let fd = handle.fileDescriptor
+        let result = fcntl(fd, F_SETNOSIGPIPE, 1)
+        if result == -1 {
+            logger.warning(
+                "Failed to disable SIGPIPE on upstream stdin pipe",
+                metadata: ["errno": "\(errno)"]
+            )
+        }
+    }
+}
+
 package struct UpstreamProcess: UpstreamSessionFactory {
     package struct Config: Sendable {
         package var command: String
@@ -83,6 +284,7 @@ package struct UpstreamProcess: UpstreamSessionFactory {
         package var maxQueuedWriteBytes: Int
         package var terminationDrainGrace: Duration
         package var clock: ClockClient
+        package var driverFactory: any UpstreamProcessDriverMaking
 
         package init(
             command: String,
@@ -90,7 +292,8 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             environment: [String: String],
             maxQueuedWriteBytes: Int,
             terminationDrainGrace: Duration = .milliseconds(250),
-            clock: ClockClient = .liveValue
+            clock: ClockClient = .liveValue,
+            driverFactory: any UpstreamProcessDriverMaking = LiveUpstreamProcessDriverFactory()
         ) {
             self.command = command
             self.args = args
@@ -98,6 +301,7 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             self.maxQueuedWriteBytes = maxQueuedWriteBytes
             self.terminationDrainGrace = terminationDrainGrace
             self.clock = clock
+            self.driverFactory = driverFactory
         }
     }
 
@@ -120,13 +324,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private let logger: Logger = XcodeMCPRuntimeLogging.make("upstream")
     private let maxBufferedStderrBytes = 16 * 1024
 
-    private var process: Process?
-    private var stdinPipe = Pipe()
-    private var stdoutPipe = Pipe()
-    private var stderrPipe = Pipe()
-    private var stdinWriter: StdinWriter?
-    private var stdoutReader: OrderedPipeReader?
-    private var stderrReader: OrderedPipeReader?
+    private var driver: (any UpstreamProcessDriving)?
     private var stdoutTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
     private var framer = StdioFramer()
@@ -166,7 +364,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
             logger.warning("Upstream send skipped because session has terminated")
             return .unavailable(.terminated)
         }
-        guard process != nil, let stdinWriter else {
+        guard let driver else {
             logger.warning("Upstream send skipped because session never started")
             return .unavailable(.notStarted)
         }
@@ -176,7 +374,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
             payload.append(0x0A)
         }
 
-        let result = stdinWriter.send(payload)
+        let result = driver.sendStdin(payload)
         if result == .backpressure {
             logger.warning(
                 "Upstream write queue overloaded",
@@ -198,17 +396,10 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
         suppressExitEvent = true
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
-        stdinWriter?.close()
-        stdoutReader?.stop()
-        stderrReader?.stop()
+        driver?.closeStdin()
+        driver?.stopOutput()
 
-        if let process {
-            if process.isRunning {
-                process.terminate()
-            } else {
-                terminationObserved = true
-            }
-        } else {
+        if driver?.terminate() != true {
             terminationObserved = true
         }
 
@@ -220,10 +411,6 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
 
 private extension ProcessBackedUpstreamSession {
     func runProcess() async throws {
-        stdinPipe = Pipe()
-        stdoutPipe = Pipe()
-        stderrPipe = Pipe()
-        configureNoSigPipe(on: stdinPipe.fileHandleForWriting)
         framer = StdioFramer()
         stderrBuffer = ""
         resetBufferedStdoutBytesIfNeeded()
@@ -237,67 +424,40 @@ private extension ProcessBackedUpstreamSession {
         didFinishEvents = false
         isStopping = false
 
-        let (executableURL, args) = resolveCommand(command: config.command, args: config.args)
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = args
-        process.environment = config.environment
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.terminationHandler = { [weak self] proc in
-            Task {
-                await self?.handleTermination(status: proc.terminationStatus)
-            }
-        }
-
-        let stdoutReader = OrderedPipeReader(
-            fileHandle: stdoutPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.UpstreamSession.stdout"
-        )
-        let stderrReader = OrderedPipeReader(
-            fileHandle: stderrPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.UpstreamSession.stderr"
-        )
-
+        let driver = config.driverFactory.makeDriver()
+        self.driver = driver
+        let io: UpstreamProcessStartedIO
         do {
-            try process.run()
+            io = try driver.start(
+                command: config.command,
+                args: config.args,
+                environment: config.environment,
+                maxQueuedWriteBytes: config.maxQueuedWriteBytes
+            ) { [weak self] status in
+                Task {
+                    await self?.handleTermination(status: status)
+                }
+            } onStdinWriteComplete: { [weak self] bytes, error in
+                Task {
+                    await self?.completeQueuedWrite(bytes: bytes, error: error)
+                }
+            }
         } catch {
-            stdoutReader.stop()
-            stderrReader.stop()
-            try? stdoutPipe.fileHandleForWriting.close()
-            try? stderrPipe.fileHandleForWriting.close()
-            try? stdinPipe.fileHandleForWriting.close()
+            driver.stopOutput()
+            driver.closeStdin()
+            self.driver = nil
             continuation.finish()
             throw error
         }
 
-        self.process = process
-        self.stdoutReader = stdoutReader
-        self.stderrReader = stderrReader
-        self.stdinWriter = StdinWriter(
-            fileHandle: stdinPipe.fileHandleForWriting,
-            maxQueuedWriteBytes: config.maxQueuedWriteBytes,
-            label: "XcodeMCPProxy.UpstreamSession.stdin"
-        ) { [weak self] bytes, error in
-            Task {
-                await self?.completeQueuedWrite(bytes: bytes, error: error)
-            }
-        }
-
-        stdoutReader.start()
-        stderrReader.start()
-        try? stdoutPipe.fileHandleForWriting.close()
-        try? stderrPipe.fileHandleForWriting.close()
-
-        stdoutTask = Task { [weak self, stdoutReader] in
-            for await data in stdoutReader.chunks {
+        stdoutTask = Task { [weak self] in
+            for await data in io.stdoutChunks {
                 await self?.handleStdoutData(data)
             }
             await self?.handleStdoutEOF()
         }
-        stderrTask = Task { [weak self, stderrReader] in
-            for await data in stderrReader.chunks {
+        stderrTask = Task { [weak self] in
+            for await data in io.stderrChunks {
                 await self?.handleStderrData(data)
             }
             await self?.handleStderrEOF()
@@ -388,7 +548,6 @@ private extension ProcessBackedUpstreamSession {
         }
 
         terminationObserved = true
-        process = nil
         if !suppressExitEvent {
             pendingExitStatus = status
             scheduleTerminationDrainTimeoutIfNeeded()
@@ -408,20 +567,16 @@ private extension ProcessBackedUpstreamSession {
         }
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
-        stdinWriter?.close()
-        stdoutReader?.stop()
-        stderrReader?.stop()
+        driver?.closeStdin()
+        driver?.stopOutput()
 
-        if let process, process.isRunning {
-            process.terminate()
-        } else {
+        if driver?.terminate() != true {
             terminationObserved = true
             finishEventsIfNeeded()
         }
     }
 
     func completeQueuedWrite(bytes: Int, error: Error?) {
-        stdinWriter?.completeWrite(bytes: bytes)
         guard let error else {
             return
         }
@@ -437,6 +592,7 @@ private extension ProcessBackedUpstreamSession {
         }
 
         didFinishEvents = true
+        driver = nil
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
         resetBufferedStdoutBytesIfNeeded()
@@ -477,8 +633,7 @@ private extension ProcessBackedUpstreamSession {
             return
         }
 
-        stdoutReader?.stop()
-        stderrReader?.stop()
+        driver?.stopOutput()
         finishEventsIfNeeded()
     }
 
@@ -512,22 +667,4 @@ private extension ProcessBackedUpstreamSession {
         continuation.yield(.stderr(message))
     }
 
-    func resolveCommand(command: String, args: [String]) -> (URL, [String]) {
-        if command.contains("/") {
-            return (URL(fileURLWithPath: command), args)
-        }
-        let env = "/usr/bin/env"
-        return (URL(fileURLWithPath: env), [command] + args)
-    }
-
-    func configureNoSigPipe(on handle: FileHandle) {
-        let fd = handle.fileDescriptor
-        let result = fcntl(fd, F_SETNOSIGPIPE, 1)
-        if result == -1 {
-            logger.warning(
-                "Failed to disable SIGPIPE on upstream stdin pipe",
-                metadata: ["errno": "\(errno)"]
-            )
-        }
-    }
 }
