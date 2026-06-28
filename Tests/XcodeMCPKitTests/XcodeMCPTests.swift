@@ -567,6 +567,33 @@ struct XcodeMCPTests {
         }
     }
 
+    @Test func streamableHTTPProxyDiscoveryUsesStandardProxyDiscoveryEnvironment() throws {
+        let explicitDiscovery = XcodeMCP.Configuration.Transport.streamableHTTPProxyDiscovery(
+            environment: [
+                "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/public-contract/endpoint.json",
+                "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/ignored-cache-root",
+            ]
+        )
+        #expect(
+            explicitDiscovery == .streamableHTTP(
+                discoveryFile: URL(fileURLWithPath: "/tmp/public-contract/endpoint.json")
+            )
+        )
+
+        let cacheRootDiscovery = XcodeMCP.Configuration.Transport.streamableHTTPProxyDiscovery(
+            environment: [
+                "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/public-contract-cache",
+            ]
+        )
+        #expect(
+            cacheRootDiscovery == .streamableHTTP(
+                discoveryFile: URL(fileURLWithPath: "/tmp/public-contract-cache")
+                    .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
+                    .appendingPathComponent("endpoint.json")
+            )
+        )
+    }
+
     @Test func streamableHTTPSendsSessionHeadersAndDeletesOnClose() async throws {
         let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
         let server = FakeStreamableHTTPServer(progressDelivery: .none)

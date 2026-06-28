@@ -129,6 +129,15 @@ let xcode = try await XcodeMCP(
 )
 ```
 
+To use the standard proxy discovery location, including
+`XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT` overrides:
+
+```swift
+let xcode = try await XcodeMCP(
+    config: .init(transport: .streamableHTTPProxyDiscovery())
+)
+```
+
 The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
 `MCPToolResult`, `MCPContent`, and `MCPProgress`. Use `request(_:params:)` and
 `notify(_:params:)` for dynamic MCP methods that are not tool calls; the client
@@ -219,6 +228,17 @@ handshake fields.
 `LaunchPlan` also carries help/version text, `--dry-run` output,
 `--force-restart`, and product metadata so launchers do not need to compose the
 lower-level parser or config types directly.
+
+Executable-style hosts can run the same facades directly:
+
+```swift
+let exitCode = await XcodeMCPProxyServer.run(
+    arguments: CommandLine.arguments,
+    environment: ProcessInfo.processInfo.environment,
+    stdout: { print($0) },
+    stderr: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+)
+```
 
 `XcodeMCPProxyKit` also exposes `XcodeMCPProxyStdioAdapter`,
 `XcodeMCPProxyAdapterEndpointResolver`, and `XcodeMCPProxyInstaller`. The STDIO

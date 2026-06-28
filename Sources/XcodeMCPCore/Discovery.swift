@@ -25,11 +25,35 @@ package struct DiscoveryRecord: Codable, Sendable {
 }
 
 package enum Discovery {
+    package static let cacheRootEnvironmentVariable = "XCODE_MCP_PROXY_CACHE_ROOT"
+    package static let discoveryFileEnvironmentVariable = "XCODE_MCP_PROXY_DISCOVERY_FILE"
+
     package static var defaultFileURL: URL {
-        let defaultRoot =
-            FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return defaultRoot
+        defaultFileURL(environment: ProcessInfo.processInfo.environment)
+    }
+
+    package static func defaultFileURL(
+        environment: [String: String],
+        fileManager: FileManager = .default
+    ) -> URL {
+        if let overridePath = nonEmpty(environment[discoveryFileEnvironmentVariable]) {
+            return URL(fileURLWithPath: NSString(string: overridePath).expandingTildeInPath)
+        }
+
+        let cacheRootURL: URL
+        if let overrideRoot = nonEmpty(environment[cacheRootEnvironmentVariable]) {
+            cacheRootURL = URL(
+                fileURLWithPath: NSString(string: overrideRoot).expandingTildeInPath,
+                isDirectory: true
+            )
+        } else {
+            let defaultRoot =
+                fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? fileManager.temporaryDirectory
+            cacheRootURL = defaultRoot
+        }
+
+        return cacheRootURL
             .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
             .appendingPathComponent("endpoint.json")
     }
@@ -136,6 +160,14 @@ package enum Discovery {
         let value = host.lowercased()
         if value.hasPrefix("["), value.hasSuffix("]") {
             return String(value.dropFirst().dropLast())
+        }
+        return value
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
         }
         return value
     }

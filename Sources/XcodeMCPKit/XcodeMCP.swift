@@ -65,6 +65,21 @@ public actor XcodeMCP {
             public static func streamableHTTP(discoveryFile: URL) -> Self {
                 .streamableHTTPDiscoveryFile(discoveryFile)
             }
+
+            /// Connect to the Streamable HTTP proxy endpoint discovered from
+            /// the standard proxy discovery file location.
+            ///
+            /// The file path honors `XCODE_MCP_PROXY_DISCOVERY_FILE` first,
+            /// then `XCODE_MCP_PROXY_CACHE_ROOT`, and otherwise uses the
+            /// default user caches location used by `xcode-mcp-proxy-server`.
+            ///
+            /// - Parameter environment: Environment used to resolve proxy
+            ///   discovery overrides.
+            public static func streamableHTTPProxyDiscovery(
+                environment: [String: String] = ProcessInfo.processInfo.environment
+            ) -> Self {
+                .streamableHTTP(discoveryFile: Discovery.defaultFileURL(environment: environment))
+            }
         }
 
         /// Upstream bridge process policy.

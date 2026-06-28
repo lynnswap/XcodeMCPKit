@@ -218,6 +218,13 @@ func compileOnlyClientDomainSurface() throws {
     let discoveryConfig = XcodeMCP.Configuration(
         transport: .streamableHTTP(discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json"))
     )
+    let proxyDiscoveryConfig = XcodeMCP.Configuration(
+        transport: .streamableHTTPProxyDiscovery(
+            environment: [
+                "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/xcode-mcp/proxy-endpoint.json",
+            ]
+        )
+    )
 
     let metadata = arguments["metadata"]?.objectValue
     let tags = arguments["tags"]?.arrayValue?.compactMap { $0.stringValue }
@@ -307,6 +314,7 @@ func compileOnlyClientDomainSurface() throws {
         customBridgeConfig,
         httpConfig,
         discoveryConfig,
+        proxyDiscoveryConfig,
         tags,
         query,
         includeBeta,
@@ -491,7 +499,7 @@ func compileOnlyProxyConfigurationSurface() {
     _ = XcodeMCPProxyInstaller.binaryNames
 }
 
-func compileOnlyProxyLaunchSurface() throws {
+func compileOnlyProxyLaunchSurface() async throws {
     let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
         arguments: [
             "xcode-mcp-proxy-server",
@@ -532,6 +540,35 @@ func compileOnlyProxyLaunchSurface() throws {
         ],
         environment: [:]
     )
+    let runnerStdout: @Sendable (String) -> Void = { _ in }
+    let runnerStderr: @Sendable (String) -> Void = { _ in }
+    let serverExitCode = await XcodeMCPProxyServer.run(
+        arguments: [
+            "xcode-mcp-proxy-server",
+            "--version",
+        ],
+        environment: [:],
+        stdout: runnerStdout,
+        stderr: runnerStderr
+    )
+    let adapterExitCode = await XcodeMCPProxyStdioAdapter.run(
+        arguments: [
+            "xcode-mcp-proxy",
+            "--version",
+        ],
+        environment: [:],
+        stdout: runnerStdout,
+        stderr: runnerStderr
+    )
+    let installerExitCode = XcodeMCPProxyInstaller.run(
+        arguments: [
+            "xcode-mcp-proxy-install",
+            "--version",
+        ],
+        environment: [:],
+        stdout: runnerStdout,
+        stderr: runnerStderr
+    )
 
     _ = (
         plan.action,
@@ -556,7 +593,10 @@ func compileOnlyProxyLaunchSurface() throws {
         installPlan.configuration,
         installPlan.options.executableName,
         installPlan.usage,
-        installPlan.versionLine
+        installPlan.versionLine,
+        serverExitCode,
+        adapterExitCode,
+        installerExitCode
     )
 }
 
