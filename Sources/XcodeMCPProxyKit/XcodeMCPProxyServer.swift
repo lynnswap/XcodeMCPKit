@@ -4,7 +4,6 @@ import NIO
 import NIOHTTP1
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.
 ///
@@ -76,7 +75,7 @@ public final class XcodeMCPProxyServer {
     ///
     /// This type is the stable server configuration surface for
     /// `XcodeMCPProxyKit`. Lower-level parser, discovery, filesystem, and
-    /// session-routing types stay internal to the package targets that own
+    /// session-routing types stay internal to the targets that own
     /// them.
     public struct Configuration: Equatable, Sendable {
         /// Address that the Streamable HTTP server binds.
@@ -114,7 +113,7 @@ public final class XcodeMCPProxyServer {
                 sessionID: String? = nil
             )
 
-            package var command: String {
+            var command: String {
                 switch self {
                 case .defaultMCPBridge:
                     return "xcrun"
@@ -123,7 +122,7 @@ public final class XcodeMCPProxyServer {
                 }
             }
 
-            package var arguments: [String] {
+            var arguments: [String] {
                 switch self {
                 case .defaultMCPBridge:
                     return ["mcpbridge"]
@@ -132,14 +131,14 @@ public final class XcodeMCPProxyServer {
                 }
             }
 
-            package var processesPerXcode: Int {
+            var processesPerXcode: Int {
                 switch self {
                 case .defaultMCPBridge(let count, _), .custom(_, _, let count, _):
                     return count
                 }
             }
 
-            package var sessionID: String? {
+            var sessionID: String? {
                 switch self {
                 case .defaultMCPBridge(_, let sessionID), .custom(_, _, _, let sessionID):
                     return sessionID
@@ -169,7 +168,7 @@ public final class XcodeMCPProxyServer {
         public struct Discovery: Equatable, Sendable {
             /// Optional discovery file URL.
             ///
-            /// `nil` uses the package default discovery location.
+            /// `nil` uses the default discovery location.
             public var fileURL: URL?
 
             /// Creates a discovery policy.
@@ -273,7 +272,7 @@ public final class XcodeMCPProxyServer {
             self.features = features
         }
 
-        package init(serverProxyConfig proxyConfig: ProxyConfig) {
+        init(serverProxyConfig proxyConfig: ProxyConfig) {
             self.init(
                 bind: BindAddress(
                     host: proxyConfig.listenHost,
@@ -299,33 +298,33 @@ public final class XcodeMCPProxyServer {
             )
         }
 
-        package var listenHost: String { bind.host }
-        package var listenPort: Int { bind.port }
-        package var upstreamCommand: String { upstream.command }
-        package var upstreamArguments: [String] { upstream.arguments }
-        package var upstreamProcessCount: Int { upstream.processesPerXcode }
-        package var upstreamSessionID: String? { upstream.sessionID }
-        package var maxBodyBytes: Int { limits.maxBodyBytes }
-        package var requestTimeout: TimeInterval { limits.requestTimeout }
-        package var configPath: String? { configurationFilePath }
-        package var discoveryFileURL: URL? { discovery.fileURL }
-        package var prewarmToolsList: Bool { features.prewarmToolsList }
-        package var autoApproveXcodeDialog: Bool { approval == .automatic }
-        package var refreshCodeIssuesMode: RefreshCodeIssuesMode {
+        var listenHost: String { bind.host }
+        var listenPort: Int { bind.port }
+        var upstreamCommand: String { upstream.command }
+        var upstreamArguments: [String] { upstream.arguments }
+        var upstreamProcessCount: Int { upstream.processesPerXcode }
+        var upstreamSessionID: String? { upstream.sessionID }
+        var maxBodyBytes: Int { limits.maxBodyBytes }
+        var requestTimeout: TimeInterval { limits.requestTimeout }
+        var configPath: String? { configurationFilePath }
+        var discoveryFileURL: URL? { discovery.fileURL }
+        var prewarmToolsList: Bool { features.prewarmToolsList }
+        var autoApproveXcodeDialog: Bool { approval == .automatic }
+        var refreshCodeIssuesMode: RefreshCodeIssuesMode {
             features.refreshCodeIssuesMode
         }
     }
 
-    package struct Dependencies: Sendable {
-        package var discoveryClient: DiscoveryClient
-        package var executableLookupClient: ExecutableLookupClient
-        package var processID: @Sendable () -> Int
-        package var runningXcodeTargets: @Sendable () -> [XcodeProcessTarget]
-        package var makeAutoApprover: @Sendable () -> any ProxyServerPermissionDialogAutoApprover
-        package var makeRuntimeCoordinator:
+    struct Dependencies: Sendable {
+        var discoveryClient: DiscoveryClient
+        var executableLookupClient: ExecutableLookupClient
+        var processID: @Sendable () -> Int
+        var runningXcodeTargets: @Sendable () -> [XcodeProcessTarget]
+        var makeAutoApprover: @Sendable () -> any ProxyServerPermissionDialogAutoApprover
+        var makeRuntimeCoordinator:
             @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
 
-        package init(
+        init(
             discoveryClient: DiscoveryClient = .liveValue,
             executableLookupClient: ExecutableLookupClient = .liveValue,
             processID: @escaping @Sendable () -> Int = {
@@ -345,7 +344,7 @@ public final class XcodeMCPProxyServer {
             self.makeRuntimeCoordinator = makeRuntimeCoordinator
         }
 
-        package static func live(config: ProxyConfig) -> Self {
+        static func live(config: ProxyConfig) -> Self {
             let executableLookupClient = ExecutableLookupClient.liveValue
             return Self(
                 executableLookupClient: executableLookupClient,
@@ -383,20 +382,20 @@ public final class XcodeMCPProxyServer {
         }
     }
 
-    package let config: ProxyConfig
-    package let dependencies: Dependencies
-    package let group: EventLoopGroup
-    package let refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator
-    package let refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver
-    package let refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState
+    let config: ProxyConfig
+    let dependencies: Dependencies
+    let group: EventLoopGroup
+    let refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator
+    let refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver
+    let refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState
     private var channels: [Channel] = []
-    package let logger: Logger = ProxyLogging.make("server")
-    package let runtimeLock = NSLock()
-    package let acceptedChannelTracker = ProxyAcceptedChannelTracker()
-    package var isShuttingDown = false
-    package var sessionManager: (any RuntimeCoordinating)?
-    package var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
-    package var hasStartedRuntimeOrChannels: Bool {
+    let logger: Logger = ProxyLogging.make("server")
+    let runtimeLock = NSLock()
+    let acceptedChannelTracker = ProxyAcceptedChannelTracker()
+    var isShuttingDown = false
+    var sessionManager: (any RuntimeCoordinating)?
+    var permissionDialogAutoApprover: (any ProxyServerPermissionDialogAutoApprover)?
+    var hasStartedRuntimeOrChannels: Bool {
         sessionManager != nil || channels.isEmpty == false
     }
 
@@ -409,7 +408,7 @@ public final class XcodeMCPProxyServer {
         self.init(proxyConfig: proxyConfig, dependencies: .live(config: proxyConfig))
     }
 
-    package init(proxyConfig: ProxyConfig, dependencies: Dependencies) {
+    init(proxyConfig: ProxyConfig, dependencies: Dependencies) {
         self.config = proxyConfig
         self.dependencies = dependencies
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -514,7 +513,7 @@ public final class XcodeMCPProxyServer {
         }
     }
 
-    package func resolvedListenAddress(for channel: Channel) -> (String, Int) {
+    func resolvedListenAddress(for channel: Channel) -> (String, Int) {
         if let address = channel.localAddress {
             let host = address.ipAddress ?? config.listenHost
             let port = address.port ?? config.listenPort
@@ -523,7 +522,7 @@ public final class XcodeMCPProxyServer {
         return (config.listenHost, config.listenPort)
     }
 
-    package func bindChannels(using bootstrap: ServerBootstrap) throws -> [Channel] {
+    func bindChannels(using bootstrap: ServerBootstrap) throws -> [Channel] {
         if config.listenHost != "localhost" {
             let channel = try bootstrap.bind(host: config.listenHost, port: config.listenPort).wait()
             return [channel]
@@ -590,11 +589,11 @@ public final class XcodeMCPProxyServer {
         }
     }
 
-    package static func listeningLogLine(displayHost: String, port: Int) -> String {
+    static func listeningLogLine(displayHost: String, port: Int) -> String {
         "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(productMetadata.version))"
     }
 
-    package static func startupSummary(
+    static func startupSummary(
         displayHost: String,
         port: Int,
         config: ProxyConfig,
@@ -654,7 +653,7 @@ public final class XcodeMCPProxyServer {
         return "disabled"
     }
 
-    package static func additionalPermissionDialogExecutableCandidates(
+    static func additionalPermissionDialogExecutableCandidates(
         config: ProxyConfig,
         executableLookupClient: ExecutableLookupClient = .liveValue
     ) -> [String] {
@@ -690,7 +689,7 @@ public final class XcodeMCPProxyServer {
         }
     }
 
-    package func setChannelsForStartedServer(_ startedChannels: [Channel]) {
+    func setChannelsForStartedServer(_ startedChannels: [Channel]) {
         channels = startedChannels
     }
 }
@@ -737,7 +736,7 @@ private extension XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode {
     }
 }
 
-package final class ProxyAcceptedChannelTracker: @unchecked Sendable {
+final class ProxyAcceptedChannelTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var channels: [ObjectIdentifier: Channel] = [:]
 
@@ -759,8 +758,8 @@ package final class ProxyAcceptedChannelTracker: @unchecked Sendable {
     }
 }
 
-package final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
-    package typealias InboundIn = Channel
+final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = Channel
 
     private let tracker: ProxyAcceptedChannelTracker
 
@@ -768,21 +767,21 @@ package final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @uncheck
         self.tracker = tracker
     }
 
-    package func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let channel = unwrapInboundIn(data)
         tracker.register(channel)
         context.fireChannelRead(data)
     }
 }
 
-package protocol ProxyServerPermissionDialogAutoApprover: Sendable {
+protocol ProxyServerPermissionDialogAutoApprover: Sendable {
     func start()
     func stop()
 }
 
 extension XcodePermissionDialog.AutoApprover: ProxyServerPermissionDialogAutoApprover {}
 
-package extension NSLock {
+extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }

@@ -1,11 +1,10 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues {
-    package enum ToolsListRewriter {
-    package static func rewriteResult(
+    enum ToolsListRewriter {
+    static func rewriteResult(
         _ result: JSONValue,
         mode: ProxyConfig.RefreshCodeIssuesMode,
         hiddenToolNames: Set<String> = []
@@ -36,7 +35,7 @@ extension RefreshCodeIssues {
         return .object(resultObject)
     }
 
-    package static func rewriteResponseDataIfNeeded(
+    static func rewriteResponseDataIfNeeded(
         _ responseData: Data,
         method: String? = nil,
         responseMethodsByIDKey: [String: String] = [:],

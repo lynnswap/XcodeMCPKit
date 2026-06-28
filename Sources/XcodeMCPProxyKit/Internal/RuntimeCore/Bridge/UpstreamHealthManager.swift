@@ -4,55 +4,55 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-package final class UpstreamHealthManager: Sendable {
-    package struct ProbeRequest: Sendable {
-        package let upstreamIndex: Int
-        package let probeGeneration: UInt64
+final class UpstreamHealthManager: Sendable {
+    struct ProbeRequest: Sendable {
+        let upstreamIndex: Int
+        let probeGeneration: UInt64
     }
 
-    package enum Effect: Sendable {
+    enum Effect: Sendable {
         case cancelInitTimeout(RuntimeScheduledTimeout)
         case startHealthProbe(UpstreamHealthManager.ProbeRequest)
         case clearPins
         case failQueuedIfNoRecovery
     }
 
-    package struct UseEvaluation: Sendable {
-        package let isUsable: Bool
-        package let effects: [UpstreamHealthManager.Effect]
+    struct UseEvaluation: Sendable {
+        let isUsable: Bool
+        let effects: [UpstreamHealthManager.Effect]
 
-        package init(isUsable: Bool, effects: [UpstreamHealthManager.Effect]) {
+        init(isUsable: Bool, effects: [UpstreamHealthManager.Effect]) {
             self.isUsable = isUsable
             self.effects = effects
         }
     }
 
-    package struct SelectionResult: Sendable {
-        package let upstreamIndex: Int?
-        package let effects: [UpstreamHealthManager.Effect]
+    struct SelectionResult: Sendable {
+        let upstreamIndex: Int?
+        let effects: [UpstreamHealthManager.Effect]
 
-        package init(upstreamIndex: Int?, effects: [UpstreamHealthManager.Effect]) {
+        init(upstreamIndex: Int?, effects: [UpstreamHealthManager.Effect]) {
             self.upstreamIndex = upstreamIndex
             self.effects = effects
         }
     }
 
-    package struct ProtocolViolationTransition: Sendable {
-        package let quarantineUntil: UInt64
-        package let cancelledInitTimeout: RuntimeScheduledTimeout?
+    struct ProtocolViolationTransition: Sendable {
+        let quarantineUntil: UInt64
+        let cancelledInitTimeout: RuntimeScheduledTimeout?
     }
 
-    package struct IncompatibilityTransition: Sendable {
-        package let quarantineUntil: UInt64
-        package let cancelledInitTimeout: RuntimeScheduledTimeout?
-        package let initUpstreamID: Int64?
+    struct IncompatibilityTransition: Sendable {
+        let quarantineUntil: UInt64
+        let cancelledInitTimeout: RuntimeScheduledTimeout?
+        let initUpstreamID: Int64?
     }
 
-    package struct MarkInitializedTransition: Sendable {
-        package let timeout: RuntimeScheduledTimeout?
+    struct MarkInitializedTransition: Sendable {
+        let timeout: RuntimeScheduledTimeout?
     }
 
-    package enum InitPhase: Sendable, Equatable {
+    enum InitPhase: Sendable, Equatable {
         case idle
         case initializing(upstreamID: Int64?)
         case initialized
@@ -73,7 +73,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package enum Event: Sendable {
+    enum Event: Sendable {
         case requestSucceeded(upstreamIndex: Int)
         case upstreamOverloaded(upstreamIndex: Int)
         case healthProbeFinished(
@@ -85,19 +85,19 @@ package final class UpstreamHealthManager: Sendable {
         case toolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64)
     }
 
-    package struct UpstreamState: Sendable {
-        package var initPhase: InitPhase = .idle
-        package var initTimeout: RuntimeScheduledTimeout?
-        package var didSendInitialized = false
-        package var healthState: Upstream.HealthState = .healthy
-        package var consecutiveRequestTimeouts = 0
-        package var healthProbeInFlight = false
-        package var healthProbeGeneration: UInt64 = 0
-        package var consecutiveToolsListFailures: Int = 0
-        package var lastToolsListSuccessUptimeNs: UInt64?
-        package var requestPickCount: Int = 0
+    struct UpstreamState: Sendable {
+        var initPhase: InitPhase = .idle
+        var initTimeout: RuntimeScheduledTimeout?
+        var didSendInitialized = false
+        var healthState: Upstream.HealthState = .healthy
+        var consecutiveRequestTimeouts = 0
+        var healthProbeInFlight = false
+        var healthProbeGeneration: UInt64 = 0
+        var consecutiveToolsListFailures: Int = 0
+        var lastToolsListSuccessUptimeNs: UInt64?
+        var requestPickCount: Int = 0
 
-        package var isInitialized: Bool {
+        var isInitialized: Bool {
             get { initPhase.isInitialized }
             set {
                 if newValue {
@@ -108,7 +108,7 @@ package final class UpstreamHealthManager: Sendable {
             }
         }
 
-        package var initInFlight: Bool {
+        var initInFlight: Bool {
             get { initPhase.isInFlight }
             set {
                 if newValue {
@@ -119,7 +119,7 @@ package final class UpstreamHealthManager: Sendable {
             }
         }
 
-        package var initUpstreamID: Int64? {
+        var initUpstreamID: Int64? {
             get { initPhase.upstreamID }
             set {
                 if initPhase.isInFlight || newValue != nil {
@@ -136,22 +136,22 @@ package final class UpstreamHealthManager: Sendable {
 
     private let state: NIOLockedValueBox<State>
 
-    package init(upstreamCount: Int) {
+    init(upstreamCount: Int) {
         self.state = NIOLockedValueBox(State(
             upstreamStates: Array(repeating: UpstreamState(), count: upstreamCount),
             nextPick: 0
         ))
     }
 
-    package func statesSnapshot() -> [UpstreamState] {
+    func statesSnapshot() -> [UpstreamState] {
         state.withLockedValue { $0.upstreamStates }
     }
 
-    package func count() -> Int {
+    func count() -> Int {
         state.withLockedValue { $0.upstreamStates.count }
     }
 
-    package func clearInitTimeoutsForShutdown() -> [RuntimeScheduledTimeout?] {
+    func clearInitTimeoutsForShutdown() -> [RuntimeScheduledTimeout?] {
         state.withLockedValue { state -> [RuntimeScheduledTimeout?] in
             var timeouts: [RuntimeScheduledTimeout?] = []
             timeouts.reserveCapacity(state.upstreamStates.count)
@@ -165,24 +165,24 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func anyInitialized() -> Bool {
+    func anyInitialized() -> Bool {
         state.withLockedValue { $0.upstreamStates.contains { $0.isInitialized } }
     }
 
-    package func primaryInitInFlight() -> Bool {
+    func primaryInitInFlight() -> Bool {
         state.withLockedValue { state in
             guard !state.upstreamStates.isEmpty else { return false }
             return state.upstreamStates[0].initInFlight
         }
     }
 
-    package func anyRecoveryInFlight() -> Bool {
+    func anyRecoveryInFlight() -> Bool {
         state.withLockedValue { state in
             state.upstreamStates.contains { $0.initInFlight || $0.healthProbeInFlight }
         }
     }
 
-    package func initializedHealthyishCount() -> Int {
+    func initializedHealthyishCount() -> Int {
         state.withLockedValue { state in
             state.upstreamStates.reduce(into: 0) { count, upstream in
                 guard upstream.isInitialized else { return }
@@ -196,7 +196,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func evaluateUsableInitialized(
+    func evaluateUsableInitialized(
         index: Int,
         nowUptimeNs: UInt64
     ) -> UpstreamHealthManager.UseEvaluation {
@@ -221,7 +221,7 @@ package final class UpstreamHealthManager: Sendable {
         return UpstreamHealthManager.UseEvaluation(isUsable: usable, effects: effects)
     }
 
-    package func chooseBestInitializedUpstream(
+    func chooseBestInitializedUpstream(
         nowUptimeNs: UInt64,
         occupiedUpstreams: Set<Int>
     ) -> UpstreamHealthManager.SelectionResult {
@@ -267,15 +267,15 @@ package final class UpstreamHealthManager: Sendable {
         return UpstreamHealthManager.SelectionResult(upstreamIndex: chosen, effects: effects)
     }
 
-    package func markRequestSucceeded(upstreamIndex: Int) {
+    func markRequestSucceeded(upstreamIndex: Int) {
         _ = apply(event: .requestSucceeded(upstreamIndex: upstreamIndex))
     }
 
-    package func markUpstreamOverloaded(upstreamIndex: Int) -> Bool {
+    func markUpstreamOverloaded(upstreamIndex: Int) -> Bool {
         apply(event: .upstreamOverloaded(upstreamIndex: upstreamIndex)).isEmpty == false
     }
 
-    package func markRequestTimedOut(upstreamIndex: Int, nowUptimeNs: UInt64) -> (shouldClearPins: Bool, timeoutCount: Int) {
+    func markRequestTimedOut(upstreamIndex: Int, nowUptimeNs: UInt64) -> (shouldClearPins: Bool, timeoutCount: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
                 return (false, 0)
@@ -295,7 +295,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func markProtocolViolation(
+    func markProtocolViolation(
         upstreamIndex: Int,
         nowUptimeNs: UInt64
     ) -> UpstreamHealthManager.ProtocolViolationTransition? {
@@ -320,7 +320,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func quarantineIncompatibleUpstream(
+    func quarantineIncompatibleUpstream(
         upstreamIndex: Int,
         nowUptimeNs: UInt64
     ) -> UpstreamHealthManager.IncompatibilityTransition? {
@@ -348,7 +348,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func finishHealthProbe(
+    func finishHealthProbe(
         upstreamIndex: Int,
         probeGeneration: UInt64,
         success: Bool,
@@ -362,14 +362,14 @@ package final class UpstreamHealthManager: Sendable {
         ))
     }
 
-    package func markToolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64) {
+    func markToolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64) {
         _ = apply(event: .toolsListRefreshSucceeded(
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNs
         ))
     }
 
-    package func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64) -> (failures: Int, quarantineUntil: UInt64)? {
+    func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64) -> (failures: Int, quarantineUntil: UInt64)? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return nil }
             let quarantineUntil = nowUptimeNs &+ 30 * 1_000_000_000
@@ -380,7 +380,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func shouldSendInitializedNotification(upstreamIndex: Int) -> Bool {
+    func shouldSendInitializedNotification(upstreamIndex: Int) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else {
                 return false
@@ -389,7 +389,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func markInitializedNotificationSent(
+    func markInitializedNotificationSent(
         upstreamIndex: Int,
         expectedUpstreamID: Int64
     ) -> Bool {
@@ -405,7 +405,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func initializeAttemptMatches(
+    func initializeAttemptMatches(
         upstreamIndex: Int,
         expectedUpstreamID: Int64
     ) -> Bool {
@@ -417,7 +417,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func resetForDebug() -> [RuntimeScheduledTimeout?] {
+    func resetForDebug() -> [RuntimeScheduledTimeout?] {
         state.withLockedValue { state in
             let timeouts = state.upstreamStates.map(\.initTimeout)
             state.upstreamStates = Array(repeating: UpstreamState(), count: state.upstreamStates.count)
@@ -426,7 +426,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func beginWarmInitialize(upstreamIndex: Int) -> Bool {
+    func beginWarmInitialize(upstreamIndex: Int) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
             if state.upstreamStates[upstreamIndex].isInitialized || state.upstreamStates[upstreamIndex].initInFlight {
@@ -437,14 +437,14 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func setWarmInitializeUpstreamID(_ upstreamID: Int64, for upstreamIndex: Int) {
+    func setWarmInitializeUpstreamID(_ upstreamID: Int64, for upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].initUpstreamID = upstreamID
         }
     }
 
-    package func replaceInitTimeout(
+    func replaceInitTimeout(
         _ timeout: RuntimeScheduledTimeout,
         upstreamIndex: Int
     ) -> RuntimeScheduledTimeout? {
@@ -456,7 +456,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func clearWarmInitializeIfMatching(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+    func clearWarmInitializeIfMatching(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return false }
             guard state.upstreamStates[upstreamIndex].initUpstreamID == upstreamID else { return false }
@@ -468,7 +468,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func markInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
+    func markInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].initInFlight = true
@@ -477,7 +477,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func clearInitInFlight(upstreamIndex: Int) {
+    func clearInitInFlight(upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreamStates.count else { return }
             state.upstreamStates[upstreamIndex].initInFlight = false
@@ -486,14 +486,14 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func clearUpstreamState(upstreamIndex: Int) -> (
+    func clearUpstreamState(upstreamIndex: Int) -> (
         timeout: RuntimeScheduledTimeout?,
         initUpstreamID: Int64?
     )? {
         clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: nil)
     }
 
-    package func clearUpstreamState(
+    func clearUpstreamState(
         upstreamIndex: Int,
         expectedUpstreamID: Int64?
     ) -> (
@@ -525,11 +525,11 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func markInitialized(upstreamIndex: Int) -> UpstreamHealthManager.MarkInitializedTransition? {
+    func markInitialized(upstreamIndex: Int) -> UpstreamHealthManager.MarkInitializedTransition? {
         markInitialized(upstreamIndex: upstreamIndex, expectedUpstreamID: nil)
     }
 
-    package func markInitialized(
+    func markInitialized(
         upstreamIndex: Int,
         expectedUpstreamID: Int64?
     ) -> UpstreamHealthManager.MarkInitializedTransition? {
@@ -552,7 +552,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func debugHealthStateString(_ state: Upstream.HealthState) -> String {
+    func debugHealthStateString(_ state: Upstream.HealthState) -> String {
         switch state {
         case .healthy:
             return "healthy"
@@ -563,7 +563,7 @@ package final class UpstreamHealthManager: Sendable {
         }
     }
 
-    package func apply(event: Event) -> [UpstreamHealthManager.Effect] {
+    func apply(event: Event) -> [UpstreamHealthManager.Effect] {
         state.withLockedValue { state in
             switch event {
             case .requestSucceeded(let upstreamIndex):

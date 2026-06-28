@@ -5,11 +5,10 @@ import NIOEmbedded
 import NIOHTTP1
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import Testing
 import XcodeMCPProxyTestSupport
 
-@testable import XcodeMCPProxyKit
 
 private func jsonRPCError(
     from resolution: ClientMCPRequestExecutor.Resolution

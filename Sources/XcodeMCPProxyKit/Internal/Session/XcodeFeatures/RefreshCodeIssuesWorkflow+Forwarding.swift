@@ -3,7 +3,6 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues.Workflow {
     /// Every proxy-mode bail-out funnels through here: record the debug
@@ -36,7 +35,7 @@ extension RefreshCodeIssues.Workflow {
         return nil
     }
 
-    package func runProxyRefresh(
+    func runProxyRefresh(
         refreshRequest: RefreshCodeIssues.Request,
         sessionID: String,
         requestIDs: [JSONRPC.ID],
@@ -243,7 +242,7 @@ extension RefreshCodeIssues.Workflow {
         return responseData
     }
 
-    package func runForwardAttempts(
+    func runForwardAttempts(
         bodyData: Data,
         sessionID: String,
         requestIDs: [JSONRPC.ID],

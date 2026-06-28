@@ -3,17 +3,16 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum DocumentationProvider {}
+enum DocumentationProvider {}
 
 extension DocumentationProvider {
-    package enum ToolListUpdate: Sendable {
+    enum ToolListUpdate: Sendable {
         case unchanged
         case unavailable
         case available(JSONValue)
 
-        package var debugLabel: String {
+        var debugLabel: String {
             switch self {
             case .unchanged:
                 "unchanged"
@@ -27,20 +26,20 @@ extension DocumentationProvider {
 }
 
 extension DocumentationProvider {
-    package enum UnavailableReason: Sendable, Error, CustomStringConvertible {
+    enum UnavailableReason: Sendable, Error, CustomStringConvertible {
         case noAvailableProvider
 
-        package static let userFacingMessage =
+        static let userFacingMessage =
             "DocumentationSearch is unavailable from the running Xcode documentation provider. Try restarting Xcode if the problem persists."
 
-        package var message: String {
+        var message: String {
             switch self {
             case .noAvailableProvider:
                 Self.userFacingMessage
             }
         }
 
-        package var description: String {
+        var description: String {
             message
         }
     }
@@ -50,14 +49,14 @@ extension DocumentationProvider {
 /// When the manager is enabled, DocumentationSearch is owned by the
 /// documentation provider and does not fall back to the regular upstream.
 extension DocumentationProvider {
-    package enum CallOutcome: Sendable {
+    enum CallOutcome: Sendable {
         case handled(Data, invalidatedProvider: Bool)
         case unavailable(DocumentationProvider.UnavailableReason)
         case failed(any Error, invalidatedProvider: Bool)
     }
 }
 
-package protocol DocumentationProviderManaging: Sendable {
+protocol DocumentationProviderManaging: Sendable {
     func startBackgroundDiscovery(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
     func toolListUpdate(requestTimeout: TimeAmount?) async -> DocumentationProvider.ToolListUpdate
     func callDocumentationSearch(
@@ -68,14 +67,14 @@ package protocol DocumentationProviderManaging: Sendable {
     func shutdown() async
 }
 
-package struct DocumentationSearchServiceRepairReport: Sendable, Equatable {
-    package let configURL: String
-    package let xcodeVersion: String
-    package let osVersion: String
-    package let documentationRelease: Int?
-    package let changedDefault: Bool
+struct DocumentationSearchServiceRepairReport: Sendable, Equatable {
+    let configURL: String
+    let xcodeVersion: String
+    let osVersion: String
+    let documentationRelease: Int?
+    let changedDefault: Bool
 
-    package init(
+    init(
         configURL: String,
         xcodeVersion: String,
         osVersion: String,
@@ -90,19 +89,19 @@ package struct DocumentationSearchServiceRepairReport: Sendable, Equatable {
     }
 }
 
-package enum DocumentationSearchServiceRepairResult: Sendable, Equatable {
+enum DocumentationSearchServiceRepairResult: Sendable, Equatable {
     case repaired(DocumentationSearchServiceRepairReport)
     case skipped(String)
     case failed(String)
 }
 
-package protocol DocumentationSearchServiceRepairing: Sendable {
+protocol DocumentationSearchServiceRepairing: Sendable {
     func repairDocumentationSearch(
         for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult
 }
 
-package protocol DocumentationSearchProviding: Sendable {
+protocol DocumentationSearchProviding: Sendable {
     func descriptor(for target: XcodeProcessTarget) async -> JSONValue?
     func callDocumentationSearch(
         requestData: Data,
@@ -111,24 +110,24 @@ package protocol DocumentationSearchProviding: Sendable {
     ) async throws -> Data
 }
 
-package struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
-    package init() {}
+struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+    init() {}
 
-    package func repairDocumentationSearch(
+    func repairDocumentationSearch(
         for _: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         .skipped("disabled")
     }
 }
 
-package struct UnavailableDocumentationSearchProvider: DocumentationSearchProviding {
-    package init() {}
+struct UnavailableDocumentationSearchProvider: DocumentationSearchProviding {
+    init() {}
 
-    package func descriptor(for _: XcodeProcessTarget) async -> JSONValue? {
+    func descriptor(for _: XcodeProcessTarget) async -> JSONValue? {
         nil
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         requestData _: Data,
         for _: XcodeProcessTarget,
         timeout _: TimeAmount?
@@ -137,18 +136,18 @@ package struct UnavailableDocumentationSearchProvider: DocumentationSearchProvid
     }
 }
 
-package enum DocumentationProviderRouteOwnership: Sendable, Equatable {
+enum DocumentationProviderRouteOwnership: Sendable, Equatable {
     case transportOwned
     case runtimeBorrowed(upstreamIndex: Int)
 }
 
-package struct DocumentationProviderRoute: Sendable, Equatable {
-    package let id: String
-    package let target: XcodeProcessTarget
-    package let ownership: DocumentationProviderRouteOwnership
-    package let serverVersion: String
+struct DocumentationProviderRoute: Sendable, Equatable {
+    let id: String
+    let target: XcodeProcessTarget
+    let ownership: DocumentationProviderRouteOwnership
+    let serverVersion: String
 
-    package var upstreamIndex: Int? {
+    var upstreamIndex: Int? {
         switch ownership {
         case .transportOwned:
             nil
@@ -157,7 +156,7 @@ package struct DocumentationProviderRoute: Sendable, Equatable {
         }
     }
 
-    package var isRuntimeBorrowed: Bool {
+    var isRuntimeBorrowed: Bool {
         switch ownership {
         case .runtimeBorrowed:
             true
@@ -166,7 +165,7 @@ package struct DocumentationProviderRoute: Sendable, Equatable {
         }
     }
 
-    package init(
+    init(
         id: String,
         target: XcodeProcessTarget,
         upstreamIndex: Int?,
@@ -181,7 +180,7 @@ package struct DocumentationProviderRoute: Sendable, Equatable {
     }
 }
 
-package protocol DocumentationProviderRouting: Sendable {
+protocol DocumentationProviderRouting: Sendable {
     func openRoute(
         for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
@@ -202,18 +201,18 @@ package protocol DocumentationProviderRouting: Sendable {
 }
 
 extension DocumentationProviderRouting {
-    package func close(route _: DocumentationProviderRoute) async {}
-    package func closeForShutdown(route: DocumentationProviderRoute) async {
+    func close(route _: DocumentationProviderRoute) async {}
+    func closeForShutdown(route: DocumentationProviderRoute) async {
         await close(route: route)
     }
-    package func shutdown() async {}
+    func shutdown() async {}
 }
 
 extension DocumentationProvider {
-    package enum ToolCatalog {
-        package static let toolName = "DocumentationSearch"
+    enum ToolCatalog {
+        static let toolName = "DocumentationSearch"
 
-        package static let proxyDescriptor: JSONValue = .object([
+        static let proxyDescriptor: JSONValue = .object([
             "name": .string(toolName),
             "description": .string("Search Apple developer documentation."),
             "inputSchema": .object([
@@ -230,7 +229,7 @@ extension DocumentationProvider {
             ]),
         ])
 
-        package static func applying(
+        static func applying(
             _ update: DocumentationProvider.ToolListUpdate,
             to result: JSONValue
         ) -> JSONValue {
@@ -244,11 +243,11 @@ extension DocumentationProvider {
             }
         }
 
-        package static func exposingProxyOwnedSearch(in result: JSONValue) -> JSONValue {
+        static func exposingProxyOwnedSearch(in result: JSONValue) -> JSONValue {
             replacingDocumentationSearch(in: result, with: proxyDescriptor)
         }
 
-        package static func descriptor(in result: JSONValue) -> JSONValue? {
+        static func descriptor(in result: JSONValue) -> JSONValue? {
             guard case .object(let object) = result,
                 case .array(let tools)? = object["tools"]
             else {
@@ -264,7 +263,7 @@ extension DocumentationProvider {
             }
         }
 
-        package static func responseIsDocumentationNotEnabled(_ data: Data) -> Bool {
+        static func responseIsDocumentationNotEnabled(_ data: Data) -> Bool {
             responseErrorTexts(in: data).contains { text in
                 let normalized = text.lowercased()
                 return normalized.contains("documentationsearch")
@@ -272,7 +271,7 @@ extension DocumentationProvider {
             }
         }
 
-        package static func responseIsDocumentationProviderFailure(_ data: Data) -> Bool {
+        static func responseIsDocumentationProviderFailure(_ data: Data) -> Bool {
             responseErrorTexts(in: data).contains { text in
                 let normalized = text.lowercased()
                 return normalized.contains("config.json")
@@ -389,15 +388,15 @@ extension DocumentationProvider {
     }
 }
 
-package protocol DocumentationProviderSessionMaking: Sendable {
+protocol DocumentationProviderSessionMaking: Sendable {
     func startSession(for target: XcodeProcessTarget) async throws -> any UpstreamSession
 }
 
-package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
+struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
     private let bridgeRuntimeConfig: MCPBridgeRuntime.Configuration
     private let baseEnvironment: [String: String]
 
-    package init(
+    init(
         config: ProxyConfig,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
@@ -405,7 +404,7 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
         self.baseEnvironment = baseEnvironment
     }
 
-    package func startSession(for target: XcodeProcessTarget) async throws
+    func startSession(for target: XcodeProcessTarget) async throws
         -> any UpstreamSession
     {
         try await MCPBridgeRuntime.startProcessBoundSession(
@@ -416,15 +415,15 @@ package struct LiveDocumentationProviderSessionFactory: DocumentationProviderSes
     }
 }
 
-package struct DocumentationSearchInstalledAsset: Sendable, Equatable {
-    package let assetURL: URL
-    package let configURL: URL
-    package let indexURL: URL
-    package let xcodeVersion: String
-    package let osVersion: String
-    package let documentationRelease: Int?
+struct DocumentationSearchInstalledAsset: Sendable, Equatable {
+    let assetURL: URL
+    let configURL: URL
+    let indexURL: URL
+    let xcodeVersion: String
+    let osVersion: String
+    let documentationRelease: Int?
 
-    package init(
+    init(
         assetURL: URL,
         configURL: URL,
         indexURL: URL,
@@ -441,13 +440,13 @@ package struct DocumentationSearchInstalledAsset: Sendable, Equatable {
     }
 }
 
-package struct DocumentationSearchAssetScan: Sendable, Equatable {
-    package let root: String
-    package let candidateCount: Int
-    package let assets: [DocumentationSearchInstalledAsset]
-    package let rejectionCounts: [String: Int]
+struct DocumentationSearchAssetScan: Sendable, Equatable {
+    let root: String
+    let candidateCount: Int
+    let assets: [DocumentationSearchInstalledAsset]
+    let rejectionCounts: [String: Int]
 
-    package init(
+    init(
         root: String,
         candidateCount: Int,
         assets: [DocumentationSearchInstalledAsset],
@@ -459,7 +458,7 @@ package struct DocumentationSearchAssetScan: Sendable, Equatable {
         self.rejectionCounts = rejectionCounts
     }
 
-    package var noAssetReason: String {
+    var noAssetReason: String {
         var parts = [
             "no_installed_documentation_asset",
             "root=\(root)",
@@ -482,18 +481,18 @@ package struct DocumentationSearchAssetScan: Sendable, Equatable {
     }
 }
 
-package enum DocumentationSearchAssetLocator {
+enum DocumentationSearchAssetLocator {
     private enum AssetCandidate {
         case asset(DocumentationSearchInstalledAsset)
         case rejected(String)
     }
 
-    package static let defaultAssetRoot = URL(
+    static let defaultAssetRoot = URL(
         fileURLWithPath: "/System/Library/AssetsV2/com_apple_MobileAsset_AppleDeveloperDocumentation",
         isDirectory: true
     )
 
-    package static func scanInstalledAssets(in root: URL) throws -> DocumentationSearchAssetScan {
+    static func scanInstalledAssets(in root: URL) throws -> DocumentationSearchAssetScan {
         let assetURLs = try FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -559,7 +558,7 @@ package enum DocumentationSearchAssetLocator {
         ))
     }
 
-    package static func bestAsset(
+    static func bestAsset(
         for targetXcodeVersion: String,
         currentOSVersion: String,
         from assets: [DocumentationSearchInstalledAsset]
@@ -569,7 +568,7 @@ package enum DocumentationSearchAssetLocator {
         }
     }
 
-    package static func latestAsset(
+    static func latestAsset(
         from assets: [DocumentationSearchInstalledAsset]
     ) -> DocumentationSearchInstalledAsset? {
         assets.max { lhs, rhs in
@@ -659,7 +658,7 @@ package enum DocumentationSearchAssetLocator {
         )
     }
 
-    package static func currentOperatingSystemVersionString() -> String {
+    static func currentOperatingSystemVersionString() -> String {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
     }
@@ -748,7 +747,7 @@ package enum DocumentationSearchAssetLocator {
     }
 }
 
-package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
     private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
     private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
 
@@ -756,7 +755,7 @@ package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServic
     private let readConfigURLOverride: @Sendable () -> String?
     private let writeConfigURLOverride: @Sendable (String) -> Bool
 
-    package init(
+    init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
         readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
         writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
@@ -766,7 +765,7 @@ package struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServic
         self.writeConfigURLOverride = writeConfigURLOverride
     }
 
-    package func repairDocumentationSearch(
+    func repairDocumentationSearch(
         for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         let scan: DocumentationSearchAssetScan
@@ -999,7 +998,7 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
     }
 }
 
-package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
+struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
     private struct SearchArguments {
         let requestID: JSONRPC.ID
         let query: String
@@ -1027,7 +1026,7 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
     private let processRunner: any ProcessRunning
     private let clock: ClockClient
 
-    package init(
+    init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
         processRunner: any ProcessRunning = ProcessRunner(),
         clock: ClockClient = .liveValue
@@ -1037,14 +1036,14 @@ package struct LiveDocumentationAssetSearchProvider: DocumentationSearchProvidin
         self.clock = clock
     }
 
-    package func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
+    func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
         guard installedAsset(for: target) != nil else {
             return nil
         }
         return Self.descriptor
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         requestData: Data,
         for target: XcodeProcessTarget,
         timeout: TimeAmount?
@@ -1329,7 +1328,7 @@ private final class DocumentationProviderManagerLifecycle: @unchecked Sendable {
     }
 }
 
-package actor DocumentationProviderConnection {
+actor DocumentationProviderConnection {
     private let session: any UpstreamSession
     private let clock: ClockClient
     private let tasks = AsyncTaskSupervisor()
@@ -1338,7 +1337,7 @@ package actor DocumentationProviderConnection {
     private var pendingResponses: [String: DocumentationPendingResponse] = [:]
     private var nextID: Int64 = 1
 
-    package init(session: any UpstreamSession, clock: ClockClient = .liveValue) {
+    init(session: any UpstreamSession, clock: ClockClient = .liveValue) {
         self.session = session
         self.clock = clock
     }
@@ -1349,7 +1348,7 @@ package actor DocumentationProviderConnection {
         failAll(CancellationError())
     }
 
-    package func start() {
+    func start() {
         guard eventTask == nil else { return }
         let session = session
         eventTask = Task { [weak self, session] in
@@ -1360,11 +1359,11 @@ package actor DocumentationProviderConnection {
         }
     }
 
-    package func stopDetachingSession() -> Task<Void, Never> {
+    func stopDetachingSession() -> Task<Void, Never> {
         ensureStopTask()
     }
 
-    package func stopAwaitingSession() async {
+    func stopAwaitingSession() async {
         await ensureStopTask().value
     }
 
@@ -1387,7 +1386,7 @@ package actor DocumentationProviderConnection {
         return stopTask
     }
 
-    package func sendNotification(_ object: [String: Any]) async throws {
+    func sendNotification(_ object: [String: Any]) async throws {
         guard let data = try? JSONRPC.Wire.data(from: object) else {
             throw ControlPlane.Error.invalidResponse("invalid notification")
         }
@@ -1397,7 +1396,7 @@ package actor DocumentationProviderConnection {
         }
     }
 
-    package func call(_ requestData: Data, timeout: TimeAmount?) async throws -> Data {
+    func call(_ requestData: Data, timeout: TimeAmount?) async throws -> Data {
         guard
             var object = try JSONSerialization.jsonObject(with: requestData, options: [])
                 as? [String: Any],
@@ -1518,26 +1517,26 @@ package actor DocumentationProviderConnection {
     }
 }
 
-package struct SessionBackedDocumentationProviderTransportTestHooks: Sendable {
-    package var shutdownWillAwaitDetachedSessionStops: @Sendable (_ stopCount: Int) -> Void
+struct SessionBackedDocumentationProviderTransportTestHooks: Sendable {
+    var shutdownWillAwaitDetachedSessionStops: @Sendable (_ stopCount: Int) -> Void
 
-    package init(
+    init(
         shutdownWillAwaitDetachedSessionStops: @escaping @Sendable (_ stopCount: Int) -> Void = { _ in }
     ) {
         self.shutdownWillAwaitDetachedSessionStops = shutdownWillAwaitDetachedSessionStops
     }
 
-    package static let noop = Self()
+    static let noop = Self()
 }
 
-package actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting {
+actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting {
     private let sessionFactory: any DocumentationProviderSessionMaking
     private let clock: ClockClient
     private let testHooks: SessionBackedDocumentationProviderTransportTestHooks
     private var connections: [String: DocumentationProviderConnection] = [:]
     private var backgroundSessionStops: [UUID: Task<Void, Never>] = [:]
 
-    package init(
+    init(
         sessionFactory: any DocumentationProviderSessionMaking,
         clock: ClockClient = .liveValue,
         testHooks: SessionBackedDocumentationProviderTransportTestHooks = .noop
@@ -1552,7 +1551,7 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         backgroundSessionStops.removeAll()
     }
 
-    package func openRoute(
+    func openRoute(
         for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
@@ -1586,7 +1585,7 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         }
     }
 
-    package func toolsList(
+    func toolsList(
         route: DocumentationProviderRoute,
         timeout: TimeAmount?
     ) async throws -> JSONValue {
@@ -1600,7 +1599,7 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         return try DocumentationProviderManager.resultValue(from: toolsList)
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         route: DocumentationProviderRoute,
         requestData: Data,
         timeout: TimeAmount?
@@ -1611,7 +1610,7 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         return try await connection.call(requestData, timeout: timeout)
     }
 
-    package func close(route: DocumentationProviderRoute) async {
+    func close(route: DocumentationProviderRoute) async {
         guard let connection = connections.removeValue(forKey: route.id) else {
             return
         }
@@ -1619,14 +1618,14 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
         trackBackgroundSessionStop(stopTask)
     }
 
-    package func closeForShutdown(route: DocumentationProviderRoute) async {
+    func closeForShutdown(route: DocumentationProviderRoute) async {
         guard let connection = connections.removeValue(forKey: route.id) else {
             return
         }
         await connection.stopAwaitingSession()
     }
 
-    package func shutdown() async {
+    func shutdown() async {
         let connections = self.connections
         self.connections.removeAll()
         let backgroundSessionStops = self.backgroundSessionStops
@@ -1677,12 +1676,12 @@ package actor SessionBackedDocumentationProviderTransport: DocumentationProvider
     }
 }
 
-package struct DocumentationProviderManagerTestHooks: Sendable {
-    package var providerPreparationReused: @Sendable (pid_t) -> Void
-    package var providerPreparationWaitTimedOut: @Sendable (pid_t) -> Void
-    package var managerDeinitialized: @Sendable () -> Void
+struct DocumentationProviderManagerTestHooks: Sendable {
+    var providerPreparationReused: @Sendable (pid_t) -> Void
+    var providerPreparationWaitTimedOut: @Sendable (pid_t) -> Void
+    var managerDeinitialized: @Sendable () -> Void
 
-    package init(
+    init(
         providerPreparationReused: @escaping @Sendable (pid_t) -> Void = { _ in },
         providerPreparationWaitTimedOut: @escaping @Sendable (pid_t) -> Void = { _ in },
         managerDeinitialized: @escaping @Sendable () -> Void = {}
@@ -1692,10 +1691,10 @@ package struct DocumentationProviderManagerTestHooks: Sendable {
         self.managerDeinitialized = managerDeinitialized
     }
 
-    package static let noop = Self()
+    static let noop = Self()
 }
 
-package actor DocumentationProviderManager: DocumentationProviderManaging {
+actor DocumentationProviderManager: DocumentationProviderManaging {
     private enum CandidateBackend: Sendable {
         case xcode(route: DocumentationProviderRoute, descriptor: JSONValue?)
         case installedDocumentationAsset(descriptor: JSONValue)
@@ -1928,7 +1927,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
     private var serviceRepairAttemptedProcessIDs: Set<pid_t> = []
     private var isShutdown = false
 
-    package init(
+    init(
         discovery: any XcodeTargetDiscovering,
         transport: any DocumentationProviderRouting,
         providerSelectionTimeout: TimeAmount? = .seconds(30),
@@ -1964,7 +1963,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         testHooks.managerDeinitialized()
     }
 
-    package init(
+    init(
         discovery: any XcodeTargetDiscovering,
         sessionFactory: any DocumentationProviderSessionMaking,
         providerSelectionTimeout: TimeAmount? = .seconds(30),
@@ -1993,7 +1992,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         )
     }
 
-    package func startBackgroundDiscovery(requestTimeout: TimeAmount?) async
+    func startBackgroundDiscovery(requestTimeout: TimeAmount?) async
         -> DocumentationProvider.ToolListUpdate
     {
         guard !isShutdown else { return .unavailable }
@@ -2055,7 +2054,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return .unavailable
     }
 
-    package func toolListUpdate(requestTimeout: TimeAmount?) async
+    func toolListUpdate(requestTimeout: TimeAmount?) async
         -> DocumentationProvider.ToolListUpdate
     {
         guard !isShutdown else {
@@ -2098,7 +2097,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return .unchanged
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationProvider.CallOutcome {
@@ -2543,7 +2542,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    package func invalidate(reason: String) async {
+    func invalidate(reason: String) async {
         await invalidate(reason: reason, awaitRouteTermination: false)
     }
 
@@ -2612,7 +2611,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    package func shutdown() async {
+    func shutdown() async {
         lifecycle.markShutdown()
         isShutdown = true
         await invalidate(reason: "shutdown", awaitRouteTermination: true)
@@ -3296,7 +3295,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         )
     }
 
-    package static func resultValue(from responseData: Data) throws -> JSONValue {
+    static func resultValue(from responseData: Data) throws -> JSONValue {
         guard
             let object = try JSONSerialization.jsonObject(with: responseData, options: [])
                 as? [String: Any],
@@ -3308,7 +3307,7 @@ package actor DocumentationProviderManager: DocumentationProviderManaging {
         return value
     }
 
-    package static func serverVersion(fromInitializeResponse data: Data) -> String? {
+    static func serverVersion(fromInitializeResponse data: Data) -> String? {
         guard
             let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],

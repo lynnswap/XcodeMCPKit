@@ -5,7 +5,7 @@ import NIOEmbedded
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct JSONRPCResponseRouterTests {

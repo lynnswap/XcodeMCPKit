@@ -5,7 +5,6 @@ import NIOHTTP1
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 final class SSEHub: Sendable {
     private struct Waiter: Sendable {

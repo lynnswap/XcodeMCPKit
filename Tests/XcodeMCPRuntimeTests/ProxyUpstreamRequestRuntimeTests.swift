@@ -4,7 +4,7 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
 import XcodeMCPCore
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct ProxyUpstreamRequestRuntimeTests {

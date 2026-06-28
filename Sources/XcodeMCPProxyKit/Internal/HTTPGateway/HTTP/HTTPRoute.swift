@@ -1,6 +1,6 @@
 import NIOHTTP1
 
-package enum HTTPRoute {
+enum HTTPRoute {
     case health
     case debugSnapshot
     case debugReset
@@ -9,7 +9,7 @@ package enum HTTPRoute {
     case post
     case notFound
 
-    package static func resolve(method: HTTPMethod, path: String) -> Self {
+    static func resolve(method: HTTPMethod, path: String) -> Self {
         switch (method, path) {
         case (.GET, "/health"):
             .health

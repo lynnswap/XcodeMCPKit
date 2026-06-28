@@ -1,17 +1,17 @@
 import Foundation
 
-package struct XcodeListWindowsEntry: Sendable, Equatable {
-    package let tabIdentifier: String
-    package let workspacePath: String
+struct XcodeListWindowsEntry: Sendable, Equatable {
+    let tabIdentifier: String
+    let workspacePath: String
 
-    package init(tabIdentifier: String, workspacePath: String) {
+    init(tabIdentifier: String, workspacePath: String) {
         self.tabIdentifier = tabIdentifier
         self.workspacePath = workspacePath
     }
 }
 
-package enum XcodeListWindowsMessageParser {
-    package static func parse(_ message: String) -> [XcodeListWindowsEntry] {
+enum XcodeListWindowsMessageParser {
+    static func parse(_ message: String) -> [XcodeListWindowsEntry] {
         message
             .split(separator: "\n")
             .compactMap { line -> XcodeListWindowsEntry? in

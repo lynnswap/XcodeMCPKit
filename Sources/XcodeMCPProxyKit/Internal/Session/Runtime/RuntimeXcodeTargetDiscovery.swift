@@ -1,16 +1,15 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class RuntimeDocumentationTargetDiscovery:
+final class RuntimeDocumentationTargetDiscovery:
     PriorityOrderedXcodeTargetDiscovering,
     Sendable
 {
     private let base: any XcodeTargetDiscovering
     private let runtimeBox: WeakRuntimeCoordinatorBox
 
-    package init(
+    init(
         base: any XcodeTargetDiscovering,
         runtimeBox: WeakRuntimeCoordinatorBox
     ) {
@@ -18,7 +17,7 @@ package final class RuntimeDocumentationTargetDiscovery:
         self.runtimeBox = runtimeBox
     }
 
-    package func runningXcodeTargets() -> [XcodeProcessTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         let targets = base.runningXcodeTargets()
         guard let runtime = runtimeBox.value,
               let routeProcessIDs = runtime.xcodeProcessRouteProcessIDs(),

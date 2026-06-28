@@ -2,25 +2,24 @@ import Foundation
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues {
-    package struct ResolvedTarget: Sendable, Equatable {
-        package let workspacePath: String
-        package let workspaceRoot: String
-        package let resolvedFilePath: String
-        package let workspaceRelativePath: String
+    struct ResolvedTarget: Sendable, Equatable {
+        let workspacePath: String
+        let workspaceRoot: String
+        let resolvedFilePath: String
+        let workspaceRelativePath: String
     }
 
-    package struct TargetResolution: Sendable, Equatable {
-        package let target: RefreshCodeIssues.ResolvedTarget?
-        package let workspacePath: String?
-        package let resolvedFilePath: String?
-        package let failureReason: String?
+    struct TargetResolution: Sendable, Equatable {
+        let target: RefreshCodeIssues.ResolvedTarget?
+        let workspacePath: String?
+        let resolvedFilePath: String?
+        let failureReason: String?
     }
 
-    package actor TargetResolver {
-    package typealias WindowsProvider =
+    actor TargetResolver {
+    typealias WindowsProvider =
         @Sendable (_ sessionID: String, _ eventLoop: EventLoop) async throws -> [XcodeWindowInfo]?
 
     private struct FileResolutionKey: Hashable {
@@ -31,11 +30,11 @@ extension RefreshCodeIssues {
     private let fileSystem: FileSystemClient
     private var resolvedFilePathCache: [FileResolutionKey: String] = [:]
 
-    package init(fileSystem: FileSystemClient = .liveValue) {
+    init(fileSystem: FileSystemClient = .liveValue) {
         self.fileSystem = fileSystem
     }
 
-    package func resolve(
+    func resolve(
         tabIdentifier: String?,
         filePath: String?,
         sessionID: String,
@@ -112,7 +111,7 @@ extension RefreshCodeIssues {
         )
     }
 
-    package func resolveAbsoluteFilePath(
+    func resolveAbsoluteFilePath(
         workspacePath: String,
         workspaceRoot: String,
         requestedFilePath: String
@@ -202,7 +201,7 @@ extension RefreshCodeIssues {
         return bestPath
     }
 
-    package func workspaceRoot(for workspacePath: String) -> String {
+    func workspaceRoot(for workspacePath: String) -> String {
         let url = URL(fileURLWithPath: workspacePath)
         if ["xcworkspace", "xcodeproj"].contains(url.pathExtension.lowercased()) {
             return url.deletingLastPathComponent().path
@@ -210,7 +209,7 @@ extension RefreshCodeIssues {
         return workspacePath
     }
 
-    package func relativePath(for absolutePath: String, within workspaceRoot: String) -> String? {
+    func relativePath(for absolutePath: String, within workspaceRoot: String) -> String? {
         let resolvedPath = resolvedPathForContainment(absolutePath)
         let resolvedRoot = resolvedPathForContainment(workspaceRoot)
         guard isPath(resolvedPath, containedIn: resolvedRoot) else {

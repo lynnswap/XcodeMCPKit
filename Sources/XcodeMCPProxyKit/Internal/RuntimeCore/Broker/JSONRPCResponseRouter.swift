@@ -4,10 +4,10 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-package final class JSONRPCResponseRouter: Sendable {
-    package struct PendingRegistration {
-        package let token: UUID
-        package let future: EventLoopFuture<ByteBuffer>
+final class JSONRPCResponseRouter: Sendable {
+    struct PendingRegistration {
+        let token: UUID
+        let future: EventLoopFuture<ByteBuffer>
     }
 
     private struct Pending: Sendable {
@@ -31,7 +31,7 @@ package final class JSONRPCResponseRouter: Sendable {
     private let hasActiveClients: @Sendable () -> Bool
     private let sendNotification: @Sendable (Data) -> Void
 
-    package init(
+    init(
         requestTimeout: TimeAmount?,
         notificationBufferLimit: Int = 50,
         hasActiveClients: @escaping @Sendable () -> Bool,
@@ -43,7 +43,7 @@ package final class JSONRPCResponseRouter: Sendable {
         self.sendNotification = sendNotification
     }
 
-    package func registerRequest(
+    func registerRequest(
         idKey: String,
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil,
@@ -57,7 +57,7 @@ package final class JSONRPCResponseRouter: Sendable {
         ).future
     }
 
-    package func registerRequestPending(
+    func registerRequestPending(
         idKey: String,
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil,
@@ -95,7 +95,7 @@ package final class JSONRPCResponseRouter: Sendable {
 
     /// `responseIDKeys` must be the exact ids the proxy forwarded; batch
     /// responses are correlated only by id overlap, never by guessing.
-    package func registerBatchPending(
+    func registerBatchPending(
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil,
         responseIDKeys: [String],
@@ -126,7 +126,7 @@ package final class JSONRPCResponseRouter: Sendable {
     }
 
     @discardableResult
-    package func cancelPending(token: UUID) -> Bool {
+    func cancelPending(token: UUID) -> Bool {
         let pending = state.withLockedValue { state -> Pending? in
             if let idKey = state.pendingByID.first(where: { $0.value.token == token })?.key {
                 return state.pendingByID.removeValue(forKey: idKey)
@@ -142,7 +142,7 @@ package final class JSONRPCResponseRouter: Sendable {
         return pending != nil
     }
 
-    package func handleIncoming(_ data: Data) {
+    func handleIncoming(_ data: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             notify(data)
             return
@@ -179,7 +179,7 @@ package final class JSONRPCResponseRouter: Sendable {
         notify(data)
     }
 
-    package func drainBufferedNotifications() -> [Data] {
+    func drainBufferedNotifications() -> [Data] {
         state.withLockedValue { state in
             let drained = state.notificationBuffer
             state.notificationBuffer.removeAll()

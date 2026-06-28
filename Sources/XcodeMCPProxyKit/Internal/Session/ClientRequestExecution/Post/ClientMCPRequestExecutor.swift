@@ -3,16 +3,15 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class ClientMCPRequestExecutor: Sendable {
-    package struct FilteredToolCallRequest: Sendable {
+final class ClientMCPRequestExecutor: Sendable {
+    struct FilteredToolCallRequest: Sendable {
         let bodyData: Data?
         let localResponseData: Data?
         let forwardedResponseIDs: [JSONRPC.ID]
         let forceBatchArray: Bool
 
-        package init(
+        init(
             bodyData: Data?,
             localResponseData: Data?,
             forwardedResponseIDs: [JSONRPC.ID],
@@ -25,11 +24,11 @@ package final class ClientMCPRequestExecutor: Sendable {
         }
     }
 
-    package struct LocalToolBatchResult: Sendable {
+    struct LocalToolBatchResult: Sendable {
         let responseData: Data?
         let fallbackForwardedRequest: FilteredToolCallRequest?
 
-        package init(
+        init(
             responseData: Data?,
             fallbackForwardedRequest: FilteredToolCallRequest?
         ) {
@@ -43,24 +42,24 @@ package final class ClientMCPRequestExecutor: Sendable {
         let resolution: ClientMCPRequestExecutor.Resolution
     }
 
-    package struct LocalToolFilterOperation {
+    struct LocalToolFilterOperation {
         let localResponseFuture: EventLoopFuture<LocalToolBatchResult>
         let forwardedRequest: FilteredToolCallRequest
         let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle
         let deadline: Date?
     }
 
-    package let sessionManager: any RuntimeClientMCPRequestPort
-    package let disabledToolNames: Set<String>
-    package let usesSynchronousLocalResolution: Bool
-    package let localResponder: LocalMCPResponder
-    package let forwardingService: MCPForwardingService
-    package let refreshWorkflow: RefreshCodeIssues.Workflow
-    package let requestTimeoutSeconds: TimeInterval
-    package let deadlineClock: ClockClient
-    package let logger: Logger
+    let sessionManager: any RuntimeClientMCPRequestPort
+    let disabledToolNames: Set<String>
+    let usesSynchronousLocalResolution: Bool
+    let localResponder: LocalMCPResponder
+    let forwardingService: MCPForwardingService
+    let refreshWorkflow: RefreshCodeIssues.Workflow
+    let requestTimeoutSeconds: TimeInterval
+    let deadlineClock: ClockClient
+    let logger: Logger
 
-    package init(
+    init(
         config: ProxyConfig,
         sessionManager: any RuntimeClientMCPRequestPort,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
@@ -99,7 +98,7 @@ package final class ClientMCPRequestExecutor: Sendable {
         self.logger = logger
     }
 
-    package func handle(
+    func handle(
         bodyData: Data,
         headerSessionID: String?,
         headerSessionExists: Bool,
@@ -401,7 +400,7 @@ package final class ClientMCPRequestExecutor: Sendable {
         ).future
     }
 
-    package func makeForwardingOperation(
+    func makeForwardingOperation(
         filteredRequest: FilteredToolCallRequest,
         sessionID: String,
         headerSessionID: String?,

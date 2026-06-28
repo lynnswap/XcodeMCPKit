@@ -2,7 +2,7 @@ import Foundation
 import NIO
 
 extension RefreshCodeIssues {
-    package actor Coordinator {
+    actor Coordinator {
     private enum WaiterState: Sendable {
         case active
         case cancelled
@@ -11,25 +11,25 @@ extension RefreshCodeIssues {
         case removed
     }
 
-    package struct Permit: Sendable {
-        package let queuePosition: Int
-        package let pendingForKey: Int
-        package let pendingTotal: Int
+    struct Permit: Sendable {
+        let queuePosition: Int
+        let pendingForKey: Int
+        let pendingTotal: Int
     }
 
-    package struct TestHooks: Sendable {
-        package var waiterQueued: @Sendable (_ key: String, _ permit: Permit) -> Void
+    struct TestHooks: Sendable {
+        var waiterQueued: @Sendable (_ key: String, _ permit: Permit) -> Void
 
-        package init(
+        init(
             waiterQueued: @escaping @Sendable (_ key: String, _ permit: Permit) -> Void = { _, _ in }
         ) {
             self.waiterQueued = waiterQueued
         }
 
-        package static let noop = Self()
+        static let noop = Self()
     }
 
-    package enum AcquireError: Error {
+    enum AcquireError: Error {
         case queueWaitTimedOut
     }
 
@@ -47,7 +47,7 @@ extension RefreshCodeIssues {
         let waitUntilFinished: @Sendable () async -> Void
     }
 
-    package nonisolated let waitClock: any Clock<Duration> & Sendable
+    nonisolated let waitClock: any Clock<Duration> & Sendable
     private var nextWaiterID: UInt64 = 0
     private var nextExecutionID: UInt64 = 0
     private var busyKeys: Set<String> = []
@@ -56,11 +56,11 @@ extension RefreshCodeIssues {
     private var waitersByKey: [String: [Waiter]] = [:]
     private let testHooks: TestHooks
 
-    package static func makeDefault() -> RefreshCodeIssues.Coordinator {
+    static func makeDefault() -> RefreshCodeIssues.Coordinator {
         RefreshCodeIssues.Coordinator()
     }
 
-    package init(
+    init(
         waitClock: any Clock<Duration> & Sendable = ContinuousClock(),
         testHooks: TestHooks = .noop
     ) {
@@ -68,13 +68,13 @@ extension RefreshCodeIssues {
         self.testHooks = testHooks
     }
 
-    package nonisolated func scheduleReset() {
+    nonisolated func scheduleReset() {
         Task {
             await self.reset()
         }
     }
 
-    package func reset() async {
+    func reset() async {
         let waiters = waitersByKey.values.flatMap { $0 }
         let activeExecutions = Array(activeExecutionsByKey.values)
         pendingWaiterCount = 0
@@ -99,7 +99,7 @@ extension RefreshCodeIssues {
         cleanupAfterReset()
     }
 
-    package func withPermit<T: Sendable>(
+    func withPermit<T: Sendable>(
         key: String,
         requestTimeout: TimeAmount?,
         body: @escaping @Sendable (_ permit: Permit) async throws -> T

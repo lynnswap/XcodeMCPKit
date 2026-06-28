@@ -89,14 +89,14 @@ public struct XcodeMCPProxyAdapterEndpointResolver: Sendable {
     /// Default endpoint URL used when no override or discovery file is available.
     public static let defaultEndpointURL = URL(string: defaultEndpointURLString)!
 
-    package var discoveryClient: DiscoveryClient
+    var discoveryClient: DiscoveryClient
 
     /// Creates a live endpoint resolver.
     public init() {
         self.init(discoveryClient: .liveValue)
     }
 
-    package init(discoveryClient: DiscoveryClient) {
+    init(discoveryClient: DiscoveryClient) {
         self.discoveryClient = discoveryClient
     }
 

@@ -2,40 +2,40 @@ import XcodeMCPCore
 import XcodeMCPProcessRuntime
 import Foundation
 
-package struct UpstreamSlotID: Sendable, Hashable, Comparable {
-    package let rawValue: Int
+struct UpstreamSlotID: Sendable, Hashable, Comparable {
+    let rawValue: Int
 
-    package init(rawValue: Int) {
+    init(rawValue: Int) {
         self.rawValue = rawValue
     }
 
-    package static func < (lhs: UpstreamSlotID, rhs: UpstreamSlotID) -> Bool {
+    static func < (lhs: UpstreamSlotID, rhs: UpstreamSlotID) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 }
 
-package struct XcodeProcessID: Sendable, Hashable, Comparable {
-    package let rawValue: pid_t
+struct XcodeProcessID: Sendable, Hashable, Comparable {
+    let rawValue: pid_t
 
-    package init(rawValue: pid_t) {
+    init(rawValue: pid_t) {
         self.rawValue = rawValue
     }
 
-    package init(_ target: XcodeProcessTarget) {
+    init(_ target: XcodeProcessTarget) {
         self.init(rawValue: target.processID)
     }
 
-    package static func < (lhs: XcodeProcessID, rhs: XcodeProcessID) -> Bool {
+    static func < (lhs: XcodeProcessID, rhs: XcodeProcessID) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 }
 
-package struct XcodeVersionKey: Sendable, Hashable {
-    package let xcodeVersion: String
-    package let developerDir: String
-    package let mcpbridgePath: String
+struct XcodeVersionKey: Sendable, Hashable {
+    let xcodeVersion: String
+    let developerDir: String
+    let mcpbridgePath: String
 
-    package init(
+    init(
         xcodeVersion: String,
         developerDir: String,
         mcpbridgePath: String
@@ -45,7 +45,7 @@ package struct XcodeVersionKey: Sendable, Hashable {
         self.mcpbridgePath = mcpbridgePath
     }
 
-    package init(_ target: XcodeProcessTarget) {
+    init(_ target: XcodeProcessTarget) {
         self.init(
             xcodeVersion: target.xcodeVersion,
             developerDir: target.developerDir,
@@ -54,20 +54,20 @@ package struct XcodeVersionKey: Sendable, Hashable {
     }
 }
 
-package enum UpstreamSelectionScope: Sendable, Hashable {
+enum UpstreamSelectionScope: Sendable, Hashable {
     case any
     case slots([UpstreamSlotID])
     case xcodeProcess(XcodeProcessID)
     case xcodeVersion(XcodeVersionKey)
 }
 
-package struct XcodeProcessBinding: Sendable, Equatable {
-    package let processID: XcodeProcessID
-    package let versionKey: XcodeVersionKey
-    package let target: XcodeProcessTarget
-    package let slotIDs: [UpstreamSlotID]
+struct XcodeProcessBinding: Sendable, Equatable {
+    let processID: XcodeProcessID
+    let versionKey: XcodeVersionKey
+    let target: XcodeProcessTarget
+    let slotIDs: [UpstreamSlotID]
 
-    package init(
+    init(
         processID: XcodeProcessID,
         versionKey: XcodeVersionKey,
         target: XcodeProcessTarget,
@@ -79,7 +79,7 @@ package struct XcodeProcessBinding: Sendable, Equatable {
         self.slotIDs = slotIDs
     }
 
-    package init(target: XcodeProcessTarget, slotIDs: [UpstreamSlotID]) {
+    init(target: XcodeProcessTarget, slotIDs: [UpstreamSlotID]) {
         self.init(
             processID: XcodeProcessID(target),
             versionKey: XcodeVersionKey(target),
@@ -89,11 +89,11 @@ package struct XcodeProcessBinding: Sendable, Equatable {
     }
 }
 
-package struct UpstreamTopologySnapshot: Sendable, Equatable {
-    package let slotIDs: [UpstreamSlotID]
-    package let xcodeProcessBindings: [XcodeProcessBinding]
+struct UpstreamTopologySnapshot: Sendable, Equatable {
+    let slotIDs: [UpstreamSlotID]
+    let xcodeProcessBindings: [XcodeProcessBinding]
 
-    package init(
+    init(
         slotIDs: [UpstreamSlotID],
         xcodeProcessBindings: [XcodeProcessBinding] = []
     ) {
@@ -101,7 +101,7 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
         self.xcodeProcessBindings = xcodeProcessBindings
     }
 
-    package init(
+    init(
         slotCount: Int,
         xcodeProcessBindings: [XcodeProcessBinding] = []
     ) {
@@ -111,9 +111,9 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
         )
     }
 
-    package static let empty = UpstreamTopologySnapshot(slotIDs: [])
+    static let empty = UpstreamTopologySnapshot(slotIDs: [])
 
-    package func xcodeProcessRoutes() -> [XcodeProcessRoute] {
+    func xcodeProcessRoutes() -> [XcodeProcessRoute] {
         xcodeProcessBindings.map { binding in
             XcodeProcessRoute(
                 target: binding.target,
@@ -122,7 +122,7 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
         }
     }
 
-    package func slotIDs(matching scope: UpstreamSelectionScope) -> [UpstreamSlotID] {
+    func slotIDs(matching scope: UpstreamSelectionScope) -> [UpstreamSlotID] {
         switch scope {
         case .any:
             return slotIDs
@@ -143,13 +143,13 @@ package struct UpstreamTopologySnapshot: Sendable, Equatable {
         }
     }
 
-    package func binding(forSlotID slotID: UpstreamSlotID) -> XcodeProcessBinding? {
+    func binding(forSlotID slotID: UpstreamSlotID) -> XcodeProcessBinding? {
         xcodeProcessBindings.first { binding in
             binding.slotIDs.contains(slotID)
         }
     }
 
-    package func binding(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessBinding? {
+    func binding(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessBinding? {
         binding(forSlotID: UpstreamSlotID(rawValue: upstreamIndex))
     }
 

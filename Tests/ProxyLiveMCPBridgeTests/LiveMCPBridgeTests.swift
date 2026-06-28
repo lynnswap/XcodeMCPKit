@@ -4,9 +4,8 @@ import NIO
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
-
 @testable import XcodeMCPProxyKit
+
 
 @Suite(.serialized, .enabled(if: LiveMCPBridgeTestEnvironment.isEnabled))
 struct LiveMCPBridgeTests {

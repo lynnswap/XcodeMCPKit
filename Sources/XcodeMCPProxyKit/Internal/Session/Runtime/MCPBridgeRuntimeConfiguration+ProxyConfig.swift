@@ -1,15 +1,14 @@
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ProxyConfig {
-    package var mcpBridgeRuntimeConfiguration: MCPBridgeRuntime.Configuration {
+    var mcpBridgeRuntimeConfiguration: MCPBridgeRuntime.Configuration {
         MCPBridgeRuntime.Configuration(proxyConfig: self)
     }
 }
 
 extension MCPBridgeRuntime.Configuration {
-    package init(proxyConfig config: ProxyConfig) {
+    init(proxyConfig config: ProxyConfig) {
         self.init(
             upstreamCommand: config.upstreamCommand,
             upstreamArgs: config.upstreamArgs,

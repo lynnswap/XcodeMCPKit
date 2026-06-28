@@ -3,10 +3,9 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues.Workflow {
-    package static func makeToolResponseData(
+    static func makeToolResponseData(
         id: JSONRPC.ID,
         result: [String: Any],
         forceBatchArray: Bool
@@ -23,7 +22,7 @@ extension RefreshCodeIssues.Workflow {
         return try? JSONSerialization.data(withJSONObject: payload, options: [])
     }
 
-    package static func filterNavigatorIssuesResult(
+    static func filterNavigatorIssuesResult(
         _ navigatorResult: [String: Any],
         matchingResolvedFilePath resolvedFilePath: String
     ) -> [String: Any]? {
@@ -60,7 +59,7 @@ extension RefreshCodeIssues.Workflow {
         return filteredResult
     }
 
-    package static func navigatorIssuesText(from structuredContent: [String: Any]) -> String {
+    static func navigatorIssuesText(from structuredContent: [String: Any]) -> String {
         guard JSONSerialization.isValidJSONObject(structuredContent),
             let data = try? JSONSerialization.data(withJSONObject: structuredContent, options: []),
             let text = String(data: data, encoding: .utf8)
@@ -70,7 +69,7 @@ extension RefreshCodeIssues.Workflow {
         return text
     }
 
-    package static func escapeGlobLiteralPath(_ path: String) -> String {
+    static func escapeGlobLiteralPath(_ path: String) -> String {
         path
             .replacingOccurrences(of: "[", with: "[[]")
             .replacingOccurrences(of: "]", with: "[]]")
@@ -78,7 +77,7 @@ extension RefreshCodeIssues.Workflow {
             .replacingOccurrences(of: "?", with: "[?]")
     }
 
-    package static func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
+    static func isRetryableRefreshCodeIssuesFailure(_ responseData: Data) -> Bool {
         let retryableErrorText = "SourceEditorCallableDiagnosticError error 5"
         guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
             return false
@@ -100,12 +99,12 @@ extension RefreshCodeIssues.Workflow {
         }
     }
 
-    package static func timeoutDescription(_ timeout: TimeAmount?) -> String {
+    static func timeoutDescription(_ timeout: TimeAmount?) -> String {
         guard let timeout else { return "none" }
         return "\(timeout.nanoseconds / 1_000_000)"
     }
 
-    package static func debugOutcome(
+    static func debugOutcome(
         for result: RefreshCodeIssues.Workflow.ForwardAttemptResult
     ) -> RefreshCodeIssues.Outcome {
         switch result {
@@ -124,7 +123,7 @@ extension RefreshCodeIssues.Workflow {
         }
     }
 
-    package static func containsRetryableRefreshCodeIssuesFailure(
+    static func containsRetryableRefreshCodeIssuesFailure(
         in responseObject: [String: Any],
         retryableErrorText: String
     ) -> Bool {
@@ -152,7 +151,7 @@ extension RefreshCodeIssues.Workflow {
         return false
     }
 
-    package static func throwIfCancelled(
+    static func throwIfCancelled(
         debugState: RefreshCodeIssues.DebugState,
         requestID: String
     ) throws {

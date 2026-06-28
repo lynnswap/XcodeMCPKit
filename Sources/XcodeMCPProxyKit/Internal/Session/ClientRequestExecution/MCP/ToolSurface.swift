@@ -1,19 +1,18 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct ToolSurface: Sendable {
-    package struct RewriteResult: Sendable {
-        package let responseData: Data
-        package let cacheableToolsListResult: JSONValue?
+struct ToolSurface: Sendable {
+    struct RewriteResult: Sendable {
+        let responseData: Data
+        let cacheableToolsListResult: JSONValue?
     }
 
     private let refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
     private let callNormalizer: ToolCallNormalizer
     private let hiddenToolNames: Set<String>
 
-    package init(
+    init(
         config: ProxyConfig,
         sessionManager: any RuntimeToolsCatalogPort
     ) {
@@ -22,7 +21,7 @@ package struct ToolSurface: Sendable {
         self.hiddenToolNames = config.disabledToolNames
     }
 
-    package func rewriteForwardedResponse(
+    func rewriteForwardedResponse(
         method: String?,
         toolName: String?,
         originalID: JSONRPC.ID?,
@@ -76,7 +75,7 @@ package struct ToolSurface: Sendable {
         )
     }
 
-    package func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {
+    func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {
         guard let any = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
             return true
         }
@@ -271,7 +270,7 @@ package struct ToolSurface: Sendable {
         )
     }
 
-    package static func responseObject(
+    static func responseObject(
         from responseData: Data,
         matching responseIDKey: String
     ) -> [String: Any]? {

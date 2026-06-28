@@ -1,10 +1,10 @@
 import Foundation
 
-package struct XcodeWindowInfo: Sendable, Equatable {
-    package let tabIdentifier: String
-    package let workspacePath: String
+struct XcodeWindowInfo: Sendable, Equatable {
+    let tabIdentifier: String
+    let workspacePath: String
 
-    package init(tabIdentifier: String, workspacePath: String) {
+    init(tabIdentifier: String, workspacePath: String) {
         self.tabIdentifier = tabIdentifier
         self.workspacePath = workspacePath
     }

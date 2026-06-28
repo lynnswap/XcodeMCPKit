@@ -27,8 +27,9 @@ External embedders configure the server through
 `XcodeMCPProxyServer.Configuration`, configure the adapter through
 `XcodeMCPProxyStdioAdapter.Configuration`, and compose installs through
 `XcodeMCPProxyInstaller.Configuration`. Lower-level session routing, upstream
-process management, Xcode support, MCP HTTP behavior, and STDIO transport
-details stay in internal implementation folders behind this kit boundary.
+process management, broker/runtime primitives, Xcode support, MCP HTTP
+behavior, and STDIO transport details stay in internal implementation folders
+behind this kit boundary. They are not published as a standalone SwiftPM target.
 
 This target intentionally does not expose the executable CLI parsers, per-tool
 typed wrappers, a public stream API, or direct access to the internal session

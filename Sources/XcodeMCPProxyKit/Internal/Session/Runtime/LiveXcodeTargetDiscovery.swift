@@ -2,12 +2,11 @@ import AppKit
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
-    package init() {}
+struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
+    init() {}
 
-    package func runningXcodeTargets() -> [XcodeProcessTarget] {
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
         var targetsByPID: [pid_t: XcodeProcessTarget] = [:]
 
         for application in NSWorkspace.shared.runningApplications {

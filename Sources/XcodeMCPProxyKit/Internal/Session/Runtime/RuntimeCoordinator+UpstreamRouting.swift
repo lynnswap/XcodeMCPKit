@@ -3,7 +3,6 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
@@ -348,13 +347,13 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
         upstreamRouter.assign(
             upstreamIndex: upstreamIndex, sessionID: sessionID, originalID: originalID,
             isInitialize: false)
     }
 
-    package func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
         _ = upstreamRouter.remove(
             upstreamIndex: upstreamIndex,
             sessionID: sessionID,
@@ -362,19 +361,19 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
         removeUpstreamIDMapping(
             sessionID: sessionID, requestIDKey: requestIDKey, upstreamIndex: upstreamIndex)
         markRequestTimedOut(upstreamIndex: upstreamIndex)
     }
 
-    package func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
         _ = sessionID
         _ = requestIDKey
         markRequestSucceeded(upstreamIndex: upstreamIndex)
     }
 
-    package func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
+    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
         guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
             return
         }
@@ -433,7 +432,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func forwardServerRequestResponse(
+    func forwardServerRequestResponse(
         responseData: Data,
         sessionID: String,
         responseID: JSONRPC.ID,
@@ -531,11 +530,11 @@ extension RuntimeCoordinator {
         try? JSONRPC.Wire.dataByReplacingID(in: responseObject, with: id)
     }
 
-    package func debugSnapshot() -> ProxyDebug.Snapshot {
+    func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)
     }
 
-    package func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
+    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         let initSnapshot = initializeManager.snapshot()
         let brokerSnapshot = canonicalBrokerState.snapshot()
         let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()
@@ -570,7 +569,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func createRequestLease(
+    func createRequestLease(
         descriptor: SessionRequestPipeline.Descriptor
     ) -> LeaseManager.ID {
         leaseManager.createLease(descriptor: descriptor)
@@ -582,7 +581,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func activateRequestLease(
+    func activateRequestLease(
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
@@ -599,15 +598,15 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func completeRequestLease(_ leaseID: LeaseManager.ID) {
+    func completeRequestLease(_ leaseID: LeaseManager.ID) {
         releaseLeases([leaseManager.completeLease(leaseID)].compactMap { $0 })
     }
 
-    package func requeueRequestLease(_ leaseID: LeaseManager.ID) {
+    func requeueRequestLease(_ leaseID: LeaseManager.ID) {
         releaseLeases([leaseManager.requeueLease(leaseID)].compactMap { $0 })
     }
 
-    package func failRequestLease(
+    func failRequestLease(
         _ leaseID: LeaseManager.ID,
         terminalState: LeaseManager.State,
         reason: LeaseManager.ReleaseReason
@@ -618,7 +617,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func handleRequestLeaseTimeout(
+    func handleRequestLeaseTimeout(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
@@ -641,7 +640,7 @@ extension RuntimeCoordinator {
         releaseLeases([leaseManager.timeoutLease(leaseID)].compactMap { $0 })
     }
 
-    package func abandonRequestLease(
+    func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],

@@ -3,10 +3,9 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class InitializeManager: Sendable {
-    package enum PrimaryInitializePhase: Sendable, Equatable {
+final class InitializeManager: Sendable {
+    enum PrimaryInitializePhase: Sendable, Equatable {
         case idle
         case pendingSend(upstreamIndex: Int)
         case sent(upstreamIndex: Int, upstreamID: Int64)
@@ -35,62 +34,62 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package enum WarmInitRecoveryIntent: Sendable, Equatable {
+    enum WarmInitRecoveryIntent: Sendable, Equatable {
         case none
         case retryPrimaryWhenNoCachedInitialize
     }
 
-    package enum WarmInitRecoveryConsumptionPolicy: Sendable {
+    enum WarmInitRecoveryConsumptionPolicy: Sendable {
         case onlyWithoutCachedInitialize
         case regardlessOfCachedInitialize
     }
 
-    package struct PendingInitialize: Sendable {
-        package let eventLoop: EventLoop
-        package let promise: EventLoopPromise<ByteBuffer>
-        package let sessionID: String
-        package let sessionGeneration: UInt64
-        package let originalID: JSONRPC.ID
+    struct PendingInitialize: Sendable {
+        let eventLoop: EventLoop
+        let promise: EventLoopPromise<ByteBuffer>
+        let sessionID: String
+        let sessionGeneration: UInt64
+        let originalID: JSONRPC.ID
     }
 
-    package struct RegisterDecision: Sendable {
-        package let promise: EventLoopPromise<ByteBuffer>?
-        package let cachedResult: JSONValue?
-        package let shouldSendRequest: Bool
-        package let shouldScheduleTimeout: Bool
-        package let isShuttingDown: Bool
+    struct RegisterDecision: Sendable {
+        let promise: EventLoopPromise<ByteBuffer>?
+        let cachedResult: JSONValue?
+        let shouldSendRequest: Bool
+        let shouldScheduleTimeout: Bool
+        let isShuttingDown: Bool
     }
 
-    package struct SuccessPreparation: Sendable {
-        package let timeout: RuntimeScheduledTimeout?
-        package let shouldWarmSecondary: Bool
-        package let cachedResult: JSONValue?
+    struct SuccessPreparation: Sendable {
+        let timeout: RuntimeScheduledTimeout?
+        let shouldWarmSecondary: Bool
+        let cachedResult: JSONValue?
     }
 
-    package struct FailureResult: Sendable {
-        package let pending: [PendingInitialize]
-        package let timeout: RuntimeScheduledTimeout?
-        package let upstreamIndex: Int?
-        package let upstreamID: Int64?
-        package let shouldRetryEagerInitialize: Bool
+    struct FailureResult: Sendable {
+        let pending: [PendingInitialize]
+        let timeout: RuntimeScheduledTimeout?
+        let upstreamIndex: Int?
+        let upstreamID: Int64?
+        let shouldRetryEagerInitialize: Bool
     }
 
-    package struct ExitResult: Sendable {
-        package let pending: [PendingInitialize]
-        package let timeout: RuntimeScheduledTimeout?
-        package let hadGlobalInit: Bool
-        package let wasInFlight: Bool
-        package let primaryInitUpstreamIndex: Int?
-        package let primaryInitUpstreamID: Int64?
+    struct ExitResult: Sendable {
+        let pending: [PendingInitialize]
+        let timeout: RuntimeScheduledTimeout?
+        let hadGlobalInit: Bool
+        let wasInFlight: Bool
+        let primaryInitUpstreamIndex: Int?
+        let primaryInitUpstreamID: Int64?
     }
 
-    package struct Snapshot: Sendable {
-        package let hasInitResult: Bool
-        package let initInFlight: Bool
-        package let activePrimaryUpstreamIndex: Int?
-        package let didWarmSecondary: Bool
-        package let shouldRetryEagerInitializePrimaryAfterWarmInitFailure: Bool
-        package let isShuttingDown: Bool
+    struct Snapshot: Sendable {
+        let hasInitResult: Bool
+        let initInFlight: Bool
+        let activePrimaryUpstreamIndex: Int?
+        let didWarmSecondary: Bool
+        let shouldRetryEagerInitializePrimaryAfterWarmInitFailure: Bool
+        let isShuttingDown: Bool
     }
 
     private struct State: Sendable {
@@ -108,11 +107,11 @@ package final class InitializeManager: Sendable {
     /// the canonical broker state so there is exactly one store to clear.
     private let brokerState: CanonicalBrokerState
 
-    package init(brokerState: CanonicalBrokerState) {
+    init(brokerState: CanonicalBrokerState) {
         self.brokerState = brokerState
     }
 
-    package func beginShutdown() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
+    func beginShutdown() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
         state.withLockedValue { state in
             state.isShuttingDown = true
             state.primaryInitializePhase = .idle
@@ -124,11 +123,11 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func isInitialized() -> Bool {
+    func isInitialized() -> Bool {
         brokerState.initializeResult() != nil
     }
 
-    package func beginEagerInitializePrimary(upstreamIndex: Int) -> (
+    func beginEagerInitializePrimary(upstreamIndex: Int) -> (
         shouldSendRequest: Bool,
         shouldScheduleTimeout: Bool
     ) {
@@ -144,7 +143,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func beginPrimaryInitializeSend(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+    func beginPrimaryInitializeSend(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard !state.isShuttingDown,
                   brokerState.initializeResult() == nil,
@@ -160,7 +159,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func registerInitialize(
+    func registerInitialize(
         sessionID: String,
         sessionGeneration: UInt64,
         originalID: JSONRPC.ID,
@@ -220,7 +219,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func pendingPrimaryInitializeUpstreamIndex() -> Int? {
+    func pendingPrimaryInitializeUpstreamIndex() -> Int? {
         state.withLockedValue { state in
             guard case .pendingSend(let upstreamIndex) = state.primaryInitializePhase else {
                 return nil
@@ -229,11 +228,11 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func activePrimaryInitializeUpstreamIndex() -> Int? {
+    func activePrimaryInitializeUpstreamIndex() -> Int? {
         state.withLockedValue { $0.primaryInitializePhase.upstreamIndex }
     }
 
-    package func primaryInitializeMatches(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+    func primaryInitializeMatches(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             state.primaryInitializePhase == .sent(
                 upstreamIndex: upstreamIndex,
@@ -242,7 +241,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func preparePrimaryInitializeRetry(upstreamIndex: Int) -> Bool {
+    func preparePrimaryInitializeRetry(upstreamIndex: Int) -> Bool {
         state.withLockedValue { state in
             guard !state.isShuttingDown,
                   brokerState.initializeResult() == nil,
@@ -256,7 +255,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func preparePrimaryInitializeSuccess() -> SuccessPreparation? {
+    func preparePrimaryInitializeSuccess() -> SuccessPreparation? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
             let timeout = state.initTimeout
@@ -271,7 +270,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func finishPrimaryInitializeSuccess() -> [PendingInitialize]? {
+    func finishPrimaryInitializeSuccess() -> [PendingInitialize]? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
             state.primaryInitializePhase = .idle
@@ -282,7 +281,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func finishPrimaryInitializeUsingCachedResult() -> (pending: [PendingInitialize], result: JSONValue)? {
+    func finishPrimaryInitializeUsingCachedResult() -> (pending: [PendingInitialize], result: JSONValue)? {
         state.withLockedValue { state in
             guard !state.isShuttingDown, let result = brokerState.initializeResult() else { return nil }
             state.primaryInitializePhase = .idle
@@ -292,19 +291,19 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func reopenPrimaryInitializeForRetry() {
+    func reopenPrimaryInitializeForRetry() {
         state.withLockedValue { state in
             state.primaryInitializePhase = .idle
         }
     }
 
-    package func markSecondaryWarmupStarted() {
+    func markSecondaryWarmupStarted() {
         state.withLockedValue { state in
             state.didWarmSecondary = true
         }
     }
 
-    package func completePrimaryInitializeFailure() -> FailureResult? {
+    func completePrimaryInitializeFailure() -> FailureResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
             let shouldRetryEagerInitialize = consumeWarmInitRecoveryIntentLocked(
@@ -328,7 +327,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func replaceInitTimeout(_ timeout: RuntimeScheduledTimeout) -> RuntimeScheduledTimeout? {
+    func replaceInitTimeout(_ timeout: RuntimeScheduledTimeout) -> RuntimeScheduledTimeout? {
         state.withLockedValue { state in
             let existing = state.initTimeout
             state.initTimeout = timeout
@@ -336,7 +335,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func handleUpstreamExit(upstreamIndex: Int) -> ExitResult? {
+    func handleUpstreamExit(upstreamIndex: Int) -> ExitResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
             let result = ExitResult(
@@ -358,13 +357,13 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func resetWarmSecondaryForRetry() {
+    func resetWarmSecondaryForRetry() {
         state.withLockedValue { state in
             state.didWarmSecondary = false
         }
     }
 
-    package func resetForDebug() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
+    func resetForDebug() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
         state.withLockedValue { state in
             let result = (pending: state.initPending, timeout: state.initTimeout)
             state.initPending.removeAll()
@@ -377,13 +376,13 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func setWarmInitRecoveryIntent(_ intent: WarmInitRecoveryIntent) {
+    func setWarmInitRecoveryIntent(_ intent: WarmInitRecoveryIntent) {
         state.withLockedValue { state in
             state.warmInitRecoveryIntent = intent
         }
     }
 
-    package func consumeWarmInitRecoveryIntent(
+    func consumeWarmInitRecoveryIntent(
         policy: WarmInitRecoveryConsumptionPolicy
     ) -> Bool {
         state.withLockedValue { state in
@@ -410,7 +409,7 @@ package final class InitializeManager: Sendable {
         return true
     }
 
-    package func snapshot() -> Snapshot {
+    func snapshot() -> Snapshot {
         state.withLockedValue { state in
             Snapshot(
                 hasInitResult: brokerState.initializeResult() != nil,
@@ -424,7 +423,7 @@ package final class InitializeManager: Sendable {
         }
     }
 
-    package func pendingInitializes() -> [PendingInitialize] {
+    func pendingInitializes() -> [PendingInitialize] {
         state.withLockedValue { $0.initPending }
     }
 }

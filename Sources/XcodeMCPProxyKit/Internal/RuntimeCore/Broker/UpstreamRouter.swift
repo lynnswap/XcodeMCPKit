@@ -2,7 +2,7 @@ import XcodeMCPCore
 import XcodeMCPProcessRuntime
 import NIOConcurrencyHelpers
 
-package final class UpstreamRouter: Sendable {
+final class UpstreamRouter: Sendable {
     private struct RequestLookupKey: Hashable, Sendable {
         let sessionID: String
         let requestIDKey: String
@@ -18,7 +18,7 @@ package final class UpstreamRouter: Sendable {
     private let state = NIOLockedValueBox(State())
     private let lateResponseMarkerLimit = 512
 
-    package init(upstreamCount: Int) {
+    init(upstreamCount: Int) {
         state.withLockedValue { state in
             state.mappingsByUpstream = Array(repeating: [:], count: upstreamCount)
             state.upstreamIDByRequestKeyByUpstream = Array(repeating: [:], count: upstreamCount)
@@ -26,7 +26,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
+    func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
         -> Int64
     {
         state.withLockedValue { state in
@@ -49,7 +49,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func assignInitialize(upstreamIndex: Int) -> Int64 {
+    func assignInitialize(upstreamIndex: Int) -> Int64 {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return 0
@@ -65,7 +65,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamRouter.Mapping? {
+    func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamRouter.Mapping? {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else {
                 return nil
@@ -85,7 +85,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func remove(upstreamIndex: Int, upstreamID: Int64) {
+    func remove(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
             let mapping = state.mappingsByUpstream[upstreamIndex].removeValue(forKey: upstreamID)
@@ -109,7 +109,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func remove(
+    func remove(
         upstreamIndex: Int,
         sessionID: String,
         requestIDKey: String
@@ -136,7 +136,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func reset(upstreamIndex: Int) {
+    func reset(upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.mappingsByUpstream.count else { return }
             state.mappingsByUpstream[upstreamIndex].removeAll()
@@ -145,7 +145,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func resetAll() {
+    func resetAll() {
         state.withLockedValue { state in
             for upstreamIndex in state.mappingsByUpstream.indices {
                 state.mappingsByUpstream[upstreamIndex].removeAll()
@@ -155,7 +155,7 @@ package final class UpstreamRouter: Sendable {
         }
     }
 
-    package func consumeReleasedResponseMarker(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+    func consumeReleasedResponseMarker(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.recentlyReleasedResponseIDsByUpstream.count else {
                 return false
@@ -191,9 +191,9 @@ package final class UpstreamRouter: Sendable {
             )
         }
     }
-    package struct Mapping: Sendable {
-        package let sessionID: String?
-        package let originalID: JSONRPC.ID?
-        package let isInitialize: Bool
+    struct Mapping: Sendable {
+        let sessionID: String?
+        let originalID: JSONRPC.ID?
+        let isInitialize: Bool
     }
 }

@@ -5,10 +5,9 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ClientMCPRequestExecutor {
-    package func makeTopLevelRequestFuture(
+    func makeTopLevelRequestFuture(
         filteredRequest: FilteredToolCallRequest,
         sessionID: String,
         headerSessionID: String?,

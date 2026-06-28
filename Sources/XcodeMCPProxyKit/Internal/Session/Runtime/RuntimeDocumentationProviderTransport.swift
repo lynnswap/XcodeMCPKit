@@ -3,9 +3,8 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting {
+final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting {
     private struct State: Sendable {
         var initializeParamsByRouteID: [String: [String: JSONValue]] = [:]
         var fallbackRoutesByRouteID: [String: DocumentationProviderRoute] = [:]
@@ -16,7 +15,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     private let clock: ClockClient
     private let state = NIOLockedValueBox(State())
 
-    package init(
+    init(
         runtimeBox: WeakRuntimeCoordinatorBox,
         fallback: any DocumentationProviderRouting = UnavailableRuntimeDocumentationProviderTransport(),
         clock: ClockClient = .liveValue
@@ -26,7 +25,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         self.clock = clock
     }
 
-    package func openRoute(
+    func openRoute(
         for target: XcodeProcessTarget,
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
@@ -46,7 +45,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         )
     }
 
-    package func toolsList(
+    func toolsList(
         route: DocumentationProviderRoute,
         timeout: TimeAmount?
     ) async throws -> JSONValue {
@@ -77,7 +76,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         }
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         route: DocumentationProviderRoute,
         requestData: Data,
         timeout: TimeAmount?
@@ -132,7 +131,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         )
     }
 
-    package func close(route: DocumentationProviderRoute) async {
+    func close(route: DocumentationProviderRoute) async {
         if !route.isRuntimeBorrowed {
             await fallback.close(route: route)
             return
@@ -146,7 +145,7 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
         }
     }
 
-    package func shutdown() async {
+    func shutdown() async {
         let fallbackRoutes = state.withLockedValue { state -> [DocumentationProviderRoute] in
             let routes = Array(state.fallbackRoutesByRouteID.values)
             state.initializeParamsByRouteID.removeAll()
@@ -234,10 +233,10 @@ package final class RuntimeDocumentationProviderTransport: DocumentationProvider
     }
 }
 
-package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationProviderRouting {
-    package init() {}
+struct UnavailableRuntimeDocumentationProviderTransport: DocumentationProviderRouting {
+    init() {}
 
-    package func openRoute(
+    func openRoute(
         for _: XcodeProcessTarget,
         requestTimeout _: TimeAmount?,
         initializeParams _: [String: JSONValue]
@@ -245,14 +244,14 @@ package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationPr
         throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
-    package func toolsList(
+    func toolsList(
         route _: DocumentationProviderRoute,
         timeout _: TimeAmount?
     ) async throws -> JSONValue {
         throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         route _: DocumentationProviderRoute,
         requestData _: Data,
         timeout _: TimeAmount?
@@ -262,7 +261,7 @@ package struct UnavailableRuntimeDocumentationProviderTransport: DocumentationPr
 }
 
 extension RuntimeCoordinator {
-    package func documentationProviderRoute(
+    func documentationProviderRoute(
         for target: XcodeProcessTarget
     ) -> DocumentationProviderRoute? {
         guard let upstreamIndex = documentationUpstreamIndex(for: target) else {
@@ -275,7 +274,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func documentationProviderToolsList(
+    func documentationProviderToolsList(
         route: DocumentationProviderRoute,
         requestTimeout: TimeAmount?
     ) async throws -> JSONValue {
@@ -301,7 +300,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func documentationProviderCall(
+    func documentationProviderCall(
         route: DocumentationProviderRoute,
         requestData: Data,
         requestTimeout: TimeAmount?

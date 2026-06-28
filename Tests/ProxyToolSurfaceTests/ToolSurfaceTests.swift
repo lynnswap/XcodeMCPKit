@@ -3,9 +3,8 @@ import NIO
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
-
 @testable import XcodeMCPProxyKit
+
 
 @Suite(.serialized)
 struct ToolSurfaceTests {

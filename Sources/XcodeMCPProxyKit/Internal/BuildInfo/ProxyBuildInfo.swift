@@ -1,5 +1,5 @@
-package enum ProxyBuildInfo {
-    package static var version: String {
+enum ProxyBuildInfo {
+    static var version: String {
         ProxyBuildGeneratedInfo.version
     }
 }

@@ -2,16 +2,15 @@ import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class CanonicalBrokerState: Sendable {
-    package struct Incompatibility: Codable, Sendable {
-        package let upstreamIndex: Int
-        package let kind: String
-        package let reason: String
-        package let observedAt: Date
+final class CanonicalBrokerState: Sendable {
+    struct Incompatibility: Codable, Sendable {
+        let upstreamIndex: Int
+        let kind: String
+        let reason: String
+        let observedAt: Date
 
-        package init(
+        init(
             upstreamIndex: Int,
             kind: String,
             reason: String,
@@ -24,14 +23,14 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package struct Snapshot: Sendable {
-        package let initializeResult: JSONValue?
-        package let initializeSourceUpstream: Int?
-        package let toolsCatalogRaw: JSONValue?
-        package let toolsSourceUpstream: Int?
-        package let lastIncompatibility: CanonicalBrokerState.Incompatibility?
+    struct Snapshot: Sendable {
+        let initializeResult: JSONValue?
+        let initializeSourceUpstream: Int?
+        let toolsCatalogRaw: JSONValue?
+        let toolsSourceUpstream: Int?
+        let lastIncompatibility: CanonicalBrokerState.Incompatibility?
 
-        package init(
+        init(
             initializeResult: JSONValue?,
             initializeSourceUpstream: Int?,
             toolsCatalogRaw: JSONValue?,
@@ -45,7 +44,7 @@ package final class CanonicalBrokerState: Sendable {
             self.lastIncompatibility = lastIncompatibility
         }
 
-        package var canonicalReady: Bool {
+        var canonicalReady: Bool {
             initializeResult != nil && toolsCatalogRaw != nil
         }
     }
@@ -65,9 +64,9 @@ package final class CanonicalBrokerState: Sendable {
 
     private let state = NIOLockedValueBox(State())
 
-    package init() {}
+    init() {}
 
-    package func snapshot() -> CanonicalBrokerState.Snapshot {
+    func snapshot() -> CanonicalBrokerState.Snapshot {
         state.withLockedValue { state in
             CanonicalBrokerState.Snapshot(
                 initializeResult: state.initializeResult,
@@ -79,27 +78,27 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package func initializeResult() -> JSONValue? {
+    func initializeResult() -> JSONValue? {
         state.withLockedValue { $0.initializeResult }
     }
 
-    package func initializeSourceUpstream() -> Int? {
+    func initializeSourceUpstream() -> Int? {
         state.withLockedValue { $0.initializeSourceUpstream }
     }
 
-    package func toolsCatalogRaw() -> JSONValue? {
+    func toolsCatalogRaw() -> JSONValue? {
         state.withLockedValue { $0.toolsCatalogRaw }
     }
 
-    package func toolsSourceUpstream() -> Int? {
+    func toolsSourceUpstream() -> Int? {
         state.withLockedValue { $0.toolsSourceUpstream }
     }
 
-    package func generation() -> UInt64 {
+    func generation() -> UInt64 {
         state.withLockedValue { $0.generation }
     }
 
-    package func syncCanonicalInitialize(
+    func syncCanonicalInitialize(
         _ result: JSONValue,
         sourceUpstream: Int
     ) {
@@ -109,7 +108,7 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package func syncCanonicalToolsCatalog(
+    func syncCanonicalToolsCatalog(
         _ rawResult: JSONValue,
         sourceUpstream: Int,
         onlyIfGeneration expectedGeneration: UInt64? = nil
@@ -123,7 +122,7 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package func clearInitialize() {
+    func clearInitialize() {
         state.withLockedValue { state in
             state.initializeResult = nil
             state.initializeSourceUpstream = nil
@@ -131,7 +130,7 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package func clearToolsCatalog() {
+    func clearToolsCatalog() {
         state.withLockedValue { state in
             state.toolsCatalogRaw = nil
             state.toolsSourceUpstream = nil
@@ -139,7 +138,7 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package func reset() {
+    func reset() {
         state.withLockedValue { state in
             state.initializeResult = nil
             state.initializeSourceUpstream = nil
@@ -150,7 +149,7 @@ package final class CanonicalBrokerState: Sendable {
         }
     }
 
-    package func recordIncompatibility(
+    func recordIncompatibility(
         upstreamIndex: Int,
         kind: String,
         reason: String

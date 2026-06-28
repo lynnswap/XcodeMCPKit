@@ -1,7 +1,6 @@
-import XcodeMCPProxyKit
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import Foundation
 import NIO
 import NIOConcurrencyHelpers

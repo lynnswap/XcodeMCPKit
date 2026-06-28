@@ -1,8 +1,9 @@
-import XcodeMCPProxyKit
 import Dispatch
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+
+@testable import XcodeMCPProxyKit
 
 package struct AsyncTestTimeoutError: Error, CustomStringConvertible {
     package let description: String

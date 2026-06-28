@@ -5,17 +5,16 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ClientMCPRequestExecutor {
-    package static func topLevelRequestTimeoutOverride(
+    static func topLevelRequestTimeoutOverride(
         method: String?,
         defaultSeconds: TimeInterval
     ) -> TimeAmount? {
         MCP.MethodDispatcher.timeoutForMethod(method, defaultSeconds: defaultSeconds)
     }
 
-    package static func minimumRequestTimeout(
+    static func minimumRequestTimeout(
         _ lhs: TimeAmount?,
         _ rhs: TimeAmount?
     ) -> TimeAmount? {
@@ -29,15 +28,15 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package func timeoutDeadline(for timeout: TimeAmount?) -> Date? {
+    func timeoutDeadline(for timeout: TimeAmount?) -> Date? {
         Self.timeoutDeadline(for: timeout, now: deadlineClock.now())
     }
 
-    package func remainingRequestTimeout(until deadline: Date?) -> TimeAmount? {
+    func remainingRequestTimeout(until deadline: Date?) -> TimeAmount? {
         Self.remainingRequestTimeout(until: deadline, now: deadlineClock.now())
     }
 
-    package static func timeoutDeadline(
+    static func timeoutDeadline(
         for timeout: TimeAmount?,
         now: Date = Date()
     ) -> Date? {
@@ -46,7 +45,7 @@ extension ClientMCPRequestExecutor {
         return now.addingTimeInterval(seconds)
     }
 
-    package static func remainingRequestTimeout(
+    static func remainingRequestTimeout(
         until deadline: Date?,
         now: Date = Date()
     ) -> TimeAmount? {
@@ -57,7 +56,7 @@ extension ClientMCPRequestExecutor {
         return .nanoseconds(remainingNanoseconds)
     }
 
-    package static func makeRequestTimeoutResponseData(
+    static func makeRequestTimeoutResponseData(
         requestIDs: [JSONRPC.ID],
         forceBatchArray: Bool
     ) -> Data? {
@@ -69,7 +68,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeMissingInitializeResolution(
+    static func makeMissingInitializeResolution(
         parsedRequestJSON: Any,
         requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
@@ -89,7 +88,7 @@ extension ClientMCPRequestExecutor {
 
     /// The one canonical "upstream unavailable" resolution: a partial batch
     /// keeps any locally-produced responses, a plain request degrades to 503.
-    package static func makeUpstreamUnavailableResolution(
+    static func makeUpstreamUnavailableResolution(
         localResponseData: Data?,
         responseIDs: [JSONRPC.ID],
         forceBatchArray: Bool,
@@ -129,7 +128,7 @@ extension ClientMCPRequestExecutor {
     }
 
     /// The one canonical "expected initialize request" rejection shape.
-    package static func makeExpectedInitializeResolution(
+    static func makeExpectedInitializeResolution(
         requestIDs: [JSONRPC.ID],
         requestIsBatch: Bool,
         sessionID: String,
@@ -153,7 +152,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func requestRequiresInitialize(_ parsedRequestJSON: Any) -> Bool {
+    static func requestRequiresInitialize(_ parsedRequestJSON: Any) -> Bool {
         if let object = parsedRequestJSON as? [String: Any] {
             if case .request("initialize", _) = JSONRPC.Message.Inspector.kind(of: object) {
                 return false
@@ -166,7 +165,7 @@ extension ClientMCPRequestExecutor {
         return false
     }
 
-    package static func makeLocalResponseResolution(
+    static func makeLocalResponseResolution(
         responseData: Data?,
         sessionID: String,
         prefersEventStream: Bool,
@@ -182,7 +181,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makePartialBatchErrorResolution(
+    static func makePartialBatchErrorResolution(
         localResponseData: Data?,
         responseIDs: [JSONRPC.ID],
         code: Int,
@@ -273,7 +272,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func mergeLocalBatchResponses(
+    static func mergeLocalBatchResponses(
         into responseData: Data,
         localResponseData: Data?
     ) -> Data {
@@ -311,7 +310,7 @@ extension ClientMCPRequestExecutor {
         return (try? JSONRPC.Wire.data(from: mergedObjects)) ?? responseData
     }
 
-    package static func mergeLocalToolResponseData(
+    static func mergeLocalToolResponseData(
         _ localResponseData: Data?,
         into resolution: ClientMCPRequestExecutor.Resolution,
         fallbackRequestIDs: [JSONRPC.ID],
@@ -342,7 +341,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func mergeBatchResponsePayloads(
+    static func mergeBatchResponsePayloads(
         _ payloads: [Data?],
         forceBatchArray: Bool
     ) -> Data? {
@@ -365,7 +364,7 @@ extension ClientMCPRequestExecutor {
         return try? JSONRPC.Wire.data(from: payload)
     }
 
-    package static func responseDataForBatchResolution(
+    static func responseDataForBatchResolution(
         _ resolution: ClientMCPRequestExecutor.Resolution?,
         fallbackRequestIDs: [JSONRPC.ID],
         forceBatchArray: Bool
@@ -395,7 +394,7 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package static func makeBlockedToolResponseObjects(
+    static func makeBlockedToolResponseObjects(
         requestObject: [String: Any],
         toolName: String
     ) -> [[String: Any]] {
@@ -405,7 +404,7 @@ extension ClientMCPRequestExecutor {
         return [makeToolResultErrorResponseObject(id: rpcID, toolName: toolName)]
     }
 
-    package static func makeToolResultErrorResponseObject(
+    static func makeToolResultErrorResponseObject(
         id: JSONRPC.ID,
         toolName: String
     ) -> [String: Any] {
@@ -415,7 +414,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeToolResultErrorResponseObject(
+    static func makeToolResultErrorResponseObject(
         id: JSONRPC.ID,
         message: String
     ) -> [String: Any] {
@@ -433,7 +432,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeJSONRPCErrorResponseObject(
+    static func makeJSONRPCErrorResponseObject(
         id: JSONRPC.ID,
         code: Int,
         message: String
@@ -441,7 +440,7 @@ extension ClientMCPRequestExecutor {
         JSONRPC.Wire.errorResponseObject(id: id, code: code, message: message)
     }
 
-    package static func makeJSONRPCErrorResponseObject(
+    static func makeJSONRPCErrorResponseObject(
         id: Any,
         code: Int,
         message: String
@@ -452,7 +451,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeJSONRPCErrorResponseData(
+    static func makeJSONRPCErrorResponseData(
         ids: [JSONRPC.ID],
         code: Int,
         message: String,
@@ -467,14 +466,14 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeJSONRPCResultResponseObject(
+    static func makeJSONRPCResultResponseObject(
         id: JSONRPC.ID,
         result: JSONValue
     ) -> [String: Any] {
         JSONRPC.Wire.resultResponseObject(id: id, result: result)
     }
 
-    package static func makeJSONRPCResultResponseData(
+    static func makeJSONRPCResultResponseData(
         ids: [JSONRPC.ID],
         result: JSONValue,
         forceBatchArray: Bool
@@ -486,7 +485,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeToolResponseData(
+    static func makeToolResponseData(
         from responseObjects: [[String: Any]],
         forceBatchArray: Bool
     ) -> Data? {
@@ -499,7 +498,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func makeToolRoutingErrorResponseData(
+    static func makeToolRoutingErrorResponseData(
         errors: [ToolRoutingError],
         forceBatchArray: Bool
     ) -> Data? {
@@ -514,7 +513,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package static func responseObjects(from responseData: Data) -> [[String: Any]] {
+    static func responseObjects(from responseData: Data) -> [[String: Any]] {
         guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
             return []
         }
@@ -527,7 +526,7 @@ extension ClientMCPRequestExecutor {
         return []
     }
 
-    package static func extractResponseIDs(from requestJSON: Any) -> [JSONRPC.ID] {
+    static func extractResponseIDs(from requestJSON: Any) -> [JSONRPC.ID] {
         if let object = requestJSON as? [String: Any] {
             guard let rpcID = JSONRPC.Message.Inspector.requestID(from: object) else {
                 return []

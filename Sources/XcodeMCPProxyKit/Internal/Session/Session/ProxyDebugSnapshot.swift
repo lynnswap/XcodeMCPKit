@@ -1,16 +1,15 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum ProxyDebug {}
+enum ProxyDebug {}
 
 extension ProxyDebug {
-    package struct Event: Codable, Sendable {
-        package let timestamp: Date
-        package let message: String
+    struct Event: Codable, Sendable {
+        let timestamp: Date
+        let message: String
 
-        package init(timestamp: Date, message: String) {
+        init(timestamp: Date, message: String) {
             self.timestamp = timestamp
             self.message = message
         }
@@ -18,14 +17,14 @@ extension ProxyDebug {
 }
 
 extension ProxyDebug {
-    package struct TrafficEvent: Codable, Sendable {
-        package let timestamp: Date
-        package let upstreamIndex: Int
-        package let direction: String
-        package let bytes: Int
-        package let preview: String
+    struct TrafficEvent: Codable, Sendable {
+        let timestamp: Date
+        let upstreamIndex: Int
+        let direction: String
+        let bytes: Int
+        let preview: String
 
-        package init(
+        init(
             timestamp: Date, upstreamIndex: Int, direction: String, bytes: Int, preview: String
         ) {
             self.timestamp = timestamp
@@ -38,33 +37,33 @@ extension ProxyDebug {
 }
 
 extension ProxyDebug {
-    package struct UpstreamSnapshot: Codable, Sendable {
-        package let upstreamIndex: Int
-        package let isInitialized: Bool
-        package let initInFlight: Bool
-        package let didSendInitialized: Bool
-        package let healthState: String
-        package let consecutiveRequestTimeouts: Int
-        package let consecutiveToolsListFailures: Int
-        package let lastToolsListSuccessUptimeNs: UInt64?
-        package let recentStderr: [ProxyDebug.Event]
-        package let lastDecodeError: ProxyDebug.Event?
-        package let lastBridgeError: ProxyDebug.Event?
-        package let protocolViolationCount: Int
-        package let lastProtocolViolationAt: Date?
-        package let lastProtocolViolationReason: String?
-        package let lastProtocolViolationBufferedBytes: Int?
-        package let lastProtocolViolationPreview: String?
-        package let lastProtocolViolationPreviewHex: String?
-        package let lastProtocolViolationLeadingByteHex: String?
-        package let bufferedStdoutBytes: Int
-        package let capacity: Int
-        package let requestPickCount: Int
-        package let activeCorrelatedRequestCount: Int
-        package let droppedUnmappedNotificationCount: Int
-        package let lateResponseDropCount: Int
+    struct UpstreamSnapshot: Codable, Sendable {
+        let upstreamIndex: Int
+        let isInitialized: Bool
+        let initInFlight: Bool
+        let didSendInitialized: Bool
+        let healthState: String
+        let consecutiveRequestTimeouts: Int
+        let consecutiveToolsListFailures: Int
+        let lastToolsListSuccessUptimeNs: UInt64?
+        let recentStderr: [ProxyDebug.Event]
+        let lastDecodeError: ProxyDebug.Event?
+        let lastBridgeError: ProxyDebug.Event?
+        let protocolViolationCount: Int
+        let lastProtocolViolationAt: Date?
+        let lastProtocolViolationReason: String?
+        let lastProtocolViolationBufferedBytes: Int?
+        let lastProtocolViolationPreview: String?
+        let lastProtocolViolationPreviewHex: String?
+        let lastProtocolViolationLeadingByteHex: String?
+        let bufferedStdoutBytes: Int
+        let capacity: Int
+        let requestPickCount: Int
+        let activeCorrelatedRequestCount: Int
+        let droppedUnmappedNotificationCount: Int
+        let lateResponseDropCount: Int
 
-        package init(
+        init(
             upstreamIndex: Int,
             isInitialized: Bool,
             initInFlight: Bool,
@@ -119,20 +118,20 @@ extension ProxyDebug {
 }
 
 extension ProxyDebug {
-    package struct Snapshot: Codable, Sendable {
-        package let generatedAt: Date
-        package let proxyInitialized: Bool
-        package let cachedToolsListAvailable: Bool
-        package let warmupInFlight: Bool
-        package let controlPlane: ControlPlane.DebugSnapshot?
-        package let upstreams: [ProxyDebug.UpstreamSnapshot]
-        package let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
-        package let recentTraffic: [ProxyDebug.TrafficEvent]
-        package let sessions: [SessionRequestPipeline.DebugSnapshot]
-        package let leases: [LeaseManager.DebugSnapshot]
-        package let queuedRequestCount: Int
+    struct Snapshot: Codable, Sendable {
+        let generatedAt: Date
+        let proxyInitialized: Bool
+        let cachedToolsListAvailable: Bool
+        let warmupInFlight: Bool
+        let controlPlane: ControlPlane.DebugSnapshot?
+        let upstreams: [ProxyDebug.UpstreamSnapshot]
+        let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
+        let recentTraffic: [ProxyDebug.TrafficEvent]
+        let sessions: [SessionRequestPipeline.DebugSnapshot]
+        let leases: [LeaseManager.DebugSnapshot]
+        let queuedRequestCount: Int
 
-        package init(
+        init(
             generatedAt: Date,
             proxyInitialized: Bool,
             cachedToolsListAvailable: Bool,

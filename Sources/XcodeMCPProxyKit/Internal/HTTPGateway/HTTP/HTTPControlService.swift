@@ -2,24 +2,23 @@ import Foundation
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class HTTPControlService: Sendable {
-    package struct DebugSnapshot: Codable, Sendable {
-        package let generatedAt: Date
-        package let proxyInitialized: Bool
-        package let cachedToolsListAvailable: Bool
-        package let warmupInFlight: Bool
-        package let controlPlane: ControlPlane.DebugSnapshot?
-        package let upstreams: [ProxyDebug.UpstreamSnapshot]
-        package let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
-        package let recentTraffic: [ProxyDebug.TrafficEvent]
-        package let sessions: [SessionRequestPipeline.DebugSnapshot]
-        package let leases: [LeaseManager.DebugSnapshot]
-        package let queuedRequestCount: Int
-        package let refreshCodeIssues: RefreshCodeIssues.DebugSnapshot?
+final class HTTPControlService: Sendable {
+    struct DebugSnapshot: Codable, Sendable {
+        let generatedAt: Date
+        let proxyInitialized: Bool
+        let cachedToolsListAvailable: Bool
+        let warmupInFlight: Bool
+        let controlPlane: ControlPlane.DebugSnapshot?
+        let upstreams: [ProxyDebug.UpstreamSnapshot]
+        let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
+        let recentTraffic: [ProxyDebug.TrafficEvent]
+        let sessions: [SessionRequestPipeline.DebugSnapshot]
+        let leases: [LeaseManager.DebugSnapshot]
+        let queuedRequestCount: Int
+        let refreshCodeIssues: RefreshCodeIssues.DebugSnapshot?
 
-        package init(
+        init(
             base: ProxyDebug.Snapshot,
             refreshCodeIssues: RefreshCodeIssues.DebugSnapshot?
         ) {
@@ -38,10 +37,10 @@ package final class HTTPControlService: Sendable {
         }
     }
 
-    package struct SSEOpenResult {
-        package let bufferedNotifications: [Data]
+    struct SSEOpenResult {
+        let bufferedNotifications: [Data]
 
-        package init(bufferedNotifications: [Data]) {
+        init(bufferedNotifications: [Data]) {
             self.bufferedNotifications = bufferedNotifications
         }
     }
@@ -50,7 +49,7 @@ package final class HTTPControlService: Sendable {
     private let refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator?
     private let refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState?
 
-    package init(
+    init(
         runtimeCoordinator: any RuntimeHTTPControlPort,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil
@@ -60,7 +59,7 @@ package final class HTTPControlService: Sendable {
         self.refreshCodeIssuesDebugState = refreshCodeIssuesDebugState
     }
 
-    package func debugSnapshotData(includeSensitiveDebugPayloads: Bool = false) -> Data? {
+    func debugSnapshotData(includeSensitiveDebugPayloads: Bool = false) -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -76,7 +75,7 @@ package final class HTTPControlService: Sendable {
         )
     }
 
-    package func openSSE(sessionID: String, channel: Channel) -> HTTPControlService.SSEOpenResult {
+    func openSSE(sessionID: String, channel: Channel) -> HTTPControlService.SSEOpenResult {
         let session = runtimeCoordinator.session(id: sessionID)
         let hadClients = session.notificationHub.hasSseClients
         session.notificationHub.addSse(channel)
@@ -85,26 +84,26 @@ package final class HTTPControlService: Sendable {
         return HTTPControlService.SSEOpenResult(bufferedNotifications: bufferedNotifications)
     }
 
-    package func closeSSE(sessionID: String, channel: Channel) {
+    func closeSSE(sessionID: String, channel: Channel) {
         guard runtimeCoordinator.hasSession(id: sessionID) else { return }
         let session = runtimeCoordinator.session(id: sessionID)
         session.notificationHub.removeSse(channel)
     }
 
-    package func deleteSession(id sessionID: String) {
+    func deleteSession(id sessionID: String) {
         guard runtimeCoordinator.hasSession(id: sessionID) else { return }
         runtimeCoordinator.removeSession(id: sessionID)
     }
 
-    package func hasSession(id sessionID: String) -> Bool {
+    func hasSession(id sessionID: String) -> Bool {
         runtimeCoordinator.hasSession(id: sessionID)
     }
 
-    package func negotiatedProtocolVersion(id sessionID: String) -> String? {
+    func negotiatedProtocolVersion(id sessionID: String) -> String? {
         runtimeCoordinator.negotiatedProtocolVersion(id: sessionID)
     }
 
-    package func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
+    func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
         let promise = eventLoop.makePromise(of: Void.self)
         promise.completeWithTask { [runtimeCoordinator, refreshCodeIssuesCoordinator, refreshCodeIssuesDebugState] in
             await refreshCodeIssuesCoordinator?.reset()

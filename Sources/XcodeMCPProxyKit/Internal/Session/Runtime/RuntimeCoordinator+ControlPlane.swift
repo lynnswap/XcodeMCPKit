@@ -4,27 +4,26 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ControlPlane {
-    package enum Error: Swift.Error, Sendable {
+    enum Error: Swift.Error, Sendable {
         case invalidResponse(String)
         case upstreamRPC(code: Int, message: String)
     }
 }
 
 extension ControlPlane {
-    package struct RequestError: Swift.Error, Sendable {
-        package let route: ControlPlane.Route
-        package let upstreamIndex: Int?
-        package let underlying: any Swift.Error
+    struct RequestError: Swift.Error, Sendable {
+        let route: ControlPlane.Route
+        let upstreamIndex: Int?
+        let underlying: any Swift.Error
     }
 }
 
 extension ControlPlane {
-    package struct RPCResponse: Sendable {
-        package let responseData: Data
-        package let upstreamIndex: Int
+    struct RPCResponse: Sendable {
+        let responseData: Data
+        let upstreamIndex: Int
     }
 }
 
@@ -36,8 +35,8 @@ private enum EventLoopFutureWaitResult<Output: Sendable>: Sendable {
 /// The one place that decides which JSON-RPC error a control-plane or
 /// upstream-acquisition failure surfaces as.
 extension ControlPlane {
-    package enum ErrorMapper {
-        package static func jsonRPCError(for error: Swift.Error) -> (code: Int, message: String) {
+    enum ErrorMapper {
+        static func jsonRPCError(for error: Swift.Error) -> (code: Int, message: String) {
             if let error = error as? DocumentationProvider.UnavailableReason {
                 return (-32001, error.message)
             }

@@ -5,10 +5,9 @@ import NIOEmbedded
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
-import XcodeMCPProxyTestSupport
-@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPProxyKit
+import XcodeMCPProxyTestSupport
+@testable import XcodeMCPProxyInternalTestSupport
 
 @Suite(.serialized)
 struct RuntimeCoordinatorTests {

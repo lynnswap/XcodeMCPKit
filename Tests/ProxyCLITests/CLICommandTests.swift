@@ -1,4 +1,4 @@
-import XcodeMCPProxyKit
+@testable import XcodeMCPProxyKit
 import Foundation
 import Testing
 

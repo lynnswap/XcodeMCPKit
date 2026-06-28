@@ -1,10 +1,9 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum MCPErrorResponder {
-    package static func errorResponseData(
+enum MCPErrorResponder {
+    static func errorResponseData(
         id: JSONRPC.ID?,
         code: Int,
         message: String,
@@ -20,7 +19,7 @@ package enum MCPErrorResponder {
         )
     }
 
-    package static func errorResponseData(
+    static func errorResponseData(
         ids: [JSONRPC.ID],
         code: Int,
         message: String,
@@ -54,11 +53,11 @@ package enum MCPErrorResponder {
         )
     }
 
-    package static func requestMetadata(from data: Data) -> (ids: [JSONRPC.ID], isBatch: Bool) {
+    static func requestMetadata(from data: Data) -> (ids: [JSONRPC.ID], isBatch: Bool) {
         requestMetadata(fromParsed: try? JSONSerialization.jsonObject(with: data, options: []))
     }
 
-    package static func requestMetadata(fromParsed json: Any?) -> (ids: [JSONRPC.ID], isBatch: Bool) {
+    static func requestMetadata(fromParsed json: Any?) -> (ids: [JSONRPC.ID], isBatch: Bool) {
         let metadata = JSONRPC.Message.Inspector.requestMetadata(fromParsed: json)
         return (metadata.ids, metadata.isBatch)
     }

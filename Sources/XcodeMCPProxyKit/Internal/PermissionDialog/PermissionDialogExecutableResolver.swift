@@ -1,10 +1,9 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum PermissionDialogExecutableResolver {
-    package static func additionalExecutableCandidates(
+enum PermissionDialogExecutableResolver {
+    static func additionalExecutableCandidates(
         config: ProxyConfig,
         executableLookupClient: ExecutableLookupClient = .liveValue
     ) -> [String] {

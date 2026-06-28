@@ -5,15 +5,14 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class SessionContext: Sendable {
-    package let id: String
-    package let router: JSONRPCResponseRouter
-    package let notificationHub: NotificationHub
-    package let serverRequestTracker: ServerRequestTracker
+final class SessionContext: Sendable {
+    let id: String
+    let router: JSONRPCResponseRouter
+    let notificationHub: NotificationHub
+    let serverRequestTracker: ServerRequestTracker
 
-    package init(id: String, config: ProxyConfig) {
+    init(id: String, config: ProxyConfig) {
         self.id = id
         self.notificationHub = NotificationHub()
         self.serverRequestTracker = ServerRequestTracker(
@@ -31,26 +30,26 @@ package final class SessionContext: Sendable {
     }
 }
 
-package final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
+final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
     weak var value: RuntimeCoordinator?
 
-    package init() {}
+    init() {}
 }
 
-package struct RuntimeCoordinatorTestHooks: Sendable {
-    package var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
-    package var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
-    package var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
-    package var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
-    package var upstreamRequestQueued:
+struct RuntimeCoordinatorTestHooks: Sendable {
+    var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
+    var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    var upstreamRequestQueued:
         (@Sendable (
             _ leaseID: LeaseManager.ID,
             _ descriptor: SessionRequestPipeline.Descriptor,
             _ queuedRequestCount: Int
         ) -> Void)?
-    package var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
+    var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
 
-    package init(
+    init(
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
@@ -75,25 +74,25 @@ package struct RuntimeCoordinatorTestHooks: Sendable {
 /// The single routing decision for a DocumentationSearch tools/call:
 /// either the provider produced the response, or proxy-managed
 /// DocumentationSearch is unavailable.
-package enum DocumentationSearchOutcome: Sendable {
+enum DocumentationSearchOutcome: Sendable {
     case handled(Data)
     case unavailable(DocumentationProvider.UnavailableReason)
 }
 
-package enum ServerRequestResponseForwardingResult: Sendable, Equatable {
+enum ServerRequestResponseForwardingResult: Sendable, Equatable {
     case accepted
     case missingRoute
     case invalidResponse
     case upstreamUnavailable
 }
 
-package protocol RuntimeSessionLifecyclePort: Sendable {
+protocol RuntimeSessionLifecyclePort: Sendable {
     func start()
     func debugReset()
     func shutdown() async
 }
 
-package protocol RuntimeSessionRegistryPort: Sendable {
+protocol RuntimeSessionRegistryPort: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
     func negotiatedProtocolVersion(id: String) -> String?
@@ -102,13 +101,13 @@ package protocol RuntimeSessionRegistryPort: Sendable {
     func isInitialized() -> Bool
 }
 
-package protocol RuntimeToolsCatalogPort: Sendable {
+protocol RuntimeToolsCatalogPort: Sendable {
     func cachedToolsListResult() -> JSONValue?
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue?
     func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
 }
 
-package protocol RuntimeInitializeToolsPort: Sendable {
+protocol RuntimeInitializeToolsPort: Sendable {
     func session(id: String) -> SessionContext
     func isInitialized() -> Bool
     func registerInitialize(
@@ -132,7 +131,7 @@ package protocol RuntimeInitializeToolsPort: Sendable {
     func hasDocumentationSearchService() -> Bool
 }
 
-package protocol RuntimeToolRoutingPort: Sendable {
+protocol RuntimeToolRoutingPort: Sendable {
     func toolRoutingDecision(
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
@@ -146,7 +145,7 @@ package protocol RuntimeToolRoutingPort: Sendable {
     ) async throws -> JSONValue
 }
 
-package protocol RuntimeUpstreamForwardingPort: Sendable {
+protocol RuntimeUpstreamForwardingPort: Sendable {
     func session(id: String) -> SessionContext
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
@@ -163,12 +162,12 @@ package protocol RuntimeUpstreamForwardingPort: Sendable {
     ) -> EventLoopFuture<ServerRequestResponseForwardingResult>
 }
 
-package protocol RuntimeDebugSnapshotPort: Sendable {
+protocol RuntimeDebugSnapshotPort: Sendable {
     func debugSnapshot() -> ProxyDebug.Snapshot
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot
 }
 
-package protocol RuntimeRequestLeasePort: Sendable {
+protocol RuntimeRequestLeasePort: Sendable {
     func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID
     func activateRequestLease(
         _ leaseID: LeaseManager.ID,
@@ -197,16 +196,16 @@ package protocol RuntimeRequestLeasePort: Sendable {
     )
 }
 
-package protocol RuntimeHTTPControlPort:
+protocol RuntimeHTTPControlPort:
     RuntimeSessionLifecyclePort,
     RuntimeSessionRegistryPort,
     RuntimeDebugSnapshotPort {}
 
-package protocol RuntimeClientLocalMCPResponderPort:
+protocol RuntimeClientLocalMCPResponderPort:
     RuntimeSessionRegistryPort,
     RuntimeInitializeToolsPort {}
 
-package protocol RuntimeMCPForwardingPort:
+protocol RuntimeMCPForwardingPort:
     RuntimeSessionRegistryPort,
     RuntimeToolsCatalogPort,
     RuntimeInitializeToolsPort,
@@ -215,42 +214,42 @@ package protocol RuntimeMCPForwardingPort:
     RuntimeRequestLeasePort,
     ProxyUpstreamRequestRuntimePort {}
 
-package protocol RuntimeClientMCPRequestPort:
+protocol RuntimeClientMCPRequestPort:
     RuntimeSessionRegistryPort,
     RuntimeClientLocalMCPResponderPort,
     RuntimeMCPForwardingPort {}
 
-package protocol RuntimeHTTPGatewayPort:
+protocol RuntimeHTTPGatewayPort:
     RuntimeHTTPControlPort,
     RuntimeClientMCPRequestPort {}
 
-package protocol RuntimeCoordinating:
+protocol RuntimeCoordinating:
     RuntimeHTTPGatewayPort {}
 
 extension RuntimeSessionLifecyclePort {
-    package func start() {}
+    func start() {}
 }
 
 extension RuntimeSessionRegistryPort {
-    package func negotiatedProtocolVersion(id _: String) -> String? {
+    func negotiatedProtocolVersion(id _: String) -> String? {
         nil
     }
 
-    package func markNotificationClientConnected(sessionID _: String) {}
+    func markNotificationClientConnected(sessionID _: String) {}
 }
 
 extension RuntimeToolsCatalogPort {
-    package func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
+    func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
         cachedToolsListResult()
     }
 }
 
 extension RuntimeInitializeToolsPort {
-    package func hasDocumentationSearchService() -> Bool {
+    func hasDocumentationSearchService() -> Bool {
         false
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         requestData _: Data,
         requestTimeoutOverride _: TimeAmount?
     ) async throws -> DocumentationSearchOutcome {
@@ -259,28 +258,28 @@ extension RuntimeInitializeToolsPort {
 }
 
 extension RuntimeToolRoutingPort {
-    package func toolRoutingDecision(
+    func toolRoutingDecision(
         for requestJSON: Any,
         requestTimeoutOverride _: TimeAmount?
     ) async -> ToolRoutingDecision {
         .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
     }
 
-    package func immediateToolRoutingDecision(for _: Any) -> ToolRoutingDecision? {
+    func immediateToolRoutingDecision(for _: Any) -> ToolRoutingDecision? {
         nil
     }
 
-    package func preferredUpstreamIndex(for _: Any) -> Int? {
+    func preferredUpstreamIndex(for _: Any) -> Int? {
         nil
     }
 
-    package func primaryUpstreamIndex(forXcodeProcessID _: pid_t) -> Int? {
+    func primaryUpstreamIndex(forXcodeProcessID _: pid_t) -> Int? {
         nil
     }
 }
 
 extension RuntimeUpstreamForwardingPort {
-    package func forwardServerRequestResponse(
+    func forwardServerRequestResponse(
         responseData _: Data,
         sessionID _: String,
         responseID _: JSONRPC.ID,
@@ -304,7 +303,7 @@ extension RuntimeUpstreamForwardingPort {
         )
     }
 
-    package func enqueueOnUpstreamSlot<Output: Sendable>(
+    func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
@@ -327,9 +326,9 @@ extension RuntimeDebugSnapshotPort {
     }
 }
 
-package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
+final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     static let redactedDebugText = "<redacted>"
-    package static let documentationProviderDiscoveryPollInterval: Duration = .seconds(2)
+    static let documentationProviderDiscoveryPollInterval: Duration = .seconds(2)
 
     struct TestSnapshot: Sendable {
         struct Upstream: Sendable {
@@ -349,52 +348,52 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let upstreams: [Upstream]
     }
 
-    package let sessionRegistry: SessionRegistry
-    package let initializeManager: InitializeManager
-    package let upstreamEventTasks = AsyncTaskSupervisor()
-    package let runtimeTasks = AsyncTaskSupervisor()
-    package let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
-    package let primaryInitializeReadinessTokenBox =
+    let sessionRegistry: SessionRegistry
+    let initializeManager: InitializeManager
+    let upstreamEventTasks = AsyncTaskSupervisor()
+    let runtimeTasks = AsyncTaskSupervisor()
+    let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
+    let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
-    package let documentationPrewarmTaskBox =
+    let documentationPrewarmTaskBox =
         NIOLockedValueBox<Task<DocumentationProvider.ToolListUpdate, Never>?>(nil)
-    package let toolCatalogSummaryLoggedBox = NIOLockedValueBox(false)
-    package let debugRecorder: ProxyDebugRecorder
-    package let leaseManager: LeaseManager
-    package let eventLoop: EventLoop
-    package let upstreamRouter: UpstreamRouter
-    package let config: ProxyConfig
-    package let logger: Logger = ProxyLogging.make("session")
-    package let upstreams: [any UpstreamSlotControlling]
-    package let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
-    package let canonicalBrokerState: CanonicalBrokerState
-    package let controlPlaneDebugMirror = ControlPlane.DebugMirror()
-    package let processToolCatalogRegistry = ProcessToolCatalogRegistry()
+    let toolCatalogSummaryLoggedBox = NIOLockedValueBox(false)
+    let debugRecorder: ProxyDebugRecorder
+    let leaseManager: LeaseManager
+    let eventLoop: EventLoop
+    let upstreamRouter: UpstreamRouter
+    let config: ProxyConfig
+    let logger: Logger = ProxyLogging.make("session")
+    let upstreams: [any UpstreamSlotControlling]
+    let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
+    let canonicalBrokerState: CanonicalBrokerState
+    let controlPlaneDebugMirror = ControlPlane.DebugMirror()
+    let processToolCatalogRegistry = ProcessToolCatalogRegistry()
 
-    package let upstreamHealthManager: UpstreamHealthManager
-    package let upstreamSlotScheduler: UpstreamSlotScheduler
-    package let upstreamReadinessGate: UpstreamReadinessGate
-    package let upstreamReadinessCoordinator: UpstreamReadinessCoordinator
-    package let clock: ClockClient
-    package let nowUptimeNanoseconds: @Sendable () -> UInt64
-    package let scheduleRuntimeTimeout:
+    let upstreamHealthManager: UpstreamHealthManager
+    let upstreamSlotScheduler: UpstreamSlotScheduler
+    let upstreamReadinessGate: UpstreamReadinessGate
+    let upstreamReadinessCoordinator: UpstreamReadinessCoordinator
+    let clock: ClockClient
+    let nowUptimeNanoseconds: @Sendable () -> UInt64
+    let scheduleRuntimeTimeout:
         @Sendable (TimeAmount, @escaping @Sendable () -> Void) ->
             RuntimeScheduledTimeout
-    package let controlPlaneCoordinator: ControlPlaneCoordinator
-    package let documentationProviderManager: (any DocumentationProviderManaging)?
-    package let xcodeProcessRoutes: [XcodeProcessRoute]
-    package let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
-    package let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
-    package let unavailableXcodeProcessRoutes =
+    let controlPlaneCoordinator: ControlPlaneCoordinator
+    let documentationProviderManager: (any DocumentationProviderManaging)?
+    let xcodeProcessRoutes: [XcodeProcessRoute]
+    let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
+    let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
+    let unavailableXcodeProcessRoutes =
         NIOLockedValueBox<[pid_t: UInt64]>([:])
-    package let prewarmDocumentationProviderOnStartup: Bool
-    package let testHooks: RuntimeCoordinatorTestHooks
+    let prewarmDocumentationProviderOnStartup: Bool
+    let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
 
     /// Composition-root entry point: the Xcode-specific readiness gate and
     /// target discovery default to this module's live session-owned
     /// implementations.
-    package convenience init(
+    convenience init(
         config: ProxyConfig,
         eventLoop: EventLoop,
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
@@ -456,7 +455,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    package static func makeDefaultDocumentationProviderManager(
+    static func makeDefaultDocumentationProviderManager(
         config: ProxyConfig,
         discovery: any XcodeTargetDiscovering,
         transport: any DocumentationProviderRouting
@@ -476,7 +475,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    package static func documentationProviderServiceIsConfigured(
+    static func documentationProviderServiceIsConfigured(
         config: ProxyConfig
     ) -> Bool {
         config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
@@ -485,7 +484,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
     }
 
-    package init(
+    init(
         config: ProxyConfig,
         eventLoop: EventLoop,
         upstreams: [any UpstreamSlotControlling],
@@ -651,7 +650,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func start() {
+    func start() {
         let shouldStart = lifecycleStartedBox.withLockedValue { started in
             guard started == false else { return false }
             started = true
@@ -665,30 +664,30 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     @discardableResult
-    package func addRuntimeTask(
+    func addRuntimeTask(
         _ operation: @escaping @Sendable () async -> Void
     ) -> Bool {
         runtimeTasks.run(operation)
     }
 
-    package func session(id: String) -> SessionContext {
+    func session(id: String) -> SessionContext {
         sessionRegistry.session(id: id)
     }
 
-    package func hasSession(id: String) -> Bool {
+    func hasSession(id: String) -> Bool {
         sessionRegistry.hasSession(id: id)
     }
 
-    package func negotiatedProtocolVersion(id: String) -> String? {
+    func negotiatedProtocolVersion(id: String) -> String? {
         sessionRegistry.negotiatedProtocolVersion(id: id)
     }
 
-    package func removeSession(id: String) {
+    func removeSession(id: String) {
         let context = sessionRegistry.removeSession(id: id)
         context?.notificationHub.closeAll()
     }
 
-    package func debugReset() {
+    func debugReset() {
         let initializeReset = initializeManager.resetForDebug()
         initializeReset.timeout?.cancel()
         for pending in initializeReset.pending {
@@ -726,7 +725,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         processToolCatalogRegistry.reset()
     }
 
-    package func shutdown() async {
+    func shutdown() async {
         let shutdownState = initializeManager.beginShutdown()
         let pendingInitializes = shutdownState.pending
         for pending in pendingInitializes {
@@ -778,20 +777,20 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         await runtimeDrain.wait()
     }
 
-    package func isInitialized() -> Bool {
+    func isInitialized() -> Bool {
         initializeManager.isInitialized()
     }
 
-    package func cachedToolsListResult() -> JSONValue? {
+    func cachedToolsListResult() -> JSONValue? {
         canonicalBrokerState.toolsCatalogRaw()
     }
 
-    package func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
+    func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
         processToolCatalogRegistry.toolsListResult(forUpstreamIndex: upstreamIndex)
             ?? canonicalBrokerState.toolsCatalogRaw()
     }
 
-    package func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int) {
+    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int) {
         guard isValidToolsListResult(result) else { return }
         canonicalBrokerState.syncCanonicalToolsCatalog(
             result,
@@ -799,7 +798,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    package func resyncProcessToolsCatalogSurfaceAfterRemoving(
+    func resyncProcessToolsCatalogSurfaceAfterRemoving(
         upstreamIndex removedUpstreamIndex: Int,
         processID removedProcessID: pid_t? = nil
     ) {
@@ -829,7 +828,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {
+    func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {
         let configuredProcessIDs = catalogEligibleConfiguredProcessIDs()
         guard configuredProcessIDs.isEmpty == false else {
             return false
@@ -837,7 +836,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return processToolCatalogRegistry.processIDsWithCatalog() == configuredProcessIDs
     }
 
-    package func refreshToolsListIfNeeded() {
+    func refreshToolsListIfNeeded() {
         guard config.prewarmToolsList, isInitialized() else { return }
         let deadline = timeoutDeadline(
             for: MCP.MethodDispatcher.timeoutForControlPlane(
@@ -860,7 +859,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func prewarmDocumentationProvider() {
+    func prewarmDocumentationProvider() {
         guard let documentationProviderManager else { return }
         let timeoutSeconds =
             config.requestTimeout > 0
@@ -908,7 +907,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func chooseUpstreamIndex() -> Int? {
+    func chooseUpstreamIndex() -> Int? {
         let nowUptimeNs = nowUptimeNanoseconds()
         let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
 
@@ -953,7 +952,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func enqueueOnUpstreamSlot<Output: Sendable>(
+    func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
@@ -969,7 +968,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    package func enqueueOnUpstreamSlot<Output: Sendable>(
+    func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
@@ -1017,7 +1016,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    package func registerInitialize(
+    func registerInitialize(
         sessionID: String,
         originalID: JSONRPC.ID,
         requestObject: [String: Any],
@@ -1095,7 +1094,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return promise.futureResult
     }
 
-    package func registerInitialize(
+    func registerInitialize(
         originalID: JSONRPC.ID,
         requestObject: [String: Any],
         on eventLoop: EventLoop
@@ -1108,11 +1107,11 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    package func markNotificationClientConnected(sessionID: String) {
+    func markNotificationClientConnected(sessionID: String) {
         sessionRegistry.markNotificationClientConnected(id: sessionID)
     }
 
-    package func sharedToolsList(
+    func sharedToolsList(
         sessionID: String,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
@@ -1152,7 +1151,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return finalResult
     }
 
-    package func liveXcodeListWindowsResult(
+    func liveXcodeListWindowsResult(
         route: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue {
@@ -1182,7 +1181,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func callDocumentationSearch(
+    func callDocumentationSearch(
         requestData: Data,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> DocumentationSearchOutcome {
@@ -1215,7 +1214,7 @@ package final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    package func hasDocumentationSearchService() -> Bool {
+    func hasDocumentationSearchService() -> Bool {
         documentationProviderManager != nil
     }
 

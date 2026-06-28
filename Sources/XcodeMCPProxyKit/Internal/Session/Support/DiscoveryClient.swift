@@ -1,16 +1,15 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct DiscoveryClient: DependencyClient {
-    package var defaultFileURL: @Sendable () -> URL
-    package var read: @Sendable (_ overrideURL: URL?) -> DiscoveryRecord?
-    package var write: @Sendable (_ record: DiscoveryRecord, _ overrideURL: URL?) throws -> Void
-    package var makeRecord: @Sendable (_ host: String, _ port: Int, _ pid: Int, _ scheme: String) ->
+struct DiscoveryClient: DependencyClient {
+    var defaultFileURL: @Sendable () -> URL
+    var read: @Sendable (_ overrideURL: URL?) -> DiscoveryRecord?
+    var write: @Sendable (_ record: DiscoveryRecord, _ overrideURL: URL?) throws -> Void
+    var makeRecord: @Sendable (_ host: String, _ port: Int, _ pid: Int, _ scheme: String) ->
         DiscoveryRecord?
 
-    package init(
+    init(
         defaultFileURL: @escaping @Sendable () -> URL,
         read: @escaping @Sendable (_ overrideURL: URL?) -> DiscoveryRecord?,
         write: @escaping @Sendable (_ record: DiscoveryRecord, _ overrideURL: URL?) throws -> Void,
@@ -23,9 +22,9 @@ package struct DiscoveryClient: DependencyClient {
         self.makeRecord = makeRecord
     }
 
-    package static let liveValue = live()
+    static let liveValue = live()
 
-    package static let testValue = Self(
+    static let testValue = Self(
         defaultFileURL: {
             URL(fileURLWithPath: "/tmp/XcodeMCPProxy/endpoint.json")
         },
@@ -43,7 +42,7 @@ package struct DiscoveryClient: DependencyClient {
         }
     )
 
-    package static func live(
+    static func live(
         defaultFileURL: @escaping @Sendable () -> URL = {
             ProxyFilesystemLocations.discoveryFileURL()
         },

@@ -5,10 +5,8 @@ import NIOHTTP1
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import XcodeMCPProxyTestSupport
-@testable import XcodeMCPProxyKit
-@testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
 struct HTTPConcurrencyTests {

@@ -1,30 +1,29 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct ProxyConfig: Sendable {
-    package enum Transport: String, CaseIterable, Sendable {
+struct ProxyConfig: Sendable {
+    enum Transport: String, CaseIterable, Sendable {
         case http
         case stdio
     }
 
-    package enum StdioUpstreamSource: String, Sendable {
+    enum StdioUpstreamSource: String, Sendable {
         case explicit
         case environment
         case discovery
         case fallback
     }
 
-    package enum RefreshCodeIssuesMode: String, Sendable {
+    enum RefreshCodeIssuesMode: String, Sendable {
         case proxy
         case upstream
     }
 
-    package enum ValidationError: Error, CustomStringConvertible {
+    enum ValidationError: Error, CustomStringConvertible {
         case unsupportedProtocolVersion(String)
 
-        package var description: String {
+        var description: String {
             switch self {
             case .unsupportedProtocolVersion(let protocolVersion):
                 return "upstream_handshake.protocolVersion must be \(MCPProtocolVersion.current); \(protocolVersion) is not supported"
@@ -32,28 +31,28 @@ package struct ProxyConfig: Sendable {
         }
     }
 
-    package enum File {}
+    enum File {}
 
-    package var listenHost: String
-    package var listenPort: Int
-    package var upstreamCommand: String
-    package var upstreamArgs: [String]
-    package var upstreamProcessCount: Int
-    package var upstreamSessionID: String?
-    package var maxBodyBytes: Int
-    package var requestTimeout: TimeInterval
-    package var configPath: String?
-    package var transport: ProxyConfig.Transport
-    package var stdioUpstreamURL: URL?
-    package var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
-    package var discoveryFileURL: URL?
-    package var prewarmToolsList: Bool
-    package var autoApproveXcodeDialog: Bool
-    package var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
-    package var disabledToolNames: Set<String>
-    package var initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
+    var listenHost: String
+    var listenPort: Int
+    var upstreamCommand: String
+    var upstreamArgs: [String]
+    var upstreamProcessCount: Int
+    var upstreamSessionID: String?
+    var maxBodyBytes: Int
+    var requestTimeout: TimeInterval
+    var configPath: String?
+    var transport: ProxyConfig.Transport
+    var stdioUpstreamURL: URL?
+    var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
+    var discoveryFileURL: URL?
+    var prewarmToolsList: Bool
+    var autoApproveXcodeDialog: Bool
+    var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
+    var disabledToolNames: Set<String>
+    var initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
 
-    package init(
+    init(
         listenHost: String,
         listenPort: Int,
         upstreamCommand: String,
@@ -97,7 +96,7 @@ package struct ProxyConfig: Sendable {
     /// Reads the TOML file config (disabled tools, initialize-params
     /// override) from `configPath` and stores the decoded values. This is
     /// the only place the file is read; consumers use the stored values.
-    package mutating func loadFileConfig() {
+    mutating func loadFileConfig() {
         loadFileConfig(preserveDisabledToolNames: false)
     }
 
@@ -115,7 +114,7 @@ package struct ProxyConfig: Sendable {
         )
     }
 
-    package func validateModernProtocolConfiguration() throws {
+    func validateModernProtocolConfiguration() throws {
         guard let protocolVersion = initializeParamsOverride?.protocolVersion else {
             return
         }

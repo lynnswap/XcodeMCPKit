@@ -3,11 +3,10 @@ import NIO
 import NIOHTTP1
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import Testing
 import XcodeMCPProxyTestSupport
 
-@testable import XcodeMCPProxyKit
 
 @Suite(.serialized, .enabled(if: StressTestEnvironment.isEnabled))
 struct DocumentationSearchStressTests {

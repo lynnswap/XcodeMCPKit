@@ -3,11 +3,10 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import Testing
 import XcodeMCPProxyTestSupport
 
-@testable import XcodeMCPProxyKit
 
 struct XcodeMCPProxyServerTests {
     @Test func endpointURLBracketsIPv6LiteralHosts() {

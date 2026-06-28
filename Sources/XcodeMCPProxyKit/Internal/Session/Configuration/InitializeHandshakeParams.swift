@@ -4,31 +4,31 @@ import Foundation
 /// initialize params the proxy presents to mcpbridge. JSON shaping lives with
 /// the session runtime, while protocol-version validation remains in
 /// XcodeMCPCore.
-package enum InitializeHandshakeParams {
-    package static func hasExplicitClientVersionOverride(
+enum InitializeHandshakeParams {
+    static func hasExplicitClientVersionOverride(
         initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     ) -> Bool {
         initializeParamsOverride?.clientVersion != nil
     }
 
-    package static func defaultClientVersion(for clientName: String) -> String {
+    static func defaultClientVersion(for clientName: String) -> String {
         xcodeChatClientVersion(for: clientName) ?? defaultProxyClientVersion()
     }
 
-    package static func defaultProxyClientName() -> String {
+    static func defaultProxyClientName() -> String {
         "XcodeMCPKit"
     }
 
-    package static func defaultProxyClientVersion() -> String {
+    static func defaultProxyClientVersion() -> String {
         "dev"
     }
 
-    package static func xcodeChatClientVersion(for clientName: String) -> String? {
+    static func xcodeChatClientVersion(for clientName: String) -> String? {
         let defaults = UserDefaults(suiteName: "com.apple.dt.Xcode")?.dictionaryRepresentation() ?? [:]
         return xcodeChatClientVersion(for: clientName, defaults: defaults)
     }
 
-    package static func xcodeChatClientVersion(for clientName: String, defaults: [String: Any]) -> String? {
+    static func xcodeChatClientVersion(for clientName: String, defaults: [String: Any]) -> String? {
         let normalizedName = normalizedChatClientName(clientName)
         guard !normalizedName.isEmpty else { return nil }
 
@@ -71,14 +71,14 @@ package enum InitializeHandshakeParams {
         return orderedAliasMatches.first?.version
     }
 
-    package static func xcodeChatVersionValue(forDefaultsKey defaultsKey: String) -> String? {
+    static func xcodeChatVersionValue(forDefaultsKey defaultsKey: String) -> String? {
         guard let raw = UserDefaults(suiteName: "com.apple.dt.Xcode")?.string(forKey: defaultsKey) else {
             return nil
         }
         return xcodeChatVersionValue(from: raw)
     }
 
-    package static func xcodeChatVersionValue(from raw: String) -> String? {
+    static func xcodeChatVersionValue(from raw: String) -> String? {
         guard
             let data = raw.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
@@ -90,7 +90,7 @@ package enum InitializeHandshakeParams {
         return version
     }
 
-    package static func chatClientAliases(forVersionStem stem: String) -> Set<String> {
+    static func chatClientAliases(forVersionStem stem: String) -> Set<String> {
         var aliases: Set<String> = []
         let normalizedStem = normalizedChatClientName(stem)
         if !normalizedStem.isEmpty {
@@ -108,7 +108,7 @@ package enum InitializeHandshakeParams {
         return aliases
     }
 
-    package static func normalizedChatClientName(_ name: String) -> String {
+    static func normalizedChatClientName(_ name: String) -> String {
         let scalars = name.unicodeScalars.filter(CharacterSet.alphanumerics.contains)
         return String(String.UnicodeScalarView(scalars)).lowercased()
     }

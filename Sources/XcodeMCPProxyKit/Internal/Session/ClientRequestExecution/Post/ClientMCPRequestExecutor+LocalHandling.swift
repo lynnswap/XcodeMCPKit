@@ -5,10 +5,9 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ClientMCPRequestExecutor {
-    package func resolveLocalHandling(
+    func resolveLocalHandling(
         _ handling: LocalPostHandling,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
@@ -77,7 +76,7 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package static func localHandlingRequest(from parsedRequestJSON: Any?) -> (
+    static func localHandlingRequest(from parsedRequestJSON: Any?) -> (
         object: [String: Any], forceBatchArray: Bool
     )? {
         if let object = parsedRequestJSON as? [String: Any] {
@@ -92,7 +91,7 @@ extension ClientMCPRequestExecutor {
         return (object, true)
     }
 
-    package static func forceBatchArrayResponseDataIfNeeded(_ data: Data) -> Data {
+    static func forceBatchArrayResponseDataIfNeeded(_ data: Data) -> Data {
         guard let payload = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return data
         }
@@ -112,7 +111,7 @@ extension ClientMCPRequestExecutor {
         return JSONRPC.Message.Inspector.responseID(from: object) != nil
     }
 
-    package struct ToolCallRouting {
+    struct ToolCallRouting {
         /// The remainder to forward. When no local tool routes exist this
         /// also carries the blocked-tool responses as localResponseData.
         let forwardedRequest: FilteredToolCallRequest
@@ -125,7 +124,7 @@ extension ClientMCPRequestExecutor {
     /// everything else forwards. The body is parsed here, not handed in, so
     /// the derived groups form a disconnected region that can transfer into
     /// the local-execution task under strict concurrency.
-    package func routeToolCalls(
+    func routeToolCalls(
         bodyData: Data,
         sessionID: String,
         forceBatchArray: Bool,
@@ -521,7 +520,7 @@ extension ClientMCPRequestExecutor {
             && sessionManager.isInitialized()
     }
 
-    package func blockedToolName(from requestObject: [String: Any]) -> String? {
+    func blockedToolName(from requestObject: [String: Any]) -> String? {
         guard let method = requestObject["method"] as? String,
             method == "tools/call",
             let params = requestObject["params"] as? [String: Any],
@@ -533,14 +532,14 @@ extension ClientMCPRequestExecutor {
         return toolName
     }
 
-    package func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssues.Request? {
+    func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssues.Request? {
         guard let object = RefreshCodeIssues.Request.singleRequestObject(from: requestJSON) else {
             return nil
         }
         return RefreshCodeIssues.Request(requestObject: object)
     }
 
-    package func refreshRequestRouting(from requestJSON: Any) -> ClientMCPRequestExecutor.RefreshRouting? {
+    func refreshRequestRouting(from requestJSON: Any) -> ClientMCPRequestExecutor.RefreshRouting? {
         if let object = requestJSON as? [String: Any],
             let refreshRequest = RefreshCodeIssues.Request(requestObject: object),
             Self.extractResponseIDs(from: object).isEmpty == false,

@@ -3,25 +3,24 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum RefreshCodeIssues {}
+enum RefreshCodeIssues {}
 
 extension RefreshCodeIssues {
-    package struct Request: Sendable {
-        package static let toolName = "XcodeRefreshCodeIssuesInFile"
-        package static let globalQueueKey = "__global__"
+    struct Request: Sendable {
+        static let toolName = "XcodeRefreshCodeIssuesInFile"
+        static let globalQueueKey = "__global__"
 
-        package let tabIdentifier: String?
-        package let filePath: String?
+        let tabIdentifier: String?
+        let filePath: String?
 
-        package init(tabIdentifier: String?, filePath: String?) {
+        init(tabIdentifier: String?, filePath: String?) {
             self.tabIdentifier = tabIdentifier
             self.filePath = filePath
         }
 
         /// The one place that recognizes this feature's tools/call shape.
-        package init?(requestObject object: [String: Any]) {
+        init?(requestObject object: [String: Any]) {
             guard
                 object["method"] as? String == "tools/call",
                 let params = object["params"] as? [String: Any],
@@ -37,7 +36,7 @@ extension RefreshCodeIssues {
         }
 
         /// Unwraps a single request object, accepting a batch of exactly one.
-        package static func singleRequestObject(from requestJSON: Any) -> [String: Any]? {
+        static func singleRequestObject(from requestJSON: Any) -> [String: Any]? {
             if let object = requestJSON as? [String: Any] {
                 return object
             }
@@ -50,7 +49,7 @@ extension RefreshCodeIssues {
             return object
         }
 
-        package var queueKey: String {
+        var queueKey: String {
             guard let tabIdentifier, tabIdentifier.isEmpty == false else {
                 return Self.globalQueueKey
             }
@@ -60,8 +59,8 @@ extension RefreshCodeIssues {
 }
 
 extension RefreshCodeIssues {
-    package struct Workflow {
-        package enum ForwardAttemptResult: Sendable {
+    struct Workflow {
+        enum ForwardAttemptResult: Sendable {
             case success(Data)
             case timeout(responseIDs: [JSONRPC.ID], isBatch: Bool)
             case upstreamUnavailable(responseIDs: [JSONRPC.ID], isBatch: Bool)
@@ -70,22 +69,22 @@ extension RefreshCodeIssues {
             case invalidUpstreamResponse
         }
 
-        package enum InternalToolResult {
+        enum InternalToolResult {
             case success([String: Any])
             case timeout
             case cancelled
             case unavailable
         }
 
-        package typealias WindowsProvider =
+        typealias WindowsProvider =
             @Sendable (
                 _ sessionID: String,
                 _ eventLoop: EventLoop,
                 _ upstreamIndexOverride: Int?,
                 _ requestTimeoutOverride: TimeAmount?
             ) async throws -> [XcodeWindowInfo]?
-        package typealias InternalUpstreamChooser = @Sendable (_ sessionID: String) async -> Int?
-        package typealias InternalToolCaller =
+        typealias InternalUpstreamChooser = @Sendable (_ sessionID: String) async -> Int?
+        typealias InternalToolCaller =
             @Sendable (
                 _ name: String,
                 _ arguments: [String: Any],
@@ -94,7 +93,7 @@ extension RefreshCodeIssues {
                 _ upstreamIndexOverride: Int?,
                 _ requestTimeoutOverride: TimeAmount?
             ) async -> RefreshCodeIssues.Workflow.InternalToolResult
-        package typealias Forwarder =
+        typealias Forwarder =
             @Sendable (
                 _ bodyData: Data,
                 _ sessionID: String,
@@ -105,13 +104,13 @@ extension RefreshCodeIssues {
                 _ requestTimeoutOverride: TimeAmount?
             ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult
 
-        package static let retryDelaysNanos: [UInt64] = [
+        static let retryDelaysNanos: [UInt64] = [
             200_000_000,
             500_000_000,
         ]
-        package static let minimumUpstreamFallbackBudgetSeconds: TimeInterval = 0.05
+        static let minimumUpstreamFallbackBudgetSeconds: TimeInterval = 0.05
 
-        package struct ExecutionBudget: Sendable {
+        struct ExecutionBudget: Sendable {
             let deadlineUptimeNs: UInt64?
             let nowUptimeNanoseconds: @Sendable () -> UInt64
 
@@ -206,17 +205,17 @@ extension RefreshCodeIssues {
             }
         }
 
-        package let mode: ProxyConfig.RefreshCodeIssuesMode
-        package let requestTimeout: TimeInterval
-        package let coordinator: RefreshCodeIssues.Coordinator
-        package let targetResolver: RefreshCodeIssues.TargetResolver
-        package let debugState: RefreshCodeIssues.DebugState
-        package let windowLookupTimeoutSeconds: TimeInterval
-        package let navigatorIssuesTimeoutSeconds: TimeInterval
-        package let clock: ClockClient
-        package let logger: Logger
+        let mode: ProxyConfig.RefreshCodeIssuesMode
+        let requestTimeout: TimeInterval
+        let coordinator: RefreshCodeIssues.Coordinator
+        let targetResolver: RefreshCodeIssues.TargetResolver
+        let debugState: RefreshCodeIssues.DebugState
+        let windowLookupTimeoutSeconds: TimeInterval
+        let navigatorIssuesTimeoutSeconds: TimeInterval
+        let clock: ClockClient
+        let logger: Logger
 
-        package init(
+        init(
             mode: ProxyConfig.RefreshCodeIssuesMode,
             requestTimeout: TimeInterval,
             coordinator: RefreshCodeIssues.Coordinator,
@@ -238,7 +237,7 @@ extension RefreshCodeIssues {
             self.logger = logger
         }
 
-        package func run(
+        func run(
             refreshRequest: RefreshCodeIssues.Request,
             bodyData: Data,
             sessionID: String,
