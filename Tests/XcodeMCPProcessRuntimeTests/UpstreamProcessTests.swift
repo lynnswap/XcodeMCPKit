@@ -23,7 +23,7 @@ struct UpstreamProcessTests {
         let splitIndex = first.utf8.index(first.utf8.startIndex, offsetBy: 4096)
         fakeDriver.emitStdout(Data(first.utf8[..<splitIndex]))
 
-        let buffered = await events.nextEvent {
+        let buffered = try await events.nextEvent {
             if case .stdoutBufferSize(let size) = $0 {
                 return size > 0
             }
@@ -62,11 +62,11 @@ struct UpstreamProcessTests {
         }
 
         fakeDriver.emitStderr(Data("warning one\nfatal".utf8))
-        let first = await events.nextStderr()
+        let first = try await events.nextStderr()
         #expect(first == "warning one")
 
         fakeDriver.emitStderr(Data(String(repeating: "x", count: 20_000).utf8))
-        let large = await events.nextStderr(startingAt: 1)
+        let large = try await events.nextStderr(startingAt: 1)
         #expect(large.contains("[truncated]"))
 
         fakeDriver.emitTermination(status: 0)
@@ -152,14 +152,14 @@ struct UpstreamProcessTests {
         }
 
         fakeDriver.emitStdout(Data(try makeJSONRPCResponse(id: 20, text: "parent").utf8))
-        _ = await events.nextMessage()
+        _ = try await events.nextMessage()
         fakeDriver.emitTermination(status: 0)
         try await drainClock.sleep(untilSuspendedBy: 1)
 
         #expect(!events.snapshot().contains(where: isExitEvent))
         drainClock.advance(by: .seconds(10))
 
-        let exit = await events.nextEvent(matching: isExitEvent)
+        let exit = try await events.nextEvent(matching: isExitEvent)
         #expect(isExitEvent(exit))
         let allEvents = await events.finishedEvents()
         #expect(allEvents.last.map(isExitEvent) == true)
@@ -178,7 +178,7 @@ struct UpstreamProcessTests {
         }
 
         fakeDriver.emitStdout(Data("Content-Length: nope\r\n\r\n{}".utf8))
-        let violation = await events.nextEvent {
+        let violation = try await events.nextEvent {
             if case .stdoutProtocolViolation = $0 {
                 return true
             }
@@ -474,12 +474,14 @@ private final class UpstreamEventRecorder: @unchecked Sendable {
         }
     }
 
-    func nextEvent(matching predicate: @escaping @Sendable (Upstream.Event) -> Bool) async -> Upstream.Event {
-        await recorder.nextValue(matching: predicate)
+    func nextEvent(
+        matching predicate: @escaping @Sendable (Upstream.Event) -> Bool
+    ) async throws -> Upstream.Event {
+        try await recorder.nextValue(matching: predicate)
     }
 
-    func nextMessage(startingAt startIndex: Int = 0) async -> String {
-        let event = await recorder.nextValue(startingAt: startIndex) {
+    func nextMessage(startingAt startIndex: Int = 0) async throws -> String {
+        let event = try await recorder.nextValue(startingAt: startIndex) {
             if case .message = $0 {
                 return true
             }
@@ -491,8 +493,8 @@ private final class UpstreamEventRecorder: @unchecked Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    func nextStderr(startingAt startIndex: Int = 0) async -> String {
-        let event = await recorder.nextValue(startingAt: startIndex) {
+    func nextStderr(startingAt startIndex: Int = 0) async throws -> String {
+        let event = try await recorder.nextValue(startingAt: startIndex) {
             if case .stderr = $0 {
                 return true
             }

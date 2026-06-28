@@ -1,17 +1,18 @@
 import Foundation
+import XcodeMCPCoreTestSupport
 
 final class DeterministicRecorder<Value: Sendable>: @unchecked Sendable {
     private struct IndexedWaiter {
         let id: UUID
         let index: Int
-        let continuation: CheckedContinuation<Value, Never>
+        let continuation: CheckedContinuation<Value, Error>
     }
 
     private struct MatchingWaiter {
         let id: UUID
         let startingAt: Int
         let predicate: @Sendable (Value) -> Bool
-        let continuation: CheckedContinuation<Value, Never>
+        let continuation: CheckedContinuation<Value, Error>
     }
 
     private let lock = NSLock()
@@ -20,93 +21,163 @@ final class DeterministicRecorder<Value: Sendable>: @unchecked Sendable {
     private var matchingWaiters: [MatchingWaiter] = []
 
     func record(_ value: Value) {
-        let resumes = lock.withLock { () -> (indexed: [CheckedContinuation<Value, Never>], matching: [CheckedContinuation<Value, Never>]) in
+        let resumes = lock.withLock { () -> (
+            indexed: [(CheckedContinuation<Value, Error>, Value)],
+            matching: [(CheckedContinuation<Value, Error>, Value)]
+        ) in
             let index = values.count
             values.append(value)
 
-            var indexedResumes: [CheckedContinuation<Value, Never>] = []
+            var indexedResumes: [(CheckedContinuation<Value, Error>, Value)] = []
             indexedWaiters.removeAll { waiter in
                 guard waiter.index <= index else {
                     return false
                 }
-                indexedResumes.append(waiter.continuation)
+                indexedResumes.append((waiter.continuation, values[waiter.index]))
                 return true
             }
 
-            var matchingResumes: [CheckedContinuation<Value, Never>] = []
+            var matchingResumes: [(CheckedContinuation<Value, Error>, Value)] = []
             matchingWaiters.removeAll { waiter in
                 guard index >= waiter.startingAt, waiter.predicate(value) else {
                     return false
                 }
-                matchingResumes.append(waiter.continuation)
+                matchingResumes.append((waiter.continuation, value))
                 return true
             }
 
             return (indexedResumes, matchingResumes)
         }
 
-        for continuation in resumes.indexed {
+        for (continuation, value) in resumes.indexed {
             continuation.resume(returning: value)
         }
-        for continuation in resumes.matching {
+        for (continuation, value) in resumes.matching {
             continuation.resume(returning: value)
         }
     }
 
-    func nextValue(at index: Int) async -> Value {
+    func nextValue(
+        at index: Int,
+        timeout: Duration = .seconds(2)
+    ) async throws -> Value {
+        try await waitWithTimeout(
+            "timed out waiting for recorded value at index \(index)",
+            timeout: timeout
+        ) {
+            try await self.waitForValue(at: index)
+        }
+    }
+
+    private func waitForValue(at index: Int) async throws -> Value {
         if let existing = value(at: index) {
             return existing
         }
 
         let waiterID = UUID()
-        return await withCheckedContinuation { continuation in
-            let existing = lock.withLock { () -> Value? in
-                if values.indices.contains(index) {
-                    return values[index]
-                }
-                indexedWaiters.append(
-                    IndexedWaiter(
-                        id: waiterID,
-                        index: index,
-                        continuation: continuation
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                var shouldCancel = false
+                let existing = lock.withLock { () -> Value? in
+                    if values.indices.contains(index) {
+                        return values[index]
+                    }
+                    guard Task.isCancelled == false else {
+                        shouldCancel = true
+                        return nil
+                    }
+                    indexedWaiters.append(
+                        IndexedWaiter(
+                            id: waiterID,
+                            index: index,
+                            continuation: continuation
+                        )
                     )
-                )
-                return nil
+                    return nil
+                }
+                if let existing {
+                    continuation.resume(returning: existing)
+                } else if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                }
             }
-            if let existing {
-                continuation.resume(returning: existing)
-            }
+        } onCancel: {
+            self.cancelIndexedWaiter(id: waiterID)
         }
     }
 
     func nextValue(
         startingAt startIndex: Int = 0,
+        timeout: Duration = .seconds(2),
+        matching predicate: @escaping @Sendable (Value) -> Bool = { _ in true }
+    ) async throws -> Value {
+        try await waitWithTimeout(
+            "timed out waiting for matching recorded value",
+            timeout: timeout
+        ) {
+            try await self.waitForValue(startingAt: startIndex, matching: predicate)
+        }
+    }
+
+    private func waitForValue(
+        startingAt startIndex: Int,
         matching predicate: @escaping @Sendable (Value) -> Bool
-    ) async -> Value {
+    ) async throws -> Value {
         if let existing = firstValue(startingAt: startIndex, matching: predicate) {
             return existing
         }
 
         let waiterID = UUID()
-        return await withCheckedContinuation { continuation in
-            let existing = lock.withLock { () -> Value? in
-                if let existing = firstValueLocked(startingAt: startIndex, matching: predicate) {
-                    return existing
-                }
-                matchingWaiters.append(
-                    MatchingWaiter(
-                        id: waiterID,
-                        startingAt: startIndex,
-                        predicate: predicate,
-                        continuation: continuation
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                var shouldCancel = false
+                let existing = lock.withLock { () -> Value? in
+                    if let existing = firstValueLocked(startingAt: startIndex, matching: predicate) {
+                        return existing
+                    }
+                    guard Task.isCancelled == false else {
+                        shouldCancel = true
+                        return nil
+                    }
+                    matchingWaiters.append(
+                        MatchingWaiter(
+                            id: waiterID,
+                            startingAt: startIndex,
+                            predicate: predicate,
+                            continuation: continuation
+                        )
                     )
-                )
+                    return nil
+                }
+                if let existing {
+                    continuation.resume(returning: existing)
+                } else if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            self.cancelMatchingWaiter(id: waiterID)
+        }
+    }
+
+    private func cancelIndexedWaiter(id: UUID) {
+        let waiter = lock.withLock { () -> IndexedWaiter? in
+            guard let index = indexedWaiters.firstIndex(where: { $0.id == id }) else {
                 return nil
             }
-            if let existing {
-                continuation.resume(returning: existing)
-            }
+            return indexedWaiters.remove(at: index)
         }
+        waiter?.continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelMatchingWaiter(id: UUID) {
+        let waiter = lock.withLock { () -> MatchingWaiter? in
+            guard let index = matchingWaiters.firstIndex(where: { $0.id == id }) else {
+                return nil
+            }
+            return matchingWaiters.remove(at: index)
+        }
+        waiter?.continuation.resume(throwing: CancellationError())
     }
 
     func snapshot() -> [Value] {

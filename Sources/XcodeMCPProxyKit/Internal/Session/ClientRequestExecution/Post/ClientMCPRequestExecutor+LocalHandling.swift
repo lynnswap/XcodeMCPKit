@@ -152,7 +152,6 @@ extension ClientMCPRequestExecutor {
             )
         }
 
-        let allowLocalToolRoutes = !usesSynchronousLocalResolution
         var didBlockItem = false
         var blockedResponseObjects: [[String: Any]] = []
         var toolsListRequests: [[String: Any]] = []
@@ -174,10 +173,10 @@ extension ClientMCPRequestExecutor {
                         toolName: toolName
                     )
                 )
-            } else if allowLocalToolRoutes, isToolsListRequest(object) {
+            } else if isToolsListRequest(object) {
                 toolsListRequests.append(object)
                 routedObjects.append(object)
-            } else if allowLocalToolRoutes, isDocumentationSearchRequest(object) {
+            } else if isDocumentationSearchRequest(object) {
                 documentationRequests.append(object)
                 routedObjects.append(object)
             } else {
@@ -253,7 +252,7 @@ extension ClientMCPRequestExecutor {
         let promise = eventLoop.makePromise(of: LocalToolBatchResult.self)
         let task = Task { [self] in
             guard !Task.isCancelled else {
-                eventLoop.execute {
+                eventLoopCompletionExecutor.execute(on: eventLoop) {
                     promise.fail(CancellationError())
                 }
                 return
@@ -267,7 +266,7 @@ extension ClientMCPRequestExecutor {
                 deadline: deadline
             )
             let wasCancelled = Task.isCancelled
-            eventLoop.execute {
+            eventLoopCompletionExecutor.execute(on: eventLoop) {
                 if wasCancelled {
                     promise.fail(CancellationError())
                     return
