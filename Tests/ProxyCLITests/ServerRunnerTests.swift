@@ -3,8 +3,8 @@ import Testing
 @testable import XcodeMCPProxyKit
 
 @Suite
-struct ServerCommandTests {
-    @Test func proxyKitLaunchPlanNormalizesServerArguments() throws {
+struct ServerRunnerTests {
+    @Test func serverLaunchPlanNormalizesServerArguments() throws {
         let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
             arguments: [
                 "xcode-mcp-proxy-server",
@@ -33,7 +33,7 @@ struct ServerCommandTests {
         )
     }
 
-    @Test func proxyKitLaunchPlanNormalizesEnvironmentDefaults() throws {
+    @Test func serverLaunchPlanNormalizesEnvironmentDefaults() throws {
         let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
             arguments: ["xcode-mcp-proxy-server"],
             environment: [
@@ -56,7 +56,7 @@ struct ServerCommandTests {
         )
     }
 
-    @Test func proxyKitLaunchPlanLetsExplicitConfigOverrideEnvironment() throws {
+    @Test func serverLaunchPlanLetsExplicitConfigOverrideEnvironment() throws {
         let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
             arguments: [
                 "xcode-mcp-proxy-server",
@@ -76,7 +76,7 @@ struct ServerCommandTests {
         )
     }
 
-    @Test func proxyKitLaunchPlanIgnoresRemovedXcodePIDEnvironment() throws {
+    @Test func serverLaunchPlanIgnoresRemovedXcodePIDEnvironment() throws {
         let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
             arguments: ["xcode-mcp-proxy-server"],
             environment: [
@@ -92,164 +92,97 @@ struct ServerCommandTests {
         #expect(config.bind.port == 9999)
     }
 
-    @Test func serverCommandPrintsVersionBeforeValidation() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            forceRestartExistingServer: { _, _, _ in
-                Issue.record("forceRestartExistingServer should not be called for --version")
-                return false
-            },
-            makeServer: { _ in
-                Issue.record("makeServer should not be called for --version")
-                return RecordingProxyServer()
-            }
+    @Test func serverRunnerPrintsVersionBeforeValidation() async throws {
+        let result = await runServer(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--version",
+                "--url", "http://localhost:8765/mcp",
+            ]
         )
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--version", "--url", "http://localhost:8765/mcp"],
-            environment: [:]
-        )
-
-        #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(XcodeMCPProxyServer.productMetadata.version)"])
+        #expect(result.exitCode == 0)
+        #expect(result.stdout == ["xcode-mcp-proxy-server \(XcodeMCPProxyServer.productMetadata.version)"])
+        #expect(result.stderr.isEmpty)
     }
 
-    @Test func serverCommandPrintsVersionWhenFlagAppearsAsConfigValue() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            forceRestartExistingServer: { _, _, _ in
-                Issue.record("forceRestartExistingServer should not be called for --version")
-                return false
-            },
-            makeServer: { _ in
-                Issue.record("makeServer should not be called for --version")
-                return RecordingProxyServer()
-            }
-        )
+    @Test func serverRunnerPrintsVersionWhenFlagAppearsAsConfigValue() async throws {
+        let result = await runServer(arguments: ["xcode-mcp-proxy-server", "--config", "--version"])
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--config", "--version"],
-            environment: [:]
-        )
-
-        #expect(exitCode == 0)
-        #expect(output.snapshot() == ["xcode-mcp-proxy-server \(XcodeMCPProxyServer.productMetadata.version)"])
+        #expect(result.exitCode == 0)
+        #expect(result.stdout == ["xcode-mcp-proxy-server \(XcodeMCPProxyServer.productMetadata.version)"])
+        #expect(result.stderr.isEmpty)
     }
 
-    @Test func serverCommandHelpWinsOverVersion() async throws {
-        let output = CapturedLines()
-        let errors = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { errors.append($0) },
-            makeServer: { _ in
-                Issue.record("makeServer should not be called for --help")
-                return RecordingProxyServer()
-            }
-        )
+    @Test func serverRunnerHelpWinsOverVersion() async throws {
+        let result = await runServer(arguments: ["xcode-mcp-proxy-server", "--version", "--help", "--url"])
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--version", "--help", "--url"],
-            environment: [:]
-        )
-
-        #expect(exitCode == 0)
-        #expect(errors.snapshot().isEmpty)
-        let line = try #require(output.snapshot().first)
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
         #expect(line.contains("Usage:"))
     }
 
-    @Test func serverCommandHelpWinsOverVersionWhenRefreshModeValueIsMissing() async throws {
-        let output = CapturedLines()
-        let errors = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { errors.append($0) },
-            makeServer: { _ in
-                Issue.record("makeServer should not be called for --help")
-                return RecordingProxyServer()
-            }
-        )
-
-        let exitCode = await command.run(
-            args: [
+    @Test func serverRunnerHelpWinsOverVersionWhenRefreshModeValueIsMissing() async throws {
+        let result = await runServer(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--version",
                 "--refresh-code-issues-mode",
                 "--help",
-            ],
-            environment: [:]
+            ]
         )
 
-        #expect(exitCode == 0)
-        #expect(errors.snapshot().isEmpty)
-        let line = try #require(output.snapshot().first)
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
         #expect(line.contains("Usage:"))
     }
 
-    @Test func serverCommandRejectsRemovedLazyInitEnvironment() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { output.append($0) }
-        )
-
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--dry-run"],
+    @Test func serverRunnerRejectsRemovedLazyInitEnvironment() async throws {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: ["LAZY_INIT": "true"]
         )
 
-        #expect(exitCode == 1)
-        #expect(output.snapshot() == [
+        #expect(result.exitCode == 1)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr == [
             "error: \(XcodeMCPProxyServer.removedLazyInitializationMessage)",
             "run with --help for usage",
         ])
     }
 
-    @Test func serverCommandRejectsRemovedLazyInitFlagBeforeDryRun() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { output.append($0) }
+    @Test func serverRunnerRejectsRemovedLazyInitFlagBeforeDryRun() async throws {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--lazy-init", "--dry-run"]
         )
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--lazy-init", "--dry-run"],
-            environment: [:]
-        )
-
-        #expect(exitCode == 1)
-        #expect(output.snapshot() == [
+        #expect(result.exitCode == 1)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr == [
             "error: \(XcodeMCPProxyServer.removedLazyInitializationMessage)",
             "run with --help for usage",
         ])
     }
 
-    @Test func serverCommandRejectsRemovedXcodePIDFlagBeforeDryRun() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { output.append($0) }
+    @Test func serverRunnerRejectsRemovedXcodePIDFlagBeforeDryRun() async throws {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--xcode-pid", "1234", "--dry-run"]
         )
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--xcode-pid", "1234", "--dry-run"],
-            environment: [:]
-        )
-
-        #expect(exitCode == 1)
-        #expect(output.snapshot() == [
+        #expect(result.exitCode == 1)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr == [
             "error: \(XcodeMCPProxyServer.removedXcodePIDMessage)",
             "run with --help for usage",
         ])
     }
 
-    @Test func serverCommandInvokesForceRestartBeforeStartingInjectedServer() async throws {
+    @Test func serverLauncherInvokesForceRestartBeforeStartingInjectedServer() async throws {
         let restarted = CapturedLines()
         let fakeServer = RecordingProxyServer()
-        let command = makeServerCommand(
+        let launcher = makeServerLauncher(
             forceRestartExistingServer: { host, port, _ in
                 restarted.append("\(host):\(port)")
                 return true
@@ -260,13 +193,15 @@ struct ServerCommandTests {
             }
         )
 
-        let exitCode = await command.run(
-            args: [
+        let exitCode = await launcher.run(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--listen", "127.0.0.1:9000",
                 "--force-restart",
             ],
-            environment: [:]
+            environment: [:],
+            stdout: { _ in },
+            stderr: { _ in }
         )
 
         #expect(exitCode == 0)
@@ -278,12 +213,11 @@ struct ServerCommandTests {
         #expect(fakeServer.waitCount() == 1)
     }
 
-    @Test func serverCommandEmitsLauncherForceRestartWarnings() async throws {
+    @Test func serverLauncherEmitsForceRestartWarnings() async throws {
         let restarted = CapturedLines()
         let warnings = CapturedLines()
         let fakeServer = RecordingProxyServer()
-        let command = makeServerCommand(
-            stderr: { warnings.append($0) },
+        let launcher = makeServerLauncher(
             forceRestartExistingServer: { host, port, emitWarning in
                 restarted.append("\(host):\(port)")
                 emitWarning("fake restart warning")
@@ -295,13 +229,15 @@ struct ServerCommandTests {
             }
         )
 
-        let exitCode = await command.run(
-            args: [
+        let exitCode = await launcher.run(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--listen", "127.0.0.1:9001",
                 "--force-restart",
             ],
-            environment: [:]
+            environment: [:],
+            stdout: { _ in },
+            stderr: { warnings.append($0) }
         )
 
         #expect(exitCode == 0)
@@ -310,21 +246,22 @@ struct ServerCommandTests {
         #expect(fakeServer.startCount() == 1)
     }
 
-    @Test func serverCommandReportsPortInUseThroughProxyKitDiagnostic() async throws {
+    @Test func serverLauncherReportsPortInUseThroughProxyKitDiagnostic() async throws {
         let errors = CapturedLines()
-        let command = makeServerCommand(
-            stderr: { errors.append($0) },
+        let launcher = makeServerLauncher(
             makeServer: { _ in FailingProxyServer(error: AddressAlreadyInUseError()) },
             isAddressAlreadyInUse: { _ in true },
             detectExistingServerProcessIDs: { _, _ in [321] }
         )
 
-        let exitCode = await command.run(
-            args: [
+        let exitCode = await launcher.run(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--listen", "127.0.0.1:9002",
             ],
-            environment: [:]
+            environment: [:],
+            stdout: { _ in },
+            stderr: { errors.append($0) }
         )
 
         #expect(exitCode == 1)
@@ -335,15 +272,9 @@ struct ServerCommandTests {
         #expect(diagnostic.contains("--force-restart"))
     }
 
-    @Test func serverCommandDryRunPrintsResolvedCommandFromLaunchPlan() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { output.append($0) }
-        )
-
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--dry-run"],
+    @Test func serverRunnerDryRunPrintsResolvedCommandFromLaunchPlan() async throws {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: [
                 "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
                 "HOST": "127.0.0.1",
@@ -351,81 +282,73 @@ struct ServerCommandTests {
             ]
         )
 
-        #expect(exitCode == 0)
-        let line = try #require(output.snapshot().first)
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
         #expect(line.contains("--listen 127.0.0.1:9999"))
         #expect(line.contains("--config /tmp/proxy-config.toml"))
         #expect(line.contains("--auto-approve") == false)
         #expect(line.contains("--lazy-init") == false)
     }
 
-    @Test func serverCommandDryRunPrintsAutoApproveWhenExplicitlyEnabled() async throws {
-        let output = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { output.append($0) }
+    @Test func serverRunnerDryRunPrintsAutoApproveWhenExplicitlyEnabled() async throws {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--auto-approve", "--dry-run"]
         )
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--auto-approve", "--dry-run"],
-            environment: [:]
-        )
-
-        #expect(exitCode == 0)
-        let line = try #require(output.snapshot().first)
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
         #expect(line.contains("--auto-approve"))
     }
 
-    @Test func serverCommandTreatsHelpOnlyAsTopLevelFlag() async throws {
-        let output = CapturedLines()
-        let errors = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { errors.append($0) }
-        )
-
-        let exitCode = await command.run(
-            args: [
+    @Test func serverRunnerTreatsHelpOnlyAsTopLevelFlag() async throws {
+        let result = await runServer(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--upstream-arg", "--help",
                 "--dry-run",
-            ],
-            environment: [:]
+            ]
         )
 
-        #expect(exitCode == 0)
-        #expect(errors.snapshot().isEmpty)
-        let line = try #require(output.snapshot().first)
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
         #expect(line.contains("--upstream-arg --help"))
         #expect(line.contains("Usage:") == false)
     }
 
-    @Test func serverCommandPreservesExplicitHelpBeforeLaterParseErrors() async throws {
-        let output = CapturedLines()
-        let errors = CapturedLines()
-        let command = makeServerCommand(
-            stdout: { output.append($0) },
-            stderr: { errors.append($0) }
-        )
-
-        let exitCode = await command.run(
-            args: [
+    @Test func serverRunnerPreservesExplicitHelpBeforeLaterParseErrors() async throws {
+        let result = await runServer(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--help",
                 "--url",
-            ],
-            environment: [:]
+            ]
         )
 
-        #expect(exitCode == 0)
-        #expect(errors.snapshot().isEmpty)
-        #expect(output.snapshot().first?.contains("Usage:") == true)
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.stdout.first?.contains("Usage:") == true)
     }
 }
 
-private func makeServerCommand(
-    stdout: @escaping (String) -> Void = { _ in },
-    stderr: @escaping (String) -> Void = { _ in },
+private func runServer(
+    arguments: [String],
+    environment: [String: String] = [:]
+) async -> (exitCode: Int32, stdout: [String], stderr: [String]) {
+    let output = CapturedLines()
+    let errors = CapturedLines()
+    let exitCode = await XcodeMCPProxyServer.run(
+        arguments: arguments,
+        environment: environment,
+        stdout: { output.append($0) },
+        stderr: { errors.append($0) }
+    )
+    return (exitCode, output.snapshot(), errors.snapshot())
+}
+
+private func makeServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
@@ -434,21 +357,13 @@ private func makeServerCommand(
     },
     isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool = { _ in false },
     detectExistingServerProcessIDs: @escaping (_ host: String, _ port: Int) -> [Int] = { _, _ in [] }
-) -> XcodeMCPProxyServerCommand {
-    let launcher = XcodeMCPProxyServer.Launcher(
+) -> XcodeMCPProxyServer.Launcher {
+    XcodeMCPProxyServer.Launcher(
         dependencies: .init(
             makeServer: makeServer,
             isAddressAlreadyInUse: isAddressAlreadyInUse,
             forceRestartExistingServer: forceRestartExistingServer,
             detectExistingServerProcessIDs: detectExistingServerProcessIDs
-        )
-    )
-    return XcodeMCPProxyServerCommand(
-        dependencies: .init(
-            bootstrapLogging: { _ in },
-            stdout: stdout,
-            stderr: stderr,
-            launcher: launcher
         )
     )
 }

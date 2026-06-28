@@ -6,7 +6,7 @@ import Testing
 @Suite
 struct CLIUsageContractTests {
     @Test func adapterUsageRemainsStable() {
-        let usage = XcodeMCPProxyCLICommand.usage(
+        let usage = XcodeMCPProxyStdioAdapter.adapterUsage(
             discoveryFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-contract/endpoint.json")
         )
 
@@ -37,7 +37,7 @@ struct CLIUsageContractTests {
 
     @Test func serverUsageRemainsStable() {
         #expect(
-            XcodeMCPProxyServerCommand.serverUsage() == """
+            XcodeMCPProxyServer.serverUsage == """
             Usage:
               xcode-mcp-proxy-server [options]
 

@@ -9,26 +9,26 @@ import Testing
 import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)
-struct CLICommandIntegrationTests {
-    @Test func cliCommandRoundTripsJSONOverModernStubHTTPServer() async throws {
-        try await runCLICommandRoundTrip(responseMode: .json)
+struct StdioAdapterFacadeIntegrationTests {
+    @Test func stdioAdapterFacadeRoundTripsJSONOverModernStubHTTPServer() async throws {
+        try await runStdioAdapterFacadeRoundTrip(responseMode: .json)
     }
 
-    @Test func cliCommandAcceptsSingleSSEPostResponsesFromModernStubHTTPServer() async throws {
-        try await runCLICommandRoundTrip(responseMode: .sse)
+    @Test func stdioAdapterFacadeAcceptsSingleSSEPostResponsesFromModernStubHTTPServer() async throws {
+        try await runStdioAdapterFacadeRoundTrip(responseMode: .sse)
     }
 
-    @Test func cliCommandEmitsEverySSEPostEventFromModernStubHTTPServer() async throws {
+    @Test func stdioAdapterFacadeEmitsEverySSEPostEventFromModernStubHTTPServer() async throws {
         let progressNotification: [String: Any] = [
             "jsonrpc": "2.0",
             "method": "notifications/progress",
             "params": ["value": 1],
         ]
-        let result = try await CLICommandHarness.run(
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .sse,
             postSSEPreludeEventsByMethod: ["tools/list": [progressNotification]],
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should emit all SSE POST events"
+            timeoutDescription: "STDIO adapter should emit all SSE POST events"
         )
 
         #expect(result.exitCode == 0)
@@ -48,12 +48,12 @@ struct CLICommandIntegrationTests {
         #expect(notificationIndex < toolsListIndex)
     }
 
-    @Test func cliCommandCompletesInitializeFromOpenPostSSE() async throws {
-        let result = try await CLICommandHarness.run(
+    @Test func stdioAdapterFacadeCompletesInitializeFromOpenPostSSE() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .sse,
             openPostSSEMethods: ["initialize"],
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should not block after streamed initialize response"
+            timeoutDescription: "STDIO adapter should not block after streamed initialize response"
         )
 
         #expect(result.exitCode == 0)
@@ -63,18 +63,18 @@ struct CLICommandIntegrationTests {
         #expect(result.requests.contains { $0.bodyMethod == "tools/list" })
     }
 
-    @Test func cliCommandStartsSSEAfterInitializeResponseIsWritten() async throws {
+    @Test func stdioAdapterFacadeStartsSSEAfterInitializeResponseIsWritten() async throws {
         let startupNotification: [String: Any] = [
             "jsonrpc": "2.0",
             "method": "notifications/startup",
             "params": ["value": 1],
         ]
-        let result = try await CLICommandHarness.run(
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             gatedResponseMethods: ["tools/list"],
             getSSEEvents: [startupNotification],
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should finish after stdin closes",
+            timeoutDescription: "STDIO adapter should finish after stdin closes",
             whileRunning: { server in
                 _ = try await waitWithTimeout(
                     "waiting for SSE GET before releasing tools/list"
@@ -97,13 +97,13 @@ struct CLICommandIntegrationTests {
         }
     }
 
-    @Test func cliCommandDoesNotSerializeRequestsAfterInitialize() async throws {
+    @Test func stdioAdapterFacadeDoesNotSerializeRequestsAfterInitialize() async throws {
         let slowCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
-        let result = try await CLICommandHarness.run(
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             gatedResponseMethods: ["tools/call"],
             stdinLines: [initializeRequest, slowCall, concurrentToolsListRequest],
-            timeoutDescription: "CLI command should finish after gated concurrent request completes",
+            timeoutDescription: "STDIO adapter should finish after gated concurrent request completes",
             whileRunning: { server in
                 let responseGate = try #require(server.responseGate)
                 try await responseGate.waitUntilPending(for: "tools/call")
@@ -122,14 +122,14 @@ struct CLICommandIntegrationTests {
         #expect(fastResponseIndex < slowResponseIndex)
     }
 
-    @Test func cliCommandBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {
+    @Test func stdioAdapterFacadeBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {
         let shutdownClocks = makeStdioAdapterShutdownClocks()
-        let result = try await CLICommandHarness.run(
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             hangsDELETE: true,
             stdinLines: [initializeRequest],
             proxyArguments: ["--request-timeout", "0"],
-            timeoutDescription: "CLI command should not hang waiting for best-effort DELETE",
+            timeoutDescription: "STDIO adapter should not hang waiting for best-effort DELETE",
             adapterShutdownPolicy: shutdownClocks.policy,
             closeInputBeforeRunning: false,
             whileRunning: { server in
@@ -154,12 +154,12 @@ struct CLICommandIntegrationTests {
         #expect(result.requests.contains { $0.httpMethod == "DELETE" })
     }
 
-    @Test func cliCommandTreatsAcceptedJSONRPCResponseAsAcknowledged() async throws {
+    @Test func stdioAdapterFacadeTreatsAcceptedJSONRPCResponseAsAcknowledged() async throws {
         let response = #"{"jsonrpc":"2.0","id":99,"result":{"ok":true}}"#
-        let result = try await CLICommandHarness.run(
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             stdinLines: [initializeRequest, response],
-            timeoutDescription: "CLI command should treat accepted JSON-RPC response as acknowledged"
+            timeoutDescription: "STDIO adapter should treat accepted JSON-RPC response as acknowledged"
         )
 
         #expect(result.exitCode == 0)
@@ -176,8 +176,8 @@ struct CLICommandIntegrationTests {
         #expect(responsePost.protocolVersion == MCP.ProtocolVersion.current)
     }
 
-    @Test func cliCommandForwardsJSONRPCErrorBodyFromHTTPErrorStatus() async throws {
-        let result = try await CLICommandHarness.run(
+    @Test func stdioAdapterFacadeForwardsJSONRPCErrorBodyFromHTTPErrorStatus() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             httpErrorResponsesByMethod: [
                 "tools/list": StubMCPHTTPErrorResponse(
@@ -193,7 +193,7 @@ struct CLICommandIntegrationTests {
                 )
             ],
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should forward JSON-RPC HTTP error bodies"
+            timeoutDescription: "STDIO adapter should forward JSON-RPC HTTP error bodies"
         )
 
         #expect(result.exitCode == 0)
@@ -204,8 +204,8 @@ struct CLICommandIntegrationTests {
         #expect(errorObject["message"] as? String == "tool denied")
     }
 
-    @Test func cliCommandReportsHTTPStatusForNonJSONErrorBody() async throws {
-        let result = try await CLICommandHarness.run(
+    @Test func stdioAdapterFacadeReportsHTTPStatusForNonJSONErrorBody() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             httpErrorResponsesByMethod: [
                 "tools/list": StubMCPHTTPErrorResponse(
@@ -215,7 +215,7 @@ struct CLICommandIntegrationTests {
                 )
             ],
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should report HTTP status for non-JSON errors"
+            timeoutDescription: "STDIO adapter should report HTTP status for non-JSON errors"
         )
 
         #expect(result.exitCode == 0)
@@ -226,15 +226,15 @@ struct CLICommandIntegrationTests {
         #expect(errorObject["message"] as? String == "upstream HTTP 500")
     }
 
-    @Test func cliCommandSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
+    @Test func stdioAdapterFacadeSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
         let shutdownClocks = makeStdioAdapterShutdownClocks()
         let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
-        let result = try await CLICommandHarness.run(
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             hangingResponseMethod: "tools/call",
             stdinLines: [initializeRequest, longRunningCall],
             proxyArguments: ["--request-timeout", "0"],
-            timeoutDescription: "CLI command should delete the session after timed-out drain",
+            timeoutDescription: "STDIO adapter should delete the session after timed-out drain",
             timeout: .seconds(6),
             adapterShutdownPolicy: shutdownClocks.policy,
             whileRunning: { server in
@@ -259,12 +259,12 @@ struct CLICommandIntegrationTests {
         #expect(delete.protocolVersion == MCP.ProtocolVersion.current)
     }
 
-    @Test func cliCommandDeletesUninitializedSessionAfterInitializeWithoutProtocol() async throws {
-        let result = try await CLICommandHarness.run(
+    @Test func stdioAdapterFacadeDeletesUninitializedSessionAfterInitializeWithoutProtocol() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             initializeProtocolVersion: nil,
             stdinLines: [initializeRequest],
-            timeoutDescription: "CLI command should delete uninitialized session after EOF"
+            timeoutDescription: "STDIO adapter should delete uninitialized session after EOF"
         )
 
         #expect(result.exitCode == 0)
@@ -278,11 +278,11 @@ struct CLICommandIntegrationTests {
         #expect(delete.protocolVersion == nil)
     }
 
-    private func runCLICommandRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
-        let result = try await CLICommandHarness.run(
+    private func runStdioAdapterFacadeRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
             responseMode: responseMode,
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "CLI command should finish after stdin closes"
+            timeoutDescription: "STDIO adapter should finish after stdin closes"
         )
 
         #expect(result.exitCode == 0)
@@ -357,7 +357,7 @@ private func advanceStdioAdapterShutdownClocks(
     clocks.timeoutClock.advance(by: duration)
 }
 
-private struct CLICommandRunResult {
+private struct StdioAdapterFacadeRunResult {
     let exitCode: Int32
     let stderr: [String]
     let outputObjects: [[String: Any]]
@@ -382,7 +382,7 @@ private struct CLICommandRunResult {
     }
 }
 
-private struct CLICommandHarness {
+private struct StdioAdapterFacadeHarness {
     static func run(
         responseMode: StubMCPHTTPResponseMode,
         gatedResponseMethods: Set<String> = [],
@@ -402,7 +402,7 @@ private struct CLICommandHarness {
         closeInputBeforeRunning: Bool = true,
         whileRunning: ((StubMCPHTTPServer) async throws -> Void)? = nil,
         afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)? = nil
-    ) async throws -> CLICommandRunResult {
+    ) async throws -> StdioAdapterFacadeRunResult {
         let server = try StubMCPHTTPServer.start(
             responseMode: responseMode,
             gatedResponseMethods: gatedResponseMethods,
@@ -447,32 +447,26 @@ private struct CLICommandHarness {
         closeInputBeforeRunning: Bool,
         whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
         afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
-    ) async throws -> CLICommandRunResult {
-        let errors = CapturedLines()
+    ) async throws -> StdioAdapterFacadeRunResult {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
-        let command = XcodeMCPProxyCLICommand(
-            dependencies: .init(
-                bootstrapLogging: { _ in },
-                stdout: { _ in },
-                makeLogSink: {
-                    XcodeMCPProxyCLICommand.LogSink(
-                        error: { errors.append($0) },
-                        info: { _, _ in }
-                    )
-                },
-                makeAdapter: { endpoint, requestTimeout, input, output in
-                    XcodeMCPProxyStdioAdapter(
-                        endpoint: endpoint,
-                        requestTimeout: requestTimeout,
-                        input: input,
-                        output: output,
-                        shutdownPolicy: adapterShutdownPolicy
-                    )
-                },
-                input: inputPipe.fileHandleForReading,
-                output: outputPipe.fileHandleForWriting
-            )
+        let serverURL = server.url
+        let plan = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
+            arguments: [
+                "xcode-mcp-proxy",
+                "--url",
+                serverURL.absoluteString,
+            ] + proxyArguments,
+            environment: environment
+        )
+        #expect(plan.action == .start)
+        let endpoint = try #require(plan.endpoint)
+        let adapter = XcodeMCPProxyStdioAdapter(
+            endpoint: endpoint,
+            requestTimeout: plan.options.requestTimeout,
+            input: inputPipe.fileHandleForReading,
+            output: outputPipe.fileHandleForWriting,
+            shutdownPolicy: adapterShutdownPolicy
         )
 
         inputPipe.fileHandleForWriting.write(stdinData(for: stdinLines))
@@ -486,16 +480,10 @@ private struct CLICommandHarness {
             closeInput()
         }
 
-        let serverURL = server.url
-        let commandTask = Task {
-            await command.run(
-                args: [
-                    "xcode-mcp-proxy",
-                    "--url",
-                    serverURL.absoluteString,
-                ] + proxyArguments,
-                environment: environment
-            )
+        let adapterTask = Task {
+            await adapter.start()
+            await adapter.wait()
+            return Int32(0)
         }
 
         do {
@@ -508,19 +496,20 @@ private struct CLICommandHarness {
                 timeoutDescription,
                 timeout: timeout
             ) {
-                await commandTask.value
+                await adapterTask.value
             }
             outputPipe.fileHandleForWriting.closeFile()
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            return try CLICommandRunResult(
+            return try StdioAdapterFacadeRunResult(
                 exitCode: exitCode,
-                stderr: errors.snapshot(),
+                stderr: [],
                 outputData: outputData,
                 requests: server.recorder.snapshot()
             )
         } catch {
             closeInput()
-            commandTask.cancel()
+            adapterTask.cancel()
+            await adapter.stop()
             outputPipe.fileHandleForWriting.closeFile()
             throw error
         }
@@ -1172,5 +1161,3 @@ private func stubIsJSONRPCResponse(_ object: [String: Any]) -> Bool {
     }
     return object["result"] != nil || object["error"] != nil
 }
-
-extension XcodeMCPProxyCLICommand: @unchecked Sendable {}
