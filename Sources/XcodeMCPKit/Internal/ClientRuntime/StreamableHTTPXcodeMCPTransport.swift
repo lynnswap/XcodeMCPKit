@@ -2,6 +2,43 @@ import XcodeMCPCore
 import XcodeMCPProcessRuntime
 import Foundation
 
+package struct StreamableHTTPDiscoveryResolver: Sendable {
+    private let readRecord: @Sendable (_ discoveryFile: URL) -> DiscoveryRecord?
+    private let isProcessAlive: @Sendable (_ processID: Int) -> Bool
+
+    package static let liveValue = Self(processControl: .liveValue)
+
+    package init(
+        processControl: ProcessControlClient,
+        readRecord: @escaping @Sendable (_ discoveryFile: URL) -> DiscoveryRecord? = {
+            Discovery.read(overrideURL: $0)
+        }
+    ) {
+        self.readRecord = readRecord
+        self.isProcessAlive = { processControl.isProcessAlive($0) }
+    }
+
+    package init(
+        readRecord: @escaping @Sendable (_ discoveryFile: URL) -> DiscoveryRecord? = {
+            Discovery.read(overrideURL: $0)
+        },
+        isProcessAlive: @escaping @Sendable (_ processID: Int) -> Bool
+    ) {
+        self.readRecord = readRecord
+        self.isProcessAlive = isProcessAlive
+    }
+
+    package func endpoint(from discoveryFile: URL) -> URL? {
+        guard let record = readRecord(discoveryFile),
+              isProcessAlive(record.pid),
+              let endpoint = URL(string: record.url)
+        else {
+            return nil
+        }
+        return endpoint
+    }
+}
+
 package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @unchecked Sendable {
     package nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
 
@@ -23,11 +60,10 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
 
     package static func start(
         discoveryFile: URL,
-        requestTimeout: Duration?
+        requestTimeout: Duration?,
+        discoveryResolver: StreamableHTTPDiscoveryResolver = .liveValue
     ) async throws -> StreamableHTTPXcodeMCPTransport {
-        guard let record = Discovery.read(overrideURL: discoveryFile),
-              let endpoint = URL(string: record.url)
-        else {
+        guard let endpoint = discoveryResolver.endpoint(from: discoveryFile) else {
             throw MCPBridgeRuntimeError.invalidRequest(
                 "Streamable HTTP discovery file is missing, stale, or invalid: \(discoveryFile.path)"
             )

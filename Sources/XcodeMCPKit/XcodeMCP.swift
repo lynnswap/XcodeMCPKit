@@ -227,6 +227,16 @@ public actor XcodeMCP {
     ///
     /// - Parameter config: Connection and initialization settings.
     public init(config: Configuration = Configuration()) async throws {
+        try await self.init(
+            config: config,
+            streamableHTTPDiscoveryResolver: .liveValue
+        )
+    }
+
+    package init(
+        config: Configuration = Configuration(),
+        streamableHTTPDiscoveryResolver: StreamableHTTPDiscoveryResolver
+    ) async throws {
         do {
             let transport: any XcodeMCPTransport
             switch config.transport {
@@ -245,7 +255,8 @@ public actor XcodeMCP {
             case .streamableHTTPDiscoveryFile(let discoveryFile):
                 transport = try await StreamableHTTPXcodeMCPTransport.start(
                     discoveryFile: discoveryFile,
-                    requestTimeout: config.requestTimeout
+                    requestTimeout: config.requestTimeout,
+                    discoveryResolver: streamableHTTPDiscoveryResolver
                 )
             }
             try await self.init(config: config, transport: transport)

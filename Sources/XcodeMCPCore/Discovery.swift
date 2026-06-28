@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Network
 
@@ -61,7 +60,6 @@ package enum Discovery {
     package static func read(overrideURL: URL? = nil) -> DiscoveryRecord? {
         let url = fileURL(overrideURL)
         guard let record = try? loadRecord(from: url) else { return nil }
-        guard isProcessAlive(record.pid) else { return nil }
         guard isLoopbackURL(record.url) else { return nil }
         return record
     }
@@ -105,15 +103,6 @@ package enum Discovery {
     package static func persist(record: DiscoveryRecord, to url: URL) throws {
         let data = try encoder.encode(record)
         try data.write(to: url, options: [.atomic])
-    }
-
-    package static func isProcessAlive(_ pid: Int) -> Bool {
-        guard pid > 0 else { return false }
-        let result = kill(pid_t(pid), 0)
-        if result == 0 {
-            return true
-        }
-        return errno == EPERM
     }
 
     private static let encoder: JSONEncoder = {
