@@ -26,10 +26,11 @@ endpoint and automated approval flow.
 The public products above are backed by internal production targets split by
 owner boundary. `XcodeMCPKit` owns the SDK's high-level API, initialized
 single-client session, and client transports. `XcodeMCPCore` owns JSON/MCP wire
-contracts and low-level support. `XcodeMCPProcessRuntime` owns local process IO
-and process discovery helpers. `XcodeMCPProxyKit` owns the embeddable proxy
-facades plus its internal HTTP, session routing, multi-upstream broker, health,
-readiness, and route scheduling primitives.
+contracts and low-level support. `XcodeMCPProcessRuntime` owns local process IO,
+stdio upstream processes, process enumeration, process runner support, and
+`xcrun` argument handling. `XcodeMCPProxyKit` owns the embeddable proxy facades
+plus its internal HTTP, session routing, Xcode process target discovery,
+multi-upstream broker, health, readiness, and route scheduling primitives.
 
 ## Install
 

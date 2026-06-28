@@ -3,7 +3,6 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
-import XcodeMCPProcessRuntime
 
 extension ControlPlane {
     enum Error: Swift.Error, Sendable {

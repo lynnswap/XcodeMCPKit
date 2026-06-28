@@ -1,5 +1,4 @@
 import XcodeMCPCore
-import XcodeMCPProcessRuntime
 import Foundation
 
 struct UpstreamSlotID: Sendable, Hashable, Comparable {

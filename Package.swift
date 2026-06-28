@@ -250,7 +250,6 @@ let package = Package(
             name: "ProxyStartupLoggingTests",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPProcessRuntime",
                 "XcodeMCPProxyKit",
             ],
             path: "Tests/ProxyStartupLoggingTests",
