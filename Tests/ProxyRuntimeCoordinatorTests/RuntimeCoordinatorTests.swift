@@ -2085,13 +2085,9 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let latestRequest = try await latestUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
-        let olderRequest = try await olderUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let olderRequest = try await sentValue(from: olderUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: olderRequest) == "tools/list")
         await latestUpstream.yield(
             .message(
@@ -2160,9 +2156,8 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        let fallbackRequest = try await fallbackUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let fallbackRequest = try await sentValue(from: fallbackUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: fallbackRequest) == "tools/list")
         #expect(await ownerUpstream.sentCount() == 0)
         await fallbackUpstream.yield(
             .message(
@@ -2199,9 +2194,8 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        let ownerRequest = try await ownerUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let ownerRequest = try await sentValue(from: ownerUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: ownerRequest) == "tools/list")
         await ownerUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2260,13 +2254,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let olderRequest = try await olderUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let olderRequest = try await sentValue(from: olderUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: olderRequest) == "tools/list")
-        let newerRequest = try await newerUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let newerRequest = try await sentValue(from: newerUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: newerRequest) == "tools/list")
         await newerUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2306,9 +2297,8 @@ struct RuntimeCoordinatorTests {
         }
         #expect(toolNames(in: secondResult) == ["NewerRouteOnly"])
 
-        let olderRefreshRequest = try await olderUpstream.nextSent(startingAt: 1) {
-            methodName(from: $0) == "tools/list"
-        }
+        let olderRefreshRequest = try await sentValue(from: olderUpstream, at: 1, timeout: .seconds(2))
+        #expect(methodName(from: olderRefreshRequest) == "tools/list")
         await olderUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2378,12 +2368,10 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let middleRequest = try await middleUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
-        let latestRequest = try await latestUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let middleRequest = try await sentValue(from: middleUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: middleRequest) == "tools/list")
+        let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: latestRequest) == "tools/list")
         await latestUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2470,9 +2458,8 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let latestRequest = try await latestUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: latestRequest) == "tools/list")
         await latestUpstream.yield(
             .message(
                 try JSONSerialization.data(
@@ -2541,9 +2528,8 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        _ = try await latestUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: latestRequest) == "tools/list")
 
         let result = try await waitWithTimeout("waiting for cached process catalog fallback") {
             try await task.value
@@ -2590,9 +2576,8 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let goodRequest = try await goodUpstream.nextSent {
-            methodName(from: $0) == "tools/list"
-        }
+        let goodRequest = try await sentValue(from: goodUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: goodRequest) == "tools/list")
         await goodUpstream.yield(
             .message(
                 try JSONSerialization.data(
