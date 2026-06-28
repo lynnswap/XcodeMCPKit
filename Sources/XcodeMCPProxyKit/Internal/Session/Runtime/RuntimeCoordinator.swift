@@ -148,7 +148,6 @@ package protocol RuntimeToolRoutingPort: Sendable {
 
 package protocol RuntimeUpstreamForwardingPort: Sendable {
     func session(id: String) -> SessionContext
-    func chooseUpstreamIndex() -> Int?
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
@@ -156,11 +155,6 @@ package protocol RuntimeUpstreamForwardingPort: Sendable {
         preferredUpstreamIndices: [Int]?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
     func forwardServerRequestResponse(
         responseData: Data,
         sessionID: String,
@@ -218,7 +212,8 @@ package protocol RuntimeMCPForwardingPort:
     RuntimeInitializeToolsPort,
     RuntimeToolRoutingPort,
     RuntimeUpstreamForwardingPort,
-    RuntimeRequestLeasePort {}
+    RuntimeRequestLeasePort,
+    ProxyUpstreamRequestRuntimePort {}
 
 package protocol RuntimeClientMCPRequestPort:
     RuntimeSessionRegistryPort,
@@ -285,10 +280,6 @@ extension RuntimeToolRoutingPort {
 }
 
 extension RuntimeUpstreamForwardingPort {
-    func sendUpstream(_ data: Data, upstreamIndex: Int) {
-        sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
-    }
-
     package func forwardServerRequestResponse(
         responseData _: Data,
         sessionID _: String,

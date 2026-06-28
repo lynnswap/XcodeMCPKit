@@ -142,7 +142,6 @@ extension ClientMCPRequestExecutor {
                             )
                         }
                     )
-                    cancellationHandle?.bindRouterPendingToken(started.routerPendingToken)
                 } catch {
                     return eventLoop.makeSucceededFuture(
                         MCPForwardingService.ResponseResolution.invalidUpstreamResponse
