@@ -92,6 +92,15 @@ let config = XcodeMCP.Configuration(
 )
 ```
 
+For the standard proxy discovery location, including
+`XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT` overrides, use:
+
+```swift
+let config = XcodeMCP.Configuration(
+    transport: .streamableHTTPProxyDiscovery()
+)
+```
+
 ## Dynamic Tools And Raw Values
 
 The Xcode MCP server decides which tools are available at runtime. Call
@@ -133,8 +142,8 @@ try await xcode.notify(
 
 `XcodeMCP.Configuration` controls transport selection and MCP initialization:
 
-- `transport` chooses `.localBridge(...)`, `.streamableHTTP(endpoint:)`, or
-  `.streamableHTTP(discoveryFile:)`.
+- `transport` chooses `.localBridge(...)`, `.streamableHTTP(endpoint:)`,
+  `.streamableHTTP(discoveryFile:)`, or `.streamableHTTPProxyDiscovery()`.
 - The compatibility `bridge` property still chooses the upstream bridge for
   local process transport. The default is Xcode's `/usr/bin/xcrun mcpbridge`.
 - Use bridge `.custom(command:arguments:environment:)` only when embedding a

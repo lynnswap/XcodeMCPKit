@@ -729,7 +729,8 @@ extension XcodeMCPProxyStdioAdapter {
         package func run(
             arguments: [String],
             environment: [String: String],
-            stdout: (String) -> Void
+            stdout: (String) -> Void,
+            stderr: ((String) -> Void)? = nil
         ) async -> Int32 {
             do {
                 let plan = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
@@ -745,10 +746,10 @@ extension XcodeMCPProxyStdioAdapter {
                     stdout(plan.versionLine)
                     return 0
                 case .start:
-                    return await startAdapter(from: plan, environment: environment)
+                    return await startAdapter(from: plan, environment: environment, stderr: stderr)
                 }
             } catch let error as XcodeMCPProxyStdioAdapter.LaunchResolutionError {
-                let logSink = dependencies.makeLogSink()
+                let logSink = makeLogSink(stderr: stderr)
                 switch error.presentation {
                 case .plain:
                     logSink.error(error.description)
@@ -761,21 +762,22 @@ extension XcodeMCPProxyStdioAdapter {
                 }
                 return 1
             } catch {
-                dependencies.makeLogSink().error("error: \(error)")
+                makeLogSink(stderr: stderr).error("error: \(error)")
                 return 1
             }
         }
 
         private func startAdapter(
             from plan: XcodeMCPProxyStdioAdapter.LaunchPlan,
-            environment: [String: String]
+            environment: [String: String],
+            stderr: ((String) -> Void)?
         ) async -> Int32 {
             guard let endpoint = plan.endpoint else {
-                dependencies.makeLogSink().error("adapter launch plan is missing endpoint")
+                makeLogSink(stderr: stderr).error("adapter launch plan is missing endpoint")
                 return 1
             }
 
-            let logSink = dependencies.makeLogSink()
+            let logSink = makeLogSink(stderr: stderr)
             logResolvedUpstream(endpoint: endpoint, environment: environment, logSink: logSink)
 
             let adapter = dependencies.makeAdapter(
@@ -823,6 +825,17 @@ extension XcodeMCPProxyStdioAdapter {
                     ["url": "\(url)"]
                 )
             }
+        }
+
+        private func makeLogSink(stderr: ((String) -> Void)?) -> XcodeMCPProxyStdioAdapter.LogSink {
+            let logSink = dependencies.makeLogSink()
+            guard let stderr else {
+                return logSink
+            }
+            return XcodeMCPProxyStdioAdapter.LogSink(
+                error: stderr,
+                info: logSink.info
+            )
         }
     }
 }

@@ -154,6 +154,17 @@ The package executable uses a package-level launcher facade to execute the same
 plan, keeping force-restart, start/wait, and port-in-use diagnostics inside this
 target.
 
+Executable-style hosts can delegate directly to the public runner facade:
+
+```swift
+let exitCode = await XcodeMCPProxyServer.run(
+    arguments: CommandLine.arguments,
+    environment: ProcessInfo.processInfo.environment,
+    stdout: { print($0) },
+    stderr: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+)
+```
+
 ## STDIO Adapter
 
 `XcodeMCPProxyStdioAdapter` forwards MCP STDIO messages to a running
@@ -191,6 +202,9 @@ without a session header, subsequent POST/GET/DELETE requests include the
 server-issued `MCP-Session-Id`, and the negotiated
 `MCP-Protocol-Version` is forwarded after initialize.
 
+Command-line hosts can run the same adapter facade with
+`XcodeMCPProxyStdioAdapter.run(arguments:environment:stdout:stderr:)`.
+
 ## Installer
 
 `XcodeMCPProxyInstaller` owns the source install composition used by
@@ -214,3 +228,6 @@ print(plan.dryRunLines.joined(separator: "\n"))
 `~/.local/bin`. A non-dry-run install builds release products when the installer
 is running from a SwiftPM `.build` directory and then copies
 `XcodeMCPProxyInstaller.binaryNames` into the resolved bin directory.
+
+Command-line hosts can run the installer facade with
+`XcodeMCPProxyInstaller.run(arguments:environment:stdout:stderr:)`.
