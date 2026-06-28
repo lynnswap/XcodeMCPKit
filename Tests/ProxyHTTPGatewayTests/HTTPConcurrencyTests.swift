@@ -384,8 +384,18 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpQueuedNotificationDoesNotOvertakeEarlierSessionRequest() async throws {
+        let notificationQueued = TestSignal()
         let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(upstream: upstream)
+        let server = try TestHTTPServer.start(
+            upstream: upstream,
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamRequestQueued: { _, descriptor, _ in
+                    if descriptor.label == "notifications/test-progress" {
+                        notificationQueued.signal()
+                    }
+                }
+            )
+        )
         let url = server.url
 
         do {
@@ -406,20 +416,26 @@ struct HTTPConcurrencyTests {
                 payload: toolListPayload(id: 400),
                 timeout: 10
             )
+            let firstUpstreamLabels = try await waitForUpstreamRequestCount(upstream, count: 1)
+            #expect(firstUpstreamLabels == ["tools/list"])
             async let notification = postStatusOnly(
                 url: url,
                 sessionID: sessionID,
                 payload: notificationPayload(method: "notifications/test-progress"),
                 timeout: 10
             )
-
-            _ = try await waitForUpstreamRequest(upstream, label: "tools/list")
+            try await notificationQueued.wait(
+                description: "waiting for notification to queue behind tools/list"
+            )
+            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
+            #expect(server.sessionManager.debugSnapshot().queuedRequestCount == 1)
             #expect(await upstream.respondNext(label: "tools/list"))
             let firstResult = try await first
             #expect(firstResult.0.statusCode == 200)
             #expect((firstResult.1["id"] as? NSNumber)?.intValue == 400)
             #expect(firstResult.1["error"] == nil)
-            _ = try await waitForUpstreamRequest(upstream, label: "notifications/test-progress")
+            let upstreamLabels = try await waitForUpstreamRequestCount(upstream, count: 2)
+            #expect(upstreamLabels == ["tools/list", "notifications/test-progress"])
             let notificationResponse = try await notification
             #expect(notificationResponse.statusCode == 202)
         } catch {
@@ -743,7 +759,8 @@ private struct TestHTTPServer {
 
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
-        requestTimeout: TimeInterval = 5
+        requestTimeout: TimeInterval = 5,
+        testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks()
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
@@ -763,7 +780,11 @@ private struct TestHTTPServer {
         }()
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
-            config: config, eventLoop: group.next(), upstreams: [upstream])
+            config: config,
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            testHooks: testHooks
+        )
         let refreshDebugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
