@@ -2,13 +2,35 @@
 
 [日本語](README.ja.md)
 
-XcodeMCPKit is a local proxy for Xcode MCP. It gives your MCP clients one stable
-endpoint and automates the `mcpbridge` approval flow.
+XcodeMCPKit is a Swift library and local proxy for Xcode MCP. Apps can use the
+Swift API to operate a local `mcpbridge` process directly or connect to a proxy
+Streamable HTTP endpoint, while MCP clients can use the proxy for one stable
+endpoint and automated approval flow.
 
 ## Requirements
 
 - macOS 15.4+
 - Swift 6.3+
+
+## Library Products
+
+- `XcodeMCPKit`: client-side SDK for talking to a local `mcpbridge` process or
+  a Streamable HTTP proxy endpoint through `XcodeMCP`.
+- `XcodeMCPKitTesting`: in-memory test runtime for exercising the same
+  `XcodeMCP` public API without launching `mcpbridge`.
+- `XcodeMCPProxyKit`: embeddable proxy server, STDIO adapter, launch-plan, and
+  installer facades used by the command-line products.
+
+## Internal Ownership
+
+The public products above are backed by facade targets with internal
+implementation folders. `XcodeMCPKit` owns the SDK's high-level API, initialized
+single-client session, client transports, JSON/MCP wire contracts, and local
+process runtime. `XcodeMCPProxyKit` owns the embeddable proxy facades plus its
+internal HTTP, session routing, Xcode process target discovery, multi-upstream
+broker, health, readiness, and route scheduling primitives. Low-level
+mcpbridge, JSON-RPC, and process modules are not published as standalone SwiftPM
+targets for external SDK clients.
 
 ## Install
 
@@ -46,6 +68,7 @@ Custom install directory:
 ```bash
 swift run -c release xcode-mcp-proxy-install --prefix "$HOME/.local"
 swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
+swift run -c release xcode-mcp-proxy-install --dry-run
 ```
 
 Add to `PATH`:
@@ -56,6 +79,175 @@ source ~/.zshrc
 ```
 
 </details>
+
+## Use From Swift
+
+Add the `XcodeMCPKit` library product to your Swift package or Xcode target,
+then create a top-level client. The default async initializer launches local
+`mcpbridge`, performs the MCP initialize handshake, and returns a ready client.
+
+```swift
+import XcodeMCPKit
+
+let xcode = try await XcodeMCP(config: .init())
+let tools = try await xcode.listTools()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": .string("SwiftData")]
+)
+let symbols = try await xcode.request(
+    "workspace/symbols",
+    params: try MCPJSONValue(jsonObject: ["query": "NavigationStack"])
+)
+await xcode.close()
+```
+
+To connect through a running proxy server instead, select Streamable HTTP
+transport:
+
+```swift
+import XcodeMCPKit
+
+let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+let xcode = try await XcodeMCP(
+    config: .init(transport: .streamableHTTP(endpoint: endpoint))
+)
+
+let tools = try await xcode.listTools()
+await xcode.close()
+```
+
+If the proxy was started with discovery enabled, you can read its discovery file:
+
+```swift
+let xcode = try await XcodeMCP(
+    config: .init(
+        transport: .streamableHTTP(
+            discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json")
+        )
+    )
+)
+```
+
+To use the standard proxy discovery location, including
+`XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT` overrides:
+
+```swift
+let xcode = try await XcodeMCP(
+    config: .init(transport: .streamableHTTPProxyDiscovery())
+)
+```
+
+The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
+`MCPToolResult`, `MCPContent`, and `MCPProgress`. Use `request(_:params:)` and
+`notify(_:params:)` for dynamic MCP methods that are not tool calls; the client
+still owns JSON-RPC framing and transport/session details. Process launch, HTTP
+session headers, SSE parsing, and session transport are internal implementation
+details.
+
+### Test With XcodeMCPKitTesting
+
+Add the `XcodeMCPKitTesting` product to tests that should exercise code through
+the real `XcodeMCP` API without launching a real bridge process:
+
+```swift
+import XcodeMCPKit
+import XcodeMCPKitTesting
+
+let runtime = XcodeMCPTestRuntime()
+await runtime.setToolResult(
+    MCPToolResult(
+        content: [
+            .text(
+                "NavigationStack documentation",
+                raw: ["type": "text", "text": "NavigationStack documentation"]
+            )
+        ]
+    ),
+    forToolNamed: "DocumentationSearch"
+)
+
+let xcode = try await runtime.makeClient()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": "NavigationStack"]
+)
+await xcode.close()
+```
+
+The testing runtime owns the fake MCP response loop and records client
+requests, so app tests do not need to build JSON-RPC transports directly.
+
+## Embed or Launch the Proxy Server
+
+Add the `XcodeMCPProxyKit` library product to embed the Streamable HTTP proxy
+server, run the STDIO adapter facade, or compose source installs. Apps can
+construct `XcodeMCPProxyServer.Configuration` directly, or normalize the same
+argv/environment accepted by `xcode-mcp-proxy-server` into a launch plan:
+
+```swift
+import XcodeMCPProxyKit
+
+let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+    arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:8765"],
+    environment: ProcessInfo.processInfo.environment
+)
+
+if plan.action == .start, let config = plan.configuration {
+    let server = XcodeMCPProxyServer(config: config)
+    _ = try server.startAndWriteDiscovery()
+    try await server.wait()
+}
+```
+
+Embedded apps can configure proxy-only behavior directly without knowing the
+TOML file schema. The `capabilities` dictionary uses `MCPJSONValue` from
+`XcodeMCPKit`, so Swift JSON literals remain concise:
+
+```swift
+import XcodeMCPKit
+import XcodeMCPProxyKit
+
+let config = XcodeMCPProxyServer.Configuration(
+    toolPolicy: .init(
+        disabledToolNames: ["RunAllTests", "RunSomeTests"]
+    ),
+    initializeHandshake: .init(
+        clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
+        capabilities: [
+            "roots": [
+                "listChanged": true,
+            ],
+        ]
+    )
+)
+
+let server = XcodeMCPProxyServer(config: config)
+```
+
+When both typed configuration and `configurationFilePath` are set, the typed
+values override the matching file-backed disabled-tools and initialize
+handshake fields.
+
+`LaunchPlan` also carries help/version text, `--dry-run` output,
+`--force-restart`, and product metadata so launchers do not need to compose the
+lower-level parser or config types directly.
+
+Executable-style hosts can run the same facades directly:
+
+```swift
+let exitCode = await XcodeMCPProxyServer.run(
+    arguments: CommandLine.arguments,
+    environment: ProcessInfo.processInfo.environment,
+    stdout: { print($0) },
+    stderr: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+)
+```
+
+`XcodeMCPProxyKit` also exposes `XcodeMCPProxyStdioAdapter`,
+`XcodeMCPProxyAdapterEndpointResolver`, and `XcodeMCPProxyInstaller`. The STDIO
+adapter endpoint order is explicit URL, `XCODE_MCP_PROXY_ENDPOINT`, discovery
+file, then `http://localhost:8765/mcp`.
 
 ## Set Up Your MCP Client
 
@@ -172,8 +364,6 @@ Only the following cases need changes:
   `MCP-Protocol-Version: 2025-06-18`. Include
   `Accept: application/json, text/event-stream` on `POST /mcp`, and do not send
   JSON-RPC batch requests.
-- SwiftPM library users:
-  pin to `v0.10.2` or migrate to the executable products.
 
 ## Troubleshooting
 
@@ -185,7 +375,8 @@ Local checks:
 
 ```bash
 swift test -Xswiftc -strict-concurrency=minimal
-XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPProcessRuntimeTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
 ```
 

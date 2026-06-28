@@ -1,13 +1,11 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import ProxyCore
-import ProxySession
-import ProxySessionUpstream
+import XcodeMCPKit
+@testable import XcodeMCPProxyKit
 import Testing
-import XcodeMCPTestSupport
+import XcodeMCPProxyTestSupport
 
-@testable import ProxyHTTPGateway
 
 @Suite(.serialized, .enabled(if: StressTestEnvironment.isEnabled))
 struct DocumentationSearchStressTests {
@@ -151,8 +149,8 @@ private struct StressHTTPServer {
             var config = ProxyConfig(
                 listenHost: "127.0.0.1",
                 listenPort: 0,
-                upstreamCommand: "xcrun",
-                upstreamArgs: ["mcpbridge"],
+                upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+                upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
                 upstreamSessionID: nil,
                 maxBodyBytes: 1_048_576,
                 requestTimeout: 60

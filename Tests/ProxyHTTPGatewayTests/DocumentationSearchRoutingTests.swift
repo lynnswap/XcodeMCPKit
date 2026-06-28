@@ -4,14 +4,10 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import ProxyCore
-import ProxyMCP
-import ProxySession
-import ProxyXcodeFeatures
-import ProxyXcodeSupport
-import XcodeMCPTestSupport
+import XcodeMCPKit
+@testable import XcodeMCPProxyKit
+import XcodeMCPProxyTestSupport
 
-@testable import ProxyHTTPGateway
 
 extension HTTPHandlerTests {
     @Test func httpDocumentationSearchFallsThroughWhenNoDocumentationProviderExists() async throws {
@@ -728,7 +724,6 @@ extension HTTPHandlerTests {
                 documentationRequests.withLockedValue { requests in
                     requests.append(query)
                 }
-                try await Task.sleep(for: .milliseconds(200))
                 let originalIDValue = try #require(object["id"])
                 let originalID = try #require(JSONRPC.ID(any: originalIDValue))
                 return try makeToolSuccessResponse(
@@ -798,7 +793,7 @@ extension HTTPHandlerTests {
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         do {
-            let service = HTTPPostService(
+            let service = ClientMCPRequestExecutor(
                 config: config,
                 sessionManager: sessionManager,
                 refreshCodeIssuesCoordinator: .makeDefault(),
@@ -841,10 +836,10 @@ extension HTTPHandlerTests {
             )
             #expect(abandonedLease.releaseReason == "clientDisconnected")
             #expect(sessionManager.sentToolNames().isEmpty)
-            try await group.shutdownGracefully()
+            try await shutdown(group)
         } catch {
             await documentationRelease.signal()
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
     }
@@ -883,7 +878,7 @@ extension HTTPHandlerTests {
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         do {
-            let service = HTTPPostService(
+            let service = ClientMCPRequestExecutor(
                 config: config,
                 sessionManager: sessionManager,
                 refreshCodeIssuesCoordinator: .makeDefault(),
@@ -933,10 +928,10 @@ extension HTTPHandlerTests {
             )
             #expect(abandonedLease.releaseReason == "clientDisconnected")
             #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
-            try await group.shutdownGracefully()
+            try await shutdown(group)
         } catch {
             await documentationRelease.signal()
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
     }
@@ -968,7 +963,7 @@ extension HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "application/json")
 
@@ -998,7 +993,7 @@ extension HTTPHandlerTests {
         ]]
         try postJSONArray(payload, sessionID: "session-batch-resources", to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
     }
 }

@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           xcode_path="$(
-            ruby -e 'paths = Dir["/Applications/Xcode_*.app"]; abort "No versioned Xcode apps found" if paths.empty?; puts paths.max_by { |path| path[/Xcode_(\d+(?:\.\d+)*)\.app\z/, 1].split(".").map(&:to_i) }'
+            ruby -e 'candidates = Dir["/Applications/Xcode*.app"].filter_map { |path| version = File.basename(path)[/\AXcode[_-](\d+(?:\.\d+)*)\.app\z/, 1]; version ? [version.split(".").map(&:to_i), path] : nil }; abort "No versioned Xcode apps found" if candidates.empty?; puts candidates.max_by(&:first).last'
           )"
           sudo xcode-select -s "${xcode_path}/Contents/Developer"
           xcodebuild -version
@@ -51,5 +51,9 @@ jobs:
         run: |
           XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
             --no-parallel \
-            --filter ProxyProcessTests \
+            --filter XcodeMCPProcessRuntimeTests \
+            -Xswiftc -strict-concurrency=minimal
+          XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+            --no-parallel \
+            --filter ProxyStdioAdapterTests \
             -Xswiftc -strict-concurrency=minimal

@@ -76,9 +76,10 @@ flowchart LR
 - `xcode-mcp-proxy-server` binds to `localhost:8765` by default (override via `--listen` / `--host` / `--port`, or env `LISTEN` / `HOST` / `PORT`).
 - The proxy server writes the resolved endpoint to `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
 - `xcode-mcp-proxy` (STDIO adapter) resolves the upstream in this order:
+  - explicit URL/config, such as CLI `--url`
   - `XCODE_MCP_PROXY_ENDPOINT`
   - discovery file (`~/Library/Caches/XcodeMCPProxy/endpoint.json`)
-- default (`http://localhost:8765/mcp`)
+  - fallback default (`http://localhost:8765/mcp`)
 
 ## Streamable HTTP Contract
 - `POST /mcp` requires `Content-Type: application/json` and `Accept` containing both `application/json` and `text/event-stream`.

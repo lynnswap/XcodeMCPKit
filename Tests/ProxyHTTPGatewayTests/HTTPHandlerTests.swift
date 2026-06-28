@@ -4,14 +4,10 @@ import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import ProxyCore
-import ProxyMCP
-import ProxySession
-import ProxyXcodeFeatures
-import ProxyXcodeSupport
-import XcodeMCPTestSupport
+import XcodeMCPKit
+@testable import XcodeMCPProxyKit
+import XcodeMCPProxyTestSupport
 
-@testable import ProxyHTTPGateway
 
 @Suite(.serialized)
 struct HTTPHandlerTests {
@@ -26,7 +22,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.body == "ok")
     }
@@ -42,7 +38,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "application/json")
 
@@ -72,7 +68,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
 
         let decoder = JSONDecoder()
@@ -96,7 +92,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
         #expect(response.body == "not found")
     }
@@ -147,7 +143,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
         #expect(response.body == "not found")
     }
@@ -289,7 +285,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notAcceptable)
         #expect(response.body.contains("text/event-stream"))
     }
@@ -310,7 +306,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notAcceptable)
     }
 
@@ -330,7 +326,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notAcceptable)
         #expect(response.body == "client must accept application/json and text/event-stream")
     }
@@ -362,7 +358,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id")?.isEmpty == false)
     }
@@ -383,7 +379,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .unsupportedMediaType)
     }
 
@@ -409,7 +405,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .badRequest)
         #expect(response.body == "session id required")
     }
@@ -438,7 +434,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
         #expect(response.body == "session not found")
     }
@@ -449,7 +445,7 @@ struct HTTPHandlerTests {
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -467,7 +463,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .badRequest)
         #expect(response.body == "protocol version required")
     }
@@ -478,7 +474,7 @@ struct HTTPHandlerTests {
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -497,7 +493,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .badRequest)
         #expect(response.body == "protocol version mismatch")
     }
@@ -508,7 +504,7 @@ struct HTTPHandlerTests {
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
 
         var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
         deleteHead.headers.add(name: "MCP-Session-Id", value: sessionID)
@@ -516,7 +512,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let deleteResponse = try collectResponse(from: channel)
+        let deleteResponse = try await collectResponse(from: channel)
         #expect(deleteResponse.head.status == .ok)
         #expect(sessionManager.hasSession(id: sessionID) == false)
 
@@ -527,7 +523,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(sseHead))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let afterDeleteResponse = try collectResponse(from: channel)
+        let afterDeleteResponse = try await collectResponse(from: channel)
         #expect(afterDeleteResponse.head.status == .notFound)
         #expect(afterDeleteResponse.body == "session not found")
     }
@@ -545,7 +541,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let deleteResponse = try collectResponse(from: channel)
+        let deleteResponse = try await collectResponse(from: channel)
         #expect(deleteResponse.head.status == .ok)
         #expect(sessionManager.hasSession(id: "uninitialized-session") == false)
     }
@@ -559,7 +555,7 @@ struct HTTPHandlerTests {
 
         try writeInitializePost(to: channel, origin: "https://example.invalid")
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
         #expect(response.body == "origin not allowed")
         #expect(sessionManager.isInitialized() == false)
@@ -574,7 +570,7 @@ struct HTTPHandlerTests {
 
         try writeInitializePost(to: channel, origin: "http://127.attacker.example:8765")
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
         #expect(response.body == "origin not allowed")
         #expect(sessionManager.isInitialized() == false)
@@ -594,7 +590,7 @@ struct HTTPHandlerTests {
             origin: "http://localhost"
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
         #expect(response.body == "origin not allowed")
         #expect(sessionManager.isInitialized() == false)
@@ -615,7 +611,7 @@ struct HTTPHandlerTests {
             origin: "http://192.0.2.10:8765"
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
         #expect(response.body == "origin not allowed")
         #expect(sessionManager.isInitialized() == false)
@@ -636,7 +632,7 @@ struct HTTPHandlerTests {
             origin: "http://attacker.example:8765"
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
         #expect(response.body == "origin not allowed")
         #expect(sessionManager.isInitialized() == false)
@@ -657,7 +653,7 @@ struct HTTPHandlerTests {
             origin: "http://localhost:8765"
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id") != nil)
     }
@@ -677,7 +673,7 @@ struct HTTPHandlerTests {
             origin: "http://192.0.2.10:8765"
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id") != nil)
     }
@@ -697,7 +693,7 @@ struct HTTPHandlerTests {
             origin: "http://example.invalid:8765"
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
         #expect(response.body == "origin not allowed")
         #expect(sessionManager.isInitialized() == false)
@@ -719,7 +715,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .payloadTooLarge)
     }
 
@@ -754,7 +750,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id")?.isEmpty == false)
 
@@ -774,7 +770,7 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
         let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
         let clientID = sessionManager.session(id: sessionID).serverRequestTracker.record(
             upstreamID: JSONRPC.ID(any: NSNumber(value: 99))!,
@@ -788,7 +784,7 @@ struct HTTPHandlerTests {
         ]
         try postJSON(payload, sessionID: sessionID, to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .accepted)
         #expect(response.body.isEmpty)
         #expect(sessionManager.chooseUpstreamIndexCallCount() == chooseCountBeforeResponse)
@@ -808,7 +804,7 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
         let session = sessionManager.session(id: sessionID)
         let clientID = session.serverRequestTracker.record(
             upstreamID: JSONRPC.ID(any: NSNumber(value: 99))!,
@@ -822,13 +818,13 @@ struct HTTPHandlerTests {
             "result": ["ok": true],
         ]
         try postJSON(payload, sessionID: sessionID, to: channel)
-        let rejected = try collectResponse(from: channel)
+        let rejected = try await collectResponse(from: channel)
         #expect(rejected.head.status == .serviceUnavailable)
         #expect(rejected.body == "upstream unavailable")
         #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
 
         try postJSON(payload, sessionID: sessionID, to: channel)
-        let accepted = try collectResponse(from: channel)
+        let accepted = try await collectResponse(from: channel)
         #expect(accepted.head.status == .accepted)
         #expect(accepted.body.isEmpty)
         #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
@@ -842,7 +838,7 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": "xcode-mcp-proxy.server-request.999",
@@ -850,7 +846,7 @@ struct HTTPHandlerTests {
         ]
         try postJSON(payload, sessionID: sessionID, to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .accepted)
         #expect(response.body.isEmpty)
         #expect(sessionManager.sentUpstreamCount() == 0)
@@ -863,14 +859,14 @@ struct HTTPHandlerTests {
         let sessionManager = TestRuntimeCoordinator(config: config)
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": 123,
         ]
         try postJSON(payload, sessionID: sessionID, to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         let responseObject = try #require(
             JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
@@ -913,7 +909,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "application/json")
     }
@@ -947,7 +943,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id") == nil)
         let object =
@@ -982,7 +978,7 @@ struct HTTPHandlerTests {
         ]
         try postJSONArray(payload, sessionID: nil, to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
         #expect(sessionManager.isInitialized() == false)
     }
@@ -1004,7 +1000,7 @@ struct HTTPHandlerTests {
         ]
         try postJSONArray(payload, sessionID: "session-batch", to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
         #expect(sessionManager.sentUpstreamCount() == 0)
     }
@@ -1033,7 +1029,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(initHead))
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [String: Any] = [
@@ -1058,7 +1054,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "application/json")
         let object =
@@ -1081,36 +1077,56 @@ struct HTTPHandlerTests {
         sessionManager.setInitialized(true)
         sessionManager.setForceAsyncToolRoutingDecision(true)
         sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: nil))
-        sessionManager.setToolRoutingDelayNanos(60_000_000)
-        let server = try TestHTTPHandlerServer.start(
+        let routingStarted = TestSignal()
+        let routingGate = AsyncGate()
+        sessionManager.setToolRoutingGate(started: routingStarted, gate: routingGate)
+        let clock = ManualDateClock()
+        let service = ClientMCPRequestExecutor(
             config: config,
-            sessionManager: sessionManager
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            ),
+            deadlineClock: clock.client
         )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
         do {
-            let (response, object) = try await postHTTPJSON(
-                url: server.url,
-                sessionID: "session-routing-deadline",
-                payload: toolsCallPayload(
-                    id: 2002,
-                    name: "BuildProject",
-                    arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
-                )
+            let payload = toolsCallPayload(
+                id: 2002,
+                name: "BuildProject",
+                arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+            )
+            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+            let operation = service.handle(
+                bodyData: bodyData,
+                headerSessionID: "session-routing-deadline",
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: group.next()
             )
 
-            #expect(response.statusCode == 200)
-            let error = try #require(object["error"] as? [String: Any])
-            #expect((error["code"] as? NSNumber)?.intValue == -32000)
-            #expect(error["message"] as? String == "upstream timeout")
+            try await routingStarted.wait(description: "waiting for async routing")
+            clock.advance(by: 1)
+            await routingGate.signal()
+
+            switch try await operation.future.get() {
+            case .mcpError(_, _, let code, let message, _, _, _):
+                #expect(code == -32000)
+                #expect(message == "upstream timeout")
+            default:
+                Issue.record("expected upstream timeout error")
+            }
             #expect(sessionManager.sentUpstreamCount() == 0)
             let lease = try #require(sessionManager.leaseDebugSnapshots().first)
             #expect(lease.state == .timedOut)
         } catch {
-            try? await server.shutdown()
+            try? await shutdown(group)
             throw error
         }
 
-        try await server.shutdown()
+        try await shutdown(group)
     }
 
     @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
@@ -1137,7 +1153,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(initHead))
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [String: Any] = [
@@ -1157,7 +1173,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notAcceptable)
         #expect(response.head.headers.first(name: "Content-Type") == "text/plain; charset=utf-8")
         #expect(response.body == "client must accept application/json and text/event-stream")
@@ -1187,7 +1203,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(initHead))
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [[String: Any]] = [
@@ -1212,7 +1228,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
         #expect(sessionManager.requestTimeoutNotificationCount() == 0)
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
@@ -1242,7 +1258,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(initHead))
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         sessionManager.setAvailableUpstreamIndex(nil)
@@ -1264,7 +1280,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         let object =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
@@ -1298,7 +1314,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(initHead))
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         sessionManager.setAvailableUpstreamIndex(nil)
@@ -1315,7 +1331,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(malformedBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         let object =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
@@ -1371,6 +1387,86 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
+    @Test func httpToolRoutingForwardAnyUsesNextUsablePreferredCandidate() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamResponder: { _, originalID in
+                try makeToolSuccessResponse(id: originalID, text: "{\"ok\":true}")
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setToolRoutingDecision(.forwardAny(preferredUpstreamIndices: [0, 1]))
+        sessionManager.setUsablePreferredUpstreamIndices([1])
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-forward-any-fallback",
+                payload: toolsCallPayload(
+                    id: 3401,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-a"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            #expect(body["result"] != nil)
+            #expect(sessionManager.sentToolRequests() == ["BuildProject@1"])
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func httpToolRoutingForwardAnyUnavailableReleasesLeaseWithoutForwarding() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        sessionManager.setToolRoutingDecision(.forwardAny(preferredUpstreamIndices: [0, 1]))
+        sessionManager.setUsablePreferredUpstreamIndices([])
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-routing-forward-any-unavailable",
+                payload: toolsCallPayload(
+                    id: 3402,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-a"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let error = try #require(body["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32001)
+            #expect((error["message"] as? String) == "upstream unavailable")
+            #expect(sessionManager.sentMethods().isEmpty)
+            #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+            let lease = try #require(
+                sessionManager.leaseDebugSnapshots().first {
+                    $0.label == "tools/call:BuildProject"
+                }
+            )
+            #expect(lease.state == .failed)
+            #expect(lease.releaseReason == "upstreamUnavailable")
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpToolRoutingRejectReturnsErrorsForNonToolBatchItems() async throws {
         let config = makeConfig()
         let sessionManager = TestRuntimeCoordinator(config: config)
@@ -1388,7 +1484,7 @@ struct HTTPHandlerTests {
                 forceBatchArray: true
             )
         )
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -1412,7 +1508,7 @@ struct HTTPHandlerTests {
             ]
             let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
             let operation = service.makeForwardingOperation(
-                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                filteredRequest: ClientMCPRequestExecutor.FilteredToolCallRequest(
                     bodyData: bodyData,
                     localResponseData: nil,
                     forwardedResponseIDs: [toolRequestID, resourceRequestID],
@@ -1460,10 +1556,10 @@ struct HTTPHandlerTests {
             )
             #expect(sessionManager.sentMethods().isEmpty)
         } catch {
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
-        try await group.shutdownGracefully()
+        try await shutdown(group)
     }
 
     @Test func httpToolRoutingLocalXcodeListWindowsReturnsAggregatedResult() async throws {
@@ -1484,7 +1580,7 @@ struct HTTPHandlerTests {
         sessionManager.setInitialized(true)
         sessionManager.setAvailableUpstreamIndices([1])
         sessionManager.setToolRoutingDecision(.localXcodeListWindows)
-        let service = HTTPPostService(
+        let service = ClientMCPRequestExecutor(
             config: config,
             sessionManager: sessionManager,
             refreshCodeIssuesCoordinator: .makeDefault(),
@@ -1502,7 +1598,7 @@ struct HTTPHandlerTests {
             )
             let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
             let operation = service.makeForwardingOperation(
-                filteredRequest: HTTPPostService.FilteredToolCallRequest(
+                filteredRequest: ClientMCPRequestExecutor.FilteredToolCallRequest(
                     bodyData: bodyData,
                     localResponseData: nil,
                     forwardedResponseIDs: [requestID],
@@ -1536,10 +1632,10 @@ struct HTTPHandlerTests {
             #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
             #expect(sessionManager.assignedUpstreamIDCount() == 0)
         } catch {
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
-        try await group.shutdownGracefully()
+        try await shutdown(group)
     }
 
     @Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {
@@ -1577,7 +1673,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(initHead))
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let payload: [String: Any] = [
@@ -1597,7 +1693,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         let object =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
@@ -1635,7 +1731,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         let returnedSessionID = try #require(response.head.headers.first(name: "Mcp-Session-Id"))
         #expect(returnedSessionID.isEmpty == false)
@@ -1660,7 +1756,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "text/event-stream")
         #expect(response.body.contains(": ok"))
@@ -1697,7 +1793,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -1720,7 +1816,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let toolsResponse = try collectResponse(from: channel)
+        let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
 
         let responseObject =
@@ -1770,7 +1866,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -1796,7 +1892,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let toolsResponse = try collectResponse(from: channel)
+        let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
 
         let responseObject =
@@ -1835,7 +1931,7 @@ struct HTTPHandlerTests {
         ]]
         try postJSONArray(payload, sessionID: "session-batch-tools-list", to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
         #expect(sessionManager.sentUpstreamCount() == 0)
     }
@@ -1878,7 +1974,7 @@ struct HTTPHandlerTests {
         ]]
         try postJSONArray(payload, sessionID: "session-forwarded-batch-tools-list", to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
         #expect(sessionManager.sentUpstreamCount() == 0)
     }
@@ -1920,7 +2016,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -1946,7 +2042,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let toolsResponse = try collectResponse(from: channel)
+        let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
         #expect(sessionManager.cachedToolsListResult() != nil)
         #expect(sessionManager.sentUpstreamCount() == 1)
@@ -1972,7 +2068,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody2))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let toolsResponse2 = try collectResponse(from: channel)
+        let toolsResponse2 = try await collectResponse(from: channel)
         #expect(toolsResponse2.head.status == .ok)
         #expect(sessionManager.sentUpstreamCount() == 1)
     }
@@ -2019,7 +2115,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let toolsPayload: [String: Any] = [
@@ -2040,7 +2136,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         let object =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
             as? [String: Any]
@@ -2089,7 +2185,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 
         let toolsPayload: [String: Any] = [
@@ -2110,7 +2206,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         let object =
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
             as? [String: Any]
@@ -2152,7 +2248,7 @@ struct HTTPHandlerTests {
         }
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
         try postJSON(
             [
                 "jsonrpc": "2.0",
@@ -2163,7 +2259,7 @@ struct HTTPHandlerTests {
             to: channel
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         let object = try #require(
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
                 as? [String: Any]
@@ -2207,7 +2303,7 @@ struct HTTPHandlerTests {
         )
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
-        let sessionID = try initializeHTTPChannel(channel)
+        let sessionID = try await initializeHTTPChannel(channel)
         try postJSON(
             [
                 "jsonrpc": "2.0",
@@ -2218,7 +2314,7 @@ struct HTTPHandlerTests {
             to: channel
         )
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         let object = try #require(
             try JSONSerialization.jsonObject(with: Data(response.body.utf8), options: [])
                 as? [String: Any]
@@ -2260,7 +2356,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -2282,7 +2378,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(toolsBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let toolsResponse = try collectResponse(from: channel)
+        let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
         #expect(toolsResponse.head.headers.first(name: "Content-Type") == "application/json")
     }
@@ -2374,7 +2470,7 @@ struct HTTPHandlerTests {
         ]]
         try postJSONArray(payload, sessionID: "session-forwarded-batch-resources-list", to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
         #expect(sessionManager.sentUpstreamCount() == 0)
     }
@@ -2513,7 +2609,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "application/json")
 
@@ -2565,7 +2661,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -2588,7 +2684,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
 
         let object =
@@ -2643,7 +2739,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -2666,7 +2762,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
 
         let object =
@@ -2716,7 +2812,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -2739,7 +2835,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
 
         let object =
@@ -2791,7 +2887,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -2814,7 +2910,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
 
         let object =
@@ -2870,7 +2966,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(initBody))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let initResponse = try collectResponse(from: channel)
+        let initResponse = try await collectResponse(from: channel)
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
@@ -2893,7 +2989,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
 
         let object =

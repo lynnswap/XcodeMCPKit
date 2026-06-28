@@ -2,12 +2,18 @@
 
 [English](README.md)
 
-XcodeMCPKitは、Xcode MCPのためのローカルプロキシです。MCPクライアントに安定したendpointを提供し、`mcpbridge`の承認フローを自動化します。
+XcodeMCPKitは、Xcode MCPのためのSwiftライブラリ兼ローカルプロキシです。アプリはSwift APIからローカル`mcpbridge`を直接操作でき、MCPクライアントはproxy経由で安定したendpointと承認フローの自動化を利用できます。
 
 ## 要件
 
 - macOS 15.4+
 - Swift 6.3+
+
+## Library Products
+
+- `XcodeMCPKit`: `XcodeMCP`からローカル`mcpbridge`またはStreamable HTTP proxy endpointを操作するclient-side SDK。
+- `XcodeMCPKitTesting`: 実`mcpbridge`を起動せず、同じ`XcodeMCP` public APIをテストするためのin-memory runtime。
+- `XcodeMCPProxyKit`: proxy server、STDIO adapter、launch plan、installerを組み込むためのfacade。
 
 ## インストール
 
@@ -55,6 +61,55 @@ source ~/.zshrc
 ```
 
 </details>
+
+## Swiftから使う
+
+Swift packageまたはXcode targetに`XcodeMCPKit` library productを追加し、top-level clientを作成します。async initializerがローカル`mcpbridge`の起動とMCP initialize handshakeを行い、利用可能なclientを返します。
+
+```swift
+import XcodeMCPKit
+
+let xcode = try await XcodeMCP(config: .init())
+let tools = try await xcode.listTools()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": .string("SwiftData")]
+)
+await xcode.close()
+```
+
+public APIは`MCPJSONValue`、`MCPTool`、`MCPToolResult`、`MCPContent`、`MCPProgress`などのMCP domain valueを公開します。process launch、JSON-RPC framing、session transportはinternal implementation detailです。
+
+### XcodeMCPKitTestingでテストする
+
+テスト target に`XcodeMCPKitTesting` productを追加すると、実`mcpbridge`を起動せずに、production codeと同じ`XcodeMCP` APIを使えます。
+
+```swift
+import XcodeMCPKit
+import XcodeMCPKitTesting
+
+let runtime = XcodeMCPTestRuntime()
+await runtime.setToolResult(
+    MCPToolResult(
+        content: [
+            .text(
+                "NavigationStack documentation",
+                raw: ["type": "text", "text": "NavigationStack documentation"]
+            )
+        ]
+    ),
+    forToolNamed: "DocumentationSearch"
+)
+
+let xcode = try await runtime.makeClient()
+let result = try await xcode.callTool(
+    "DocumentationSearch",
+    arguments: ["query": "NavigationStack"]
+)
+await xcode.close()
+```
+
+fake MCP response loopとrequest recordingはtesting runtimeが所有するため、app側のテストでJSON-RPC transportを組み立てる必要はありません。
 
 ## MCPクライアント設定
 
@@ -128,7 +183,7 @@ xcode-mcp-proxy --help
 |------|------|
 | `LISTEN` | listen address。例:`127.0.0.1:8765`。 |
 | `HOST` / `PORT` | `LISTEN`未指定時のlisten host / port。 |
-| `MCP_XCODE_PID` | upstream `mcpbridge`へそのまま渡します。proxy自身は解釈しません。 |
+| `MCP_XCODE_PID` | process-bound upstream `mcpbridge` child ではproxyが設定します。process-bound Xcode routingが有効でない場合だけ、継承された値をそのまま渡します。 |
 | `MCP_XCODE_SESSION_ID` | 明示的に指定するupstream Xcode MCP session ID。 |
 | `MCP_XCODE_CONFIG` | TOML config path。`--config`が優先されます。 |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy`または`upstream`。 |
@@ -170,8 +225,6 @@ Codex/Claude Codeから利用している場合は、移行作業はありませ
   `MCP-Protocol-Version: 2025-06-18`を送り、`POST /mcp`には
   `Accept: application/json, text/event-stream`を付けてください。
   JSON-RPC batch requestは送らないでください。
-- SwiftPM library productに依存している場合:
-  `v0.10.2`に固定するか、executable productに移行してください。
 
 ## Troubleshooting
 
@@ -183,7 +236,8 @@ Local checks:
 
 ```bash
 swift test -Xswiftc -strict-concurrency=minimal
-XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPProcessRuntimeTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
 ```
 

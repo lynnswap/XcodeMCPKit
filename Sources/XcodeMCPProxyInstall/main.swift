@@ -1,10 +1,11 @@
 import Foundation
-import ProxyInstallCLI
+import XcodeMCPProxyKit
 
-let command = XcodeMCPProxyInstallCommand()
-let exitCode = command.run(
-    args: CommandLine.arguments,
-    environment: ProcessInfo.processInfo.environment
+let exitCode = XcodeMCPProxyInstaller.run(
+    arguments: CommandLine.arguments,
+    environment: ProcessInfo.processInfo.environment,
+    stdout: { print($0) },
+    stderr: XcodeMCPProxyConsole.writeStandardErrorLine
 )
 if exitCode != 0 {
     exit(exitCode)

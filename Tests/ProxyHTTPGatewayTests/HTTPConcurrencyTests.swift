@@ -3,13 +3,10 @@ import NIO
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import ProxyCore
-import ProxyMCP
-import ProxySession
-import ProxySessionUpstream
-import ProxyXcodeFeatures
-import XcodeMCPTestSupport
-@testable import ProxyHTTPGateway
+import XcodeMCPKit
+@testable import XcodeMCPProxyKit
+@testable import XcodeMCPProxyInternalTestSupport
+import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)
 struct HTTPConcurrencyTests {
@@ -66,35 +63,27 @@ struct HTTPConcurrencyTests {
             #expect(initID == 1)
             await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
-            let first = Task {
-                _ = try? await postJSON(
-                    url: url,
-                    sessionID: sessionID,
-                    payload: toolListPayload(id: 100)
-                )
-            }
-            let second = Task {
-                _ = try? await postJSON(
-                    url: url,
-                    sessionID: sessionID,
-                    payload: toolListPayload(id: 101)
-                )
-            }
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 1
-                }
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 100)
             )
-            await upstream.respondNext()
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.sessionManager.cachedToolsListResult() != nil
-                }
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 101)
             )
+            let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
+            #expect(labels == ["tools/list"])
+            #expect(await upstream.respondNext(label: "tools/list"))
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
+            #expect((firstResult.1["id"] as? NSNumber)?.intValue == 100)
+            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 101)
             #expect(await upstream.nonInitializeLabels() == ["tools/list"])
-            first.cancel()
-            second.cancel()
+            #expect(server.sessionManager.cachedToolsListResult() != nil)
         } catch {
             try? await server.shutdown()
             throw error
@@ -125,36 +114,25 @@ struct HTTPConcurrencyTests {
             }
             await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
-            let first = Task {
-                _ = try? await postJSON(
-                    url: url,
-                    sessionID: sessionA,
-                    payload: toolListPayload(id: 200)
-                )
-            }
-            let second = Task {
-                _ = try? await postJSON(
-                    url: url,
-                    sessionID: sessionB,
-                    payload: toolListPayload(id: 201)
-                )
-            }
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 1
-                }
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionA,
+                payload: toolListPayload(id: 200)
             )
-
-            await upstream.respondNext()
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.sessionManager.cachedToolsListResult() != nil
-                }
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionB,
+                payload: toolListPayload(id: 201)
             )
+            let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
+            #expect(labels == ["tools/list"])
+            #expect(await upstream.respondNext(label: "tools/list"))
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
             #expect(await upstream.nonInitializeLabels() == ["tools/list"])
-            first.cancel()
-            second.cancel()
+            #expect(server.sessionManager.cachedToolsListResult() != nil)
         } catch {
             try? await server.shutdown()
             throw error
@@ -163,164 +141,259 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
-        let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(
-            upstream: upstream,
-            requestTimeout: 0.15
+        let upstream = EmbeddedControlledUpstreamClient()
+        let config = makeEmbeddedConfig(requestTimeout: 0.15)
+        let eventLoop = EmbeddedEventLoop()
+        let sessionManager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            startImmediately: false
         )
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
-
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 300)
-            )
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolListPayload(id: 301)
-            )
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() == 1
-                }
-            )
-            await upstream.respondNext()
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect(secondResult.0.statusCode == 200)
-            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 301)
-        } catch {
-            try? await server.shutdown()
-            throw error
+        defer {
+            sessionManager.shutdownAndWait()
         }
-        try await server.shutdown()
+
+        ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
+        let deadlineClock = ManualDateClock()
+        let service = ClientMCPRequestExecutor(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            ),
+            deadlineClock: deadlineClock.client
+        )
+        let sessionID = "session-queued-timeout-budget"
+
+        func makeBodyData(_ payload: [String: Any]) throws -> Data {
+            try JSONSerialization.data(withJSONObject: payload, options: [])
+        }
+
+        func handlePost(_ payload: [String: Any]) throws -> ClientMCPRequestExecutor.Operation {
+            service.handle(
+                bodyData: try makeBodyData(payload),
+                headerSessionID: sessionID,
+                headerSessionExists: true,
+                prefersEventStream: false,
+                eventLoop: eventLoop
+            )
+        }
+
+        func responseObject(
+            from resolution: ClientMCPRequestExecutor.Resolution
+        ) throws -> [String: Any] {
+            guard case .responseData(let data, _, _) = resolution else {
+                throw ConcurrencyTestError.invalidResponse
+            }
+            return try #require(
+                JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+            )
+        }
+
+        _ = sessionManager.session(id: sessionID)
+        sessionManager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current
+        )
+        sessionManager.markUpstreamInitialized(upstreamIndex: 0)
+        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
+            try #require(
+                JSONValue(any: [
+                    "protocolVersion": MCP.ProtocolVersion.current,
+                    "capabilities": [String: Any](),
+                ])
+            ),
+            sourceUpstream: 0
+        )
+        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        upstream.clearRecordedRequests()
+
+        let firstOperation = try handlePost(
+            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
+        )
+        eventLoop.run()
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
+
+        let secondOperation = try handlePost(
+            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2")
+        )
+        eventLoop.run()
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        deadlineClock.advance(by: config.requestTimeout)
+        eventLoop.run()
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        let firstResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(firstResponseData, upstreamIndex: 0)
+        eventLoop.run()
+        let firstObject = try responseObject(from: try await firstOperation.future.get())
+        #expect((firstObject["id"] as? NSNumber)?.intValue == 300)
+        #expect(firstObject["error"] == nil)
+
+        eventLoop.run()
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        #expect(secondRequestLabels == [
+            "tools/call:ExecuteSnippet",
+            "tools/call:ExecuteSnippet",
+        ])
+        let secondResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
+        eventLoop.run()
+
+        let secondObject = try responseObject(from: try await secondOperation.future.get())
+        #expect((secondObject["id"] as? NSNumber)?.intValue == 301)
+        #expect(secondObject["error"] == nil)
     }
 
-    @Test func httpTimedOutExecuteSnippetReleasesSessionAndStartsNextQueuedRequest() async throws {
-        let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(
-            upstream: upstream,
-            requestTimeout: 0.15
+    @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() throws {
+        let upstream = EmbeddedControlledUpstreamClient()
+        let config = makeEmbeddedConfig(requestTimeout: 0.15)
+        let firstChannel = EmbeddedChannel()
+        let secondChannel = EmbeddedChannel()
+        let sessionManager = RuntimeCoordinator(
+            config: config,
+            eventLoop: firstChannel.eventLoop,
+            upstreams: [upstream],
+            startImmediately: false
         )
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.sessionManager.isInitialized()
-                }
-            )
-            server.sessionManager.setCachedToolsListResult(
-                JSONValue(any: [
-                    "tools": [
-                        [
-                            "name": "ExecuteSnippet",
-                            "outputSchema": [
-                                "type": "object",
-                            ],
-                        ],
-                    ],
-                ])!,
-                sourceUpstream: 0
-            )
-            await upstream.clearRecordedRequests()
-
-            async let first = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolCallPayload(
-                    id: 700,
-                    name: "ExecuteSnippet",
-                    arguments: [
-                        "tabIdentifier": "windowtab-timeout",
-                        "sourceFilePath": "App.swift",
-                        "codeSnippet": "print(\"first\")",
-                        "timeout": 20,
-                    ]
-                )
-            )
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == ["tools/call:ExecuteSnippet"]
-                }
-            )
-
-            async let second = postJSON(
-                url: url,
-                sessionID: sessionID,
-                payload: toolCallPayload(
-                    id: 701,
-                    name: "ExecuteSnippet",
-                    arguments: [
-                        "tabIdentifier": "windowtab-timeout-2",
-                        "sourceFilePath": "App.swift",
-                        "codeSnippet": "print(\"second\")",
-                        "timeout": 20,
-                    ]
-                )
-            )
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == [
-                        "tools/call:ExecuteSnippet",
-                        "tools/call:ExecuteSnippet",
-                    ]
-                }
-            )
-
-            await upstream.discardNextResponse()
-            await upstream.respondNext()
-
-            let firstResult = try await first
-            let secondResult = try await second
-            #expect(firstResult.0.statusCode == 200)
-            #expect((firstResult.1["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
-            #expect(secondResult.0.statusCode == 200)
-            #expect((secondResult.1["id"] as? NSNumber)?.intValue == 701)
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    if let snapshot = server.sessionManager.debugSnapshot().sessions.first(where: { $0.sessionID == sessionID }) {
-                        return snapshot.activeCorrelatedRequestCount == 0
-                    }
-                    return false
-                }
-            )
-        } catch {
-            try? await server.shutdown()
-            throw error
+        defer {
+            sessionManager.shutdownAndWait()
+            _ = try? firstChannel.finish()
+            _ = try? secondChannel.finish()
         }
-        try await server.shutdown()
+
+        ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
+        try addEmbeddedHTTPHandler(
+            to: firstChannel,
+            config: config,
+            sessionManager: sessionManager
+        )
+        try addEmbeddedHTTPHandler(
+            to: secondChannel,
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        let sessionID = "session-timeout-queue"
+        _ = sessionManager.session(id: sessionID)
+        sessionManager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current
+        )
+        sessionManager.markUpstreamInitialized(upstreamIndex: 0)
+        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
+            try #require(
+                JSONValue(any: [
+                    "protocolVersion": MCP.ProtocolVersion.current,
+                    "capabilities": [String: Any](),
+                ])
+            ),
+            sourceUpstream: 0
+        )
+        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        upstream.clearRecordedRequests()
+
+        try postEmbeddedJSON(
+            executeSnippetPayload(id: 700, tabIdentifier: "windowtab-timeout"),
+            sessionID: sessionID,
+            to: firstChannel
+        )
+        firstChannel.embeddedEventLoop.run()
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
+
+        try postEmbeddedJSON(
+            executeSnippetPayload(id: 701, tabIdentifier: "windowtab-timeout-2"),
+            sessionID: sessionID,
+            to: secondChannel
+        )
+        secondChannel.embeddedEventLoop.run()
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+
+        firstChannel.embeddedEventLoop.advanceTime(by: .milliseconds(150))
+        firstChannel.embeddedEventLoop.run()
+        let firstResponse = try collectEmbeddedResponse(from: firstChannel)
+        #expect(firstResponse.head.status == .ok)
+        let firstObject = try jsonObject(from: firstResponse.body)
+        #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
+
+        secondChannel.embeddedEventLoop.run()
+        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        #expect(secondRequestLabels == [
+            "tools/call:ExecuteSnippet",
+            "tools/call:ExecuteSnippet",
+        ])
+
+        #expect(upstream.discardNextResponse(label: "tools/call:ExecuteSnippet"))
+        let secondResponseData = try #require(
+            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
+        )
+        sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
+        secondChannel.embeddedEventLoop.run()
+
+        let secondResponse = try collectEmbeddedResponse(from: secondChannel)
+        #expect(secondResponse.head.status == .ok)
+        let secondObject = try jsonObject(from: secondResponse.body)
+        #expect((secondObject["id"] as? NSNumber)?.intValue == 701)
+        #expect(secondObject["error"] == nil)
+        #expect(
+            sessionManager.debugSnapshot().sessions
+                .first(where: { $0.sessionID == sessionID })?
+                .activeCorrelatedRequestCount == 0
+        )
+    }
+
+    private func executeSnippetPayload(id: Int, tabIdentifier: String) -> [String: Any] {
+        toolCallPayload(
+            id: id,
+            name: "ExecuteSnippet",
+            arguments: [
+                "tabIdentifier": tabIdentifier,
+                "sourceFilePath": "App.swift",
+                "codeSnippet": "print(\"\(id)\")",
+                "timeout": 20,
+            ]
+        )
+    }
+
+    private func executeSnippetToolsCatalog() -> JSONValue {
+        JSONValue(any: [
+            "tools": [
+                [
+                    "name": "ExecuteSnippet",
+                    "outputSchema": [
+                        "type": "object",
+                    ],
+                ],
+            ],
+        ])!
     }
 
     @Test func httpQueuedNotificationDoesNotOvertakeEarlierSessionRequest() async throws {
+        let notificationQueued = TestSignal()
         let upstream = ControlledUpstreamClient()
-        let server = try TestHTTPServer.start(upstream: upstream)
+        let server = try TestHTTPServer.start(
+            upstream: upstream,
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamRequestQueued: { _, descriptor, _ in
+                    if descriptor.label == "notifications/test-progress" {
+                        notificationQueued.signal()
+                    }
+                }
+            )
+        )
         let url = server.url
 
         do {
@@ -341,23 +414,28 @@ struct HTTPConcurrencyTests {
                 payload: toolListPayload(id: 400),
                 timeout: 10
             )
+            let firstUpstreamLabels = try await waitForUpstreamRequestCount(upstream, count: 1)
+            #expect(firstUpstreamLabels == ["tools/list"])
             async let notification = postStatusOnly(
                 url: url,
                 sessionID: sessionID,
                 payload: notificationPayload(method: "notifications/test-progress"),
                 timeout: 10
             )
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeRequestCount() >= 1
-                }
+            try await notificationQueued.wait(
+                description: "waiting for notification to queue behind tools/list"
             )
-            await upstream.respondNext()
-            let notificationResponse = try await notification
-            #expect(notificationResponse.statusCode == 202)
+            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
+            #expect(server.sessionManager.debugSnapshot().queuedRequestCount == 1)
+            #expect(await upstream.respondNext(label: "tools/list"))
             let firstResult = try await first
             #expect(firstResult.0.statusCode == 200)
+            #expect((firstResult.1["id"] as? NSNumber)?.intValue == 400)
+            #expect(firstResult.1["error"] == nil)
+            let upstreamLabels = try await waitForUpstreamRequestCount(upstream, count: 2)
+            #expect(upstreamLabels == ["tools/list", "notifications/test-progress"])
+            let notificationResponse = try await notification
+            #expect(notificationResponse.statusCode == 202)
         } catch {
             try? await server.shutdown()
             throw error
@@ -382,38 +460,35 @@ struct HTTPConcurrencyTests {
             }
             await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
 
-            let first = Task {
-                _ = try? await postJSON(
-                    url: url,
-                    sessionID: sessionID,
-                    payload: toolListPayload(id: 600),
-                    timeout: 10
-                )
-            }
-            let second = Task {
-                _ = try? await postJSON(
-                    url: url,
-                    sessionID: sessionID,
-                    payload: toolListPayload(id: 601),
-                    timeout: 10
-                )
-            }
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.sessionManager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog == 2
-                }
+            async let first = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 600),
+                timeout: 10
+            )
+            async let second = postJSON(
+                url: url,
+                sessionID: sessionID,
+                payload: toolListPayload(id: 601),
+                timeout: 10
             )
 
-            await upstream.respondNext()
-            first.cancel()
-            second.cancel()
-
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.sessionManager.cachedToolsListResult() != nil
+            _ = try await waitForUpstreamRequest(upstream, label: "tools/list")
+            _ = try await waitWithTimeout(
+                "waiting for tools catalog waiters",
+                timeout: .seconds(2)
+            ) {
+                try await server.sessionManager.controlPlaneDebugMirror.waitForSnapshot {
+                    $0.waiterCounts.toolsCatalog == 2
                 }
-            )
+            }
+
+            #expect(await upstream.respondNext(label: "tools/list"))
+            let firstResult = try await first
+            let secondResult = try await second
+            #expect(firstResult.0.statusCode == 200)
+            #expect(secondResult.0.statusCode == 200)
+            #expect(server.sessionManager.cachedToolsListResult() != nil)
         } catch {
             try? await server.shutdown()
             throw error
@@ -455,11 +530,7 @@ struct HTTPConcurrencyTests {
             }
 
             try await upstream.waitForRefreshStartCount(1)
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.refreshDebugState.snapshot().queue.activeRequestCount >= 1
-                }
-            )
+            #expect(server.refreshDebugState.snapshot().queue.activeRequestCount >= 1)
             #expect(await upstream.didEmitErrorFive() == false)
             await upstream.releaseRefreshResponses()
             for task in tasks {
@@ -506,11 +577,13 @@ struct HTTPConcurrencyTests {
             }
 
             try await upstream.waitForRefreshStartCount(1)
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.refreshDebugState.snapshot().queue.activeRequestCount == 3
-                }
-            )
+            try await waitWithTimeout(
+                "waiting for concurrent refresh requests to enter the debug queue",
+                timeout: .seconds(2)
+            ) {
+                try await server.refreshDebugState.waitForActiveRequestCount(3)
+            }
+            #expect(server.refreshDebugState.snapshot().queue.activeRequestCount == 3)
             #expect(await upstream.didEmitConcurrentRefreshError() == false)
             await upstream.releaseRefreshResponses()
             for task in tasks {
@@ -555,11 +628,8 @@ struct HTTPConcurrencyTests {
             )
 
             #expect(response.statusCode == 202)
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    await upstream.nonInitializeLabels() == ["tools/call:XcodeRefreshCodeIssuesInFile"]
-                }
-            )
+            let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
+            #expect(labels == ["tools/call:XcodeRefreshCodeIssuesInFile"])
         } catch {
             try? await server.shutdown()
             throw error
@@ -608,11 +678,13 @@ struct HTTPConcurrencyTests {
             }
             defer { sseTask.cancel() }
 
-            #expect(
-                await waitUntil(timeout: .seconds(2)) {
-                    server.sessionManager.session(id: sessionID).notificationHub.hasSseClients
-                }
-            )
+            _ = try await waitWithTimeout(
+                "waiting for SSE client registration",
+                timeout: .seconds(2)
+            ) {
+                try await server.sessionManager.session(id: sessionID)
+                    .notificationHub.waitForSSEClient()
+            }
 
             let notificationData = try JSONSerialization.data(
                 withJSONObject: [
@@ -685,7 +757,8 @@ private struct TestHTTPServer {
 
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
-        requestTimeout: TimeInterval = 5
+        requestTimeout: TimeInterval = 5,
+        testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks()
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
@@ -694,8 +767,8 @@ private struct TestHTTPServer {
             var config = ProxyConfig(
                 listenHost: "127.0.0.1",
                 listenPort: 0,
-                upstreamCommand: "xcrun",
-                upstreamArgs: ["mcpbridge"],
+                upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+                upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
                 upstreamSessionID: nil,
                 maxBodyBytes: 1_048_576,
                 requestTimeout: requestTimeout
@@ -705,7 +778,11 @@ private struct TestHTTPServer {
         }()
         let upstream = providedUpstream ?? EchoUpstreamClient()
         let sessionManager = RuntimeCoordinator(
-            config: config, eventLoop: group.next(), upstreams: [upstream])
+            config: config,
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            testHooks: testHooks
+        )
         let refreshDebugState = RefreshCodeIssues.DebugState(
             defaultRequestTimeoutSeconds: config.requestTimeout
         )
@@ -820,6 +897,192 @@ private actor EchoUpstreamClient: UpstreamSlotControlling {
     }
 }
 
+private func waitForUpstreamRequest(
+    _ upstream: ControlledUpstreamClient,
+    label: String
+) async throws -> String {
+    try await waitWithTimeout("waiting for upstream \(label) request", timeout: .seconds(2)) {
+        try await upstream.waitForNonInitializeRequest(label: label)
+    }
+}
+
+private func waitForUpstreamRequestCount(
+    _ upstream: ControlledUpstreamClient,
+    count: Int
+) async throws -> [String] {
+    try await waitWithTimeout("waiting for \(count) upstream request(s)", timeout: .seconds(2)) {
+        try await upstream.waitForNonInitializeRequestCount(count)
+    }
+}
+
+private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @unchecked Sendable {
+    private struct SentRequest: Sendable {
+        let label: String
+        let responseData: Data?
+    }
+
+    private struct State {
+        var sentRequests: [SentRequest] = []
+        var requestHistory: [String] = []
+    }
+
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let lock = NSLock()
+    private var state = State()
+
+    init() {
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return .accepted
+        }
+
+        if let object = json as? [String: Any] {
+            handle(object)
+        } else if let array = json as? [Any] {
+            for item in array {
+                guard let object = item as? [String: Any] else { continue }
+                handle(object)
+            }
+        }
+        return .accepted
+    }
+
+    func clearRecordedRequests() {
+        withLock {
+            $0.sentRequests.removeAll()
+            $0.requestHistory.removeAll()
+        }
+    }
+
+    func recordedRequestLabels(count: Int) -> [String] {
+        guard count > 0 else { return [] }
+
+        return withLock { Array($0.requestHistory.prefix(count)) }
+    }
+
+    @discardableResult
+    func respondNext(label expectedLabel: String? = nil) -> Bool {
+        guard let responseData = takeNextResponse(label: expectedLabel) else { return false }
+        continuation.yield(.message(responseData))
+        return true
+    }
+
+    func takeNextResponse(label expectedLabel: String? = nil) -> Data? {
+        removeNextRequest(label: expectedLabel)?.responseData
+    }
+
+    @discardableResult
+    func discardNextResponse(label expectedLabel: String? = nil) -> Bool {
+        removeNextRequest(label: expectedLabel) != nil
+    }
+
+    private func removeNextRequest(label expectedLabel: String?) -> SentRequest? {
+        withLock { state in
+            let requestIndex: Array<SentRequest>.Index?
+            if let expectedLabel {
+                requestIndex = state.sentRequests.firstIndex { $0.label == expectedLabel }
+            } else {
+                requestIndex = state.sentRequests.indices.first
+            }
+            guard let requestIndex else { return nil }
+            return state.sentRequests.remove(at: requestIndex)
+        }
+    }
+
+    private func handle(_ object: [String: Any]) {
+        let method = (object["method"] as? String) ?? "unknown"
+        guard method != "initialize" else {
+            if let id = object["id"] {
+                continuation.yield(.message(makeInitializeResponse(id: id)))
+            }
+            return
+        }
+
+        let label = requestLabel(from: object)
+        let responseData = makeDefaultResponse(id: object["id"], method: method)
+        withLock {
+            $0.sentRequests.append(SentRequest(label: label, responseData: responseData))
+            $0.requestHistory.append(label)
+        }
+    }
+
+    private func withLock<T>(_ body: (inout State) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&state)
+    }
+
+    private func requestLabel(from object: [String: Any]) -> String {
+        let method = (object["method"] as? String) ?? "unknown"
+        if method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let name = params["name"] as? String
+        {
+            return "\(method):\(name)"
+        }
+        return method
+    }
+
+    private func makeInitializeResponse(id: Any) -> Data {
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [String: Any]()],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeSuccessResponse(id: Any?) -> Data? {
+        guard let id else { return nil }
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [:],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeToolsListResponse(id: Any?) -> Data? {
+        guard let id else { return nil }
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": [
+                "tools": [[
+                    "name": "XcodeListWindows",
+                    "description": "List Xcode windows",
+                    "inputSchema": [
+                        "type": "object",
+                        "properties": [String: Any](),
+                    ],
+                ]]
+            ],
+        ]
+        return try! JSONSerialization.data(withJSONObject: response, options: [])
+    }
+
+    private func makeDefaultResponse(id: Any?, method: String) -> Data? {
+        if method == "tools/list" {
+            return makeToolsListResponse(id: id)
+        }
+        return makeSuccessResponse(id: id)
+    }
+}
+
 private actor ControlledUpstreamClient: UpstreamSlotControlling {
     struct SentRequest: Sendable {
         let label: String
@@ -830,6 +1093,9 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     private var sentRequests: [SentRequest] = []
     private var requestHistory: [String] = []
+    private let requestLabels = RecordedValues<String>()
+    private var requestLabelBaseline = 0
+    private var requestLabelCount = 0
 
     init() {
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
@@ -873,21 +1139,53 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         requestHistory
     }
 
+    @discardableResult
+    func waitForNonInitializeRequestCount(_ count: Int) async throws -> [String] {
+        guard count > 0 else { return [] }
+        _ = try await requestLabels.nextValue(at: requestLabelBaseline + count - 1)
+        let labels = await requestLabels.snapshot()
+        return Array(labels.dropFirst(requestLabelBaseline).prefix(count))
+    }
+
+    @discardableResult
+    func waitForNonInitializeRequest(label expectedLabel: String) async throws -> String {
+        try await requestLabels.nextValue(startingAt: requestLabelBaseline) { label in
+            label == expectedLabel
+        }
+    }
+
     func clearRecordedRequests() {
         sentRequests.removeAll()
         requestHistory.removeAll()
+        requestLabelBaseline = requestLabelCount
     }
 
-    func respondNext() {
-        guard !sentRequests.isEmpty else { return }
-        let request = sentRequests.removeFirst()
-        guard let responseData = request.responseData else { return }
+    @discardableResult
+    func respondNext(label expectedLabel: String? = nil) -> Bool {
+        let requestIndex: Array<SentRequest>.Index?
+        if let expectedLabel {
+            requestIndex = sentRequests.firstIndex { $0.label == expectedLabel }
+        } else {
+            requestIndex = sentRequests.indices.first
+        }
+        guard let requestIndex else { return false }
+        let request = sentRequests.remove(at: requestIndex)
+        guard let responseData = request.responseData else { return false }
         continuation.yield(.message(responseData))
+        return true
     }
 
-    func discardNextResponse() {
-        guard !sentRequests.isEmpty else { return }
-        _ = sentRequests.removeFirst()
+    @discardableResult
+    func discardNextResponse(label expectedLabel: String? = nil) -> Bool {
+        let requestIndex: Array<SentRequest>.Index?
+        if let expectedLabel {
+            requestIndex = sentRequests.firstIndex { $0.label == expectedLabel }
+        } else {
+            requestIndex = sentRequests.indices.first
+        }
+        guard let requestIndex else { return false }
+        _ = sentRequests.remove(at: requestIndex)
+        return true
     }
 
     private func handle(_ object: [String: Any]) async {
@@ -903,6 +1201,8 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
         let responseData = makeDefaultResponse(id: object["id"], method: method)
         sentRequests.append(SentRequest(label: label, responseData: responseData))
         requestHistory.append(label)
+        requestLabelCount += 1
+        await requestLabels.append(label)
     }
 
     private func requestLabel(from object: [String: Any]) -> String {
@@ -1493,15 +1793,17 @@ private func postStatusOnly(
 }
 
 private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyConfig {
-    ProxyConfig(
+    var config = ProxyConfig(
         listenHost: "127.0.0.1",
         listenPort: 0,
-        upstreamCommand: "xcrun",
-        upstreamArgs: ["mcpbridge"],
+        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
         upstreamSessionID: nil,
         maxBodyBytes: 1_048_576,
         requestTimeout: requestTimeout
     )
+    config.prewarmToolsList = false
+    return config
 }
 
 private func addEmbeddedHTTPHandler(
@@ -1509,12 +1811,11 @@ private func addEmbeddedHTTPHandler(
     config: ProxyConfig,
     sessionManager: any RuntimeCoordinating
 ) throws {
-    let handler = HTTPHandler(
+    try addHTTPHandler(
+        to: channel,
         config: config,
-        sessionManager: sessionManager,
-        usesSynchronousLocalResolution: true
+        sessionManager: sessionManager
     )
-    try channel.pipeline.addHandler(handler).wait()
 }
 
 private func postEmbeddedJSON(
@@ -1540,6 +1841,11 @@ private func postEmbeddedJSON(
 private func collectEmbeddedResponse(
     from channel: EmbeddedChannel
 ) throws -> (head: HTTPResponseHead, body: String) {
+    drainEmbeddedCompletions(for: channel)
+    channel.embeddedEventLoop.run()
+    drainEmbeddedCompletions(for: channel)
+    channel.embeddedEventLoop.run()
+
     var responseHead: HTTPResponseHead?
     var bodyBuffer = channel.allocator.buffer(capacity: 0)
 
@@ -1566,48 +1872,16 @@ private func collectEmbeddedResponse(
     return (responseHead, body)
 }
 
+private func jsonObject(from string: String) throws -> [String: Any] {
+    try #require(
+        JSONSerialization.jsonObject(with: Data(string.utf8), options: []) as? [String: Any]
+    )
+}
+
 private func drainInitialToolsCatalogWarmupIfNeeded(
     server: TestHTTPServer,
     upstream: ControlledUpstreamClient
 ) async {
-    if await waitUntil(
-        timeout: .milliseconds(100),
-        condition: {
-            await upstream.pendingNonInitializeRequestCount() > 0
-        }
-    ) {
-        var remaining = await upstream.pendingNonInitializeRequestCount()
-        while remaining > 0 {
-            let currentRemaining = remaining
-            await upstream.respondNext()
-            _ = await waitUntil(timeout: .milliseconds(100)) {
-                await upstream.pendingNonInitializeRequestCount() < currentRemaining
-                    || server.sessionManager.cachedToolsListResult() != nil
-            }
-            remaining = await upstream.pendingNonInitializeRequestCount()
-        }
-    }
+    _ = server
     await upstream.clearRecordedRequests()
-}
-
-private func waitUntil(
-    timeout: Duration,
-    interval: Duration = .milliseconds(20),
-    condition: @escaping @Sendable () async -> Bool
-) async -> Bool {
-    // These HTTP tests cross URLSession and NIO channel scheduling boundaries.
-    // Polling here is only a bounded eventual-I/O guard, not an intra-actor
-    // synchronization primitive.
-    let intervalNanos = interval.components.seconds * 1_000_000_000
-        + Int64(interval.components.attoseconds / 1_000_000_000)
-    let deadline = ContinuousClock.now + timeout
-
-    while ContinuousClock.now < deadline {
-        if await condition() {
-            return true
-        }
-        try? await Task.sleep(nanoseconds: UInt64(max(intervalNanos, 1)))
-    }
-
-    return await condition()
 }

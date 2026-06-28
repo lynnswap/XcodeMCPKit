@@ -37,7 +37,12 @@ run_group "swift test" swift test \
   --no-parallel \
   -Xswiftc -strict-concurrency=minimal
 
-run_group "ProxyProcessTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+run_group "XcodeMCPProcessRuntimeTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
   --no-parallel \
-  --filter ProxyProcessTests \
+  --filter XcodeMCPProcessRuntimeTests \
+  -Xswiftc -strict-concurrency=minimal
+
+run_group "ProxyStdioAdapterTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+  --no-parallel \
+  --filter ProxyStdioAdapterTests \
   -Xswiftc -strict-concurrency=minimal

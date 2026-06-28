@@ -2,47 +2,43 @@
 
 ## Module Layout
 
-- `ProxyCore`
-  - CLI/config parsing, discovery file handling, logging, small shared helpers.
-- `ProxyMCP`
-  - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request inspection.
-- `ProxySession`
-  - Session lifecycle, initialize handshake, upstream process pool, leases, routing.
-- `ProxyXcodeSupport`
-  - Xcode window inspection and permission-dialog auto approval.
-- `ProxyXcodeFeatures`
-  - `XcodeRefreshCodeIssuesInFile` planning, target resolution, queueing, tool-list rewriting.
-- `ProxyHTTPGateway`
-  - Streamable HTTP request handling, transport validation, local MCP responses, forwarding.
-- `ProxyStdioTransport`
-  - STDIO compatibility adapter that forwards through the Streamable HTTP proxy.
-- `XcodeMCPProxy`
-  - Composition root only.
+- `XcodeMCPKit`
+  - Public client SDK facade, MCP value types, initialized single-client
+    session, configured client transports, and internal/package-scoped
+    JSON-RPC, stdio framing, timeout dispatch, request inspection, and local
+    process runtime primitives.
+- `XcodeMCPProxyKit`
+  - Public proxy facades plus internal session lifecycle, proxy config state,
+    initialize handshake, upstream process pool, leases, routing,
+    discovery-file clients, Xcode target discovery/window query/readiness,
+    `XcodeRefreshCodeIssuesInFile` workflow, HTTP gateway, STDIO adapter,
+    permission-dialog auto approval, process restart, and install-product
+    helpers.
 
 ## Ownership Boundaries
 
-- `ProxySession`
-  - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, and lease cleanup.
-- `ProxyHTTPGateway`
+- `XcodeMCPProxyKit` session internals
+  - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, lease cleanup, and refresh-code-issues feature workflow.
+- `XcodeMCPProxyKit` HTTP gateway internals
   - Owns HTTP transport validation, server-issued session ids, protocol-version enforcement, and request/response transport concerns.
   - Rejects JSON-RPC batch arrays at the HTTP boundary.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
-- `ProxyXcodeFeatures`
-  - Owns refresh workflow and other Xcode-specific feature logic.
 
 ## Dependency Direction
 
-- `ProxyCore` must not depend on gateway/session/Xcode modules.
-- `ProxyMCP` depends on `ProxyCore` for shared protocol primitives and extends the `MCP` namespace for JSON-RPC / MCP helpers.
-  Avoid introducing gateway/session/Xcode knowledge here.
-- `ProxySession` depends on `ProxyCore` and `ProxyMCP`.
-- `ProxyXcodeSupport` depends on `ProxyCore`.
-- `ProxyXcodeFeatures` depends on `ProxyCore`, `ProxyMCP`, and `ProxyXcodeSupport`.
-- `ProxyHTTPGateway` is the highest-level internal target and may depend on the lower-level targets above.
-- `ProxyCLI` depends on `XcodeMCPProxy` only.
+- `XcodeMCPKit` owns SDK protocol/runtime primitives and must not depend on
+  proxy-only modules. Avoid introducing gateway/session/Xcode proxy knowledge
+  here.
+- `XcodeMCPProxyKit` depends on `XcodeMCPKit` and owns proxy session/config
+  state, public proxy facades, CLI composition, installer helpers, and HTTP
+  gateway internals. Low-level proxy implementation files live under
+  `Sources/XcodeMCPProxyKit/Internal`, including session implementation files
+  under `Sources/XcodeMCPProxyKit/Internal/Session`.
+- Executable targets depend on `XcodeMCPProxyKit` only.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
-the default suite includes `ProxyArchitectureTests`.
+the default suite includes public product compile contract tests and proxy
+contract tests that exercise package and product boundaries.
 
 ## Protocol Boundaries
 
@@ -60,7 +56,8 @@ the default suite includes `ProxyArchitectureTests`.
 - Fast regression suite:
   - `swift test -Xswiftc -strict-concurrency=minimal`
 - Process / pipe suite:
-  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyProcessTests -Xswiftc -strict-concurrency=minimal`
+  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPProcessRuntimeTests -Xswiftc -strict-concurrency=minimal`
+  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal`
 - Full local maintainer check:
   - `scripts/check.sh`
 
