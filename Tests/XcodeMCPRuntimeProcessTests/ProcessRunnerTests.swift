@@ -1,107 +1,91 @@
-import Darwin
 import Foundation
 import Testing
-import XcodeMCPCore
 import XcodeMCPRuntimeTestSupport
 
-@testable import XcodeMCPCore
 @testable import XcodeMCPProcessRuntime
 
-@Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
+@Suite
 struct ProcessRunnerTests {
-    @Test func dispatchGroupLeaveGuardLeavesOnlyOnce() {
-        let group = DispatchGroup()
-        let guarder = DispatchGroupLeaveGuard(group: group)
-
-        guarder.leaveIfNeeded()
-        guarder.leaveIfNeeded()
-
-        #expect(group.wait(timeout: .now()) == .success)
-    }
-
-    @Test func processRunnerDrainsLargeStdoutWithoutHanging() async throws {
-        let runner = ProcessRunner()
-        let output = try await waitWithTimeout(
-            "ProcessRunner should finish draining large stdout",
-            timeout: .seconds(5)
-        ) {
+    @Test func processRunnerCollectsStdoutAndStderrAfterTerminationAndDrain() async throws {
+        let fakeDriver = FakeProcessRunnerDriver()
+        let runner = ProcessRunner(processDriverFactory: StaticProcessRunnerDriverFactory(fakeDriver))
+        let task = Task {
             try await runner.run(
                 ProcessRequest(
-                    label: "large-stdout",
-                    executablePath: "/bin/sh",
-                    arguments: ["-c", "yes x | head -c 200000"],
+                    label: "fake-output",
+                    executablePath: "/fake/tool",
+                    arguments: ["--flag"],
                     input: nil
                 )
             )
         }
+        defer {
+            task.cancel()
+        }
 
-        #expect(output.terminationStatus == 0)
-        #expect(output.stdout.utf8.count == 200000)
+        let request = await fakeDriver.nextStartedRequest()
+        #expect(request.label == "fake-output")
+        #expect(request.executablePath == "/fake/tool")
+        #expect(request.arguments == ["--flag"])
+
+        fakeDriver.emitStdout(Data("out-1".utf8))
+        fakeDriver.emitStderr(Data("err-1".utf8))
+        fakeDriver.emitTermination(status: 7)
+        fakeDriver.emitStdout(Data("-out-2".utf8))
+        fakeDriver.emitStderr(Data("-err-2".utf8))
+        fakeDriver.finishStdout()
+        fakeDriver.finishStderr()
+
+        let output = try await task.value
+        #expect(output.terminationStatus == 7)
+        #expect(output.stdout == "out-1-out-2")
+        #expect(output.stderr == "err-1-err-2")
     }
 
-    @Test func processRunnerPreservesLargeChunkedStdoutOrder() async throws {
-        let runner = ProcessRunner()
-        let markerFIFO = try TemporaryFIFO(name: "chunk-marker")
-        let releaseFIFO = try TemporaryFIFO(name: "chunk-release")
-        defer {
-            markerFIFO.cleanup()
-            releaseFIFO.cleanup()
-        }
-        let segments = (0..<64).map { index in
-            let prefix = "[\(String(index).leftPadding(toLength: 3, withPad: "0"))]"
-            let scalar = UnicodeScalar(65 + (index % 26))!
-            return prefix + String(repeating: Character(scalar), count: 2048)
-        }
-        let expected = segments.joined()
-        let outputTask = Task {
-            try await waitWithTimeout(
-                "ProcessRunner should preserve large chunk ordering",
-                timeout: .seconds(5)
-            ) {
-                try await runner.run(
-                    ProcessRequest(
-                        label: "ordered-large-stdout",
-                        executablePath: "/usr/bin/python3",
-                        arguments: makePythonSegmentEmitterArgs(
-                            segments: segments,
-                            markerFIFOPath: markerFIFO.path,
-                            releaseFIFOPath: releaseFIFO.path
-                        ),
-                        input: nil
-                    )
+    @Test func processRunnerWritesStdinAndClosesItBeforeCompletion() async throws {
+        let fakeDriver = FakeProcessRunnerDriver()
+        let runner = ProcessRunner(processDriverFactory: StaticProcessRunnerDriverFactory(fakeDriver))
+        let task = Task {
+            try await runner.run(
+                ProcessRequest(
+                    label: "fake-input",
+                    executablePath: "/fake/tool",
+                    arguments: [],
+                    input: "request-body"
                 )
-            }
+            )
         }
         defer {
-            outputTask.cancel()
+            task.cancel()
         }
 
-        for index in segments.indices {
-            let marker = try await waitWithTimeout(
-                "ProcessRunner segment \(index) should complete",
-                timeout: .seconds(2)
-            ) {
-                try await markerFIFO.reader.readLine()
-            }
-            #expect(marker == "chunk \(index)")
-            try releaseFIFO.writer.writeLine("continue")
-        }
+        _ = await fakeDriver.nextStartedRequest()
+        #expect(await fakeDriver.nextInputWrite() == "request-body")
+        _ = await fakeDriver.nextStdinClose()
+        #expect(fakeDriver.snapshot().closeStdinCount == 1)
 
-        let output = try await outputTask.value
+        fakeDriver.emitTermination(status: 0)
+        fakeDriver.finishStdout()
+        fakeDriver.finishStderr()
+
+        let output = try await task.value
         #expect(output.terminationStatus == 0)
-        #expect(output.stdout == expected)
     }
 
-    @Test func processRunnerTerminatesTimedOutProcess() async throws {
+    @Test func processRunnerTimeoutTerminatesWithoutWaitingForOutputDrain() async throws {
         let scheduler = TestProcessRunnerDelayScheduler()
-        let runner = ProcessRunner(delayScheduler: scheduler)
+        let fakeDriver = FakeProcessRunnerDriver()
+        let runner = ProcessRunner(
+            delayScheduler: scheduler,
+            processDriverFactory: StaticProcessRunnerDriverFactory(fakeDriver)
+        )
         let timeoutNanoseconds: Int64 = 10_000_000_000
         let task = Task {
             try await runner.run(
                 ProcessRequest(
                     label: "timeout",
-                    executablePath: "/usr/bin/python3",
-                    arguments: makePythonPausedProcessArgs(),
+                    executablePath: "/fake/hang",
+                    arguments: [],
                     input: nil,
                     timeoutNanoseconds: timeoutNanoseconds
                 )
@@ -111,118 +95,234 @@ struct ProcessRunnerTests {
             task.cancel()
         }
 
-        let timeout = try await waitWithTimeout("ProcessRunner should schedule timeout") {
-            try await scheduler.nextScheduled(.timeout)
-        }
+        _ = await fakeDriver.nextStartedRequest()
+        let timeout = try await scheduler.nextScheduled(.timeout)
         #expect(timeout.delayNanoseconds == timeoutNanoseconds)
         timeout.fire()
 
         await #expect(throws: ProcessTimeoutError.self) {
-            _ = try await waitWithTimeout(
-                "ProcessRunner should terminate a timed out process",
-                timeout: .seconds(3)
-            ) {
-                try await task.value
-            }
+            _ = try await task.value
         }
+        let snapshot = fakeDriver.snapshot()
+        #expect(snapshot.terminateCount == 1)
+        #expect(snapshot.stopOutputCount == 1)
 
-        let killFallback = try await waitWithTimeout("ProcessRunner should schedule kill fallback") {
-            try await scheduler.nextScheduled(.terminationKillFallback)
-        }
+        let killFallback = try await scheduler.nextScheduled(.terminationKillFallback)
         #expect(killFallback.delayNanoseconds == 1_000_000_000)
         killFallback.fire()
+        #expect(fakeDriver.snapshot().killCount == 1)
     }
 
-    @Test func processRunnerTimeoutDoesNotWaitForChildHeldPipeAfterParentExit() async throws {
+    @Test func processRunnerCancellationTerminatesAndClosesOutput() async throws {
         let scheduler = TestProcessRunnerDelayScheduler()
-        let runner = ProcessRunner(delayScheduler: scheduler)
-        let timeoutNanoseconds: Int64 = 10_000_000_000
-        let fifo = try TemporaryFIFO(name: "ready")
-        var childPID: pid_t?
-        defer {
-            if let childPID {
-                kill(childPID, SIGKILL)
-            }
-            fifo.cleanup()
-        }
-        let task = Task {
-            try await runner.run(
-                ProcessRequest(
-                    label: "timeout-inherited-pipe",
-                    executablePath: "/usr/bin/python3",
-                    arguments: makePythonForkingPipeHolderArgs(readyFIFOPath: fifo.path),
-                    input: nil,
-                    timeoutNanoseconds: timeoutNanoseconds
-                )
-            )
-        }
-        defer {
-            task.cancel()
-        }
-
-        let childPIDLine = try await waitWithTimeout("pipe-holding child should start") {
-            try await fifo.reader.readLine()
-        }
-        childPID = try parsePID(childPIDLine)
-
-        let timeout = try await waitWithTimeout("ProcessRunner should schedule inherited-pipe timeout") {
-            try await scheduler.nextScheduled(.timeout)
-        }
-        #expect(timeout.delayNanoseconds == timeoutNanoseconds)
-        timeout.fire()
-
-        await #expect(throws: ProcessTimeoutError.self) {
-            _ = try await waitWithTimeout(
-                "ProcessRunner should time out without waiting for child-held pipes",
-                timeout: .seconds(2)
-            ) {
-                try await task.value
-            }
-        }
-    }
-
-    @Test func processRunnerCancelsRunningProcessPromptly() async throws {
-        let scheduler = TestProcessRunnerDelayScheduler()
-        let runner = ProcessRunner(delayScheduler: scheduler)
-        let fifo = try TemporaryFIFO(name: "ready")
-        defer {
-            fifo.cleanup()
-        }
+        let fakeDriver = FakeProcessRunnerDriver()
+        let runner = ProcessRunner(
+            delayScheduler: scheduler,
+            processDriverFactory: StaticProcessRunnerDriverFactory(fakeDriver)
+        )
         let task = Task {
             try await runner.run(
                 ProcessRequest(
                     label: "cancel",
-                    executablePath: "/usr/bin/python3",
-                    arguments: makePythonPausedProcessArgs(readyFIFOPath: fifo.path),
+                    executablePath: "/fake/hang",
+                    arguments: [],
                     input: nil
                 )
             )
         }
-        defer {
-            task.cancel()
-        }
 
-        _ = try await waitWithTimeout("ProcessRunner child should be running before cancellation") {
-            try await fifo.reader.readLine()
-        }
+        _ = await fakeDriver.nextStartedRequest()
         task.cancel()
 
         await #expect(throws: CancellationError.self) {
-            _ = try await waitWithTimeout(
-                "ProcessRunner should finish promptly when cancelled",
-                timeout: .seconds(1)
-            ) {
-                try await task.value
-            }
+            _ = try await task.value
         }
+        let snapshot = fakeDriver.snapshot()
+        #expect(snapshot.terminateCount == 1)
+        #expect(snapshot.stopOutputCount == 1)
 
-        let killFallback = try await waitWithTimeout(
-            "ProcessRunner should own the cancellation kill delay"
-        ) {
-            try await scheduler.nextScheduled(.terminationKillFallback)
-        }
+        let killFallback = try await scheduler.nextScheduled(.terminationKillFallback)
         #expect(killFallback.delayNanoseconds == 1_000_000_000)
         killFallback.fire()
+        #expect(fakeDriver.snapshot().killCount == 1)
+    }
+}
+
+@Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
+struct LiveProcessRunnerSmokeTests {
+    @Test func processRunnerLiveSmokeCollectsOutput() async throws {
+        let runner = ProcessRunner()
+        let output = try await waitWithTimeout(
+            "live ProcessRunner smoke should finish",
+            timeout: .seconds(5)
+        ) {
+            try await runner.run(
+                ProcessRequest(
+                    label: "live-smoke",
+                    executablePath: "/bin/sh",
+                    arguments: ["-c", "printf 'stdout'; printf 'stderr' >&2"],
+                    input: nil
+                )
+            )
+        }
+
+        #expect(output.terminationStatus == 0)
+        #expect(output.stdout == "stdout")
+        #expect(output.stderr == "stderr")
+    }
+}
+
+private struct StaticProcessRunnerDriverFactory: ProcessRunnerProcessDriverMaking {
+    private let driver: FakeProcessRunnerDriver
+
+    init(_ driver: FakeProcessRunnerDriver) {
+        self.driver = driver
+    }
+
+    func makeDriver() -> any ProcessRunnerProcessDriving {
+        driver
+    }
+}
+
+private final class FakeProcessRunnerDriver: ProcessRunnerProcessDriving, @unchecked Sendable {
+    struct Snapshot: Sendable {
+        let terminateCount: Int
+        let stopOutputCount: Int
+        let closeStdinCount: Int
+        let killCount: Int
+    }
+
+    private struct State {
+        var onTermination: (@Sendable (Int32) -> Void)?
+        var isRunning = false
+        var terminateCount = 0
+        var stopOutputCount = 0
+        var closeStdinCount = 0
+        var killCount = 0
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+    private let startedRequests = DeterministicRecorder<ProcessRequest>()
+    private let inputWrites = DeterministicRecorder<String>()
+    private let stdinCloses = DeterministicRecorder<Int>()
+    private let stdoutContinuation: AsyncStream<Data>.Continuation
+    private let stderrContinuation: AsyncStream<Data>.Continuation
+    private let stdoutChunks: AsyncStream<Data>
+    private let stderrChunks: AsyncStream<Data>
+
+    init() {
+        var stdoutContinuation: AsyncStream<Data>.Continuation!
+        self.stdoutChunks = AsyncStream { continuation in
+            stdoutContinuation = continuation
+        }
+        self.stdoutContinuation = stdoutContinuation
+
+        var stderrContinuation: AsyncStream<Data>.Continuation!
+        self.stderrChunks = AsyncStream { continuation in
+            stderrContinuation = continuation
+        }
+        self.stderrContinuation = stderrContinuation
+    }
+
+    func start(
+        request: ProcessRequest,
+        onTermination: @escaping @Sendable (Int32) -> Void
+    ) throws -> ProcessRunnerStartedProcessIO {
+        lock.withLock {
+            state.onTermination = onTermination
+            state.isRunning = true
+        }
+        startedRequests.record(request)
+        return ProcessRunnerStartedProcessIO(
+            stdoutChunks: stdoutChunks,
+            stderrChunks: stderrChunks
+        )
+    }
+
+    func writeInput(_ input: String) throws {
+        inputWrites.record(input)
+    }
+
+    func closeStdin() {
+        let count = lock.withLock { () -> Int in
+            state.closeStdinCount += 1
+            return state.closeStdinCount
+        }
+        stdinCloses.record(count)
+    }
+
+    func terminate() {
+        lock.withLock {
+            state.terminateCount += 1
+        }
+    }
+
+    func stopOutput() {
+        lock.withLock {
+            state.stopOutputCount += 1
+        }
+        finishStdout()
+        finishStderr()
+    }
+
+    func killIfRunning() {
+        let shouldRecord = lock.withLock { () -> Bool in
+            guard state.isRunning else {
+                return false
+            }
+            state.killCount += 1
+            state.isRunning = false
+            return true
+        }
+        _ = shouldRecord
+    }
+
+    func emitStdout(_ data: Data) {
+        stdoutContinuation.yield(data)
+    }
+
+    func emitStderr(_ data: Data) {
+        stderrContinuation.yield(data)
+    }
+
+    func emitTermination(status: Int32) {
+        let onTermination = lock.withLock { () -> (@Sendable (Int32) -> Void)? in
+            state.isRunning = false
+            return state.onTermination
+        }
+        onTermination?(status)
+    }
+
+    func finishStdout() {
+        stdoutContinuation.finish()
+    }
+
+    func finishStderr() {
+        stderrContinuation.finish()
+    }
+
+    func nextStartedRequest() async -> ProcessRequest {
+        await startedRequests.nextValue(at: 0)
+    }
+
+    func nextInputWrite() async -> String {
+        await inputWrites.nextValue(at: 0)
+    }
+
+    func nextStdinClose() async -> Int {
+        await stdinCloses.nextValue(at: 0)
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                terminateCount: state.terminateCount,
+                stopOutputCount: state.stopOutputCount,
+                closeStdinCount: state.closeStdinCount,
+                killCount: state.killCount
+            )
+        }
     }
 }
 
@@ -360,75 +460,4 @@ private final class TestProcessRunnerDelayScheduler: ProcessRunnerDelaySchedulin
         }
         return try body()
     }
-}
-
-private extension String {
-    func leftPadding(toLength length: Int, withPad pad: String) -> String {
-        guard count < length else { return self }
-        return String(repeating: pad, count: length - count) + self
-    }
-}
-
-private func makePythonPausedProcessArgs(readyFIFOPath: String? = nil) -> [String] {
-    let script = """
-    import signal
-    import sys
-
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], "w") as ready:
-            ready.write("ready\\n")
-            ready.flush()
-
-    signal.pause()
-    """
-    if let readyFIFOPath {
-        return ["-c", script, readyFIFOPath]
-    }
-    return ["-c", script]
-}
-
-private func makePythonForkingPipeHolderArgs(readyFIFOPath: String) -> [String] {
-    let script = """
-    import os
-    import signal
-    import sys
-
-    parent_pid = os.getpid()
-    pid = os.fork()
-    if pid == 0:
-        while os.getppid() == parent_pid:
-            pass
-        with open(sys.argv[1], "w") as ready:
-            ready.write(str(os.getpid()) + "\\n")
-            ready.flush()
-        signal.pause()
-        os._exit(0)
-
-    os._exit(0)
-    """
-    return ["-c", script, readyFIFOPath]
-}
-
-private func makePythonSegmentEmitterArgs(
-    segments: [String],
-    markerFIFOPath: String,
-    releaseFIFOPath: String
-) -> [String] {
-    let script = """
-    import sys
-
-    marker_path = sys.argv[1]
-    release_path = sys.argv[2]
-    segments = sys.argv[3:]
-
-    with open(marker_path, "w") as marker, open(release_path, "r") as release:
-        for index, segment in enumerate(segments):
-            sys.stdout.write(segment)
-            sys.stdout.flush()
-            marker.write("chunk " + str(index) + "\\n")
-            marker.flush()
-            if release.readline() == "":
-                sys.exit(1)
-    """
-    return ["-c", script, markerFIFOPath, releaseFIFOPath] + segments
 }

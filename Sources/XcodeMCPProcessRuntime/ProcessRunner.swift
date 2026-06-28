@@ -1,62 +1,6 @@
-import XcodeMCPCore
 import Foundation
 import Darwin
 import NIOConcurrencyHelpers
-
-final class DispatchGroupLeaveGuard: @unchecked Sendable {
-    private let group: DispatchGroup
-    private let didLeave = NIOLockedValueBox(false)
-
-    init(group: DispatchGroup) {
-        self.group = group
-        self.group.enter()
-    }
-
-    func leaveIfNeeded() {
-        let shouldLeave = didLeave.withLockedValue { didLeave in
-            guard didLeave == false else { return false }
-            didLeave = true
-            return true
-        }
-        guard shouldLeave else { return }
-        group.leave()
-    }
-}
-
-private final class PipeCollector: @unchecked Sendable {
-    private let reader: OrderedPipeReader
-    private let drainGuard: DispatchGroupLeaveGuard
-    private let buffer = NIOLockedValueBox(Data())
-    private var task: Task<Void, Never>?
-
-    init(fileHandle: FileHandle, drainGroup: DispatchGroup, label: String) {
-        self.reader = OrderedPipeReader(fileHandle: fileHandle, label: label)
-        self.drainGuard = DispatchGroupLeaveGuard(group: drainGroup)
-    }
-
-    func start() {
-        reader.start()
-        task = Task { [buffer, drainGuard, reader] in
-            for await chunk in reader.chunks {
-                buffer.withLockedValue { data in
-                    data.append(chunk)
-                }
-            }
-            drainGuard.leaveIfNeeded()
-        }
-    }
-
-    func collectedData() -> Data {
-        buffer.withLockedValue { $0 }
-    }
-
-    func cancel() {
-        reader.stop()
-        task?.cancel()
-        task = nil
-        drainGuard.leaveIfNeeded()
-    }
-}
 
 package enum ProcessRunnerScheduledDelayKind: Sendable {
     case timeout
@@ -307,87 +251,290 @@ package protocol ProcessRunning: Sendable {
     func run(_ request: ProcessRequest) async throws -> ProcessOutput
 }
 
+package struct ProcessRunnerStartedProcessIO: Sendable {
+    package let stdoutChunks: AsyncStream<Data>
+    package let stderrChunks: AsyncStream<Data>
+
+    package init(
+        stdoutChunks: AsyncStream<Data>,
+        stderrChunks: AsyncStream<Data>
+    ) {
+        self.stdoutChunks = stdoutChunks
+        self.stderrChunks = stderrChunks
+    }
+}
+
+package protocol ProcessRunnerProcessDriving: AnyObject, Sendable {
+    func start(
+        request: ProcessRequest,
+        onTermination: @escaping @Sendable (Int32) -> Void
+    ) throws -> ProcessRunnerStartedProcessIO
+    func writeInput(_ input: String) throws
+    func closeStdin()
+    func terminate()
+    func stopOutput()
+    func killIfRunning()
+}
+
+package protocol ProcessRunnerProcessDriverMaking: Sendable {
+    func makeDriver() -> any ProcessRunnerProcessDriving
+}
+
+package struct LiveProcessRunnerProcessDriverFactory: ProcessRunnerProcessDriverMaking {
+    package init() {}
+
+    package func makeDriver() -> any ProcessRunnerProcessDriving {
+        LiveProcessRunnerProcessDriver()
+    }
+}
+
+private final class LiveProcessRunnerProcessDriver: ProcessRunnerProcessDriving, @unchecked Sendable {
+    private struct State {
+        var process: Process?
+        var stdoutPipe: Pipe?
+        var stderrPipe: Pipe?
+        var stdinPipe: Pipe?
+        var stdoutReader: OrderedPipeReader?
+        var stderrReader: OrderedPipeReader?
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+
+    func start(
+        request: ProcessRequest,
+        onTermination: @escaping @Sendable (Int32) -> Void
+    ) throws -> ProcessRunnerStartedProcessIO {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdinPipe = Pipe()
+        let stdoutReader = OrderedPipeReader(
+            fileHandle: stdoutPipe.fileHandleForReading,
+            label: "XcodeMCPProxy.ProcessRunner.stdout"
+        )
+        let stderrReader = OrderedPipeReader(
+            fileHandle: stderrPipe.fileHandleForReading,
+            label: "XcodeMCPProxy.ProcessRunner.stderr"
+        )
+
+        process.executableURL = URL(fileURLWithPath: request.executablePath)
+        process.arguments = request.arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        if request.input != nil {
+            process.standardInput = stdinPipe
+        }
+        process.terminationHandler = { [weak self] process in
+            self?.clearProcess()
+            onTermination(process.terminationStatus)
+        }
+
+        stdoutReader.start()
+        stderrReader.start()
+        do {
+            try process.run()
+        } catch {
+            stdoutReader.stop()
+            stderrReader.stop()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            try? stdinPipe.fileHandleForWriting.close()
+            throw error
+        }
+
+        lock.withLock {
+            state.process = process
+            state.stdoutPipe = stdoutPipe
+            state.stderrPipe = stderrPipe
+            state.stdinPipe = stdinPipe
+            state.stdoutReader = stdoutReader
+            state.stderrReader = stderrReader
+        }
+
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+
+        return ProcessRunnerStartedProcessIO(
+            stdoutChunks: stdoutReader.chunks,
+            stderrChunks: stderrReader.chunks
+        )
+    }
+
+    func writeInput(_ input: String) throws {
+        guard let inputData = input.data(using: .utf8) else {
+            return
+        }
+        let pipe = lock.withLock { state.stdinPipe }
+        try pipe?.fileHandleForWriting.write(contentsOf: inputData)
+    }
+
+    func closeStdin() {
+        let pipe = lock.withLock { state.stdinPipe }
+        try? pipe?.fileHandleForWriting.close()
+    }
+
+    func terminate() {
+        let process = lock.withLock { state.process }
+        guard let process, process.isRunning else {
+            return
+        }
+        process.terminate()
+    }
+
+    func stopOutput() {
+        let snapshot = lock.withLock {
+            (
+                stdoutReader: state.stdoutReader,
+                stderrReader: state.stderrReader,
+                stdoutPipe: state.stdoutPipe,
+                stderrPipe: state.stderrPipe
+            )
+        }
+        snapshot.stdoutReader?.stop()
+        snapshot.stderrReader?.stop()
+        try? snapshot.stdoutPipe?.fileHandleForWriting.close()
+        try? snapshot.stderrPipe?.fileHandleForWriting.close()
+    }
+
+    func killIfRunning() {
+        let process = lock.withLock { state.process }
+        guard let process, process.isRunning else {
+            return
+        }
+        kill(process.processIdentifier, SIGKILL)
+    }
+
+    private func clearProcess() {
+        lock.withLock {
+            state.process = nil
+        }
+    }
+}
+
+private final class ProcessRunnerRunState: @unchecked Sendable {
+    private struct State {
+        var stdout = Data()
+        var stderr = Data()
+        var terminationStatus: Int32?
+        var stdoutDrained = false
+        var stderrDrained = false
+        var didResume = false
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    func appendStdout(_ data: Data) {
+        state.withLockedValue { state in
+            state.stdout.append(data)
+        }
+    }
+
+    func appendStderr(_ data: Data) {
+        state.withLockedValue { state in
+            state.stderr.append(data)
+        }
+    }
+
+    func markStdoutDrained() -> ProcessOutput? {
+        state.withLockedValue { state in
+            state.stdoutDrained = true
+            return completeOutputIfReady(state: &state)
+        }
+    }
+
+    func markStderrDrained() -> ProcessOutput? {
+        state.withLockedValue { state in
+            state.stderrDrained = true
+            return completeOutputIfReady(state: &state)
+        }
+    }
+
+    func markTerminated(status: Int32) -> ProcessOutput? {
+        state.withLockedValue { state in
+            state.terminationStatus = status
+            return completeOutputIfReady(state: &state)
+        }
+    }
+
+    func reserveResume() -> Bool {
+        state.withLockedValue { state in
+            guard state.didResume == false else {
+                return false
+            }
+            state.didResume = true
+            return true
+        }
+    }
+
+    private func completeOutputIfReady(state: inout State) -> ProcessOutput? {
+        guard
+            state.didResume == false,
+            let terminationStatus = state.terminationStatus,
+            state.stdoutDrained,
+            state.stderrDrained
+        else {
+            return nil
+        }
+        state.didResume = true
+        return ProcessOutput(
+            terminationStatus: terminationStatus,
+            stdout: String(decoding: state.stdout, as: UTF8.self),
+            stderr: String(decoding: state.stderr, as: UTF8.self)
+        )
+    }
+}
+
 package struct ProcessRunner: ProcessRunning {
     private static let terminationKillFallbackDelayNanoseconds: Int64 = 1_000_000_000
 
     private let delayScheduler: any ProcessRunnerDelayScheduling
+    private let processDriverFactory: any ProcessRunnerProcessDriverMaking
 
     package init(
-        delayScheduler: any ProcessRunnerDelayScheduling = DispatchProcessRunnerDelayScheduler()
+        delayScheduler: any ProcessRunnerDelayScheduling = DispatchProcessRunnerDelayScheduler(),
+        processDriverFactory: any ProcessRunnerProcessDriverMaking = LiveProcessRunnerProcessDriverFactory()
     ) {
         self.delayScheduler = delayScheduler
+        self.processDriverFactory = processDriverFactory
     }
 
     package func run(_ request: ProcessRequest) async throws -> ProcessOutput {
         let cancellationState = ProcessCancellationState()
+        let runState = ProcessRunnerRunState()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let process = Process()
-                let stdoutPipe = Pipe()
-                let stderrPipe = Pipe()
-                let stdinPipe = Pipe()
-                let drainGroup = DispatchGroup()
+                let driver = processDriverFactory.makeDriver()
                 let timeoutController = ProcessTimeoutController(scheduler: delayScheduler)
-                let stdoutCollector = PipeCollector(
-                    fileHandle: stdoutPipe.fileHandleForReading,
-                    drainGroup: drainGroup,
-                    label: "XcodeMCPProxy.ProcessRunner.stdout"
-                )
-                let stderrCollector = PipeCollector(
-                    fileHandle: stderrPipe.fileHandleForReading,
-                    drainGroup: drainGroup,
-                    label: "XcodeMCPProxy.ProcessRunner.stderr"
-                )
-                let didResume = NIOLockedValueBox(false)
-                let reserveResume: @Sendable () -> Bool = {
-                    let shouldResume = didResume.withLockedValue { didResume in
-                        guard didResume == false else { return false }
-                        didResume = true
-                        return true
-                    }
-                    return shouldResume
-                }
                 let resumeReserved: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in
                     timeoutController.cancel()
                     cancellationState.complete()
                     continuation.resume(with: result)
                 }
                 let resumeOnce: @Sendable (Result<ProcessOutput, Error>) -> Void = { result in
-                    guard reserveResume() else { return }
+                    guard runState.reserveResume() else { return }
                     resumeReserved(result)
                 }
-
-                process.executableURL = URL(fileURLWithPath: request.executablePath)
-                process.arguments = request.arguments
-                process.standardOutput = stdoutPipe
-                process.standardError = stderrPipe
-                if request.input != nil {
-                    process.standardInput = stdinPipe
-                }
-                stdoutCollector.start()
-                stderrCollector.start()
-                let cancelResources: @Sendable () -> Void = {
-                    process.terminationHandler = nil
-                    if process.isRunning {
-                        process.terminate()
-                        delayScheduler.schedule(
-                            .terminationKillFallback,
-                            afterNanoseconds: Self.terminationKillFallbackDelayNanoseconds
-                        ) {
-                            guard process.isRunning else {
-                                return
-                            }
-                            kill(process.processIdentifier, SIGKILL)
-                        }
+                let resumeSuccessIfReady: @Sendable (ProcessOutput?) -> Void = { output in
+                    guard let output else {
+                        return
                     }
-                    stdoutCollector.cancel()
-                    stderrCollector.cancel()
-                    try? stdoutPipe.fileHandleForWriting.close()
-                    try? stderrPipe.fileHandleForWriting.close()
-                    try? stdinPipe.fileHandleForWriting.close()
+                    resumeReserved(.success(output))
+                }
+
+                let cancelResources: @Sendable () -> Void = {
+                    driver.terminate()
+                    delayScheduler.schedule(
+                        .terminationKillFallback,
+                        afterNanoseconds: Self.terminationKillFallbackDelayNanoseconds
+                    ) {
+                        driver.killIfRunning()
+                    }
+                    driver.stopOutput()
+                    driver.closeStdin()
                 }
                 timeoutController.configure(timeoutNanoseconds: request.timeoutNanoseconds) {
-                    guard reserveResume() else {
+                    guard runState.reserveResume() else {
                         return
                     }
                     cancelResources()
@@ -399,43 +546,35 @@ package struct ProcessRunner: ProcessRunning {
                     return
                 }
 
-                process.terminationHandler = { process in
-                    DispatchQueue.global().async {
-                        drainGroup.wait()
-                        let output = ProcessOutput(
-                            terminationStatus: process.terminationStatus,
-                            stdout: String(decoding: stdoutCollector.collectedData(), as: UTF8.self),
-                            stderr: String(decoding: stderrCollector.collectedData(), as: UTF8.self)
-                        )
-                        resumeOnce(.success(output))
-                    }
-                }
-
                 do {
-                    try process.run()
+                    let io = try driver.start(request: request) { status in
+                        resumeSuccessIfReady(runState.markTerminated(status: status))
+                    }
+                    Task {
+                        for await chunk in io.stdoutChunks {
+                            runState.appendStdout(chunk)
+                        }
+                        resumeSuccessIfReady(runState.markStdoutDrained())
+                    }
+                    Task {
+                        for await chunk in io.stderrChunks {
+                            runState.appendStderr(chunk)
+                        }
+                        resumeSuccessIfReady(runState.markStderrDrained())
+                    }
                     if cancellationState.isCancelled() {
                         cancelResources()
                         return
                     }
                     timeoutController.schedule()
-                    try? stdoutPipe.fileHandleForWriting.close()
-                    try? stderrPipe.fileHandleForWriting.close()
                     if let input = request.input {
-                        if let inputData = input.data(using: .utf8) {
-                            try stdinPipe.fileHandleForWriting.write(contentsOf: inputData)
-                        }
-                        try stdinPipe.fileHandleForWriting.close()
+                        try driver.writeInput(input)
+                        driver.closeStdin()
                     }
                 } catch {
-                    process.terminationHandler = nil
-                    if process.isRunning {
-                        process.terminate()
-                    }
-                    stdoutCollector.cancel()
-                    stderrCollector.cancel()
-                    try? stdoutPipe.fileHandleForWriting.close()
-                    try? stderrPipe.fileHandleForWriting.close()
-                    try? stdinPipe.fileHandleForWriting.close()
+                    driver.terminate()
+                    driver.stopOutput()
+                    driver.closeStdin()
                     resumeOnce(.failure(error))
                 }
             }
