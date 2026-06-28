@@ -1,13 +1,13 @@
 import NIO
 
 final class EventLoopCompletionExecutor: @unchecked Sendable {
-    private let executeImpl: (EventLoop, @escaping () -> Void) -> Void
+    private let executeImpl: @Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void
 
-    init(_ execute: @escaping (EventLoop, @escaping () -> Void) -> Void) {
+    init(_ execute: @escaping @Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void) {
         self.executeImpl = execute
     }
 
-    func execute(on eventLoop: EventLoop, _ operation: @escaping () -> Void) {
+    func execute(on eventLoop: EventLoop, _ operation: @escaping @Sendable () -> Void) {
         executeImpl(eventLoop, operation)
     }
 
