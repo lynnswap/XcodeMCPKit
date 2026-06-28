@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -17,6 +18,17 @@ struct PublicProductContractTests {
             packageURL: fixture.url,
             logURL: fixture.url.appendingPathComponent("swift-build.log")
         )
+
+        if result.timedOut {
+            Issue.record(
+                """
+                swift build timed out after \(Int(result.timeoutSeconds)) seconds:
+                \(result.output)
+                """
+            )
+            #expect(!result.timedOut)
+            return
+        }
 
         if result.exitCode != 0 {
             Issue.record("swift build failed with exit code \(result.exitCode):\n\(result.output)")
@@ -115,10 +127,21 @@ struct PublicProductContractTests {
         """
     }
 
-    private func runSwiftBuild(packageURL: URL, logURL: URL) throws -> CommandResult {
+    private func runSwiftBuild(
+        packageURL: URL,
+        logURL: URL,
+        timeoutSeconds: TimeInterval = 180
+    ) throws -> CommandResult {
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let output = try FileHandle(forWritingTo: logURL)
-        defer { try? output.close() }
+        var outputClosed = false
+        func closeOutput() {
+            guard !outputClosed else {
+                return
+            }
+            outputClosed = true
+            try? output.close()
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -139,19 +162,47 @@ struct PublicProductContractTests {
         process.standardOutput = output
         process.standardError = output
 
+        let exitSemaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            exitSemaphore.signal()
+        }
+
         try process.run()
-        process.waitUntilExit()
+        let timedOut = exitSemaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut
+        if timedOut {
+            terminate(process, exitSemaphore: exitSemaphore)
+        }
+        closeOutput()
+        let exitCode: Int32 = process.isRunning ? -1 : process.terminationStatus
 
         return CommandResult(
-            exitCode: process.terminationStatus,
-            output: (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+            exitCode: exitCode,
+            output: (try? String(contentsOf: logURL, encoding: .utf8)) ?? "",
+            timedOut: timedOut,
+            timeoutSeconds: timeoutSeconds
         )
+    }
+
+    private func terminate(_ process: Process, exitSemaphore: DispatchSemaphore) {
+        guard process.isRunning else {
+            return
+        }
+
+        process.terminate()
+        if exitSemaphore.wait(timeout: .now() + 5) == .success {
+            return
+        }
+
+        kill(process.processIdentifier, SIGKILL)
+        _ = exitSemaphore.wait(timeout: .now() + 5)
     }
 }
 
 private struct CommandResult {
     let exitCode: Int32
     let output: String
+    let timedOut: Bool
+    let timeoutSeconds: TimeInterval
 }
 
 private struct TemporaryDirectory {

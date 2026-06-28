@@ -692,7 +692,7 @@ struct RuntimeCoordinatorTests {
         #expect(acceptedResult == .accepted)
         #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
 
-        let forwarded = try await upstream.nextSent(at: 3)
+        let forwarded = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         let forwardedObject = try #require(
             JSONSerialization.jsonObject(with: forwarded, options: []) as? [String: Any]
         )
@@ -3627,9 +3627,16 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(2)
             )
         }
-        let firstRequest = try await upstream0.nextSent(startingAt: firstUpstream0StartIndex) {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
-        }
+        let firstRequest = try await sentValue(
+            from: upstream0,
+            startingAt: firstUpstream0StartIndex,
+            matching: {
+                methodName(from: $0) == "tools/call"
+                    && toolCallName(from: $0) == "XcodeListWindows"
+            },
+            timeout: .seconds(2),
+            description: "waiting for first XcodeListWindows fanout request"
+        )
         #expect(await upstream1.sentCount() == firstUpstream1StartIndex)
         await upstream0.yield(
             .message(
@@ -3651,12 +3658,26 @@ struct RuntimeCoordinatorTests {
                 requestTimeoutOverride: .seconds(2)
             )
         }
-        let secondRequest0 = try await upstream0.nextSent(startingAt: secondUpstream0StartIndex) {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
-        }
-        let secondRequest1 = try await upstream1.nextSent(startingAt: secondUpstream1StartIndex) {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
-        }
+        let secondRequest0 = try await sentValue(
+            from: upstream0,
+            startingAt: secondUpstream0StartIndex,
+            matching: {
+                methodName(from: $0) == "tools/call"
+                    && toolCallName(from: $0) == "XcodeListWindows"
+            },
+            timeout: .seconds(2),
+            description: "waiting for second XcodeListWindows fanout request on upstream 0"
+        )
+        let secondRequest1 = try await sentValue(
+            from: upstream1,
+            startingAt: secondUpstream1StartIndex,
+            matching: {
+                methodName(from: $0) == "tools/call"
+                    && toolCallName(from: $0) == "XcodeListWindows"
+            },
+            timeout: .seconds(2),
+            description: "waiting for second XcodeListWindows fanout request on upstream 1"
+        )
         await upstream0.yield(
             .message(
                 try makeXcodeListWindowsResponse(
@@ -7355,15 +7376,13 @@ struct RuntimeCoordinatorTests {
         let serverInfo = try #require(result["serverInfo"] as? [String: Any])
         #expect(serverInfo["name"] as? String == "cached-handshake")
 
-        let secondWarmRetry = try await waitWithTimeout(
-            "primary should start another warm initialize after overload",
-            timeout: .seconds(2)
-        ) {
-            try await upstream0.nextSent(
-                startingAt: 3,
-                matching: { methodName(from: $0) == "initialize" }
-            )
-        }
+        let secondWarmRetry = try await sentValue(
+            from: upstream0,
+            startingAt: 3,
+            matching: { methodName(from: $0) == "initialize" },
+            timeout: .seconds(2),
+            description: "primary should start another warm initialize after overload"
+        )
         #expect(methodName(from: secondWarmRetry) == "initialize")
     }
 
