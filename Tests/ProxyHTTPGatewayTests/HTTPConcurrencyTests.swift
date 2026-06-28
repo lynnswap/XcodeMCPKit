@@ -217,7 +217,7 @@ struct HTTPConcurrencyTests {
             executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
         )
         eventLoop.run()
-        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        let firstRequestLabels = try upstream.recordedRequestLabels(count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         let secondOperation = try handlePost(
@@ -240,7 +240,7 @@ struct HTTPConcurrencyTests {
         #expect(firstObject["error"] == nil)
 
         eventLoop.run()
-        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        let secondRequestLabels = try upstream.recordedRequestLabels(count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
             "tools/call:ExecuteSnippet",
@@ -310,7 +310,7 @@ struct HTTPConcurrencyTests {
             to: firstChannel
         )
         firstChannel.embeddedEventLoop.run()
-        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        let firstRequestLabels = try upstream.recordedRequestLabels(count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         try postEmbeddedJSON(
@@ -329,7 +329,7 @@ struct HTTPConcurrencyTests {
         #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
 
         secondChannel.embeddedEventLoop.run()
-        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        let secondRequestLabels = try upstream.recordedRequestLabels(count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
             "tools/call:ExecuteSnippet",
@@ -946,13 +946,18 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
         }
     }
 
-    func recordedRequestLabels(count: Int) -> [String] {
+    func recordedRequestLabels(count: Int) throws -> [String] {
         guard count > 0 else { return [] }
 
+        let timeoutAt = Date(timeIntervalSinceNow: 2)
         condition.lock()
         defer { condition.unlock() }
         while state.requestHistory.count < count {
-            condition.wait()
+            guard condition.wait(until: timeoutAt) else {
+                throw AsyncTestTimeoutError(
+                    description: "waiting for \(count) embedded upstream request(s)"
+                )
+            }
         }
         return Array(state.requestHistory.prefix(count))
     }
