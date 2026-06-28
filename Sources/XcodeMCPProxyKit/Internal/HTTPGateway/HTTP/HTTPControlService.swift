@@ -1,7 +1,6 @@
 import Foundation
 import NIO
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 final class HTTPControlService: Sendable {
     struct DebugSnapshot: Codable, Sendable {

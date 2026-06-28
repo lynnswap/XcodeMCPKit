@@ -1,5 +1,4 @@
 import Foundation
-import XcodeMCPCore
 
 /// A JSON value used by MCP requests, responses, and dynamic metadata.
 ///

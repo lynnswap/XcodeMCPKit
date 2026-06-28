@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import XcodeMCPCore
+import XcodeMCPKit
 
 struct JSONRPCResponseCompletionTrackerTests {
     @Test func completionTracksStringAndNumericIDsSeparately() async throws {

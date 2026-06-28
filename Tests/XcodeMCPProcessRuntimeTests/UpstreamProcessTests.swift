@@ -1,10 +1,9 @@
 import Foundation
 import Testing
-import XcodeMCPCore
+import XcodeMCPKit
 import XcodeMCPCoreTestSupport
 
-@testable import XcodeMCPCore
-@testable import XcodeMCPProcessRuntime
+@testable import XcodeMCPKit
 
 @Suite
 struct UpstreamProcessTests {

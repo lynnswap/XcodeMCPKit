@@ -1,5 +1,4 @@
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 extension ProxyConfig {
     var mcpBridgeRuntimeConfiguration: MCPBridgeRuntime.Configuration {

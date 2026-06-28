@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPCore
+import XcodeMCPKit
 
 enum ProxyFilesystemLocations {
     static let cacheRootEnv = Discovery.cacheRootEnvironmentVariable

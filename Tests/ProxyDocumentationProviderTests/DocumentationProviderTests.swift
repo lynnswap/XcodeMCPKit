@@ -3,8 +3,7 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport

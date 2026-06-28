@@ -1,6 +1,5 @@
 import Darwin
 import Foundation
-import XcodeMCPCore
 
 package struct ProcessSignalResult: Sendable {
     package let result: Int32

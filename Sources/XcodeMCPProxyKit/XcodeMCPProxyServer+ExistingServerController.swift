@@ -1,12 +1,11 @@
 
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.
     ///
     /// Proxy restart policy stays inside `XcodeMCPProxyKit`; low-level process
-    /// command and signal mechanics are owned by `XcodeMCPProcessRuntime`.
+    /// command and signal mechanics are owned by the internal process runtime.
     struct ExistingServerController: DependencyClient {
         var terminateExistingServer:
             @Sendable (_ host: String, _ port: Int, _ emitWarning: (String) -> Void) -> Bool

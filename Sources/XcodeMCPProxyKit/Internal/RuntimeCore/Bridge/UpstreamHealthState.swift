@@ -1,5 +1,4 @@
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 import Foundation
 
 extension Upstream {

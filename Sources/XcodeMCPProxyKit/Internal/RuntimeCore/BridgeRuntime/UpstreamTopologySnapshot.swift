@@ -1,4 +1,4 @@
-import XcodeMCPCore
+import XcodeMCPKit
 import Foundation
 
 struct UpstreamSlotID: Sendable, Hashable, Comparable {

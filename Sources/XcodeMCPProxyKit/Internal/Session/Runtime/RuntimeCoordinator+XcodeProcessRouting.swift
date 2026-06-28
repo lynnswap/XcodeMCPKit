@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIOCore
-import XcodeMCPCore
+import XcodeMCPKit
 
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =

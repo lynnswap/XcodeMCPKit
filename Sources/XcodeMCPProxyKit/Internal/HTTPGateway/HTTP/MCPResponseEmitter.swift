@@ -1,8 +1,7 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 enum MCPResponseEmitter {
     enum EmitterError: Error {

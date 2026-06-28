@@ -1,7 +1,6 @@
 import Foundation
 import Logging
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 package struct StdioAdapterShutdownPolicy: Sendable {
     package let requestDrainTimeout: Duration

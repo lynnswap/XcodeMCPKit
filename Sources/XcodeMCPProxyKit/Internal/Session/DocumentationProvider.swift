@@ -1,8 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 enum DocumentationProvider {}
 

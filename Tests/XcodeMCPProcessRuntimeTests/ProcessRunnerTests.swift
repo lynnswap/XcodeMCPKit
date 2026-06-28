@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPCoreTestSupport
 
-@testable import XcodeMCPProcessRuntime
+@testable import XcodeMCPKit
 
 @Suite
 struct ProcessRunnerTests {

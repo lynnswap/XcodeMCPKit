@@ -1,9 +1,9 @@
 import Darwin
 import Foundation
 import Testing
-import XcodeMCPCore
+import XcodeMCPKit
 
-@testable import XcodeMCPProcessRuntime
+@testable import XcodeMCPKit
 
 @Suite
 struct ProcessControlClientTests {

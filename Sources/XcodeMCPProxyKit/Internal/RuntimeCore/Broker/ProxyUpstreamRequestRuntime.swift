@@ -1,6 +1,6 @@
 import Foundation
 import NIO
-import XcodeMCPCore
+import XcodeMCPKit
 
 protocol ProxyUpstreamRequestRuntimePort: Sendable {
     func chooseUpstreamIndex() -> Int?

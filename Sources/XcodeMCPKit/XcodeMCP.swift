@@ -1,6 +1,4 @@
 import Foundation
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
 
 /// A high-level client for Xcode MCP.
 ///

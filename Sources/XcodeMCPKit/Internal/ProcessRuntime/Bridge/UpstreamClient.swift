@@ -1,4 +1,3 @@
-import XcodeMCPCore
 import Foundation
 
 package enum Upstream {}

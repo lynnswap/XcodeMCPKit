@@ -1,8 +1,7 @@
 import Foundation
 import NIO
 import NIOFoundationCompat
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 extension RuntimeCoordinator {
     func markRequestSucceeded(upstreamIndex: Int) {

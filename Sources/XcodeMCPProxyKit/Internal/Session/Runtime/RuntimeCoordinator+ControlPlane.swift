@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPCore
+import XcodeMCPKit
 
 extension ControlPlane {
     enum Error: Swift.Error, Sendable {

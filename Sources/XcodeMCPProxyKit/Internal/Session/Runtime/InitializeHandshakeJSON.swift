@@ -1,6 +1,5 @@
 import Foundation
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 enum InitializeHandshakeJSON {
     static func resolved(

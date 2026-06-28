@@ -23,10 +23,9 @@ It intentionally does not expose tool-specific Swift wrappers, JSON-RPC framing,
 transport streams, or server-to-client handlers such as roots, sampling, and
 elicitation.
 
-MCP wire values and process primitives live in internal targets:
-`XcodeMCPCore` owns JSON/MCP protocol contracts, and
-`XcodeMCPProcessRuntime` owns local process IO. `XcodeMCPKit` uses those targets
-without making runtime types part of the public library product surface.
+MCP wire values and process primitives live in internal implementation folders
+inside this target. They are package implementation details, not standalone
+SwiftPM modules that SDK clients can import through the public library product.
 
 Use the separate `XcodeMCPKitTesting` product when tests need deterministic
 tool catalogs, progress notifications, and tool results through the same
