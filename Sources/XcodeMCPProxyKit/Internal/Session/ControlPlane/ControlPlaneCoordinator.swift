@@ -512,7 +512,9 @@ actor ControlPlaneCoordinator {
     ) {
         guard let load = takeToolsCatalogLoadIfMatching(loadID: loadID) else { return }
         let completedUnderCurrentGeneration = brokerState.generation() == load.startGeneration
-        if case .success(let loaded) = result, let sourceUpstream = loaded.sourceUpstream {
+        if case .success(let loaded) = result,
+           loaded.cacheableAsCanonical,
+           let sourceUpstream = loaded.sourceUpstream {
             brokerState.syncCanonicalToolsCatalog(
                 loaded.rawResult,
                 sourceUpstream: sourceUpstream,

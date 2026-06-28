@@ -25,11 +25,18 @@ struct CanonicalToolsCatalogLoadResult: Sendable {
     let rawResult: JSONValue
     let sourceUpstream: Int?
     let durationMilliseconds: Int
+    let cacheableAsCanonical: Bool
 
-    init(rawResult: JSONValue, sourceUpstream: Int?, durationMilliseconds: Int) {
+    init(
+        rawResult: JSONValue,
+        sourceUpstream: Int?,
+        durationMilliseconds: Int,
+        cacheableAsCanonical: Bool = true
+    ) {
         self.rawResult = rawResult
         self.sourceUpstream = sourceUpstream
         self.durationMilliseconds = durationMilliseconds
+        self.cacheableAsCanonical = cacheableAsCanonical
     }
 }
 
