@@ -1,6 +1,4 @@
 import Foundation
-import XcodeMCPCore
-import XcodeMCPClientRuntime
 import XcodeMCPKit
 
 /// An in-memory MCP runtime for tests that need an ``XcodeMCP`` client without

@@ -24,11 +24,11 @@ endpoint and automated approval flow.
 ## Internal Target Ownership
 
 The public products above are backed by internal production targets split by
-owner boundary. `XcodeMCPCore` owns JSON/MCP wire contracts and low-level
-support. `XcodeMCPProcessRuntime` owns local process IO and process discovery
-helpers. `XcodeMCPClientRuntime` owns the SDK's initialized single-client
-session transports. `XcodeMCPProxyRuntime` owns proxy-only multi-upstream
-broker, health, readiness, and route scheduling primitives.
+owner boundary. `XcodeMCPKit` owns the SDK's high-level API, initialized
+single-client session, and client transports. `XcodeMCPCore` owns JSON/MCP wire
+contracts and low-level support. `XcodeMCPProcessRuntime` owns local process IO
+and process discovery helpers. `XcodeMCPProxyRuntime` owns proxy-only
+multi-upstream broker, health, readiness, and route scheduling primitives.
 
 ## Install
 

@@ -16,16 +16,17 @@ This target owns:
 - `MCPJSONValue`, the raw JSON value used for dynamic MCP payloads
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
 - `XcodeMCPError`
+- the initialized single-client session and configured client transports used
+  behind `XcodeMCP`
 
 It intentionally does not expose tool-specific Swift wrappers, JSON-RPC framing,
 transport streams, or server-to-client handlers such as roots, sampling, and
 elicitation.
 
-MCP wire values and configured transports live in internal targets:
-`XcodeMCPCore` owns JSON/MCP protocol contracts, `XcodeMCPProcessRuntime` owns
-local process IO, and `XcodeMCPClientRuntime` owns the initialized single-client
-session. `XcodeMCPKit` uses those targets without making runtime types part of
-the public library product surface.
+MCP wire values and process primitives live in internal targets:
+`XcodeMCPCore` owns JSON/MCP protocol contracts, and
+`XcodeMCPProcessRuntime` owns local process IO. `XcodeMCPKit` uses those targets
+without making runtime types part of the public library product surface.
 
 Use the separate `XcodeMCPKitTesting` product when tests need deterministic
 tool catalogs, progress notifications, and tool results through the same
