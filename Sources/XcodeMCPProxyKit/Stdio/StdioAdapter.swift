@@ -24,6 +24,27 @@ package struct StdioAdapterShutdownPolicy: Sendable {
     package static let live = Self()
 }
 
+protocol StdioAdapterHTTPClient: Sendable {
+    var events: AsyncStream<Data> { get }
+
+    func send(
+        _ data: Data,
+        onMessage: @Sendable (Data) async throws -> StreamableHTTPMCPClientMessageDisposition
+    ) async throws -> StreamableHTTPMCPClientSendResult
+
+    func startEventStreamIfReady() async
+
+    func close(
+        deleteTimeout: Duration?,
+        deleteSessionGrace: Duration?,
+        clock: ClockClient
+    ) async
+
+    func cancelNetworkRequests() async
+}
+
+extension StreamableHTTPMCPClient: StdioAdapterHTTPClient {}
+
 actor StdioAdapter {
     private enum AdapterError: Error {
         case invalidResponse
@@ -34,7 +55,7 @@ actor StdioAdapter {
     private let inputHandle: FileHandle
     private let outputWriter: StdioWriter
     private let logger: Logger
-    private let client: StreamableHTTPMCPClient
+    private let client: any StdioAdapterHTTPClient
     private let shutdownPolicy: StdioAdapterShutdownPolicy
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
@@ -66,19 +87,37 @@ actor StdioAdapter {
         output: FileHandle,
         shutdownPolicy: StdioAdapterShutdownPolicy
     ) {
-        self.requestTimeout = requestTimeout
-        self.inputHandle = input
-        self.logger = ProxyLogging.make("stdio.adapter")
-        self.outputWriter = StdioWriter(handle: output, logger: logger)
-        self.shutdownPolicy = shutdownPolicy
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = true
-        self.client = StreamableHTTPMCPClient(
+        let client = StreamableHTTPMCPClient(
             endpoint: upstreamURL,
             urlSession: URLSession(configuration: configuration),
             requestTimeout: Self.duration(fromRequestTimeout: requestTimeout),
             automaticallyStartsEventStream: false
         )
+        self.init(
+            requestTimeout: requestTimeout,
+            input: input,
+            output: output,
+            client: client,
+            shutdownPolicy: shutdownPolicy
+        )
+    }
+
+    init(
+        requestTimeout: TimeInterval,
+        input: FileHandle,
+        output: FileHandle,
+        client: any StdioAdapterHTTPClient,
+        shutdownPolicy: StdioAdapterShutdownPolicy
+    ) {
+        self.requestTimeout = requestTimeout
+        self.inputHandle = input
+        let logger = ProxyLogging.make("stdio.adapter")
+        self.logger = logger
+        self.outputWriter = StdioWriter(handle: output, logger: logger)
+        self.shutdownPolicy = shutdownPolicy
+        self.client = client
     }
 
     func start() async {
@@ -102,7 +141,7 @@ actor StdioAdapter {
         do {
             for try await byte in inputHandle.bytes {
                 if Task.isCancelled { break }
-                handleInput(Data([byte]))
+                await handleInput(Data([byte]))
             }
         } catch is CancellationError {
             return
@@ -114,7 +153,7 @@ actor StdioAdapter {
         await stop(cancelReadTask: false)
     }
 
-    private func handleInput(_ data: Data) {
+    private func handleInput(_ data: Data) async {
         if stopped { return }
 
         let result = framer.append(data)
@@ -145,7 +184,7 @@ actor StdioAdapter {
                 "preview": "\(protocolViolation.preview)",
             ]
         )
-        stopLocked(cancelReadTask: true)
+        await stopLocked(cancelReadTask: true)
     }
 
     private func runRequestTask(id: UUID, data: Data) async {
@@ -258,7 +297,7 @@ actor StdioAdapter {
             task.cancel()
         }
         stopped = true
-        client.cancelNetworkRequests()
+        await client.cancelNetworkRequests()
         await drainRequestTasks()
     }
 
@@ -266,7 +305,7 @@ actor StdioAdapter {
         if !stopped {
             await closeClientSession()
         }
-        stopLocked(cancelReadTask: cancelReadTask)
+        await stopLocked(cancelReadTask: cancelReadTask)
     }
 
     private func closeClientSession() async {
@@ -322,7 +361,7 @@ actor StdioAdapter {
         return .nanoseconds(Int64(nanoseconds))
     }
 
-    private func stopLocked(cancelReadTask: Bool) {
+    private func stopLocked(cancelReadTask: Bool) async {
         if cancelReadTask {
             readTask?.cancel()
         }
@@ -331,7 +370,7 @@ actor StdioAdapter {
         clientEventTask = nil
         if !stopped {
             stopped = true
-            client.cancelNetworkRequests()
+            await client.cancelNetworkRequests()
         }
     }
 
