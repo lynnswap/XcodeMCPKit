@@ -1,8 +1,6 @@
 import Foundation
 import Testing
 import XcodeMCPCore
-import XcodeMCPProcessRuntime
-@testable import XcodeMCPProxyKit
 
 @Suite
 struct JSONValueTests {
