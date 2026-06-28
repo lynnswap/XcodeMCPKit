@@ -2092,6 +2092,7 @@ struct RuntimeCoordinatorTests {
         let olderRequest = try await olderUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
+        #expect(methodName(from: olderRequest) == "tools/list")
         await latestUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2103,41 +2104,30 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        await olderUpstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: olderRequest),
-                    tools: [
-                        toolDescriptor(name: "SharedTool", description: "from-26"),
-                        toolDescriptor(name: "Only26", description: "old-only"),
-                    ],
-                )
-            )
-        )
 
         let result = try await waitWithTimeout("waiting for process-routed tools/list") {
             try await task.value
         }
-        #expect(toolNames(in: result) == ["Only26", "Only27", "SharedTool"])
+        #expect(toolNames(in: result) == ["Only27", "SharedTool"])
         #expect(toolDescription(in: result, name: "SharedTool") == "from-27")
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
-            "Only26",
             "Only27",
             "SharedTool",
         ])
         #expect(await olderUpstream.sentCount() == 1)
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let catalogs = manager.debugSnapshot().processToolCatalogs
-        #expect(catalogs.count == 2)
+        #expect(catalogs.count == 1)
         let latestCatalog = try #require(catalogs.first { $0.processID == latestTarget.processID })
         #expect(latestCatalog.toolCount == 2)
         #expect(latestCatalog.tabOwnerCount == 1)
         #expect(latestCatalog.workspaceOwnerCount == 1)
         #expect(latestCatalog.isCanonicalSource)
         #expect(latestCatalog.exposurePolicy == "available_route_catalog_surface")
-        #expect(latestCatalog.extraBeyondExposedCatalog == ["Only26"])
-        #expect(latestCatalog.schemaConflicts == ["SharedTool"])
+        #expect(latestCatalog.extraBeyondExposedCatalog == [])
+        #expect(latestCatalog.schemaConflicts == [])
     }
 
     @Test func sessionManagerToolsListUnionsFallbackCatalogAfterOwnerIsLearned()
@@ -2233,23 +2223,23 @@ struct RuntimeCoordinatorTests {
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
-    @Test func sessionManagerToolsListWaitsForUsableRoutesBeforeReturningUnion()
+    @Test func sessionManagerToolsListReturnsNewerProcessCatalogBeforeStalledOlderRoute()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let earlierUpstream = TestUpstreamClient()
-        let laterUpstream = TestUpstreamClient()
-        let earlierTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
-        let laterTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
+        let olderUpstream = TestUpstreamClient()
+        let newerUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [earlierUpstream, laterUpstream],
+            upstreams: [olderUpstream, newerUpstream],
             xcodeProcessRoutes: [
-                XcodeProcessRoute(target: earlierTarget, upstreamIndices: [0]),
-                XcodeProcessRoute(target: laterTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: newerTarget, upstreamIndices: [1]),
             ],
             startImmediately: false
         )
@@ -2264,40 +2254,39 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let earlierRequest = try await earlierUpstream.nextSent {
+        let olderRequest = try await olderUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        let laterRequest = try await laterUpstream.nextSent {
+        #expect(methodName(from: olderRequest) == "tools/list")
+        let newerRequest = try await newerUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        await laterUpstream.yield(
+        await newerUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: laterRequest),
+                    id: try extractUpstreamID(from: newerRequest),
                     tools: [
-                        toolDescriptor(name: "LaterRouteOnly"),
-                    ]
-                )
-            )
-        )
-        await earlierUpstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: earlierRequest),
-                    tools: [
-                        toolDescriptor(name: "EarlierRouteOnly"),
+                        toolDescriptor(name: "NewerRouteOnly"),
                     ]
                 )
             )
         )
 
-        let result = try await waitWithTimeout("waiting for later route tools/list") {
+        let result = try await waitWithTimeout(
+            "waiting for newer route tools/list before older route completes",
+            timeout: .seconds(1)
+        ) {
             try await task.value
         }
-        #expect(toolNames(in: result) == ["EarlierRouteOnly", "LaterRouteOnly"])
-        #expect(await earlierUpstream.sentCount() == 1)
-        #expect(await laterUpstream.sentCount() == 1)
+        #expect(toolNames(in: result) == ["NewerRouteOnly"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["NewerRouteOnly"])
+        #expect(await olderUpstream.sentCount() == 1)
+        #expect(await newerUpstream.sentCount() == 1)
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
+            newerTarget.processID,
+        ])
     }
 
     @Test func sessionManagerToolsListUnionsCachedProcessCatalogWithFreshRoute()

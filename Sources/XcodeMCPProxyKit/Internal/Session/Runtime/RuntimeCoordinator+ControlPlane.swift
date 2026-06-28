@@ -203,23 +203,18 @@ extension RuntimeCoordinator {
             }
 
             var failures: [(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)] = []
-            var firstSuccess: CanonicalToolsCatalogLoadResult?
             while let outcome = try await group.next() {
                 switch outcome {
                 case .success(_, let result):
-                    if firstSuccess == nil {
-                        firstSuccess = result
-                    }
+                    group.cancelAll()
+                    return availableToolsCatalogSurfaceResult(
+                        startedAt: startedAt,
+                        exposedProcessIDs: exposedProcessIDs,
+                        fallback: result
+                    )
                 case .failure(let route, let upstreamIndex, let error):
                     failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
                 }
-            }
-            if let firstSuccess {
-                return availableToolsCatalogSurfaceResult(
-                    startedAt: startedAt,
-                    exposedProcessIDs: exposedProcessIDs,
-                    fallback: firstSuccess
-                )
             }
             if let lastFailure = failures.last {
                 throw ControlPlane.RequestError(
