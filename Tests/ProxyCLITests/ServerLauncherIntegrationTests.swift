@@ -3,31 +3,31 @@ import Testing
 @testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
-struct ServerCommandIntegrationTests {
-    @Test func serverCommandDryRunUsesEnvironmentDerivedDefaults() async throws {
+struct ServerLauncherIntegrationTests {
+    @Test func serverRunnerDryRunUsesEnvironmentDerivedDefaults() async throws {
         let output = CapturedLines()
-        let command = makeIntegrationServerCommand(
-            stdout: { output.append($0) },
-            stderr: { output.append($0) }
-        )
+        let errors = CapturedLines()
 
-        let exitCode = await command.run(
-            args: ["xcode-mcp-proxy-server", "--dry-run"],
+        let exitCode = await XcodeMCPProxyServer.run(
+            arguments: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: [
                 "LISTEN": "127.0.0.1:7777",
                 "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
-            ]
+            ],
+            stdout: { output.append($0) },
+            stderr: { errors.append($0) }
         )
 
         #expect(exitCode == 0)
+        #expect(errors.snapshot().isEmpty)
         let line = try #require(output.snapshot().first)
         #expect(line == "xcode-mcp-proxy-server --listen 127.0.0.1:7777 --config /tmp/proxy-config.toml")
     }
 
-    @Test func serverCommandStartsInjectedProxyServer() async throws {
+    @Test func serverLauncherStartsInjectedProxyServer() async throws {
         let restarted = CapturedLines()
         let fakeServer = IntegrationRecordingProxyServer()
-        let command = makeIntegrationServerCommand(
+        let launcher = makeIntegrationServerLauncher(
             forceRestartExistingServer: { host, port, _ in
                 restarted.append("\(host):\(port)")
                 return true
@@ -38,14 +38,16 @@ struct ServerCommandIntegrationTests {
             }
         )
 
-        let exitCode = await command.run(
-            args: [
+        let exitCode = await launcher.run(
+            arguments: [
                 "xcode-mcp-proxy-server",
                 "--listen", "127.0.0.1:8766",
                 "--request-timeout", "12",
                 "--force-restart",
             ],
-            environment: [:]
+            environment: [:],
+            stdout: { _ in },
+            stderr: { _ in }
         )
 
         #expect(exitCode == 0)
@@ -59,30 +61,20 @@ struct ServerCommandIntegrationTests {
     }
 }
 
-private func makeIntegrationServerCommand(
-    stdout: @escaping (String) -> Void = { _ in },
-    stderr: @escaping (String) -> Void = { _ in },
+private func makeIntegrationServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
     makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
         IntegrationRecordingProxyServer()
     }
-) -> XcodeMCPProxyServerCommand {
-    let launcher = XcodeMCPProxyServer.Launcher(
+) -> XcodeMCPProxyServer.Launcher {
+    XcodeMCPProxyServer.Launcher(
         dependencies: .init(
             makeServer: makeServer,
             isAddressAlreadyInUse: { _ in false },
             forceRestartExistingServer: forceRestartExistingServer,
             detectExistingServerProcessIDs: { _, _ in [] }
-        )
-    )
-    return XcodeMCPProxyServerCommand(
-        dependencies: .init(
-            bootstrapLogging: { _ in },
-            stdout: stdout,
-            stderr: stderr,
-            launcher: launcher
         )
     )
 }

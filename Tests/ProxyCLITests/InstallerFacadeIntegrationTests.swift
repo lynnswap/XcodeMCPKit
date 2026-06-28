@@ -3,39 +3,22 @@ import Testing
 @testable import XcodeMCPProxyKit
 
 @Suite(.serialized)
-struct InstallCommandIntegrationTests {
-    @Test func installCommandDryRunPrintsInstallPlan() throws {
+struct InstallerFacadeIntegrationTests {
+    @Test func installerFacadeDryRunPrintsInstallPlan() throws {
         let tempDir = try TemporaryDirectory()
         defer { tempDir.cleanup() }
 
         let output = CapturedLines()
-        let command = XcodeMCPProxyInstallCommand(
-            dependencies: .init(
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                executableURL: { tempDir.url.appendingPathComponent("xcode-mcp-proxy-install") },
-                install: { configuration, executableURL, stdout in
-                    try XcodeMCPProxyInstaller(configuration: configuration).install(
-                        executableURL: executableURL,
-                        fileManager: .default,
-                        buildProducts: { _, _ in },
-                        stdout: stdout
-                    )
-                }
-            )
-        )
-
         let bindir = tempDir.url.appendingPathComponent("bin", isDirectory: true)
-        let exitCode = command.run(
-            args: [
-                "xcode-mcp-proxy-install",
-                "--bindir", bindir.path,
-                "--dry-run",
-            ],
-            environment: [:]
+        try XcodeMCPProxyInstaller(
+            configuration: .init(prefix: nil, bindir: bindir.path, dryRun: true)
+        ).install(
+            executableURL: tempDir.url.appendingPathComponent("xcode-mcp-proxy-install"),
+            fileManager: .default,
+            buildProducts: { _, _ in },
+            stdout: { output.append($0) }
         )
 
-        #expect(exitCode == 0)
         let expectedProxy = bindir.appendingPathComponent("xcode-mcp-proxy").path
         let expectedServer = bindir.appendingPathComponent("xcode-mcp-proxy-server").path
         #expect(output.snapshot() == [
@@ -45,7 +28,7 @@ struct InstallCommandIntegrationTests {
         ])
     }
 
-    @Test func installCommandCopiesFakeBinariesIntoBindir() throws {
+    @Test func installerFacadeCopiesFakeBinariesIntoBindir() throws {
         let sourceDir = try TemporaryDirectory()
         defer { sourceDir.cleanup() }
         let installDir = try TemporaryDirectory()
@@ -60,33 +43,17 @@ struct InstallCommandIntegrationTests {
 
         let output = CapturedLines()
         let buildCalls = Counter()
-        let command = XcodeMCPProxyInstallCommand(
-            dependencies: .init(
-                stdout: { output.append($0) },
-                stderr: { output.append($0) },
-                executableURL: { installerURL },
-                install: { configuration, executableURL, stdout in
-                    try XcodeMCPProxyInstaller(configuration: configuration).install(
-                        executableURL: executableURL,
-                        fileManager: .default,
-                        buildProducts: { _, _ in
-                            buildCalls.increment()
-                        },
-                        stdout: stdout
-                    )
-                }
-            )
+        try XcodeMCPProxyInstaller(
+            configuration: .init(prefix: nil, bindir: installDir.url.path, dryRun: false)
+        ).install(
+            executableURL: installerURL,
+            fileManager: .default,
+            buildProducts: { _, _ in
+                buildCalls.increment()
+            },
+            stdout: { output.append($0) }
         )
 
-        let exitCode = command.run(
-            args: [
-                "xcode-mcp-proxy-install",
-                "--bindir", installDir.url.path,
-            ],
-            environment: [:]
-        )
-
-        #expect(exitCode == 0)
         #expect(buildCalls.value == 0)
         #expect(
             try String(
