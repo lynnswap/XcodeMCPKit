@@ -51,7 +51,7 @@ jobs:
         run: |
           XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
             --no-parallel \
-            --filter XcodeMCPRuntimeProcessTests \
+            --filter XcodeMCPProcessRuntimeTests \
             -Xswiftc -strict-concurrency=minimal
           XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
             --no-parallel \
