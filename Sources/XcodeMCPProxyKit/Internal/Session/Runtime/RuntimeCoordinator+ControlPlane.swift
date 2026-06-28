@@ -136,13 +136,25 @@ extension RuntimeCoordinator {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
-        return try await loadAvailableToolsCatalogsInBatch(
-            uncachedRoutes,
-            requestTimeout: requestTimeout,
-            deadlineUptimeNs: deadlineUptimeNs,
-            startedAt: startedAt,
-            exposedProcessIDs: exposedProcessIDs
-        )
+        do {
+            return try await loadAvailableToolsCatalogsInBatch(
+                uncachedRoutes,
+                requestTimeout: requestTimeout,
+                deadlineUptimeNs: deadlineUptimeNs,
+                startedAt: startedAt,
+                exposedProcessIDs: exposedProcessIDs
+            )
+        } catch {
+            guard let surface = currentSurface,
+                  let sourceUpstream = surface.sourceUpstream else {
+                throw error
+            }
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: surface.rawResult,
+                sourceUpstream: sourceUpstream,
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+            )
+        }
     }
 
     private func loadAvailableToolsCatalogsInBatch(

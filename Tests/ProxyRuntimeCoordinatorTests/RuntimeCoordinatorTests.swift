@@ -2371,6 +2371,76 @@ struct RuntimeCoordinatorTests {
         #expect(try #require(catalogs.first { $0.processID == latestTarget.processID }).toolCount == 1)
     }
 
+    @Test func sessionManagerToolsListKeepsCachedProcessCatalogWhenFreshRouteFails()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let olderUpstream = TestUpstreamClient()
+        let latestUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 66340, xcodeVersion: "26.6")
+        let latestTarget = xcodeProcessTarget(processID: 80427, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [olderUpstream, latestUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: latestTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")]),
+            ]
+        )
+        manager.canonicalBrokerState.clearToolsCatalog()
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-cached-fresh-fails",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let latestRequest = try await latestUpstream.nextSent {
+            methodName(from: $0) == "tools/list"
+        }
+        await latestUpstream.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: latestRequest),
+                        "result": [
+                            "tools": "invalid",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for cached process catalog fallback") {
+            try await task.value
+        }
+
+        #expect(toolNames(in: result) == ["OlderRouteOnly"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["OlderRouteOnly"])
+        #expect(await olderUpstream.sentCount() == 0)
+        #expect(await latestUpstream.sentCount() == 1)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
+            olderTarget.processID,
+        ])
+    }
+
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
