@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import XcodeMCPCore
-import XcodeMCPRuntimeTestSupport
+import XcodeMCPCoreTestSupport
 
 @testable import XcodeMCPCore
 @testable import XcodeMCPProcessRuntime

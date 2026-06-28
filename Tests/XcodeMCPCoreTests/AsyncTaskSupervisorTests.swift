@@ -1,6 +1,6 @@
 import Testing
 import XcodeMCPCore
-@testable import XcodeMCPRuntimeTestSupport
+@testable import XcodeMCPCoreTestSupport
 
 @Suite struct AsyncTaskSupervisorTests {
     @Test func runReportsAcceptedBeforeShutdown() async throws {
