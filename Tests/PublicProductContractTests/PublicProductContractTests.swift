@@ -370,6 +370,15 @@ private final class SpawnedProcessGroup: @unchecked Sendable {
         arguments: [String],
         outputFD: CInt
     ) throws -> SpawnedProcessGroup {
+        let pid = try unsafe spawnPOSIX(executable: executable, arguments: arguments, outputFD: outputFD)
+        return SpawnedProcessGroup(pid: pid)
+    }
+
+    @unsafe private static func spawnPOSIX(
+        executable: String,
+        arguments: [String],
+        outputFD: CInt
+    ) throws -> pid_t {
         var fileActions: posix_spawn_file_actions_t?
         var attr: posix_spawnattr_t?
 
@@ -404,27 +413,37 @@ private final class SpawnedProcessGroup: @unchecked Sendable {
             operation: "posix_spawnattr_setflags"
         )
 
-        var cArguments: [UnsafeMutablePointer<CChar>] = []
+        var cArguments = unsafe [UnsafeMutablePointer<CChar>]()
+        func freeCArguments() {
+            var index = 0
+            while index < (unsafe cArguments.count) {
+                unsafe free(cArguments[index])
+                index += 1
+            }
+        }
+
         for argument in arguments {
             guard let cArgument = unsafe strdup(argument) else {
-                for cArgument in unsafe cArguments {
-                    free(cArgument)
-                }
+                freeCArguments()
                 throw POSIXCommandError(operation: "strdup argument", code: ENOMEM)
             }
-            cArguments.append(cArgument)
+            unsafe cArguments.append(cArgument)
         }
         defer {
-            for cArgument in unsafe cArguments {
-                free(cArgument)
-            }
+            freeCArguments()
         }
-        var argv = unsafe cArguments.map { Optional($0) }
-        argv.append(nil)
+
+        var argv = unsafe [UnsafeMutablePointer<CChar>?]()
+        var argumentIndex = 0
+        while argumentIndex < (unsafe cArguments.count) {
+            unsafe argv.append(cArguments[argumentIndex])
+            argumentIndex += 1
+        }
+        unsafe argv.append(nil)
 
         var pid: pid_t = 0
-        let spawnResult = executable.withCString { executablePath in
-            argv.withUnsafeMutableBufferPointer { argvBuffer in
+        let spawnResult = unsafe executable.withCString { executablePath in
+            unsafe argv.withUnsafeMutableBufferPointer { argvBuffer in
                 unsafe posix_spawnp(
                     &pid,
                     executablePath,
@@ -436,7 +455,7 @@ private final class SpawnedProcessGroup: @unchecked Sendable {
             }
         }
         try checkPOSIX(spawnResult, operation: "posix_spawnp \(executable)")
-        return SpawnedProcessGroup(pid: pid)
+        return pid
     }
 
     func wait(timeoutSeconds: TimeInterval) -> (exitCode: Int32, timedOut: Bool) {
