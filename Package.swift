@@ -107,6 +107,7 @@ let package = Package(
             name: "XcodeMCPProxyTestSupport",
             dependencies: [
                 "XcodeMCPCore",
+                "XcodeMCPCoreTestSupport",
                 "XcodeMCPProcessRuntime",
                 "XcodeMCPProxyKit",
                 .product(name: "NIO", package: "swift-nio"),
@@ -116,13 +117,12 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPRuntimeTestSupport",
+            name: "XcodeMCPCoreTestSupport",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPProcessRuntime",
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
-            path: "Tests/XcodeMCPRuntimeTestSupport",
+            path: "Tests/XcodeMCPCoreTestSupport",
             swiftSettings: strictSwiftSettings
         ),
         .target(
@@ -184,15 +184,15 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "XcodeMCPRuntimeTests",
+            name: "XcodeMCPCoreTests",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPRuntimeTestSupport",
+                "XcodeMCPCoreTestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "Tests/XcodeMCPRuntimeTests",
+            path: "Tests/XcodeMCPCoreTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
@@ -245,22 +245,13 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
-            name: "ProxyStartupLoggingTests",
-            dependencies: [
-                "XcodeMCPCore",
-                "XcodeMCPProxyKit",
-            ],
-            path: "Tests/ProxyStartupLoggingTests",
-            swiftSettings: strictSwiftSettings
-        ),
-        .testTarget(
-            name: "XcodeMCPRuntimeProcessTests",
+            name: "XcodeMCPProcessRuntimeTests",
             dependencies: [
                 "XcodeMCPCore",
                 "XcodeMCPProcessRuntime",
-                "XcodeMCPRuntimeTestSupport",
+                "XcodeMCPCoreTestSupport",
             ],
-            path: "Tests/XcodeMCPRuntimeProcessTests",
+            path: "Tests/XcodeMCPProcessRuntimeTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

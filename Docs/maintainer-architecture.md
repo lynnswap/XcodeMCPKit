@@ -52,7 +52,7 @@ contract tests that exercise package and product boundaries.
 - Fast regression suite:
   - `swift test -Xswiftc -strict-concurrency=minimal`
 - Process / pipe suite:
-  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPRuntimeProcessTests -Xswiftc -strict-concurrency=minimal`
+  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPProcessRuntimeTests -Xswiftc -strict-concurrency=minimal`
   - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal`
 - Full local maintainer check:
   - `scripts/check.sh`

@@ -61,6 +61,10 @@ package actor RecordedValues<Value: Sendable> {
         values
     }
 
+    package func count() -> Int {
+        values.count
+    }
+
     package func value(at index: Int) -> Value? {
         guard values.indices.contains(index) else {
             return nil

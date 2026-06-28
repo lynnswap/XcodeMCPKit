@@ -236,7 +236,7 @@ Local checks:
 
 ```bash
 swift test -Xswiftc -strict-concurrency=minimal
-XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPRuntimeProcessTests -Xswiftc -strict-concurrency=minimal
+XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPProcessRuntimeTests -Xswiftc -strict-concurrency=minimal
 XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal
 scripts/check.sh
 ```
