@@ -2110,11 +2110,12 @@ struct RuntimeCoordinatorTests {
         }
         #expect(toolNames(in: result) == ["Only27", "SharedTool"])
         #expect(toolDescription(in: result, name: "SharedTool") == "from-27")
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(Set(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 1) ?? .null)) == Set([
             "Only27",
             "SharedTool",
-        ])
+        ]))
         #expect(await olderUpstream.sentCount() == 1)
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
@@ -2124,7 +2125,7 @@ struct RuntimeCoordinatorTests {
         #expect(latestCatalog.toolCount == 2)
         #expect(latestCatalog.tabOwnerCount == 1)
         #expect(latestCatalog.workspaceOwnerCount == 1)
-        #expect(latestCatalog.isCanonicalSource)
+        #expect(latestCatalog.isCanonicalSource == false)
         #expect(latestCatalog.exposurePolicy == "available_route_catalog_surface")
         #expect(latestCatalog.extraBeyondExposedCatalog == [])
         #expect(latestCatalog.schemaConflicts == [])
@@ -2214,11 +2215,16 @@ struct RuntimeCoordinatorTests {
         let ownerResult = try await waitWithTimeout("waiting for owner tools/list") {
             try await ownerTask.value
         }
-        #expect(toolNames(in: ownerResult) == ["FallbackOnly", "OwnerOnly"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+        #expect(toolNames(in: ownerResult) == ["FallbackOnly"])
+        _ = try await waitWithTimeout("waiting for owner catalog completion") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
             "FallbackOnly",
             "OwnerOnly",
-        ])
+        ]))
         #expect(await fallbackUpstream.sentCount() == 1)
         #expect(await ownerUpstream.sentCount() == 1)
     }
@@ -2279,17 +2285,54 @@ struct RuntimeCoordinatorTests {
             try await task.value
         }
         #expect(toolNames(in: result) == ["NewerRouteOnly"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["NewerRouteOnly"])
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 1) ?? .null) == ["NewerRouteOnly"])
         #expect(await olderUpstream.sentCount() == 1)
         #expect(await newerUpstream.sentCount() == 1)
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
             newerTarget.processID,
         ])
+
+        let secondResult = try await waitWithTimeout(
+            "waiting for cached partial tools/list while older route refreshes",
+            timeout: .seconds(1)
+        ) {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-refresh-missing-route",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        #expect(toolNames(in: secondResult) == ["NewerRouteOnly"])
+
+        let olderRefreshRequest = try await olderUpstream.nextSent(startingAt: 1) {
+            methodName(from: $0) == "tools/list"
+        }
+        await olderUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: olderRefreshRequest),
+                    tools: [
+                        toolDescriptor(name: "OlderRouteOnly"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout("waiting for completed process catalog cache") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
+        let fullResult = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-after-missing-route-refresh",
+            requestTimeoutOverride: .seconds(5)
+        )
+        #expect(Set(toolNames(in: fullResult)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
     }
 
-    @Test func sessionManagerToolsListUnionsCachedProcessCatalogWithFreshRoute()
+    @Test func sessionManagerToolsListCompletesCachedProcessCatalogWithFreshRoute()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2345,14 +2388,20 @@ struct RuntimeCoordinatorTests {
             )
         )
 
-        let result = try await waitWithTimeout("waiting for deterministic process catalog union") {
+        let result = try await waitWithTimeout("waiting for cached process catalog surface") {
             try await task.value
         }
 
-        #expect(Set(toolNames(in: result)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
-        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
+        #expect(toolNames(in: result) == ["OlderRouteOnly"])
+        #expect(manager.cachedToolsListResult() == nil)
         #expect(await olderUpstream.sentCount() == 0)
         #expect(await latestUpstream.sentCount() == 1)
+        _ = try await waitWithTimeout("waiting for completed process catalog cache") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
         let catalogs = manager.debugSnapshot().processToolCatalogs
         #expect(catalogs.count == 2)
@@ -2421,16 +2470,17 @@ struct RuntimeCoordinatorTests {
         }
 
         #expect(toolNames(in: result) == ["OlderRouteOnly"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["OlderRouteOnly"])
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 0) ?? .null) == ["OlderRouteOnly"])
         #expect(await olderUpstream.sentCount() == 0)
         #expect(await latestUpstream.sentCount() == 1)
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
             olderTarget.processID,
         ])
     }
 
-    @Test func sessionManagerToolsListDoesNotReturnCachedProcessCatalogWhenFreshRouteIsCancelled()
+    @Test func sessionManagerToolsListReturnsCachedProcessCatalogWhileFreshRouteRefreshIsPending()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2471,11 +2521,11 @@ struct RuntimeCoordinatorTests {
         _ = try await latestUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        task.cancel()
 
-        await #expect(throws: CancellationError.self) {
-            _ = try await task.value
+        let result = try await waitWithTimeout("waiting for cached process catalog fallback") {
+            try await task.value
         }
+        #expect(toolNames(in: result) == ["OlderRouteOnly"])
         #expect(await olderUpstream.sentCount() == 0)
         #expect(await latestUpstream.sentCount() == 1)
         #expect(manager.cachedToolsListResult() == nil)

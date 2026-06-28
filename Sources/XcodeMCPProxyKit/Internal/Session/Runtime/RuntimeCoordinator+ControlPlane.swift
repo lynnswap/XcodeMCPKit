@@ -135,6 +135,20 @@ extension RuntimeCoordinator {
         guard uncachedRoutes.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+        if let surface = currentSurface,
+           let sourceUpstream = surface.sourceUpstream {
+            scheduleAvailableToolsCatalogCompletion(
+                uncachedRoutes,
+                requestTimeout: requestTimeout,
+                exposedProcessIDs: exposedProcessIDs
+            )
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: surface.rawResult,
+                sourceUpstream: sourceUpstream,
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
+                cacheableAsCanonical: false
+            )
+        }
 
         do {
             return try await loadAvailableToolsCatalogsInBatch(
@@ -154,7 +168,8 @@ extension RuntimeCoordinator {
             return CanonicalToolsCatalogLoadResult(
                 rawResult: surface.rawResult,
                 sourceUpstream: sourceUpstream,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
+                cacheableAsCanonical: surface.processIDs == exposedProcessIDs
             )
         }
     }
@@ -240,7 +255,8 @@ extension RuntimeCoordinator {
         return CanonicalToolsCatalogLoadResult(
             rawResult: surface.rawResult,
             sourceUpstream: surface.sourceUpstream ?? fallback.sourceUpstream,
-            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
+            cacheableAsCanonical: surface.processIDs == exposedProcessIDs
         )
     }
 
@@ -267,8 +283,69 @@ extension RuntimeCoordinator {
         return CanonicalToolsCatalogLoadResult(
             rawResult: surface?.rawResult ?? result.rawResult,
             sourceUpstream: surface?.sourceUpstream ?? sourceUpstream,
-            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
+            cacheableAsCanonical: surface?.processIDs == exposedProcessIDs
         )
+    }
+
+    private func scheduleAvailableToolsCatalogCompletion(
+        _ routes: [AvailableToolsCatalogRoute],
+        requestTimeout: TimeAmount?,
+        exposedProcessIDs: Set<pid_t>
+    ) {
+        let key = availableToolsCatalogRefreshKey(for: routes)
+        let shouldStart = availableToolsCatalogRefreshKeys.withLockedValue { keys in
+            keys.insert(key).inserted
+        }
+        guard shouldStart else {
+            return
+        }
+        let accepted = addRuntimeTask { [weak self] in
+            guard let self else { return }
+            defer {
+                _ = self.availableToolsCatalogRefreshKeys.withLockedValue { keys in
+                    keys.remove(key)
+                }
+            }
+            let startedAt = self.nowUptimeNanoseconds()
+            let generation = self.canonicalBrokerState.generation()
+            do {
+                let result = try await self.loadAvailableToolsCatalogsInBatch(
+                    routes,
+                    requestTimeout: requestTimeout,
+                    deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
+                    startedAt: startedAt,
+                    exposedProcessIDs: exposedProcessIDs
+                )
+                guard result.cacheableAsCanonical,
+                      let sourceUpstream = result.sourceUpstream,
+                      self.canonicalBrokerState.generation() == generation else {
+                    return
+                }
+                self.canonicalBrokerState.syncCanonicalToolsCatalog(
+                    result.rawResult,
+                    sourceUpstream: sourceUpstream,
+                    onlyIfGeneration: generation
+                )
+                await self.controlPlaneCoordinator.syncDebug()
+            } catch is CancellationError {
+            } catch {
+            }
+        }
+        if accepted == false {
+            _ = availableToolsCatalogRefreshKeys.withLockedValue { keys in
+                keys.remove(key)
+            }
+        }
+    }
+
+    private func availableToolsCatalogRefreshKey(
+        for routes: [AvailableToolsCatalogRoute]
+    ) -> String {
+        routes
+            .map { "\($0.target.processID)" }
+            .sorted()
+            .joined(separator: ",")
     }
 
     private func loadToolsCatalogFromAvailableProcessRoute(
