@@ -80,6 +80,49 @@ public enum MCPJSONValue: Codable, Equatable, Sendable {
     }
 }
 
+extension MCPJSONValue {
+    /// Creates an MCP JSON value from a Foundation JSON object.
+    ///
+    /// Pass values returned by `JSONSerialization.jsonObject(with:)` or values
+    /// that can be serialized as JSON: `String`, `NSNumber`, `Bool`, `NSNull`,
+    /// arrays, and dictionaries with `String` keys. Non-JSON values throw
+    /// ``XcodeMCPError/invalidRequest(_:)``.
+    ///
+    /// - Parameter value: A Foundation object that represents a JSON value.
+    public init(jsonObject value: Any) throws {
+        guard let jsonValue = JSONValue(any: value),
+              Self.isValidJSONValue(jsonValue)
+        else {
+            throw XcodeMCPError.invalidRequest(
+                "value is not a JSON-compatible Foundation object"
+            )
+        }
+        self.init(jsonValue)
+    }
+
+    /// Creates an MCP JSON value by encoding an `Encodable` value with
+    /// `JSONEncoder`.
+    ///
+    /// Encoding errors from the value are rethrown. This initializer is useful
+    /// for building dynamic MCP params from local request structs without
+    /// writing a tool-specific wrapper.
+    ///
+    /// - Parameter value: The value to encode into MCP JSON.
+    public init<T: Encodable>(encoding value: T) throws {
+        let data = try JSONEncoder().encode(value)
+        self = try JSONDecoder().decode(MCPJSONValue.self, from: data)
+    }
+
+    /// A Foundation JSON object suitable for `JSONSerialization`.
+    ///
+    /// Objects are returned as `[String: Any]`, arrays as `[Any]`, strings as
+    /// `String`, numbers as `NSNumber`, booleans as `Bool`, and null as
+    /// `NSNull`.
+    public var jsonObject: Any {
+        jsonValue.foundationObject
+    }
+}
+
 extension MCPJSONValue: ExpressibleByStringLiteral {
     /// Creates a JSON string from a Swift string literal.
     public init(stringLiteral value: String) {
@@ -201,14 +244,11 @@ extension MCPJSONValue {
     }
 
     package init?(foundationObject value: Any) {
-        guard let value = JSONValue(any: value) else {
-            return nil
-        }
-        self.init(value)
+        try? self.init(jsonObject: value)
     }
 
     package var foundationObject: Any {
-        jsonValue.foundationObject
+        jsonObject
     }
 
     package var jsonValue: JSONValue {
@@ -230,4 +270,19 @@ extension MCPJSONValue {
         }
     }
 
+}
+
+private extension MCPJSONValue {
+    static func isValidJSONValue(_ value: JSONValue) -> Bool {
+        switch value {
+        case .object(let values):
+            return values.values.allSatisfy(isValidJSONValue)
+        case .array(let values):
+            return values.allSatisfy(isValidJSONValue)
+        case .number(.double(let value)):
+            return value.isFinite
+        case .number(.int), .string, .bool, .null:
+            return true
+        }
+    }
 }

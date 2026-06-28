@@ -145,6 +145,62 @@ struct XcodeMCPTests {
         ]))
     }
 
+    @Test func rawRequestSendsDynamicMethodAndReturnsRawResult() async throws {
+        let transport = FakeXcodeMCPTransport()
+        let xcode = try await XcodeMCP(transport: transport)
+        defer {
+            Task { await xcode.close() }
+        }
+
+        let result = try await xcode.request(
+            "workspace/symbols",
+            params: [
+                "query": "NavigationStack",
+                "limit": 3,
+            ]
+        )
+
+        #expect(result == [
+            "method": "workspace/symbols",
+            "echo": [
+                "query": "NavigationStack",
+                "limit": 3,
+            ],
+        ])
+
+        let request = try #require(
+            await transport.sentMessages().last { $0.method == "workspace/symbols" }
+        )
+        #expect(request.id != nil)
+        #expect(request.params == [
+            "query": "NavigationStack",
+            "limit": 3,
+        ])
+    }
+
+    @Test func rawNotifySendsDynamicNotificationWithoutRequestID() async throws {
+        let transport = FakeXcodeMCPTransport()
+        let xcode = try await XcodeMCP(transport: transport)
+        defer {
+            Task { await xcode.close() }
+        }
+
+        try await xcode.notify(
+            "notifications/custom",
+            params: [
+                "enabled": true,
+            ]
+        )
+
+        let notification = try #require(
+            await transport.sentMessages().last { $0.method == "notifications/custom" }
+        )
+        #expect(notification.id == nil)
+        #expect(notification.params == [
+            "enabled": true,
+        ])
+    }
+
     @Test func callToolAddsProgressTokenAndRoutesMatchingProgress() async throws {
         let transport = FakeXcodeMCPTransport()
         let progressValues = RecordedValues<MCPProgress>()
@@ -442,6 +498,54 @@ struct XcodeMCPTests {
         let encodedProgress = try jsonObject(encoder.encode(progress))
         #expect(encodedProgress["raw"] == nil)
         #expect(encodedProgress["x-progress"] == .string("kept"))
+    }
+
+    @Test func jsonValueConvertsFoundationObjectsAndEncodableValues() throws {
+        struct Payload: Encodable {
+            var query: String
+            var limit: Int
+            var flags: [String: Bool]
+        }
+
+        let foundationValue = try MCPJSONValue(jsonObject: [
+            "query": "SwiftUI",
+            "limit": NSNumber(value: 5),
+            "tags": ["toolbar", "navigation"],
+            "metadata": [
+                "isBeta": true,
+                "none": NSNull(),
+            ],
+        ])
+
+        #expect(foundationValue == [
+            "query": "SwiftUI",
+            "limit": 5,
+            "tags": ["toolbar", "navigation"],
+            "metadata": [
+                "isBeta": true,
+                "none": .null,
+            ],
+        ])
+
+        let object = try #require(foundationValue.jsonObject as? [String: Any])
+        #expect(object["query"] as? String == "SwiftUI")
+        #expect((object["limit"] as? NSNumber)?.intValue == 5)
+
+        let encoded = try MCPJSONValue(encoding: Payload(
+            query: "Observation",
+            limit: 2,
+            flags: ["exact": true]
+        ))
+
+        #expect(encoded.objectValue?["query"] == .string("Observation"))
+        #expect(encoded.objectValue?["limit"] == .integer(2))
+        #expect(encoded.objectValue?["flags"] == ["exact": true])
+
+        #expect(throws: XcodeMCPError.invalidRequest(
+            "value is not a JSON-compatible Foundation object"
+        )) {
+            _ = try MCPJSONValue(jsonObject: Date())
+        }
     }
 
     @Test func streamableHTTPSendsSessionHeadersAndDeletesOnClose() async throws {
@@ -1185,6 +1289,11 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
                 ]),
                 "isError": .bool(true),
                 "x-result": .string("dynamic"),
+            ])
+        case "workspace/symbols":
+            return .object([
+                "method": .string(method),
+                "echo": params ?? .null,
             ])
         default:
             return .null

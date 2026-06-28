@@ -42,6 +42,17 @@ let result = try await xcode.callTool(
 await xcode.close()
 ```
 
+Raw MCP requests can be handled without creating a tool wrapper:
+
+```swift
+await runtime.setRequestHandler({ method, params in
+    [
+        "method": .string(method),
+        "echo": params ?? .null,
+    ]
+}, forMethod: "workspace/symbols")
+```
+
 The testing runtime owns the fake transport and JSON-RPC response loop. Test
 code should interact with `XcodeMCP`, `MCPTool`, `MCPToolResult`, and
 `MCPJSONValue` instead of building raw JSON-RPC messages.

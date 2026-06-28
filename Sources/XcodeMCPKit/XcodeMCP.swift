@@ -324,6 +324,45 @@ public actor XcodeMCP {
         return try MCPToolResult(json: result)
     }
 
+    /// Sends an arbitrary MCP request and returns the raw result.
+    ///
+    /// Use this escape hatch for dynamic MCP methods that are not `tools/list`
+    /// or `tools/call`. The client still owns JSON-RPC framing, request ids,
+    /// transport session headers, timeouts, and response error mapping.
+    ///
+    /// This method intentionally returns ``MCPJSONValue`` instead of a
+    /// tool-specific model so SDK consumers can call newly discovered MCP
+    /// methods without this package adding typed wrappers.
+    ///
+    /// - Parameters:
+    ///   - method: MCP method name to send.
+    ///   - params: Optional raw MCP params.
+    /// - Returns: The raw MCP result value, or ``MCPJSONValue/null`` when the
+    ///   server response omits `result`.
+    public func request(
+        _ method: String,
+        params: MCPJSONValue? = nil
+    ) async throws -> MCPJSONValue {
+        try await request(method, params: params, onProgress: nil)
+    }
+
+    /// Sends an arbitrary MCP notification.
+    ///
+    /// Use this escape hatch for dynamic MCP notifications. The client still
+    /// owns JSON-RPC framing, transport session headers, and transport error
+    /// mapping, but no response is expected from the server.
+    ///
+    /// - Parameters:
+    ///   - method: MCP notification method name to send.
+    ///   - params: Optional raw MCP params.
+    public func notify(_ method: String, params: MCPJSONValue? = nil) async throws {
+        do {
+            try await session.notify(method, params: params?.jsonValue)
+        } catch {
+            throw Self.publicError(from: error)
+        }
+    }
+
     /// Closes the client and terminates the underlying transport.
     ///
     /// Closing is idempotent. Pending requests fail with ``XcodeMCPError/closed``,
@@ -338,7 +377,7 @@ extension XcodeMCP {
     package func request(
         _ method: String,
         params: MCPJSONValue? = nil,
-        onProgress: InitializedMCPClientSession.ProgressHandler? = nil
+        onProgress: InitializedMCPClientSession.ProgressHandler?
     ) async throws -> MCPJSONValue {
         do {
             let result = try await session.request(
@@ -347,14 +386,6 @@ extension XcodeMCP {
                 onProgress: onProgress
             )
             return MCPJSONValue(result)
-        } catch {
-            throw Self.publicError(from: error)
-        }
-    }
-
-    package func notify(_ method: String, params: MCPJSONValue? = nil) async throws {
-        do {
-            try await session.notify(method, params: params?.jsonValue)
         } catch {
             throw Self.publicError(from: error)
         }

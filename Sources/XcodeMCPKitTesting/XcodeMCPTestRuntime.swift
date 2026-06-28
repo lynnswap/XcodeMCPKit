@@ -120,11 +120,20 @@ public actor XcodeMCPTestRuntime {
 
     public typealias ToolHandler = @Sendable (ToolCall) async throws -> MCPToolResult
 
+    /// A handler for raw MCP requests sent through ``XcodeMCP/request(_:params:)``.
+    ///
+    /// Throw ``ServerError`` to return a JSON-RPC error response to the client.
+    public typealias RequestHandler = @Sendable (
+        _ method: String,
+        _ params: MCPJSONValue?
+    ) async throws -> MCPJSONValue
+
     private let initializeResult: MCPJSONValue
     private var tools: [MCPTool]
     private var toolResults: [String: MCPToolResult] = [:]
     private var progressUpdates: [String: [ProgressUpdate]] = [:]
     private var toolHandler: ToolHandler?
+    private var requestHandlers: [String: RequestHandler] = [:]
     private var messages: [RecordedMessage] = []
     private var closeCount = 0
     private var transportContinuations: [UUID: AsyncStream<XcodeMCPTransportEvent>.Continuation] = [:]
@@ -172,6 +181,22 @@ public actor XcodeMCPTestRuntime {
     /// throw ``ServerError`` to produce a JSON-RPC error response.
     public func setToolHandler(_ handler: ToolHandler?) {
         toolHandler = handler
+    }
+
+    /// Installs a dynamic raw request handler for a method name.
+    ///
+    /// Use this when tests exercise ``XcodeMCP/request(_:params:)`` directly
+    /// instead of going through `tools/call`. Passing `nil` removes the
+    /// handler for that method.
+    ///
+    /// - Parameters:
+    ///   - handler: Raw request handler to invoke.
+    ///   - method: MCP method name handled by `handler`.
+    public func setRequestHandler(
+        _ handler: RequestHandler?,
+        forMethod method: String
+    ) {
+        requestHandlers[method] = handler
     }
 
     /// Configures progress updates emitted for a named tool call.
@@ -273,7 +298,7 @@ public actor XcodeMCPTestRuntime {
             return initializeResult
         case "tools/list":
             return .object([
-                "tools": .array(try tools.map(Self.encodedJSONValue))
+                "tools": try MCPJSONValue(encoding: tools)
             ])
         case "tools/call":
             let call = try decodeToolCall(params)
@@ -293,6 +318,9 @@ public actor XcodeMCPTestRuntime {
                 message: "No test result configured for tool \(call.name)"
             )
         default:
+            if let handler = requestHandlers[method] {
+                return try await handler(method, params)
+            }
             throw ServerError(code: -32601, message: "Method not found: \(method)")
         }
     }
@@ -356,7 +384,7 @@ public actor XcodeMCPTestRuntime {
 
     private func emit(_ object: [String: MCPJSONValue], to transportID: UUID) {
         guard let data = try? JSONSerialization.data(
-            withJSONObject: MCPJSONValue.object(object).foundationObject
+            withJSONObject: MCPJSONValue.object(object).jsonObject
         ) else {
             return
         }
@@ -365,21 +393,12 @@ public actor XcodeMCPTestRuntime {
 
     private func parse(_ data: Data) throws -> [String: MCPJSONValue] {
         let raw = try JSONSerialization.jsonObject(with: data)
-        guard let value = MCPJSONValue(foundationObject: raw),
-              let object = value.objectValue
+        let value = try MCPJSONValue(jsonObject: raw)
+        guard let object = value.objectValue
         else {
             throw XcodeMCPError.invalidRequest("message is not an object")
         }
         return object
-    }
-
-    private static func encodedJSONValue<T: Encodable>(_ value: T) throws -> MCPJSONValue {
-        let data = try JSONEncoder().encode(value)
-        let raw = try JSONSerialization.jsonObject(with: data)
-        guard let json = MCPJSONValue(foundationObject: raw) else {
-            throw XcodeMCPError.invalidResponse("encoded value is not JSON")
-        }
-        return json
     }
 }
 
