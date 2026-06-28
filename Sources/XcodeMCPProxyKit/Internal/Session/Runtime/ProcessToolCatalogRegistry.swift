@@ -1,7 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPCore
-import XcodeMCPProcessRuntime
 
 final class ProcessToolCatalogRegistry: Sendable {
     struct Catalog: Sendable {

@@ -2,7 +2,6 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
-import XcodeMCPProcessRuntime
 
 final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting {
     private struct State: Sendable {

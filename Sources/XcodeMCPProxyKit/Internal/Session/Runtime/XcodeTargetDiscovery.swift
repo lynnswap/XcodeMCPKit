@@ -1,4 +1,3 @@
-import XcodeMCPCore
 import Foundation
 
 package struct XcodeProcessTarget: Sendable, Equatable {

@@ -1,6 +1,4 @@
 import Foundation
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
 
 final class RuntimeDocumentationTargetDiscovery:
     PriorityOrderedXcodeTargetDiscovering,

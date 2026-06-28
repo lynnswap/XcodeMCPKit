@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import XcodeMCPCore
 import XcodeMCPProcessRuntime
 
 struct LiveXcodeTargetDiscovery: XcodeTargetDiscovering, Sendable {
