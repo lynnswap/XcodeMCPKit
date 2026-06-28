@@ -71,7 +71,7 @@ struct DiscoveryTests {
         #expect(Discovery.read(overrideURL: url) == nil)
     }
 
-    @Test func discoveryRejectsDeadPID() async throws {
+    @Test func discoveryReadDoesNotOwnProcessLiveness() async throws {
         let url = makeTempDiscoveryURL()
         defer { cleanupTempDiscoveryURL(url) }
         let record = DiscoveryRecord(
@@ -82,7 +82,7 @@ struct DiscoveryTests {
             updatedAt: Date()
         )
         try Discovery.write(record: record, overrideURL: url)
-        #expect(Discovery.read(overrideURL: url) == nil)
+        #expect(Discovery.read(overrideURL: url)?.pid == record.pid)
     }
 
     @Test func discoveryAllowsIPv4LoopbackRange() async throws {

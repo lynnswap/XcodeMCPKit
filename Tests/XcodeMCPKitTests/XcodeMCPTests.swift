@@ -630,6 +630,42 @@ struct XcodeMCPTests {
         )
     }
 
+    @Test func streamableHTTPDiscoveryRejectsStaleRecordBeforeConnecting() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = directory.appendingPathComponent("endpoint.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let record = DiscoveryRecord(
+            url: "http://127.0.0.1:8765/mcp",
+            host: "127.0.0.1",
+            port: 8765,
+            pid: 12345,
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+        try Discovery.write(record: record, overrideURL: fileURL)
+
+        let liveness = DiscoveryLivenessProbe(isAlive: false)
+        let resolver = StreamableHTTPDiscoveryResolver(
+            isProcessAlive: { pid in
+                liveness.isProcessAlive(pid)
+            }
+        )
+
+        await #expect(throws: XcodeMCPError.invalidRequest(
+            "Streamable HTTP discovery file is missing, stale, or invalid: \(fileURL.path)"
+        )) {
+            _ = try await XcodeMCP(
+                config: .init(
+                    transport: .streamableHTTP(discoveryFile: fileURL),
+                    requestTimeout: .seconds(2)
+                ),
+                streamableHTTPDiscoveryResolver: resolver
+            )
+        }
+        #expect(liveness.checkedProcessIDs() == [record.pid])
+    }
+
     @Test func streamableHTTPSendsSessionHeadersAndDeletesOnClose() async throws {
         let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
         let server = FakeStreamableHTTPServer(progressDelivery: .none)
@@ -953,6 +989,29 @@ struct XcodeMCPTests {
 }
 
 private final class DeinitProbe: @unchecked Sendable {}
+
+private final class DiscoveryLivenessProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let isAlive: Bool
+    private var processIDs: [Int] = []
+
+    init(isAlive: Bool) {
+        self.isAlive = isAlive
+    }
+
+    func isProcessAlive(_ processID: Int) -> Bool {
+        lock.withLock {
+            processIDs.append(processID)
+        }
+        return isAlive
+    }
+
+    func checkedProcessIDs() -> [Int] {
+        lock.withLock {
+            processIDs
+        }
+    }
+}
 
 private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>

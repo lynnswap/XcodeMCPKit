@@ -56,7 +56,7 @@ struct DiscoveryClient: DependencyClient {
             try FileManager.default.createDirectory(at: $0, withIntermediateDirectories: true)
         },
         isProcessAlive: @escaping @Sendable (_ pid: Int) -> Bool = {
-            Discovery.isProcessAlive($0)
+            ProcessControlClient.liveValue.isProcessAlive($0)
         },
         now: @escaping @Sendable () -> Date = {
             Date()
