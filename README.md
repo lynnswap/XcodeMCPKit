@@ -93,6 +93,10 @@ let result = try await xcode.callTool(
     "DocumentationSearch",
     arguments: ["query": .string("SwiftData")]
 )
+let symbols = try await xcode.request(
+    "workspace/symbols",
+    params: try MCPJSONValue(jsonObject: ["query": "NavigationStack"])
+)
 await xcode.close()
 ```
 
@@ -124,9 +128,11 @@ let xcode = try await XcodeMCP(
 ```
 
 The public API exposes MCP domain values such as `MCPJSONValue`, `MCPTool`,
-`MCPToolResult`, `MCPContent`, and `MCPProgress`. Process launch, JSON-RPC
-framing, HTTP session headers, SSE parsing, and session transport are internal
-implementation details.
+`MCPToolResult`, `MCPContent`, and `MCPProgress`. Use `request(_:params:)` and
+`notify(_:params:)` for dynamic MCP methods that are not tool calls; the client
+still owns JSON-RPC framing and transport/session details. Process launch, HTTP
+session headers, SSE parsing, and session transport are internal implementation
+details.
 
 ### Test With XcodeMCPKitTesting
 

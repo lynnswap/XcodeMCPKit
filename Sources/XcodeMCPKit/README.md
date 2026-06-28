@@ -102,6 +102,31 @@ inspect MCP data that this package does not model as a fixed Swift type. Domain
 models keep raw values for unknown fields and future MCP extensions. Use public
 accessors such as `objectValue`, `arrayValue`, `stringValue`, `boolValue`,
 `integerValue`, `doubleValue`, and `isNull` when inspecting dynamic responses.
+Use `MCPJSONValue(jsonObject:)`, `MCPJSONValue(encoding:)`, and `jsonObject` to
+bridge between Foundation or Codable values and raw MCP JSON.
+
+For dynamic MCP methods that are not tool calls, use the raw request and
+notification escape hatches:
+
+```swift
+struct SymbolParams: Encodable {
+    var query: String
+    var limit: Int
+}
+
+let symbols = try await xcode.request(
+    "workspace/symbols",
+    params: try MCPJSONValue(encoding: SymbolParams(
+        query: "NavigationStack",
+        limit: 5
+    ))
+)
+
+try await xcode.notify(
+    "notifications/custom",
+    params: try MCPJSONValue(jsonObject: ["enabled": true])
+)
+```
 
 ## Configuration
 

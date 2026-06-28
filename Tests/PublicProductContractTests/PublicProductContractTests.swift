@@ -171,7 +171,12 @@ private let xcodeMCPKitClientSource = """
 import Foundation
 import XcodeMCPKit
 
-func compileOnlyClientDomainSurface() {
+private struct ContractPayload: Encodable {
+    var query: String
+    var limit: Int
+}
+
+func compileOnlyClientDomainSurface() throws {
     let arguments: [String: MCPJSONValue] = [
         "query": "SwiftData",
         "includeBeta": true,
@@ -219,6 +224,16 @@ func compileOnlyClientDomainSurface() {
     let integerLimit = arguments["limit"]?.integerValue
     let score = arguments["score"]?.doubleValue
     let optionalIsNull = metadata?["optional"]?.isNull
+    let jsonFromObject = try MCPJSONValue(jsonObject: [
+        "query": "NavigationStack",
+        "limit": 3,
+        "optional": NSNull(),
+    ])
+    let jsonFromEncodable = try MCPJSONValue(encoding: ContractPayload(
+        query: "Observation",
+        limit: 2
+    ))
+    let foundationObject = jsonFromObject.jsonObject
 
     let tool = MCPTool(
         name: "DocumentationSearch",
@@ -295,6 +310,9 @@ func compileOnlyClientDomainSurface() {
         integerLimit,
         score,
         optionalIsNull,
+        jsonFromObject,
+        jsonFromEncodable,
+        foundationObject,
         tool,
         result,
         progress,
@@ -313,6 +331,18 @@ func compileOnlyClientLifecycleSurface(config: XcodeMCP.Configuration) async thr
     ) { progress in
         _ = progress.message
     }
+    _ = try await client.request(
+        "workspace/symbols",
+        params: [
+            "query": "NavigationStack",
+        ]
+    )
+    try await client.notify(
+        "notifications/custom",
+        params: [
+            "enabled": true,
+        ]
+    )
     await client.close()
 }
 """
