@@ -259,11 +259,8 @@ let package = Package(
             name: "ProxyStdioAdapterTests",
             dependencies: [
                 "XcodeMCPCore",
-                "XcodeMCPProcessRuntime",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyTestSupport",
-                .product(name: "NIO", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Tests/ProxyStdioAdapterTests",
             swiftSettings: strictSwiftSettings

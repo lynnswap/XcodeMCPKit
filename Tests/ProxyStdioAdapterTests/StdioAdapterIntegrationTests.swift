@@ -1,170 +1,309 @@
 import Foundation
-import NIO
-import NIOHTTP1
 import Testing
+import XcodeMCPCore
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyKit
 
-@Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
-struct StdioAdapterIntegrationTests {
-    @Test func stdioAdapterDoesNotHangOnEOFWithStalledRequest() async throws {
-        let server = try HangingHTTPServer.start()
+@Suite(.serialized)
+struct StdioAdapterContractTests {
+    @Test func eofWithInFlightStalledRequestClosesAndCancelsClientAfterDrainTimeout() async throws {
+        let shutdownClocks = makeStdioAdapterShutdownClocks()
+        let client = StalledStdioAdapterHTTPClient()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let adapter = StdioAdapter(
-            upstreamURL: server.url,
             requestTimeout: 0,
             input: inputPipe.fileHandleForReading,
-            output: outputPipe.fileHandleForWriting
+            output: outputPipe.fileHandleForWriting,
+            client: client,
+            shutdownPolicy: shutdownClocks.policy
         )
 
-        do {
-            let waitTask = Task {
-                await adapter.start()
-                await adapter.wait()
-            }
+        await adapter.start()
+        let waitCompleted = AsyncGate()
+        let waitTask = Task {
+            await adapter.wait()
+            await waitCompleted.signal()
+        }
+        var inputClosed = false
+        var outputClosed = false
 
-            inputPipe.fileHandleForWriting.write(
-                Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8) + Data("\n".utf8)
-            )
+        func closeInput() {
+            guard !inputClosed else { return }
             inputPipe.fileHandleForWriting.closeFile()
+            inputClosed = true
+        }
 
-            let completed = try await waitWithTimeout(
-                "StdioAdapter should cancel stalled requests after stdin closes",
-                timeout: .seconds(2)
-            ) {
-                await waitTask.value
-                return true
+        func closeOutput() {
+            guard !outputClosed else { return }
+            outputPipe.fileHandleForWriting.closeFile()
+            outputClosed = true
+        }
+
+        do {
+            inputPipe.fileHandleForWriting.write(Data(toolsListRequest.utf8) + Data("\n".utf8))
+            let sentBody = try await client.sentBody()
+            #expect(sentBody == Data(toolsListRequest.utf8))
+
+            closeInput()
+            try await waitUntilDrainSleepSuspended(shutdownClocks)
+            #expect(await client.closeCallCount() == 0)
+            #expect(await client.networkCancellationCallCount() == 0)
+
+            advanceStdioAdapterShutdownClocks(shutdownClocks, by: .seconds(1))
+
+            let closeCall = try await client.closeCall()
+            #expect(closeCall.deleteTimeout == nil)
+            #expect(closeCall.deleteSessionGrace == .milliseconds(250))
+
+            try await client.networkCancellation()
+            try await client.sendCancellation()
+            try await waitWithTimeout("adapter wait completed after drain timeout") {
+                try await waitCompleted.wait()
             }
-
-            #expect(completed)
         } catch {
-            try? await server.shutdown()
+            closeInput()
+            await client.releaseStalledSends()
+            await adapter.stop()
+            waitTask.cancel()
+            closeOutput()
             throw error
         }
 
-        outputPipe.fileHandleForWriting.closeFile()
-        try await server.shutdown()
+        closeOutput()
+        await waitTask.value
     }
 
-    @Test func stdioAdapterStopsReadLoopAfterFatalInputProtocolViolation() async throws {
-        let server = try HangingHTTPServer.start()
+    @Test func fatalInputProtocolViolationCancelsClientAndFinishesWaitWithoutSendingUpstream() async throws {
+        let client = StalledStdioAdapterHTTPClient()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let adapter = StdioAdapter(
-            upstreamURL: server.url,
             requestTimeout: 0,
             input: inputPipe.fileHandleForReading,
-            output: outputPipe.fileHandleForWriting
+            output: outputPipe.fileHandleForWriting,
+            client: client,
+            shutdownPolicy: .live
         )
 
-        do {
-            let waitTask = Task {
-                await adapter.start()
-                await adapter.wait()
-            }
+        await adapter.start()
+        let waitCompleted = AsyncGate()
+        let waitTask = Task {
+            await adapter.wait()
+            await waitCompleted.signal()
+        }
+        var inputClosed = false
+        var outputClosed = false
 
+        func closeInput() {
+            guard !inputClosed else { return }
+            inputPipe.fileHandleForWriting.closeFile()
+            inputClosed = true
+        }
+
+        func closeOutput() {
+            guard !outputClosed else { return }
+            outputPipe.fileHandleForWriting.closeFile()
+            outputClosed = true
+        }
+
+        do {
             inputPipe.fileHandleForWriting.write(Data("Content-Length: abc\r\n\r\n{}".utf8))
 
-            let completed = try await waitWithTimeout(
-                "StdioAdapter should stop after a fatal input protocol violation",
-                timeout: .seconds(2)
-            ) {
-                await waitTask.value
-                return true
+            try await client.networkCancellation()
+            try await waitWithTimeout("adapter wait completed after fatal input violation") {
+                try await waitCompleted.wait()
             }
-
-            #expect(completed)
+            #expect(await client.sendCallCount() == 0)
+            #expect(await client.closeCallCount() == 0)
         } catch {
-            inputPipe.fileHandleForWriting.closeFile()
-            outputPipe.fileHandleForWriting.closeFile()
-            try? await server.shutdown()
+            closeInput()
+            await client.releaseStalledSends()
+            await adapter.stop()
+            waitTask.cancel()
+            closeOutput()
             throw error
         }
 
-        inputPipe.fileHandleForWriting.closeFile()
-        outputPipe.fileHandleForWriting.closeFile()
-        try await server.shutdown()
+        closeInput()
+        closeOutput()
+        await waitTask.value
     }
 }
 
-private struct HangingHTTPServer {
-    let group: MultiThreadedEventLoopGroup
-    let channel: Channel
-    let url: URL
-    let childChannelTracker: HTTPTestServerChannelTracker
+private let toolsListRequest = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
 
-    static func start() throws -> HangingHTTPServer {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let childChannelTracker = HTTPTestServerChannelTracker()
-        let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 32)
-            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { channel in
-                return channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-                    channel.pipeline.addHandler(HangingHTTPHandler())
-                }
-            }
-            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+private struct ControlledStdioAdapterShutdownClocks: Sendable {
+    let policy: StdioAdapterShutdownPolicy
+    let timeoutClock: TestClock
+    let uptimeClock: TestUptimeClock
+}
 
-        let channel = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
-        try channel.pipeline.addHandler(
-            HTTPTestServerAcceptedChannelHandler(tracker: childChannelTracker)
-        ).wait()
-        let port = try #require(channel.localAddress?.port)
-        return HangingHTTPServer(
-            group: group,
-            channel: channel,
-            url: URL(string: "http://127.0.0.1:\(port)/mcp")!,
-            childChannelTracker: childChannelTracker
-        )
-    }
+private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownClocks {
+    let timeoutClock = TestClock()
+    let uptimeClock = TestUptimeClock()
+    let clock = ClockClient(
+        now: {
+            Date(timeIntervalSince1970: Double(uptimeClock.now()) / 1_000_000_000)
+        },
+        uptimeNanoseconds: uptimeClock.now,
+        sleep: { duration in
+            try? await timeoutClock.sleep(for: duration)
+        },
+        sleepForTimeInterval: { _ in }
+    )
+    return ControlledStdioAdapterShutdownClocks(
+        policy: StdioAdapterShutdownPolicy(clock: clock),
+        timeoutClock: timeoutClock,
+        uptimeClock: uptimeClock
+    )
+}
 
-    func shutdown() async throws {
-        try await shutdownHTTPTestServer(
-            listenChannel: channel,
-            childChannelTracker: childChannelTracker,
-            group: group
-        )
+private func waitUntilDrainSleepSuspended(
+    _ clocks: ControlledStdioAdapterShutdownClocks
+) async throws {
+    try await waitWithTimeout("waiting for adapter drain timeout sleep") {
+        await clocks.timeoutClock.sleep(untilSuspendedBy: 1)
     }
 }
 
-private final class HangingHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = HTTPServerRequestPart
-    typealias OutboundOut = HTTPServerResponsePart
+private func advanceStdioAdapterShutdownClocks(
+    _ clocks: ControlledStdioAdapterShutdownClocks,
+    by duration: Duration
+) {
+    clocks.uptimeClock.advance(by: duration)
+    clocks.timeoutClock.advance(by: duration)
+}
 
-    private var requestHead: HTTPRequestHead?
+private struct StdioAdapterCloseCall: Sendable {
+    let deleteTimeout: Duration?
+    let deleteSessionGrace: Duration?
+}
 
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        switch unwrapInboundIn(data) {
-        case .head(let head):
-            requestHead = head
-        case .body:
-            break
-        case .end:
-            handleRequest(context: context)
-            requestHead = nil
+private final class StalledStdioAdapterHTTPClient: StdioAdapterHTTPClient {
+    let events = AsyncStream<Data> { continuation in
+        continuation.finish()
+    }
+
+    private let sendBodies = RecordedValues<Data>()
+    private let closeCalls = RecordedValues<StdioAdapterCloseCall>()
+    private let networkCancellationCalls = RecordedValues<Void>()
+    private let sendCancellationCalls = RecordedValues<Void>()
+    private let stalledSends = StalledSendContinuations()
+
+    func send(
+        _ data: Data,
+        onMessage: @Sendable (Data) async throws -> StreamableHTTPMCPClientMessageDisposition
+    ) async throws -> StreamableHTTPMCPClientSendResult {
+        _ = onMessage
+        await sendBodies.append(data)
+        do {
+            return try await stalledSends.wait()
+        } catch is CancellationError {
+            await sendCancellationCalls.append(())
+            throw CancellationError()
         }
     }
 
-    private func handleRequest(context: ChannelHandlerContext) {
-        guard let requestHead else { return }
+    func startEventStreamIfReady() async {}
 
-        if requestHead.method == .GET {
-            var headers = HTTPHeaders()
-            headers.add(name: "Content-Type", value: "text/event-stream")
-            headers.add(name: "Cache-Control", value: "no-cache")
-            headers.add(name: "Connection", value: "keep-alive")
-            let responseHead = HTTPResponseHead(
-                version: requestHead.version,
-                status: .ok,
-                headers: headers
+    func close(
+        deleteTimeout: Duration?,
+        deleteSessionGrace: Duration?,
+        clock: ClockClient
+    ) async {
+        _ = clock
+        await closeCalls.append(
+            StdioAdapterCloseCall(
+                deleteTimeout: deleteTimeout,
+                deleteSessionGrace: deleteSessionGrace
             )
-            context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
-            context.flush()
+        )
+    }
+
+    func cancelNetworkRequests() async {
+        await networkCancellationCalls.append(())
+    }
+
+    func sentBody(at index: Int = 0) async throws -> Data {
+        try await waitWithTimeout("waiting for fake client send") {
+            try await self.sendBodies.nextValue(at: index)
+        }
+    }
+
+    func closeCall(at index: Int = 0) async throws -> StdioAdapterCloseCall {
+        try await waitWithTimeout("waiting for fake client close") {
+            try await self.closeCalls.nextValue(at: index)
+        }
+    }
+
+    func networkCancellation(at index: Int = 0) async throws {
+        _ = try await waitWithTimeout("waiting for fake client cancellation") {
+            try await self.networkCancellationCalls.nextValue(at: index)
+        }
+    }
+
+    func sendCancellation(at index: Int = 0) async throws {
+        _ = try await waitWithTimeout("waiting for stalled send cancellation") {
+            try await self.sendCancellationCalls.nextValue(at: index)
+        }
+    }
+
+    func sendCallCount() async -> Int {
+        await sendBodies.count()
+    }
+
+    func closeCallCount() async -> Int {
+        await closeCalls.count()
+    }
+
+    func networkCancellationCallCount() async -> Int {
+        await networkCancellationCalls.count()
+    }
+
+    func releaseStalledSends() async {
+        await stalledSends.releaseAll()
+    }
+}
+
+private actor StalledSendContinuations {
+    private typealias Continuation = CheckedContinuation<StreamableHTTPMCPClientSendResult, Error>
+
+    private var waiters: [UUID: Continuation] = [:]
+    private var released = false
+
+    func wait() async throws -> StreamableHTTPMCPClientSendResult {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if released {
+                    continuation.resume(throwing: StalledSendReleaseError())
+                    return
+                }
+                waiters[id] = continuation
+            }
+        } onCancel: {
+            Task {
+                await self.cancel(id: id)
+            }
+        }
+    }
+
+    func releaseAll() {
+        released = true
+        let waiters = Array(waiters.values)
+        self.waiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(throwing: StalledSendReleaseError())
+        }
+    }
+
+    private func cancel(id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else {
             return
         }
-
-        // Intentionally never answer POST requests to simulate a stalled upstream.
+        waiter.resume(throwing: CancellationError())
     }
 }
+
+private struct StalledSendReleaseError: Error {}
