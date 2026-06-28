@@ -72,6 +72,13 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
         return Drain(tasks: tasks)
     }
 
+    package func drainCurrentTasks() -> Drain {
+        let tasks = state.withLockedValue { state -> [Task<Void, Never>] in
+            state.records.values.compactMap(\.task)
+        }
+        return Drain(tasks: tasks)
+    }
+
     private func finish(_ id: UUID) {
         _ = state.withLockedValue { state in
             state.records.removeValue(forKey: id)

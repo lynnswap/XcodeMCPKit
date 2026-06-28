@@ -435,6 +435,16 @@ extension RuntimeCoordinator {
         }
         semaphore.wait()
     }
+
+    package func drainRuntimeTasksAndWaitForTesting() {
+        let drain = runtimeTasks.drainCurrentTasks()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            await drain.wait()
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
 }
 
 package func shutdownAndWait(_ group: EventLoopGroup) {
