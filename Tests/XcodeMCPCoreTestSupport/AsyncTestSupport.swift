@@ -157,23 +157,71 @@ package func waitWithTimeout<T: Sendable>(
     timeout: Duration = .seconds(5),
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
+    let race = TimeoutRace<T>()
     let clock = ContinuousClock()
-
-    return try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask {
-            try await operation()
+    let operationTask = Task {
+        do {
+            race.complete(.success(try await operation()))
+        } catch {
+            race.complete(.failure(error))
         }
-        group.addTask {
+    }
+    let timeoutTask = Task {
+        do {
             try await clock.sleep(until: clock.now.advanced(by: timeout))
-            throw AsyncTestTimeoutError(description: description)
+            race.complete(.failure(AsyncTestTimeoutError(description: description)))
+        } catch {
+            return
         }
+    }
 
-        guard let result = try await group.next() else {
-            throw AsyncTestTimeoutError(description: description)
+    return try await withTaskCancellationHandler {
+        defer {
+            operationTask.cancel()
+            timeoutTask.cancel()
         }
+        return try await withCheckedThrowingContinuation { continuation in
+            race.install(continuation)
+        }
+    } onCancel: {
+        operationTask.cancel()
+        timeoutTask.cancel()
+        race.complete(.failure(CancellationError()))
+    }
+}
 
-        group.cancelAll()
-        return result
+private final class TimeoutRace<T: Sendable>: @unchecked Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<T, Error>?
+        var result: Result<T, Error>?
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    func install(_ continuation: CheckedContinuation<T, Error>) {
+        let result = state.withLockedValue { state -> Result<T, Error>? in
+            guard let result = state.result else {
+                state.continuation = continuation
+                return nil
+            }
+            return result
+        }
+        if let result {
+            continuation.resume(with: result)
+        }
+    }
+
+    func complete(_ result: Result<T, Error>) {
+        let continuation = state.withLockedValue { state -> CheckedContinuation<T, Error>? in
+            guard state.result == nil else {
+                return nil
+            }
+            state.result = result
+            let continuation = state.continuation
+            state.continuation = nil
+            return continuation
+        }
+        continuation?.resume(with: result)
     }
 }
 
@@ -188,7 +236,7 @@ package final class TestClock: Clock, @unchecked Sendable {
 
     private struct SuspensionWaiter {
         let minimumSleepers: Int
-        let continuation: CheckedContinuation<Void, Never>
+        let continuation: CheckedContinuation<Void, Error>
     }
 
     private struct State {
@@ -230,12 +278,21 @@ package final class TestClock: Clock, @unchecked Sendable {
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let continuations = state.withLockedValue { state -> [CheckedContinuation<Void, Never>] in
+                var shouldCancel = false
+                let continuations = state.withLockedValue { state -> [CheckedContinuation<Void, Error>] in
+                    guard Task.isCancelled == false else {
+                        shouldCancel = true
+                        return []
+                    }
                     state.sleepers[token] = SleepWaiter(deadline: deadline, continuation: continuation)
                     return Self.resumeReadySuspensionWaiters(state: &state)
                 }
+                if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 for continuation in continuations {
-                    continuation.resume()
+                    continuation.resume(returning: ())
                 }
             }
         } onCancel: {
@@ -261,7 +318,23 @@ package final class TestClock: Clock, @unchecked Sendable {
         }
     }
 
-    package func sleep(untilSuspendedBy minimumSleepers: Int) async {
+    package func sleep(
+        untilSuspendedBy minimumSleepers: Int,
+        timeout: Duration = .seconds(5),
+        description: String? = nil
+    ) async throws {
+        let description = description
+            ?? "timed out waiting for \(minimumSleepers) suspended fake clock sleeper(s)"
+        try await waitWithTimeout(description, timeout: timeout) {
+            try await self.waitUntilSuspendedBy(minimumSleepers)
+        }
+    }
+
+    private func waitUntilSuspendedBy(_ minimumSleepers: Int) async throws {
+        guard minimumSleepers > 0 else {
+            return
+        }
+
         let token = state.withLockedValue { state -> UInt64? in
             guard state.sleepers.count < minimumSleepers else {
                 return nil
@@ -275,26 +348,40 @@ package final class TestClock: Clock, @unchecked Sendable {
             return
         }
 
-        await withCheckedContinuation { continuation in
-            let shouldResume = state.withLockedValue { state in
-                if state.sleepers.count >= minimumSleepers {
-                    return true
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                var shouldCancel = false
+                let shouldResume = state.withLockedValue { state in
+                    if state.sleepers.count >= minimumSleepers {
+                        return true
+                    }
+                    guard Task.isCancelled == false else {
+                        shouldCancel = true
+                        return false
+                    }
+                    state.suspensionWaiters[token] = SuspensionWaiter(
+                        minimumSleepers: minimumSleepers,
+                        continuation: continuation
+                    )
+                    return false
                 }
-                state.suspensionWaiters[token] = SuspensionWaiter(
-                    minimumSleepers: minimumSleepers,
-                    continuation: continuation
-                )
-                return false
+                if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                } else if shouldResume {
+                    continuation.resume(returning: ())
+                }
             }
-            if shouldResume {
-                continuation.resume()
+        } onCancel: {
+            let waiter = state.withLockedValue { state in
+                state.suspensionWaiters.removeValue(forKey: token)
             }
+            waiter?.continuation.resume(throwing: CancellationError())
         }
     }
 
     private static func resumeReadySuspensionWaiters(
         state: inout State
-    ) -> [CheckedContinuation<Void, Never>] {
+    ) -> [CheckedContinuation<Void, Error>] {
         let readyTokens = state.suspensionWaiters.compactMap { token, waiter in
             state.sleepers.count >= waiter.minimumSleepers ? token : nil
         }

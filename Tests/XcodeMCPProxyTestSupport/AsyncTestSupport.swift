@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
+import Testing
 import XcodeMCPCoreTestSupport
 
 package typealias AsyncTestTimeoutError = XcodeMCPCoreTestSupport.AsyncTestTimeoutError
@@ -262,21 +263,48 @@ package func waitWithTimeout<T: Sendable>(
     )
 }
 
-package func shutdown(_ group: EventLoopGroup) async {
-    await withCheckedContinuation { continuation in
-        group.shutdownGracefully { _ in
-            continuation.resume()
+package func shutdown(_ group: EventLoopGroup, timeout: Duration = .seconds(5)) async throws {
+    try await waitWithTimeout(
+        "timed out waiting for event loop group shutdown",
+        timeout: timeout
+    ) {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            group.shutdownGracefully { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
         }
+    }
+}
+
+package func waitForTestSemaphore(
+    _ semaphore: DispatchSemaphore,
+    timeout: TimeInterval = 10,
+    description: String
+) {
+    if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+        Issue.record(AsyncTestTimeoutError(description: description))
     }
 }
 
 package func shutdownAndWait(_ group: EventLoopGroup) {
     let semaphore = DispatchSemaphore(value: 0)
     Task.detached(priority: .userInitiated) {
-        await shutdown(group)
+        do {
+            try await shutdown(group)
+        } catch {
+            Issue.record("event loop group shutdown failed: \(error)")
+        }
         semaphore.signal()
     }
-    semaphore.wait()
+    waitForTestSemaphore(
+        semaphore,
+        description: "timed out waiting for event loop group shutdown task"
+    )
 }
 
 package func makeTestURLSession(
@@ -389,7 +417,13 @@ package func shutdownHTTPTestServer(
         shutdownError = error
     }
 
-    await shutdown(group)
+    do {
+        try await shutdown(group, timeout: timeout)
+    } catch {
+        if shutdownError == nil {
+            shutdownError = error
+        }
+    }
 
     if let shutdownError {
         throw shutdownError

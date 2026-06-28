@@ -836,10 +836,10 @@ extension HTTPHandlerTests {
             )
             #expect(abandonedLease.releaseReason == "clientDisconnected")
             #expect(sessionManager.sentToolNames().isEmpty)
-            try await group.shutdownGracefully()
+            try await shutdown(group)
         } catch {
             await documentationRelease.signal()
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
     }
@@ -928,10 +928,10 @@ extension HTTPHandlerTests {
             )
             #expect(abandonedLease.releaseReason == "clientDisconnected")
             #expect(sessionManager.sentToolNames() == ["OtherAllowedTool"])
-            try await group.shutdownGracefully()
+            try await shutdown(group)
         } catch {
             await documentationRelease.signal()
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
     }

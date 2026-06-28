@@ -17,7 +17,10 @@ extension RuntimeCoordinator {
             await shutdown()
             semaphore.signal()
         }
-        semaphore.wait()
+        waitForTestSemaphore(
+            semaphore,
+            description: "timed out waiting for RuntimeCoordinator.shutdown()"
+        )
     }
 
     func drainRuntimeTasksAndWaitForTesting() {
@@ -27,7 +30,10 @@ extension RuntimeCoordinator {
             await drain.wait()
             semaphore.signal()
         }
-        semaphore.wait()
+        waitForTestSemaphore(
+            semaphore,
+            description: "timed out waiting for RuntimeCoordinator runtime task drain"
+        )
     }
 }
 
@@ -2197,8 +2203,8 @@ func advanceRuntimeCoordinatorTimeout(
     uptimeClock: TestUptimeClock,
     by duration: Duration,
     suspendedSleepers: Int = 1
-) async {
-    await timeoutClock.sleep(untilSuspendedBy: suspendedSleepers)
+) async throws {
+    try await timeoutClock.sleep(untilSuspendedBy: suspendedSleepers)
     uptimeClock.advance(by: duration)
     timeoutClock.advance(by: duration)
 }

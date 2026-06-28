@@ -1004,7 +1004,7 @@ struct DocumentationProviderTests {
         try await waitWithTimeout("waiting for queued documentation provider route") {
             try await queuedRequestLabels.nextValue(at: 0)
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(10)
@@ -1967,7 +1967,7 @@ struct DocumentationProviderTests {
         await documentationProvider.setToolListUpdate(
             .available(documentationDescriptor(version: "27.0"))
         )
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: RuntimeCoordinator.documentationProviderDiscoveryPollInterval
@@ -2091,7 +2091,7 @@ struct DocumentationProviderTests {
         try await waitWithTimeout("waiting for first transient descriptor refresh") {
             try await transport.waitForToolsListCount(1)
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(250)
@@ -2305,7 +2305,7 @@ struct DocumentationProviderTests {
         try await waitWithTimeout("waiting for documentation repair to suspend") {
             try await repairGate.waitUntilWaiting(for: target.processID, count: 1)
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(20)
@@ -3291,7 +3291,7 @@ struct DocumentationProviderTests {
         try await waitWithTimeout("waiting for local DocumentationSearch process to suspend") {
             try await runGate.waitUntilWaiting(for: 1, count: 1)
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(20)
@@ -3389,7 +3389,7 @@ struct DocumentationProviderTests {
                 requestTimeoutOverride: .seconds(1)
             )
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(1),
@@ -4010,7 +4010,7 @@ struct DocumentationProviderTests {
                 method: "tools/call"
             )
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(100)
@@ -4408,7 +4408,7 @@ struct DocumentationProviderTests {
         try await waitWithTimeout("waiting for shared preparation to suspend") {
             try await startGate.waitUntilWaiting(for: target.processID, count: 1)
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(1)
@@ -4497,7 +4497,7 @@ struct DocumentationProviderTests {
             try await waitWithTimeout("waiting for shared preparation to suspend") {
                 try await startGate.waitUntilWaiting(for: target.processID, count: 1)
             }
-            await advanceRuntimeCoordinatorTimeout(
+            try await advanceRuntimeCoordinatorTimeout(
                 timeoutClock: timeoutClock,
                 uptimeClock: uptimeClock,
                 by: .milliseconds(1)
@@ -4589,7 +4589,7 @@ struct DocumentationProviderTests {
                 method: "tools/call"
             )
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(1)

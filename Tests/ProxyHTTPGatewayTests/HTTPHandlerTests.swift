@@ -1122,11 +1122,11 @@ struct HTTPHandlerTests {
             let lease = try #require(sessionManager.leaseDebugSnapshots().first)
             #expect(lease.state == .timedOut)
         } catch {
-            await shutdown(group)
+            try? await shutdown(group)
             throw error
         }
 
-        await shutdown(group)
+        try await shutdown(group)
     }
 
     @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
@@ -1556,10 +1556,10 @@ struct HTTPHandlerTests {
             )
             #expect(sessionManager.sentMethods().isEmpty)
         } catch {
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
-        try await group.shutdownGracefully()
+        try await shutdown(group)
     }
 
     @Test func httpToolRoutingLocalXcodeListWindowsReturnsAggregatedResult() async throws {
@@ -1632,10 +1632,10 @@ struct HTTPHandlerTests {
             #expect(sessionManager.sentToolRequests() == ["XcodeListWindows@1"])
             #expect(sessionManager.assignedUpstreamIDCount() == 0)
         } catch {
-            try? await group.shutdownGracefully()
+            try? await shutdown(group)
             throw error
         }
-        try await group.shutdownGracefully()
+        try await shutdown(group)
     }
 
     @Test func httpOverloadedErrorResponseDoesNotMarkRequestSuccess() async throws {
