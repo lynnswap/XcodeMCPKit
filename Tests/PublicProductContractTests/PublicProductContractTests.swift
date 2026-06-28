@@ -449,11 +449,18 @@ private final class SpawnedProcessGroup: @unchecked Sendable {
 
     private func reap() {
         var status: Int32 = 0
-        let waitedPID = unsafe waitpid(pid, &status, 0)
-        if waitedPID == pid {
-            lock.lock()
-            waitStatus = status
-            lock.unlock()
+        while true {
+            let waitedPID = unsafe waitpid(pid, &status, 0)
+            if waitedPID == pid {
+                lock.lock()
+                waitStatus = status
+                lock.unlock()
+                break
+            }
+            if waitedPID == -1, errno == EINTR {
+                continue
+            }
+            break
         }
         exitSemaphore.signal()
     }
