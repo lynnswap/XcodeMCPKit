@@ -2454,3 +2454,27 @@ func sentMessage(
         try await upstream.nextSent(matching: predicate)
     }
 }
+
+func sentValue(
+    from upstream: TestUpstreamClient,
+    startingAt index: Int,
+    matching predicate: @escaping @Sendable (Data) -> Bool,
+    timeout: Duration = .seconds(5),
+    description: String = "waiting for matching sent message"
+) async throws -> Data {
+    try await waitWithTimeout(description, timeout: timeout) {
+        try await upstream.nextSent(startingAt: index, matching: predicate)
+    }
+}
+
+func sentValue(
+    from upstream: ToggleableOverloadUpstreamClient,
+    startingAt index: Int,
+    matching predicate: @escaping @Sendable (Data) -> Bool,
+    timeout: Duration = .seconds(5),
+    description: String = "waiting for matching sent message"
+) async throws -> Data {
+    try await waitWithTimeout(description, timeout: timeout) {
+        try await upstream.nextSent(startingAt: index, matching: predicate)
+    }
+}
