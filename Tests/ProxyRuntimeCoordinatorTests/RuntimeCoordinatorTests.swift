@@ -2211,8 +2211,6 @@ struct RuntimeCoordinatorTests {
         let ownerRequest = try await ownerUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        try await waitForSentCount(fallbackUpstream, count: 2, timeoutSeconds: 2)
-        #expect(await fallbackUpstream.sentCount() == 2)
         await ownerUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2231,11 +2229,11 @@ struct RuntimeCoordinatorTests {
             "FallbackOnly",
             "OwnerOnly",
         ])
-        #expect(await fallbackUpstream.sentCount() == 2)
+        #expect(await fallbackUpstream.sentCount() == 1)
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
-    @Test func sessionManagerToolsListReturnsLaterUsableRouteWithoutWaitingForEarlierRoute()
+    @Test func sessionManagerToolsListWaitsForUsableRoutesBeforeReturningUnion()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -2266,7 +2264,7 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        _ = try await earlierUpstream.nextSent {
+        let earlierRequest = try await earlierUpstream.nextSent {
             methodName(from: $0) == "tools/list"
         }
         let laterRequest = try await laterUpstream.nextSent {
@@ -2282,11 +2280,21 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
+        await earlierUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: earlierRequest),
+                    tools: [
+                        toolDescriptor(name: "EarlierRouteOnly"),
+                    ]
+                )
+            )
+        )
 
         let result = try await waitWithTimeout("waiting for later route tools/list") {
             try await task.value
         }
-        #expect(toolNames(in: result) == ["LaterRouteOnly"])
+        #expect(toolNames(in: result) == ["EarlierRouteOnly", "LaterRouteOnly"])
         #expect(await earlierUpstream.sentCount() == 1)
         #expect(await laterUpstream.sentCount() == 1)
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
@@ -2354,6 +2362,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(Set(toolNames(in: result)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
+        #expect(await olderUpstream.sentCount() == 0)
         #expect(await latestUpstream.sentCount() == 1)
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
         let catalogs = manager.debugSnapshot().processToolCatalogs
