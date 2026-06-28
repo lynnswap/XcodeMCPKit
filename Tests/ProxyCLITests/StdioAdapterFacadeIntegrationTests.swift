@@ -1,5 +1,4 @@
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import Foundation
 import NIO

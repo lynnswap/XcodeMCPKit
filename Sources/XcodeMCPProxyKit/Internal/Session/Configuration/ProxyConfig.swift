@@ -1,6 +1,5 @@
 import Foundation
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 struct ProxyConfig: Sendable {
     enum Transport: String, CaseIterable, Sendable {

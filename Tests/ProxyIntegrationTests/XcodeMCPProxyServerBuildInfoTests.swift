@@ -1,6 +1,5 @@
 import Testing
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 
 

@@ -3,8 +3,7 @@ import NIO
 import NIOEmbedded
 import NIOHTTP1
 import Testing
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 @testable import XcodeMCPProxyInternalTestSupport
 import XcodeMCPProxyTestSupport

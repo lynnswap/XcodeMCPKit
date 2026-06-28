@@ -4,8 +4,7 @@ import NIO
 import NIOFoundationCompat
 import NIOHTTP1
 import NIOConcurrencyHelpers
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 final class HTTPHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = HTTPServerRequestPart

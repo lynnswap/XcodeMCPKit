@@ -1,7 +1,6 @@
 import Foundation
 import Testing
 
-@testable import XcodeMCPCore
 @testable import XcodeMCPKit
 
 @Suite(.serialized)

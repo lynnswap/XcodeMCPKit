@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 enum CLIError: Error, CustomStringConvertible {
     case message(String)

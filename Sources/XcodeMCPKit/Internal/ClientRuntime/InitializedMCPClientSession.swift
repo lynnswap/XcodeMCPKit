@@ -1,5 +1,3 @@
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
 import Foundation
 
 private final class MCPClientPendingRequests: @unchecked Sendable {

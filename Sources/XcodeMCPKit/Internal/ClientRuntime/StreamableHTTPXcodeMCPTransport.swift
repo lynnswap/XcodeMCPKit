@@ -1,5 +1,3 @@
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
 import Foundation
 
 package struct StreamableHTTPDiscoveryResolver: Sendable {

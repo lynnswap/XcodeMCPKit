@@ -3,8 +3,7 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import NIOHTTP1
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import Testing
 import XcodeMCPProxyTestSupport

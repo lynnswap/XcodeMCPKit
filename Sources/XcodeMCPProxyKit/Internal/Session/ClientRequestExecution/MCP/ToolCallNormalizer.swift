@@ -1,6 +1,5 @@
 import Foundation
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 struct ToolCallNormalizer: Sendable {
     private static let structuredContentTools: Set<String> = [

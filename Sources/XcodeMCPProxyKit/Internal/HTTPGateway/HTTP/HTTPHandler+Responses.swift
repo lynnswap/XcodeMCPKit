@@ -1,8 +1,7 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 extension HTTPHandler {
     func sendPostResolution(

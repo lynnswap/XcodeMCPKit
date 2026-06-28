@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPCore
+import XcodeMCPKit
 
 enum ToolRoutingDecision: Sendable {
     case forward(preferredUpstreamIndex: Int?)

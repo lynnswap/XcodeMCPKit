@@ -1,8 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 final class InitializeManager: Sendable {
     enum PrimaryInitializePhase: Sendable, Equatable {

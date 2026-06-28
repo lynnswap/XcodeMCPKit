@@ -1,5 +1,5 @@
 import Testing
-import XcodeMCPCore
+import XcodeMCPKit
 
 @Suite
 struct MCPProtocolVersionTests {

@@ -2,8 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Logging
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 extension XcodePermissionDialog {
     final class AutoApprover: @unchecked Sendable {

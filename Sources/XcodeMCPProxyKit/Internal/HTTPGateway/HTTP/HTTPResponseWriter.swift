@@ -2,8 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 struct HTTPResponseWriter: Sendable {
     private let logger: Logger

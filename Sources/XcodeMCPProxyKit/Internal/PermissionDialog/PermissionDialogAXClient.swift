@@ -2,8 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Logging
-import XcodeMCPCore
-import XcodeMCPProcessRuntime
+import XcodeMCPKit
 
 extension XcodePermissionDialog {
     protocol AXAccessing: Sendable {
