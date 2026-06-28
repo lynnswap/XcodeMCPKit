@@ -2,16 +2,16 @@ import XcodeMCPCore
 import XcodeMCPProcessRuntime
 import Foundation
 
-package enum MCPBridgeRuntime {
-    package struct Configuration: Sendable {
-        package let upstreamCommand: String
-        package let upstreamArgs: [String]
-        package let upstreamProcessCount: Int
-        package let sharedSessionID: String?
-        package let maxBodyBytes: Int
-        package let processBoundRoutingSupported: Bool
+enum MCPBridgeRuntime {
+    struct Configuration: Sendable {
+        let upstreamCommand: String
+        let upstreamArgs: [String]
+        let upstreamProcessCount: Int
+        let sharedSessionID: String?
+        let maxBodyBytes: Int
+        let processBoundRoutingSupported: Bool
 
-        package init(
+        init(
             upstreamCommand: String,
             upstreamArgs: [String],
             upstreamProcessCount: Int,
@@ -28,7 +28,7 @@ package enum MCPBridgeRuntime {
         }
     }
 
-    package static func makeUpstreamPlan(
+    static func makeUpstreamPlan(
         config: Configuration,
         xcodeTargets: [XcodeProcessTarget]
     ) -> MCPBridgeUpstreamPlan {
@@ -87,11 +87,11 @@ package enum MCPBridgeRuntime {
         )
     }
 
-    package static func supportsProcessBoundRouting(config: Configuration) -> Bool {
+    static func supportsProcessBoundRouting(config: Configuration) -> Bool {
         config.processBoundRoutingSupported
     }
 
-    package static func makeProcessBoundSessionFactory(
+    static func makeProcessBoundSessionFactory(
         config: Configuration,
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
@@ -103,7 +103,7 @@ package enum MCPBridgeRuntime {
         ))
     }
 
-    package static func startProcessBoundSession(
+    static func startProcessBoundSession(
         config: Configuration,
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
@@ -204,12 +204,12 @@ package enum MCPBridgeRuntime {
     }
 }
 
-package struct MCPBridgeUpstreamPlan: Sendable {
-    package let upstreams: [ManagedUpstreamSlot]
-    package let xcodeProcessRoutes: [XcodeProcessRoute]
-    package let topology: UpstreamTopologySnapshot
+struct MCPBridgeUpstreamPlan: Sendable {
+    let upstreams: [ManagedUpstreamSlot]
+    let xcodeProcessRoutes: [XcodeProcessRoute]
+    let topology: UpstreamTopologySnapshot
 
-    package init(
+    init(
         upstreams: [ManagedUpstreamSlot],
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
         topology: UpstreamTopologySnapshot? = nil

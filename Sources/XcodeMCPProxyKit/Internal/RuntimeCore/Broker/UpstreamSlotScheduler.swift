@@ -5,15 +5,15 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 
-package struct UpstreamSlotSchedulerTestHooks: Sendable {
-    package var requestQueued:
+struct UpstreamSlotSchedulerTestHooks: Sendable {
+    var requestQueued:
         @Sendable (
             _ leaseID: LeaseManager.ID,
             _ descriptor: SessionRequestPipeline.Descriptor,
             _ queuedRequestCount: Int
         ) -> Void
 
-    package init(
+    init(
         requestQueued: @escaping @Sendable (
             _ leaseID: LeaseManager.ID,
             _ descriptor: SessionRequestPipeline.Descriptor,
@@ -23,19 +23,19 @@ package struct UpstreamSlotSchedulerTestHooks: Sendable {
         self.requestQueued = requestQueued
     }
 
-    package static let noop = Self()
+    static let noop = Self()
 }
 
-package final class UpstreamSlotScheduler: Sendable {
-    package enum AcquisitionError: Error {
+final class UpstreamSlotScheduler: Sendable {
+    enum AcquisitionError: Error {
         case unavailable
     }
 
-    package struct DebugSnapshot: Codable, Sendable {
-        package let queuedRequestCount: Int
-        package let activeLeaseCountByUpstream: [Int: Int]
+    struct DebugSnapshot: Codable, Sendable {
+        let queuedRequestCount: Int
+        let activeLeaseCountByUpstream: [Int: Int]
 
-        package init(
+        init(
             queuedRequestCount: Int,
             activeLeaseCountByUpstream: [Int: Int]
         ) {
@@ -74,7 +74,7 @@ package final class UpstreamSlotScheduler: Sendable {
     private let applyHealthEffects: @Sendable ([UpstreamHealthManager.Effect]) -> Void
     private let testHooks: UpstreamSlotSchedulerTestHooks
 
-    package init(
+    init(
         logger: Logger = XcodeMCPRuntimeLogging.make("upstream.scheduler"),
         canUseUpstream: @escaping @Sendable (Int) -> UpstreamHealthManager.UseEvaluation,
         selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult,
@@ -94,7 +94,7 @@ package final class UpstreamSlotScheduler: Sendable {
         )
     }
 
-    package func enqueueRequest(
+    func enqueueRequest(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
@@ -114,7 +114,7 @@ package final class UpstreamSlotScheduler: Sendable {
         )
     }
 
-    package func enqueueRequest(
+    func enqueueRequest(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
@@ -154,7 +154,7 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func releaseUpstreamSlot(upstreamIndex: Int, leaseID: LeaseManager.ID) {
+    func releaseUpstreamSlot(upstreamIndex: Int, leaseID: LeaseManager.ID) {
         let released = state.withLockedValue { state -> Bool in
             guard state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID else { return false }
             state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
@@ -180,7 +180,7 @@ package final class UpstreamSlotScheduler: Sendable {
         dispatchQueuedRequestsIfPossible()
     }
 
-    package func failQueuedRequests() {
+    func failQueuedRequests() {
         let failed = state.withLockedValue { state -> [PendingRequest] in
             let pending = state.pendingRequests
             state.pendingRequests.removeAll()
@@ -226,7 +226,7 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func cancelQueuedRequest(leaseID: LeaseManager.ID) {
+    func cancelQueuedRequest(leaseID: LeaseManager.ID) {
         enum CancelledRequest {
             case pending(PendingRequest)
             case reserved(PendingRequest, Int)
@@ -281,7 +281,7 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func debugSnapshot() -> UpstreamSlotScheduler.DebugSnapshot {
+    func debugSnapshot() -> UpstreamSlotScheduler.DebugSnapshot {
         state.withLockedValue { state in
             UpstreamSlotScheduler.DebugSnapshot(
                 queuedRequestCount: state.pendingRequests.count,
@@ -293,11 +293,11 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func occupiedUpstreamIndices() -> Set<Int> {
+    func occupiedUpstreamIndices() -> Set<Int> {
         state.withLockedValue { Set($0.activeLeaseIDsByUpstream.keys) }
     }
 
-    package func reset() {
+    func reset() {
         let cancelled = state.withLockedValue { state -> [PendingRequest] in
             let pendingRequests = state.pendingRequests
             let reservedRequests = state.reservationsByLeaseID.values
@@ -324,7 +324,7 @@ package final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    package func wake() {
+    func wake() {
         dispatchQueuedRequestsIfPossible()
     }
 

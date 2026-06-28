@@ -3,7 +3,6 @@ import NIO
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RuntimeCoordinator {
     func markRequestSucceeded(upstreamIndex: Int) {

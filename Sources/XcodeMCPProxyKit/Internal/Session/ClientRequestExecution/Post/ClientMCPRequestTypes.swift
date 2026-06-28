@@ -5,10 +5,9 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ClientMCPRequestExecutor {
-    package enum Status: Sendable, Equatable {
+    enum Status: Sendable, Equatable {
         case ok
         case accepted
         case badRequest
@@ -17,7 +16,7 @@ extension ClientMCPRequestExecutor {
         case badGateway
         case serviceUnavailable
 
-        package var code: UInt {
+        var code: UInt {
             switch self {
             case .ok:
                 return 200
@@ -37,7 +36,7 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package enum Resolution {
+    enum Resolution {
         case responseData(
             data: Data,
             sessionID: String?,
@@ -63,31 +62,31 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package struct Operation {
-        package let future: EventLoopFuture<ClientMCPRequestExecutor.Resolution>
-        package let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+    struct Operation {
+        let future: EventLoopFuture<ClientMCPRequestExecutor.Resolution>
+        let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
     }
 
-    package struct RefreshRoute: Sendable {
+    struct RefreshRoute: Sendable {
         let request: RefreshCodeIssues.Request
         let bodyData: Data
         let requestIDs: [JSONRPC.ID]
         let requestIsBatch: Bool
     }
 
-    package struct RefreshRouting: Sendable {
+    struct RefreshRouting: Sendable {
         let refreshRoutes: [ClientMCPRequestExecutor.RefreshRoute]
         let remainingBodyData: Data?
         let remainingRequestIDs: [JSONRPC.ID]
         let remainingLocalResponseData: Data?
     }
 
-    package enum CancellationSource: String, Sendable {
+    enum CancellationSource: String, Sendable {
         case channelInactive
         case responseWriteFailure
     }
 
-    package final class CancellationHandle: @unchecked Sendable {
+    final class CancellationHandle: @unchecked Sendable {
         private struct State: Sendable {
             var requestIDKeys: [String]
             var upstreamIndex: Int?
@@ -97,11 +96,11 @@ extension ClientMCPRequestExecutor {
             var isTerminal = false
         }
 
-        package let leaseID: LeaseManager.ID
-        package let sessionID: String
+        let leaseID: LeaseManager.ID
+        let sessionID: String
         private let state: NIOLockedValueBox<State>
 
-        package init(
+        init(
             leaseID: LeaseManager.ID,
             sessionID: String,
             requestIDKeys: [String]
@@ -113,36 +112,36 @@ extension ClientMCPRequestExecutor {
             )
         }
 
-        package var requestIDKeys: [String] {
+        var requestIDKeys: [String] {
             state.withLockedValue { $0.requestIDKeys }
         }
 
-        package var isCancelled: Bool {
+        var isCancelled: Bool {
             state.withLockedValue { $0.isTerminal }
         }
 
-        package func activate(upstreamIndex: Int) {
+        func activate(upstreamIndex: Int) {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return }
                 state.upstreamIndex = upstreamIndex
             }
         }
 
-        package func bindRouterPendingToken(_ token: UUID) {
+        func bindRouterPendingToken(_ token: UUID) {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return }
                 state.routerPendingToken = token
             }
         }
 
-        package func bindRequestIDKeys(_ requestIDKeys: [String]) {
+        func bindRequestIDKeys(_ requestIDKeys: [String]) {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return }
                 state.requestIDKeys = requestIDKeys
             }
         }
 
-        package func markCompleted() {
+        func markCompleted() {
             state.withLockedValue { state in
                 state.isTerminal = true
                 state.refreshTask = nil
@@ -150,7 +149,7 @@ extension ClientMCPRequestExecutor {
             }
         }
 
-        package func bindRefreshTask(_ task: Task<Void, Never>) {
+        func bindRefreshTask(_ task: Task<Void, Never>) {
             let shouldCancel = state.withLockedValue { state -> Bool in
                 guard !state.isTerminal else { return true }
                 state.refreshTask = task
@@ -162,7 +161,7 @@ extension ClientMCPRequestExecutor {
         }
 
         @discardableResult
-        package func bindChildHandle(_ handle: ClientMCPRequestExecutor.CancellationHandle) -> Bool {
+        func bindChildHandle(_ handle: ClientMCPRequestExecutor.CancellationHandle) -> Bool {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return false }
                 state.childHandles.append(handle)
@@ -170,7 +169,7 @@ extension ClientMCPRequestExecutor {
             }
         }
 
-        package func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
+        func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
             let snapshot = state.withLockedValue {
                 state -> (
                     Int?, UUID?, Task<Void, Never>?, [ClientMCPRequestExecutor.CancellationHandle], [String]

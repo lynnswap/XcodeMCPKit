@@ -2,7 +2,6 @@ import Foundation
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RuntimeCoordinator {
     func startEagerInitializePrimary(applyBackoff: Bool = false) {

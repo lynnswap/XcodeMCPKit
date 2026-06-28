@@ -4,22 +4,21 @@ import Foundation
 import Logging
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension XcodePermissionDialog {
-    package protocol AXAccessing: Sendable {
+    protocol AXAccessing: Sendable {
         func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus
         func runningXcodeProcessIDs() -> [pid_t]
         func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow]
         func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws
     }
 
-    package final class AXWindow {
-        package let processID: pid_t
-        package let snapshot: XcodePermissionDialog.WindowSnapshot
+    final class AXWindow {
+        let processID: pid_t
+        let snapshot: XcodePermissionDialog.WindowSnapshot
         private let defaultButton: AXUIElement
 
-        package init(
+        init(
             processID: pid_t,
             snapshot: XcodePermissionDialog.WindowSnapshot,
             defaultButton: AXUIElement
@@ -37,11 +36,11 @@ extension XcodePermissionDialog {
         }
     }
 
-    package enum AXError: Error, CustomStringConvertible {
+    enum AXError: Error, CustomStringConvertible {
         case copyAttributeFailed(attribute: String, error: ApplicationServices.AXError)
         case performActionFailed(ApplicationServices.AXError)
 
-        package var description: String {
+        var description: String {
             switch self {
             case .copyAttributeFailed(let attribute, let error):
                 return "AX attribute '\(attribute)' failed: \(error.rawValue)"
@@ -51,11 +50,11 @@ extension XcodePermissionDialog {
         }
     }
 
-    package enum AXFailureClassifier {
+    enum AXFailureClassifier {
         private static let externalViewServiceBundleIdentifier = "com.apple.dt.ExternalViewService"
         private static let windowsAttribute = kAXWindowsAttribute as String
 
-        package static func isBenignOpenWindowsFailure(
+        static func isBenignOpenWindowsFailure(
             _ error: Error,
             processBundleIdentifier: String?
         ) -> Bool {
@@ -72,12 +71,12 @@ extension XcodePermissionDialog {
         }
     }
 
-    package struct AXClient: XcodePermissionDialog.AXAccessing {
+    struct AXClient: XcodePermissionDialog.AXAccessing {
         private let maxDescendantCount = 128
 
-        package init() {}
+        init() {}
 
-        package func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus {
+        func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus {
             if promptIfNeeded {
                 let options: NSDictionary = [
                     "AXTrustedCheckOptionPrompt" as NSString: true
@@ -87,7 +86,7 @@ extension XcodePermissionDialog {
             return AXIsProcessTrusted() ? .trusted : .untrusted
         }
 
-        package func runningXcodeProcessIDs() -> [pid_t] {
+        func runningXcodeProcessIDs() -> [pid_t] {
             let bundleIdentifiers: Set<String> = [
                 "com.apple.dt.Xcode",
                 "com.apple.dt.ExternalViewService",
@@ -106,14 +105,14 @@ extension XcodePermissionDialog {
         return processIDs.sorted()
     }
 
-    package func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
+    func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
         let app = AXUIElementCreateApplication(processID)
         return try copyElementArray(attribute: kAXWindowsAttribute as CFString, from: app).compactMap { window in
                 try makeWindow(processID: processID, window: window)
             }
         }
 
-        package func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws {
+        func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws {
             try window.pressDefaultButton()
         }
 

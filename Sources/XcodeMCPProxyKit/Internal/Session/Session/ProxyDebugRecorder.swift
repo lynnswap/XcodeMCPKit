@@ -2,9 +2,8 @@ import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class ProxyDebugRecorder: Sendable {
+final class ProxyDebugRecorder: Sendable {
     private struct DebugUpstreamState: Sendable {
         var recentStderr: [ProxyDebug.Event] = []
         var lastDecodeError: ProxyDebug.Event?
@@ -30,7 +29,7 @@ package final class ProxyDebugRecorder: Sendable {
     private let trafficLimit: Int
     private let stderrLimit: Int
 
-    package init(
+    init(
         upstreamCount: Int,
         trafficLimit: Int = 50,
         stderrLimit: Int = 20
@@ -43,21 +42,21 @@ package final class ProxyDebugRecorder: Sendable {
         }
     }
 
-    package func resetUpstream(_ upstreamIndex: Int) {
+    func resetUpstream(_ upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex] = DebugUpstreamState()
         }
     }
 
-    package func resetAll() {
+    func resetAll() {
         state.withLockedValue { state in
             state.upstreams = Array(repeating: DebugUpstreamState(), count: state.upstreams.count)
             state.recentTraffic.removeAll()
         }
     }
 
-    package func recordStderr(_ message: String, upstreamIndex: Int) {
+    func recordStderr(_ message: String, upstreamIndex: Int) {
         let event = ProxyDebug.Event(timestamp: Date(), message: message)
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
@@ -76,7 +75,7 @@ package final class ProxyDebugRecorder: Sendable {
         }
     }
 
-    package func recordProtocolViolation(
+    func recordProtocolViolation(
         _ protocolViolation: StdioFramer.ProtocolViolation,
         upstreamIndex: Int
     ) {
@@ -97,28 +96,28 @@ package final class ProxyDebugRecorder: Sendable {
         }
     }
 
-    package func recordBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {
+    func recordBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex].bufferedStdoutBytes = size
         }
     }
 
-    package func recordDroppedUnmappedNotification(upstreamIndex: Int) {
+    func recordDroppedUnmappedNotification(upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex].droppedUnmappedNotificationCount += 1
         }
     }
 
-    package func recordLateResponse(upstreamIndex: Int) {
+    func recordLateResponse(upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
             state.upstreams[upstreamIndex].lateResponseDropCount += 1
         }
     }
 
-    package func recordTraffic(
+    func recordTraffic(
         upstreamIndex: Int, direction: String, data: Data, redactedText: String
     ) {
         let event = ProxyDebug.TrafficEvent(
@@ -136,7 +135,7 @@ package final class ProxyDebugRecorder: Sendable {
         }
     }
 
-    package func snapshot(
+    func snapshot(
         proxyInitialized: Bool,
         cachedToolsListAvailable: Bool,
         controlPlane: ControlPlane.DebugSnapshot?,

@@ -2,13 +2,12 @@ import Foundation
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct MCPForwardingService: Sendable {
-    package typealias PreparedRequest = ProxyUpstreamRequestRuntime.PreparedRequest
-    package typealias StartedRequest = ProxyUpstreamRequestRuntime.StartedRequest
+struct MCPForwardingService: Sendable {
+    typealias PreparedRequest = ProxyUpstreamRequestRuntime.PreparedRequest
+    typealias StartedRequest = ProxyUpstreamRequestRuntime.StartedRequest
 
-    package enum ResponseResolution: Sendable {
+    enum ResponseResolution: Sendable {
         case success(Data)
         case timeout
         case invalidUpstreamResponse
@@ -19,14 +18,14 @@ package struct MCPForwardingService: Sendable {
     private let upstreamRuntime: ProxyUpstreamRequestRuntime
     private let toolSurface: ToolSurface
 
-    package init(config: ProxyConfig, sessionManager: any RuntimeMCPForwardingPort) {
+    init(config: ProxyConfig, sessionManager: any RuntimeMCPForwardingPort) {
         self.config = config
         self.sessionManager = sessionManager
         self.upstreamRuntime = ProxyUpstreamRequestRuntime(port: sessionManager)
         self.toolSurface = ToolSurface(config: config, sessionManager: sessionManager)
     }
 
-    package func prepareRequest(
+    func prepareRequest(
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
@@ -40,7 +39,7 @@ package struct MCPForwardingService: Sendable {
         )
     }
 
-    package func startRequest(
+    func startRequest(
         _ prepared: PreparedRequest,
         session: SessionContext,
         on eventLoop: EventLoop,
@@ -69,7 +68,7 @@ package struct MCPForwardingService: Sendable {
         )
     }
 
-    package func resolveResponse(
+    func resolveResponse(
         _ result: Result<ByteBuffer, Error>,
         started: StartedRequest,
         sessionID: String,
@@ -119,7 +118,7 @@ package struct MCPForwardingService: Sendable {
         }
     }
 
-    package func callInternalTool(
+    func callInternalTool(
         name: String,
         arguments: [String: Any],
         sessionID: String,

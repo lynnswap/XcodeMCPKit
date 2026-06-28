@@ -1,10 +1,9 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import XcodeMCPProxyTestSupport
 
-@testable import XcodeMCPProxyKit
 
 actor TestUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>

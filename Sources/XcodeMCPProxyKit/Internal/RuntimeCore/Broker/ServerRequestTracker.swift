@@ -4,10 +4,10 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 
-package final class ServerRequestTracker: Sendable {
-    package struct Route: Sendable {
-        package let upstreamIndex: Int
-        package let upstreamID: JSONRPC.ID
+final class ServerRequestTracker: Sendable {
+    struct Route: Sendable {
+        let upstreamIndex: Int
+        let upstreamID: JSONRPC.ID
     }
 
     private struct StoredRoute: Sendable {
@@ -25,7 +25,7 @@ package final class ServerRequestTracker: Sendable {
     private let routeTimeout: TimeAmount
     private let maxRoutes: Int
 
-    package init(
+    init(
         routeTimeout: TimeAmount = .seconds(300),
         maxRoutes: Int = 256
     ) {
@@ -33,7 +33,7 @@ package final class ServerRequestTracker: Sendable {
         self.maxRoutes = max(0, maxRoutes)
     }
 
-    package func record(
+    func record(
         upstreamID: JSONRPC.ID,
         upstreamIndex: Int,
         now: Date = Date()
@@ -57,7 +57,7 @@ package final class ServerRequestTracker: Sendable {
         }
     }
 
-    package func consume(clientID: JSONRPC.ID, now: Date = Date()) -> ServerRequestTracker.Route? {
+    func consume(clientID: JSONRPC.ID, now: Date = Date()) -> ServerRequestTracker.Route? {
         state.withLockedValue { state in
             Self.removeExpiredRoutes(now: now, state: &state)
             guard let stored = state.routesByClientIDKey.removeValue(forKey: clientID.key) else {
@@ -68,7 +68,7 @@ package final class ServerRequestTracker: Sendable {
         }
     }
 
-    package func lookup(clientID: JSONRPC.ID, now: Date = Date()) -> ServerRequestTracker.Route? {
+    func lookup(clientID: JSONRPC.ID, now: Date = Date()) -> ServerRequestTracker.Route? {
         state.withLockedValue { state in
             Self.removeExpiredRoutes(now: now, state: &state)
             return state.routesByClientIDKey[clientID.key]?.route
@@ -76,7 +76,7 @@ package final class ServerRequestTracker: Sendable {
     }
 
     @discardableResult
-    package func complete(
+    func complete(
         clientID: JSONRPC.ID,
         route: ServerRequestTracker.Route,
         now: Date = Date()

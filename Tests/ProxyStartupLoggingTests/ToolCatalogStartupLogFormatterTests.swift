@@ -1,9 +1,8 @@
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 import Testing
 
-@testable import XcodeMCPProxyKit
 
 @Suite
 struct ToolCatalogStartupLogFormatterTests {

@@ -1,20 +1,19 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum ToolCatalogStartupLogFormatter {
-    package struct Process: Sendable, Equatable {
-        package let appPath: String
-        package let processID: pid_t
+enum ToolCatalogStartupLogFormatter {
+    struct Process: Sendable, Equatable {
+        let appPath: String
+        let processID: pid_t
 
-        package init(appPath: String, processID: pid_t) {
+        init(appPath: String, processID: pid_t) {
             self.appPath = appPath
             self.processID = processID
         }
     }
 
-    package static func summary(
+    static func summary(
         from result: JSONValue,
         process: Process? = nil,
         exposurePolicy: String? = nil

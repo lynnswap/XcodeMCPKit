@@ -3,21 +3,21 @@ import ApplicationServices
 import Foundation
 import Logging
 
-package enum XcodePermissionDialog {}
+enum XcodePermissionDialog {}
 
 extension XcodePermissionDialog {
-    package enum AccessibilityStatus: Sendable {
+    enum AccessibilityStatus: Sendable {
         case trusted
         case untrusted
     }
 
-    package struct ButtonSnapshot: Equatable, Sendable {
-        package let title: String?
-        package let role: String?
-        package let subrole: String?
-        package let identifier: String?
+    struct ButtonSnapshot: Equatable, Sendable {
+        let title: String?
+        let role: String?
+        let subrole: String?
+        let identifier: String?
 
-        package init(
+        init(
             title: String? = nil,
             role: String? = nil,
             subrole: String? = nil,
@@ -30,23 +30,23 @@ extension XcodePermissionDialog {
         }
     }
 
-    package struct WindowSnapshot: Equatable, Sendable {
-        package let processBundleIdentifier: String?
-        package let title: String
-        package let textValues: [String]
-        package let role: String?
-        package let subrole: String?
-        package let windowIdentifier: String?
-        package let isModal: Bool
-        package let isMain: Bool?
-        package let isMinimized: Bool?
-        package let document: String?
-        package let childCount: Int
-        package let hasProxy: Bool
-        package let defaultButton: XcodePermissionDialog.ButtonSnapshot?
-        package let cancelButton: XcodePermissionDialog.ButtonSnapshot?
+    struct WindowSnapshot: Equatable, Sendable {
+        let processBundleIdentifier: String?
+        let title: String
+        let textValues: [String]
+        let role: String?
+        let subrole: String?
+        let windowIdentifier: String?
+        let isModal: Bool
+        let isMain: Bool?
+        let isMinimized: Bool?
+        let document: String?
+        let childCount: Int
+        let hasProxy: Bool
+        let defaultButton: XcodePermissionDialog.ButtonSnapshot?
+        let cancelButton: XcodePermissionDialog.ButtonSnapshot?
 
-        package init(
+        init(
             processBundleIdentifier: String? = nil,
             title: String,
             textValues: [String],
@@ -79,11 +79,11 @@ extension XcodePermissionDialog {
         }
     }
 
-    package struct MatchDecision: Equatable, Sendable {
-        package let fingerprint: String
-        package let defaultButtonTitle: String
+    struct MatchDecision: Equatable, Sendable {
+        let fingerprint: String
+        let defaultButtonTitle: String
 
-        package init(fingerprint: String, defaultButtonTitle: String) {
+        init(fingerprint: String, defaultButtonTitle: String) {
             self.fingerprint = fingerprint
             self.defaultButtonTitle = defaultButtonTitle
         }

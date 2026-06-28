@@ -4,20 +4,19 @@ import Foundation
 import Logging
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension XcodePermissionDialog {
-    package final class AutoApprover: @unchecked Sendable {
-        package struct Dependencies: DependencyClient {
-            package var axClient: any XcodePermissionDialog.AXAccessing
-            package var agentPathCandidates: @Sendable () -> Set<String>
-            package var assistantNameCandidates: @Sendable () -> Set<String>
-            package var serverProcessIDCandidates: @Sendable () -> Set<pid_t>
-            package var sleep: @Sendable (Duration) async -> Void
-            package var pollInterval: Duration
-            package var logger: Logger
+    final class AutoApprover: @unchecked Sendable {
+        struct Dependencies: DependencyClient {
+            var axClient: any XcodePermissionDialog.AXAccessing
+            var agentPathCandidates: @Sendable () -> Set<String>
+            var assistantNameCandidates: @Sendable () -> Set<String>
+            var serverProcessIDCandidates: @Sendable () -> Set<pid_t>
+            var sleep: @Sendable (Duration) async -> Void
+            var pollInterval: Duration
+            var logger: Logger
 
-            package init(
+            init(
                 axClient: any XcodePermissionDialog.AXAccessing,
                 agentPathCandidates: @escaping @Sendable () -> Set<String>,
                 assistantNameCandidates: @escaping @Sendable () -> Set<String>,
@@ -35,7 +34,7 @@ extension XcodePermissionDialog {
                 self.logger = logger
             }
 
-            package static func live(
+            static func live(
                 agentPathCandidates: @escaping @Sendable () -> Set<String> = {
                     XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates()
                 },
@@ -59,11 +58,11 @@ extension XcodePermissionDialog {
                 )
             }
 
-            package static var liveValue: Self {
+            static var liveValue: Self {
                 live()
             }
 
-            package static let testValue = Self(
+            static let testValue = Self(
                 axClient: NoopXcodePermissionDialogAXClient(),
                 agentPathCandidates: { [] },
                 assistantNameCandidates: { [] },
@@ -95,11 +94,11 @@ extension XcodePermissionDialog {
         private var state = State()
         private let retryIntervalNanoseconds: UInt64 = 500_000_000
 
-        package init(dependencies: Dependencies = .live()) {
+        init(dependencies: Dependencies = .live()) {
             self.dependencies = dependencies
         }
 
-        package func start() {
+        func start() {
             stateLock.lock()
             defer { stateLock.unlock() }
 
@@ -132,7 +131,7 @@ extension XcodePermissionDialog {
             }
         }
 
-        package func stop() {
+        func stop() {
             let task: Task<Void, Never>? = stateLock.withLock {
                 state.started = false
                 state.lastAttemptUptimeByFingerprint.removeAll()
@@ -145,7 +144,7 @@ extension XcodePermissionDialog {
             task?.cancel()
         }
 
-        package static func defaultAgentPathCandidates(
+        static func defaultAgentPathCandidates(
             arguments: [String] = CommandLine.arguments,
             executableURL: URL? = Bundle.main.executableURL,
             additionalExecutableCandidates: [String] = []
@@ -176,7 +175,7 @@ extension XcodePermissionDialog {
             return Set(candidates.filter { $0.isEmpty == false })
         }
 
-        package static func defaultServerProcessIDCandidates(
+        static func defaultServerProcessIDCandidates(
             parentProcessID: pid_t = ProcessInfo.processInfo.processIdentifier
         ) -> Set<pid_t> {
             var candidates: Set<pid_t> = [parentProcessID]

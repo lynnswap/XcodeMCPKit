@@ -4,9 +4,8 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum LocalPostHandling {
+enum LocalPostHandling {
     case pendingResponse(
         future: EventLoopFuture<ByteBuffer>,
         sessionID: String,
@@ -17,7 +16,7 @@ package enum LocalPostHandling {
     case mcpError(id: JSONRPC.ID?, code: Int, message: String, sessionID: String?)
 }
 
-package struct LocalMCPResponder {
+struct LocalMCPResponder {
     private typealias LocalResultOperation = @Sendable () async throws -> JSONValue
 
     private struct EmbeddedTestResolutionError: Error {}
@@ -31,7 +30,7 @@ package struct LocalMCPResponder {
     private let usesSynchronousLocalResolution: Bool
     private let logger: Logger
 
-    package init(
+    init(
         sessionManager: any RuntimeClientLocalMCPResponderPort,
         refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
@@ -45,7 +44,7 @@ package struct LocalMCPResponder {
         self.logger = logger
     }
 
-    package func toolsListResponseData(
+    func toolsListResponseData(
         object: [String: Any],
         sessionID: String,
         requestTimeoutOverride: TimeAmount?
@@ -65,7 +64,7 @@ package struct LocalMCPResponder {
         return try Self.encodeResultData(id: originalID, result: rewrittenResult)
     }
 
-    package func handle(
+    func handle(
         object: [String: Any],
         headerSessionID: String?,
         headerSessionExists: Bool,

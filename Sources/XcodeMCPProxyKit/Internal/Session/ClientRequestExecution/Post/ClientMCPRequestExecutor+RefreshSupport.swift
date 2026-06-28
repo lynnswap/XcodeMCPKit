@@ -5,10 +5,9 @@ import NIOConcurrencyHelpers
 import NIOFoundationCompat
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ClientMCPRequestExecutor {
-    package func listXcodeWindows(
+    func listXcodeWindows(
         sessionID: String,
         eventLoop: EventLoop,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil,
@@ -37,7 +36,7 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package func forwardOnce(
+    func forwardOnce(
         bodyData: Data,
         sessionID: String,
         requestIDs: [JSONRPC.ID],
@@ -201,7 +200,7 @@ extension ClientMCPRequestExecutor {
 
     /// The single terminal lease transition for a refresh request,
     /// regardless of whether the proxy answered locally or forwarded.
-    package func finishRefreshLease(
+    func finishRefreshLease(
         _ leaseID: LeaseManager.ID,
         result: RefreshCodeIssues.Workflow.ForwardAttemptResult
     ) {
@@ -232,7 +231,7 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package static func requestLabel(from requestJSON: Any) -> String {
+    static func requestLabel(from requestJSON: Any) -> String {
         if let object = requestJSON as? [String: Any] {
             let method = (object["method"] as? String) ?? "unknown"
             if method == "tools/call",
@@ -249,7 +248,7 @@ extension ClientMCPRequestExecutor {
         return "unknown"
     }
 
-    package static func isRetryScopedRefreshLeaseRequest(_ requestJSON: Any) -> Bool {
+    static func isRetryScopedRefreshLeaseRequest(_ requestJSON: Any) -> Bool {
         if let object = requestJSON as? [String: Any] {
             return RefreshCodeIssues.Request(requestObject: object) != nil
         }
@@ -263,7 +262,7 @@ extension ClientMCPRequestExecutor {
     }
 
 
-    package static func topLevelRequestDescriptor(
+    static func topLevelRequestDescriptor(
         sessionID: String,
         parsedRequestJSON: Any,
         requestIsBatch: Bool,
@@ -278,7 +277,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package func forwardRefreshCodeIssuesRequest(
+    func forwardRefreshCodeIssuesRequest(
         _ refreshRequest: RefreshCodeIssues.Request,
         bodyData: Data,
         sessionID: String,
@@ -343,7 +342,7 @@ extension ClientMCPRequestExecutor {
     /// so re-entering handle() for it would only replay request gates that
     /// are no-ops; this performs exactly the lease/cancellation choreography
     /// the re-entry used to produce.
-    package func executeRefreshRoute(
+    func executeRefreshRoute(
         _ route: ClientMCPRequestExecutor.RefreshRoute,
         sessionID: String,
         prefersEventStream: Bool,
@@ -406,7 +405,7 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    package func makeResolution(
+    func makeResolution(
         from result: RefreshCodeIssues.Workflow.ForwardAttemptResult,
         sessionID: String,
         prefersEventStream: Bool
@@ -474,7 +473,7 @@ extension ClientMCPRequestExecutor {
         }
     }
 
-    package func makeImmediateLeaseResolution(
+    func makeImmediateLeaseResolution(
         _ resolution: ClientMCPRequestExecutor.Resolution,
         leaseID: LeaseManager.ID,
         eventLoop: EventLoop,
@@ -485,7 +484,7 @@ extension ClientMCPRequestExecutor {
         return eventLoop.makeSucceededFuture(resolution)
     }
 
-    package func cancel(
+    func cancel(
         _ handle: ClientMCPRequestExecutor.CancellationHandle,
         source: ClientMCPRequestExecutor.CancellationSource = .channelInactive
     ) {

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 
 private func makeTempDiscoveryURL() -> URL {
     FileManager.default.temporaryDirectory

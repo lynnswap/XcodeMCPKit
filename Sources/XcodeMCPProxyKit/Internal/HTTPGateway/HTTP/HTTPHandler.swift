@@ -6,37 +6,36 @@ import NIOHTTP1
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class HTTPHandler: ChannelInboundHandler, Sendable {
-    package typealias InboundIn = HTTPServerRequestPart
-    package typealias OutboundOut = HTTPServerResponsePart
+final class HTTPHandler: ChannelInboundHandler, Sendable {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundOut = HTTPServerResponsePart
 
-    package struct RequestLogContext: Sendable {
-        package let id: String
-        package let method: String
-        package let path: String
-        package let remoteAddress: String?
+    struct RequestLogContext: Sendable {
+        let id: String
+        let method: String
+        let path: String
+        let remoteAddress: String?
     }
 
-    package struct State: Sendable {
-        package var requestHead: HTTPRequestHead?
-        package var bodyBuffer: ByteBuffer?
-        package var isSSE = false
-        package var sseSessionID: String?
-        package var bodyTooLarge = false
-        package var activePostRequestHandles: [String: ClientMCPRequestExecutor.CancellationHandle] = [:]
-        package var responseWriteTail: EventLoopFuture<Void>?
+    struct State: Sendable {
+        var requestHead: HTTPRequestHead?
+        var bodyBuffer: ByteBuffer?
+        var isSSE = false
+        var sseSessionID: String?
+        var bodyTooLarge = false
+        var activePostRequestHandles: [String: ClientMCPRequestExecutor.CancellationHandle] = [:]
+        var responseWriteTail: EventLoopFuture<Void>?
     }
 
-    package let state = NIOLockedValueBox(State())
-    package let config: ProxyConfig
-    package let controlService: HTTPControlService
-    package let postService: ClientMCPRequestExecutor
-    package let responseWriter: HTTPResponseWriter
-    package let logger: Logger = ProxyLogging.make("http")
+    let state = NIOLockedValueBox(State())
+    let config: ProxyConfig
+    let controlService: HTTPControlService
+    let postService: ClientMCPRequestExecutor
+    let responseWriter: HTTPResponseWriter
+    let logger: Logger = ProxyLogging.make("http")
 
-    package init(
+    init(
         config: ProxyConfig,
         sessionManager: any RuntimeHTTPGatewayPort,
         refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
@@ -72,7 +71,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))
     }
 
-    package func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
@@ -105,7 +104,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
     }
 
-    package func channelActive(context: ChannelHandlerContext) {
+    func channelActive(context: ChannelHandlerContext) {
         if let remote = remoteAddressString(for: context.channel) {
             logger.info("Client connected", metadata: ["remote": .string(remote)])
         } else {
@@ -113,7 +112,7 @@ package final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
     }
 
-    package func channelInactive(context: ChannelHandlerContext) {
+    func channelInactive(context: ChannelHandlerContext) {
         let (sessionID, activePostRequestHandles) = state.withLockedValue { state in
             let handles = Array(state.activePostRequestHandles.values)
             state.activePostRequestHandles.removeAll()

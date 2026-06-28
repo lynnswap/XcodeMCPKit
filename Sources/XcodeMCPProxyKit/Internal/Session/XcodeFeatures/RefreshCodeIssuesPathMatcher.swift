@@ -1,11 +1,10 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues {
-    package enum PathMatcher {
-    package static func matches(
+    enum PathMatcher {
+    static func matches(
         issuePath: String,
         resolvedFilePath: String,
         caseSensitiveFileSystemOverride: Bool? = nil,
@@ -43,7 +42,7 @@ extension RefreshCodeIssues {
         ) == .orderedSame
     }
 
-    package static func normalizedPath(_ path: String) -> String {
+    static func normalizedPath(_ path: String) -> String {
         let symlinkResolvedPath = (path as NSString).resolvingSymlinksInPath
         return URL(fileURLWithPath: symlinkResolvedPath).standardizedFileURL.path
     }

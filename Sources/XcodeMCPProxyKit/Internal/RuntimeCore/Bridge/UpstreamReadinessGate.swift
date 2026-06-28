@@ -4,23 +4,23 @@ import Foundation
 import Logging
 import NIOConcurrencyHelpers
 
-package final class UpstreamReadinessWaiterToken: Sendable {
+final class UpstreamReadinessWaiterToken: Sendable {
     private let isCancelledBox = NIOLockedValueBox(false)
 
-    package init() {}
+    init() {}
 
-    package func cancel() {
+    func cancel() {
         isCancelledBox.withLockedValue { isCancelled in
             isCancelled = true
         }
     }
 
-    package var isCancelled: Bool {
+    var isCancelled: Bool {
         isCancelledBox.withLockedValue { $0 }
     }
 }
 
-package final class UpstreamReadinessCoordinator: Sendable {
+final class UpstreamReadinessCoordinator: Sendable {
     private struct Waiter: Sendable {
         let reason: String
         let applyBackoff: Bool
@@ -51,12 +51,12 @@ package final class UpstreamReadinessCoordinator: Sendable {
     private let logger: Logger
     private let state = NIOLockedValueBox(State())
 
-    package init(gate: UpstreamReadinessGate, logger: Logger) {
+    init(gate: UpstreamReadinessGate, logger: Logger) {
         self.gate = gate
         self.logger = logger
     }
 
-    package func runWhenReady(
+    func runWhenReady(
         reason: String,
         applyBackoff: Bool = false,
         token: UpstreamReadinessWaiterToken? = nil,
@@ -80,7 +80,7 @@ package final class UpstreamReadinessCoordinator: Sendable {
         }
     }
 
-    package func cancelWaiter(_ token: UpstreamReadinessWaiterToken) {
+    func cancelWaiter(_ token: UpstreamReadinessWaiterToken) {
         token.cancel()
         state.withLockedValue { state in
             state.waiters.removeAll { waiter in
@@ -89,13 +89,13 @@ package final class UpstreamReadinessCoordinator: Sendable {
         }
     }
 
-    package func resetBackoff() {
+    func resetBackoff() {
         state.withLockedValue { state in
             state.retryBackoffAttempt = 0
         }
     }
 
-    package func reset() {
+    func reset() {
         let tasks = state.withLockedValue { state -> (Task<Void, Never>?, Task<Void, Never>?) in
             let tasks = (state.waitTask, state.deferredTask)
             state.epoch &+= 1
@@ -109,7 +109,7 @@ package final class UpstreamReadinessCoordinator: Sendable {
         tasks.1?.cancel()
     }
 
-    package func shutdown() {
+    func shutdown() {
         let tasks = state.withLockedValue { state -> (Task<Void, Never>?, Task<Void, Never>?) in
             let tasks = (state.waitTask, state.deferredTask)
             state.epoch &+= 1

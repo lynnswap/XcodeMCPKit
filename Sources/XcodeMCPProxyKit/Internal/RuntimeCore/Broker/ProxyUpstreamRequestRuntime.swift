@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import XcodeMCPCore
 
-package protocol ProxyUpstreamRequestRuntimePort: Sendable {
+protocol ProxyUpstreamRequestRuntimePort: Sendable {
     func chooseUpstreamIndex() -> Int?
     func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
@@ -18,40 +18,40 @@ package protocol ProxyUpstreamRequestRuntimePort: Sendable {
 }
 
 extension ProxyUpstreamRequestRuntimePort {
-    package func sendUpstream(_ data: Data, upstreamIndex: Int) {
+    func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
 }
 
-package struct ProxyUpstreamRequestRuntime: Sendable {
-    package struct PreparedRequest: Sendable {
-        package let transform: RequestTransform
-        package let upstreamIndex: Int
+struct ProxyUpstreamRequestRuntime: Sendable {
+    struct PreparedRequest: Sendable {
+        let transform: RequestTransform
+        let upstreamIndex: Int
 
-        package init(transform: RequestTransform, upstreamIndex: Int) {
+        init(transform: RequestTransform, upstreamIndex: Int) {
             self.transform = transform
             self.upstreamIndex = upstreamIndex
         }
     }
 
-    package struct StartedRegistration: Sendable {
-        package let upstreamIndex: Int
-        package let routerPendingToken: UUID
+    struct StartedRegistration: Sendable {
+        let upstreamIndex: Int
+        let routerPendingToken: UUID
 
-        package init(upstreamIndex: Int, routerPendingToken: UUID) {
+        init(upstreamIndex: Int, routerPendingToken: UUID) {
             self.upstreamIndex = upstreamIndex
             self.routerPendingToken = routerPendingToken
         }
     }
 
-    package struct StartedRequest: Sendable {
-        package let transform: RequestTransform
-        package let upstreamIndex: Int
-        package let requestTimeout: TimeAmount?
-        package let routerPendingToken: UUID
-        package let future: EventLoopFuture<ByteBuffer>
+    struct StartedRequest: Sendable {
+        let transform: RequestTransform
+        let upstreamIndex: Int
+        let requestTimeout: TimeAmount?
+        let routerPendingToken: UUID
+        let future: EventLoopFuture<ByteBuffer>
 
-        package init(
+        init(
             transform: RequestTransform,
             upstreamIndex: Int,
             requestTimeout: TimeAmount?,
@@ -66,17 +66,17 @@ package struct ProxyUpstreamRequestRuntime: Sendable {
         }
     }
 
-    package enum Error: Swift.Error, Sendable {
+    enum Error: Swift.Error, Sendable {
         case missingRequestID
     }
 
     private let port: any ProxyUpstreamRequestRuntimePort
 
-    package init(port: any ProxyUpstreamRequestRuntimePort) {
+    init(port: any ProxyUpstreamRequestRuntimePort) {
         self.port = port
     }
 
-    package func prepareRequest(
+    func prepareRequest(
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
@@ -107,7 +107,7 @@ package struct ProxyUpstreamRequestRuntime: Sendable {
         return PreparedRequest(transform: transform, upstreamIndex: upstreamIndex)
     }
 
-    package func startRequest(
+    func startRequest(
         _ prepared: PreparedRequest,
         router: JSONRPCResponseRouter,
         on eventLoop: EventLoop,
@@ -167,7 +167,7 @@ package struct ProxyUpstreamRequestRuntime: Sendable {
         )
     }
 
-    package func recordRequestSucceeded(
+    func recordRequestSucceeded(
         sessionID: String,
         started: StartedRequest
     ) {
@@ -180,7 +180,7 @@ package struct ProxyUpstreamRequestRuntime: Sendable {
         }
     }
 
-    package func recordRequestTimedOut(
+    func recordRequestTimedOut(
         sessionID: String,
         started: StartedRequest,
         accountTimeout: Bool

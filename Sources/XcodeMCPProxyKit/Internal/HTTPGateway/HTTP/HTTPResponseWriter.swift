@@ -4,16 +4,15 @@ import NIO
 import NIOHTTP1
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct HTTPResponseWriter: Sendable {
+struct HTTPResponseWriter: Sendable {
     private let logger: Logger
 
-    package init(logger: Logger) {
+    init(logger: Logger) {
         self.logger = logger
     }
 
-    package func sendSingleSSE(
+    func sendSingleSSE(
         on channel: Channel,
         data: Data,
         keepAlive: Bool,
@@ -39,7 +38,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendJSON(
+    func sendJSON(
         on channel: Channel,
         buffer: ByteBuffer,
         keepAlive: Bool,
@@ -55,7 +54,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendJSONData(
+    func sendJSONData(
         on channel: Channel,
         data: Data,
         keepAlive: Bool,
@@ -73,7 +72,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendPlain(
+    func sendPlain(
         on channel: Channel,
         status: HTTPResponseStatus,
         body: String,
@@ -91,7 +90,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendEmpty(
+    func sendEmpty(
         on channel: Channel,
         status: HTTPResponseStatus,
         keepAlive: Bool,
@@ -107,7 +106,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendMCPError(
+    func sendMCPError(
         on channel: Channel,
         id: JSONRPC.ID?,
         code: Int,
@@ -143,7 +142,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendMCPError(
+    func sendMCPError(
         on channel: Channel,
         ids: [JSONRPC.ID],
         code: Int,
@@ -179,7 +178,7 @@ package struct HTTPResponseWriter: Sendable {
         )
     }
 
-    package func sendSSE(to channel: Channel, data: Data) {
+    func sendSSE(to channel: Channel, data: Data) {
         guard let payload = SSECodec.encodeDataEvent(data) else {
             logger.warning("Dropping non-UTF8 SSE payload", metadata: ["bytes": "\(data.count)"])
             return
@@ -192,7 +191,7 @@ package struct HTTPResponseWriter: Sendable {
         }
     }
 
-    package func logRequest(_ request: HTTPHandler.RequestLogContext) {
+    func logRequest(_ request: HTTPHandler.RequestLogContext) {
         var metadata: Logger.Metadata = [
             "id": .string(request.id),
             "method": .string(request.method),
@@ -204,7 +203,7 @@ package struct HTTPResponseWriter: Sendable {
         logger.info("HTTP request", metadata: metadata)
     }
 
-    package func logResponse(
+    func logResponse(
         _ request: HTTPHandler.RequestLogContext,
         status: HTTPResponseStatus,
         sessionID: String?

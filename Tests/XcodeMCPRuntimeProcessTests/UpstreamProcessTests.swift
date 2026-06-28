@@ -6,7 +6,6 @@ import XcodeMCPRuntimeTestSupport
 
 @testable import XcodeMCPCore
 @testable import XcodeMCPProcessRuntime
-@testable import XcodeMCPProxyRuntime
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct UpstreamProcessTests {
@@ -206,24 +205,6 @@ struct UpstreamProcessTests {
 
             #expect(events.contains(where: { $0 > 0 }))
         }
-    }
-
-    @Test func upstreamSessionReturnsOverloadedWhenLaunchFails() async throws {
-        let config = UpstreamProcess.Config(
-            command: "/path/that/does/not/exist",
-            args: [],
-            environment: ProcessInfo.processInfo.environment,
-            maxQueuedWriteBytes: 1024
-        )
-        let slot = ManagedUpstreamSlot(factory: UpstreamProcess(config: config))
-        await slot.start()
-
-        let first = await slot.send(Data(#"{"jsonrpc":"2.0","id":1}"#.utf8))
-        let second = await slot.send(Data(#"{"jsonrpc":"2.0","id":2}"#.utf8))
-        await slot.stop()
-
-        #expect(first == .unavailable(.startFailed))
-        #expect(second == .unavailable(.notStarted))
     }
 
     @Test func upstreamSessionRejectsWritesAfterExitEvent() async throws {

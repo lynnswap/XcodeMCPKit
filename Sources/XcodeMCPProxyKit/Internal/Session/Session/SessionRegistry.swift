@@ -1,15 +1,15 @@
 import Foundation
 import NIOConcurrencyHelpers
 
-package struct SessionRecord: Sendable {
-    package let context: SessionContext
-    package let generation: UInt64
-    package var isInitialized: Bool
-    package var negotiatedProtocolVersion: String?
-    package var buffersUnmappedNotificationsUntilClientConnects: Bool
+struct SessionRecord: Sendable {
+    let context: SessionContext
+    let generation: UInt64
+    var isInitialized: Bool
+    var negotiatedProtocolVersion: String?
+    var buffersUnmappedNotificationsUntilClientConnects: Bool
 }
 
-package final class SessionRegistry: Sendable {
+final class SessionRegistry: Sendable {
     private struct State: Sendable {
         var sessions: [String: SessionRecord] = [:]
         var nextGeneration: UInt64 = 0
@@ -18,11 +18,11 @@ package final class SessionRegistry: Sendable {
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
 
-    package init(config: ProxyConfig) {
+    init(config: ProxyConfig) {
         self.config = config
     }
 
-    package func session(id: String) -> SessionContext {
+    func session(id: String) -> SessionContext {
         state.withLockedValue { state in
             if let existing = state.sessions[id] {
                 return existing.context
@@ -40,23 +40,23 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func hasSession(id: String) -> Bool {
+    func hasSession(id: String) -> Bool {
         state.withLockedValue { $0.sessions[id] != nil }
     }
 
-    package func removeSession(id: String) -> SessionContext? {
+    func removeSession(id: String) -> SessionContext? {
         state.withLockedValue { $0.sessions.removeValue(forKey: id)?.context }
     }
 
-    package func generation(of sessionID: String) -> UInt64? {
+    func generation(of sessionID: String) -> UInt64? {
         state.withLockedValue { $0.sessions[sessionID]?.generation }
     }
 
-    package func contextIfPresent(id sessionID: String) -> SessionContext? {
+    func contextIfPresent(id sessionID: String) -> SessionContext? {
         state.withLockedValue { $0.sessions[sessionID]?.context }
     }
 
-    package func sessionStillMatchesPendingInitialize(
+    func sessionStillMatchesPendingInitialize(
         sessionID: String,
         sessionGeneration: UInt64
     ) -> Bool {
@@ -66,11 +66,11 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func sessionIDs() -> [String] {
+    func sessionIDs() -> [String] {
         state.withLockedValue { Array($0.sessions.keys).sorted() }
     }
 
-    package func activeNotificationTargets() -> [SessionContext] {
+    func activeNotificationTargets() -> [SessionContext] {
         state.withLockedValue { state in
             state.sessions.values.compactMap { record in
                 record.context.notificationHub.hasClients ? record.context : nil
@@ -78,7 +78,7 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func pendingNotificationClientTargets() -> [SessionContext] {
+    func pendingNotificationClientTargets() -> [SessionContext] {
         state.withLockedValue { state in
             state.sessions.values.compactMap { record in
                 record.isInitialized && record.buffersUnmappedNotificationsUntilClientConnects
@@ -88,7 +88,7 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func markInitialized(
+    func markInitialized(
         id sessionID: String,
         negotiatedProtocolVersion: String?,
         buffersUnmappedNotificationsUntilClientConnects: Bool = false
@@ -103,7 +103,7 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func markNotificationClientConnected(id sessionID: String) {
+    func markNotificationClientConnected(id sessionID: String) {
         state.withLockedValue { state in
             guard var record = state.sessions[sessionID] else { return }
             record.buffersUnmappedNotificationsUntilClientConnects = false
@@ -111,19 +111,19 @@ package final class SessionRegistry: Sendable {
         }
     }
 
-    package func isInitialized(id sessionID: String) -> Bool {
+    func isInitialized(id sessionID: String) -> Bool {
         state.withLockedValue { state in
             state.sessions[sessionID]?.isInitialized ?? false
         }
     }
 
-    package func negotiatedProtocolVersion(id sessionID: String) -> String? {
+    func negotiatedProtocolVersion(id sessionID: String) -> String? {
         state.withLockedValue { state in
             state.sessions[sessionID]?.negotiatedProtocolVersion
         }
     }
 
-    package func removeAllSessions() -> [SessionContext] {
+    func removeAllSessions() -> [SessionContext] {
         state.withLockedValue { state in
             let contexts = state.sessions.values.map(\.context)
             state.sessions.removeAll()

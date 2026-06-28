@@ -1,9 +1,9 @@
 import Foundation
 
-package enum CLIError: Error, CustomStringConvertible {
+enum CLIError: Error, CustomStringConvertible {
     case message(String)
 
-    package var description: String {
+    var description: String {
         switch self {
         case .message(let text):
             return text
@@ -11,17 +11,17 @@ package enum CLIError: Error, CustomStringConvertible {
     }
 }
 
-package struct CLIParser {
+struct CLIParser {
     private static let defaultStdioUpstream = "http://localhost:8765/mcp"
     private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
     private static let refreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
-    package static let configPathEnv = "MCP_XCODE_CONFIG"
-    package static let removedLazyInitMessage =
+    static let configPathEnv = "MCP_XCODE_CONFIG"
+    static let removedLazyInitMessage =
         "The proxy always uses eager initialization; --lazy-init has been removed."
-    package static let removedXcodePIDMessage =
+    static let removedXcodePIDMessage =
         "Xcode PID support has been removed; --xcode-pid is no longer supported."
 
-    package static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
+    static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
         return try parse(
             args: args,
             environment: environment,
@@ -30,7 +30,7 @@ package struct CLIParser {
         )
     }
 
-    package static func parse(
+    static func parse(
         args: [String],
         environment: [String: String],
         discoveryOverrideURL: URL?,

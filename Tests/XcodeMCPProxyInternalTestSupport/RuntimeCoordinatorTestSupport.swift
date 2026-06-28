@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
@@ -5,9 +6,31 @@ import NIOEmbedded
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
-import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyKit
+import XcodeMCPProxyTestSupport
+
+extension RuntimeCoordinator {
+    /// Test-only synchronous teardown for defer blocks; production code
+    /// awaits shutdown() directly.
+    func shutdownAndWait() {
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) { [self] in
+            await shutdown()
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+
+    func drainRuntimeTasksAndWaitForTesting() {
+        let drain = runtimeTasks.drainCurrentTasks()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            await drain.wait()
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+}
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
     UpstreamSlotScheduler(

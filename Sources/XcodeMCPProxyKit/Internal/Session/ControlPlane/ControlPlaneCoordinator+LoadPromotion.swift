@@ -2,7 +2,6 @@ import Foundation
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension ControlPlaneCoordinator {
     func replaceToolsCatalogRequestLoad(

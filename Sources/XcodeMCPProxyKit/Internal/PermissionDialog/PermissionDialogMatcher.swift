@@ -4,7 +4,7 @@ import Foundation
 import Logging
 
 extension XcodePermissionDialog {
-    package enum Matcher {
+    enum Matcher {
     private static let allowedProcessBundleIdentifiers = normalizedCandidates([
         "com.apple.dt.Xcode",
         "com.apple.dt.ExternalViewService",
@@ -18,7 +18,7 @@ extension XcodePermissionDialog {
         "AXSystemDialog",
     ])
 
-    package static func decision(
+    static func decision(
         for snapshot: XcodePermissionDialog.WindowSnapshot,
         processID: pid_t,
         agentPathCandidates: Set<String> = [],
@@ -50,7 +50,7 @@ extension XcodePermissionDialog {
         )
     }
 
-    package static func fingerprint(
+    static func fingerprint(
         for snapshot: XcodePermissionDialog.WindowSnapshot,
         processID: pid_t
     ) -> String {
@@ -68,7 +68,7 @@ extension XcodePermissionDialog {
         ].joined(separator: "|")
     }
 
-    package static func passesStructuralChecks(_ snapshot: XcodePermissionDialog.WindowSnapshot) -> Bool {
+    static func passesStructuralChecks(_ snapshot: XcodePermissionDialog.WindowSnapshot) -> Bool {
         guard
             let normalizedBundleIdentifier = normalizedText(snapshot.processBundleIdentifier),
             allowedProcessBundleIdentifiers.contains(normalizedBundleIdentifier)

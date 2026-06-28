@@ -1,13 +1,12 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension UpstreamReadinessGate {
     /// The live gate for the stock xcrun mcpbridge upstream: hold
     /// initialization until an Xcode process is available.
     /// Any other upstream invocation gets the always-ready gate.
-    package static func liveDefault(
+    static func liveDefault(
         config: ProxyConfig,
         clock: ClockClient
     ) -> UpstreamReadinessGate {
@@ -27,7 +26,7 @@ extension UpstreamReadinessGate {
         )
     }
 
-    package static func xcodeMCPBridge(
+    static func xcodeMCPBridge(
         uptimeNanoseconds: @escaping @Sendable () -> UInt64,
         sleepNanoseconds: @escaping @Sendable (UInt64) async -> Void,
         runProcess: @escaping @Sendable (ProcessRequest) async throws -> ProcessOutput
@@ -82,8 +81,8 @@ extension UpstreamReadinessGate {
     }
 }
 
-package enum XcodeReadinessProbe {
-    package static func processIDs(fromPGrepOutput output: ProcessOutput) -> Set<pid_t> {
+enum XcodeReadinessProbe {
+    static func processIDs(fromPGrepOutput output: ProcessOutput) -> Set<pid_t> {
         guard output.terminationStatus == 0 else { return [] }
         return Set(
             output.stdout
@@ -92,7 +91,7 @@ package enum XcodeReadinessProbe {
         )
     }
 
-    package static func isReady(xcodeProcessIDs: Set<pid_t>) -> Bool {
+    static func isReady(xcodeProcessIDs: Set<pid_t>) -> Bool {
         xcodeProcessIDs.isEmpty == false
     }
 }

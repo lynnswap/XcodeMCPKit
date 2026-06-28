@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyKit
 
 struct JSONRPCRuntimeStdioContractTests {
     @Test func requestEnvelopeInspectsSingleRequestsAndNotifications() throws {

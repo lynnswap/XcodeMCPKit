@@ -1,20 +1,19 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package struct ToolCallNormalizer: Sendable {
+struct ToolCallNormalizer: Sendable {
     private static let structuredContentTools: Set<String> = [
         "DocumentationSearch"
     ]
 
     private let sessionManager: any RuntimeToolsCatalogPort
 
-    package init(sessionManager: any RuntimeToolsCatalogPort) {
+    init(sessionManager: any RuntimeToolsCatalogPort) {
         self.sessionManager = sessionManager
     }
 
-    package func normalizeResponseDataIfNeeded(
+    func normalizeResponseDataIfNeeded(
         method: String? = nil,
         toolName: String? = nil,
         responseMethodsByIDKey: [String: String] = [:],

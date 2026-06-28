@@ -1,10 +1,9 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum InitializeHandshakeJSON {
-    package static func resolved(
+enum InitializeHandshakeJSON {
+    static func resolved(
         initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     ) -> [String: JSONValue] {
         let mergedParams = mergeJSONObjects(
@@ -19,7 +18,7 @@ package enum InitializeHandshakeJSON {
         return applyingAutomaticClientVersion(to: mergedParams)
     }
 
-    package static func defaultParams() -> [String: JSONValue] {
+    static func defaultParams() -> [String: JSONValue] {
         [
             "protocolVersion": .string(MCP.ProtocolVersion.current),
             "capabilities": .object([:]),

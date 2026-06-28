@@ -1,4 +1,3 @@
-import XcodeMCPProxyKit
 import Dispatch
 import Foundation
 import NIO
@@ -421,29 +420,6 @@ package func shutdown(_ group: EventLoopGroup) async {
         group.shutdownGracefully { _ in
             continuation.resume()
         }
-    }
-}
-
-extension RuntimeCoordinator {
-    /// Test-only synchronous teardown for defer blocks; production code
-    /// awaits shutdown() directly.
-    package func shutdownAndWait() {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) { [self] in
-            await shutdown()
-            semaphore.signal()
-        }
-        semaphore.wait()
-    }
-
-    package func drainRuntimeTasksAndWaitForTesting() {
-        let drain = runtimeTasks.drainCurrentTasks()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
-            await drain.wait()
-            semaphore.signal()
-        }
-        semaphore.wait()
     }
 }
 

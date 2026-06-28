@@ -3,7 +3,6 @@ import Logging
 import NIOCore
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
@@ -33,7 +32,7 @@ extension RuntimeCoordinator {
         case reject
     }
 
-    package func liveXcodeListWindowsAcrossProcessRoutes(
+    func liveXcodeListWindowsAcrossProcessRoutes(
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
         let unavailable = unavailableXcodeProcessIDs()
@@ -162,11 +161,11 @@ extension RuntimeCoordinator {
         throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
-    package func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int? {
+    func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int? {
         xcodeProcessRoutes.first { $0.target.processID == processID }?.primaryUpstreamIndex
     }
 
-    package func xcodeProcessRouteHasUsableInitializedUpstream(
+    func xcodeProcessRouteHasUsableInitializedUpstream(
         containing upstreamIndex: Int
     ) -> Bool {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
@@ -175,25 +174,25 @@ extension RuntimeCoordinator {
         return firstUsableInitializedUpstreamIndex(in: route) != nil
     }
 
-    package func documentationCandidateProcessIDs() -> Set<pid_t>? {
+    func documentationCandidateProcessIDs() -> Set<pid_t>? {
         documentationCandidateProcessOrder().map(Set.init)
     }
 
-    package func xcodeProcessRouteProcessIDs() -> Set<pid_t>? {
+    func xcodeProcessRouteProcessIDs() -> Set<pid_t>? {
         guard xcodeProcessRoutes.isEmpty == false else {
             return nil
         }
         return Set(xcodeProcessRoutes.map(\.target.processID))
     }
 
-    package func catalogEligibleConfiguredProcessIDs() -> Set<pid_t> {
+    func catalogEligibleConfiguredProcessIDs() -> Set<pid_t> {
         let unavailable = unavailableXcodeProcessIDs()
         return Set(xcodeProcessRoutes.compactMap { route in
             unavailable.contains(route.target.processID) ? nil : route.target.processID
         })
     }
 
-    package func documentationCandidateProcessOrder() -> [pid_t]? {
+    func documentationCandidateProcessOrder() -> [pid_t]? {
         guard xcodeProcessRoutes.isEmpty == false else {
             return nil
         }
@@ -237,7 +236,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func unavailableXcodeProcessIDs() -> Set<pid_t> {
+    func unavailableXcodeProcessIDs() -> Set<pid_t> {
         let now = nowUptimeNanoseconds()
         return unavailableXcodeProcessRoutes.withLockedValue { state in
             state = state.filter { $0.value > now }
@@ -245,7 +244,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func markXcodeProcessRouteUnavailable(
+    func markXcodeProcessRouteUnavailable(
         upstreamIndex: Int,
         reason: String
     ) {
@@ -276,7 +275,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func markXcodeProcessRouteAvailable(upstreamIndex: Int) {
+    func markXcodeProcessRouteAvailable(upstreamIndex: Int) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
@@ -285,14 +284,14 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {
+    func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {
         guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
             return
         }
         removeXcodeWindowOwners(forProcessID: processID)
     }
 
-    package func removeXcodeWindowOwners(forProcessID processID: pid_t) {
+    func removeXcodeWindowOwners(forProcessID processID: pid_t) {
         tabOwnerProcessIDs.withLockedValue { owners in
             owners = owners.filter { $0.value != processID }
         }
@@ -301,12 +300,12 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func clearXcodeWindowOwners() {
+    func clearXcodeWindowOwners() {
         tabOwnerProcessIDs.withLockedValue { $0.removeAll() }
         workspaceOwnerProcessIDs.withLockedValue { $0.removeAll() }
     }
 
-    package func documentationUpstreamIndex(for target: XcodeProcessTarget) -> Int? {
+    func documentationUpstreamIndex(for target: XcodeProcessTarget) -> Int? {
         guard let route = xcodeProcessRoutes.first(where: {
             $0.target.processID == target.processID
         }) else {
@@ -315,11 +314,11 @@ extension RuntimeCoordinator {
         return firstUsableInitializedUpstreamIndex(in: route)
     }
 
-    package func firstUsableInitializedUpstreamIndex(in route: XcodeProcessRoute) -> Int? {
+    func firstUsableInitializedUpstreamIndex(in route: XcodeProcessRoute) -> Int? {
         usableInitializedUpstreamIndices(in: route).first
     }
 
-    package func usableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
+    func usableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
         let states = upstreamHealthManager.statesSnapshot()
         return route.upstreamIndices.filter { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else {
@@ -337,7 +336,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
+    func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
         guard xcodeProcessRoutes.isEmpty == false else {
             return nil
         }
@@ -348,7 +347,7 @@ extension RuntimeCoordinator {
         return indices.first
     }
 
-    package func toolRoutingDecision(
+    func toolRoutingDecision(
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
@@ -361,7 +360,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    package func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
+    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
         guard xcodeProcessRoutes.isEmpty == false else {
             return .forward(preferredUpstreamIndex: nil)
         }
@@ -636,7 +635,7 @@ extension RuntimeCoordinator {
     }
 
     @discardableResult
-    package func recordXcodeWindowOwners(
+    func recordXcodeWindowOwners(
         from result: JSONValue,
         upstreamIndex: Int
     ) -> Bool {
@@ -709,7 +708,7 @@ extension RuntimeCoordinator {
         return true
     }
 
-    package static func mergedXcodeListWindowsResult(
+    static func mergedXcodeListWindowsResult(
         _ results: [JSONValue]
     ) -> JSONValue? {
         let successfulResults = results.filter {
@@ -759,7 +758,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    package func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
+    func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
         xcodeProcessRoutes.first { $0.upstreamIndices.contains(upstreamIndex) }
     }
 

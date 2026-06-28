@@ -1,7 +1,6 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RuntimeCoordinator {
     func runWhenUpstreamReady(

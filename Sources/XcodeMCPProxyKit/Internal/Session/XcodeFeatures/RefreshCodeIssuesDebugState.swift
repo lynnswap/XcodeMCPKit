@@ -1,17 +1,16 @@
 import Foundation
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
 extension RefreshCodeIssues {
-    package struct QueueSnapshot: Codable, Sendable {
-        package let defaultRequestTimeoutSeconds: Double
-        package let activeByQueueKey: [String: Int]
-        package let waitingByQueueKey: [String: Int]
-        package let activeRequestCount: Int
-        package let waitingRequestCount: Int
+    struct QueueSnapshot: Codable, Sendable {
+        let defaultRequestTimeoutSeconds: Double
+        let activeByQueueKey: [String: Int]
+        let waitingByQueueKey: [String: Int]
+        let activeRequestCount: Int
+        let waitingRequestCount: Int
 
-        package init(
+        init(
             defaultRequestTimeoutSeconds: Double,
             activeByQueueKey: [String: Int],
             waitingByQueueKey: [String: Int],
@@ -29,7 +28,7 @@ extension RefreshCodeIssues {
     /// A refresh request's terminal outcome. The diagnostic final state is
     /// derived here, so the outcome-to-state mapping cannot drift between the
     /// workflow and the debug snapshot.
-    package enum Outcome: String, Sendable {
+    enum Outcome: String, Sendable {
         case success
         case timeout
         case queueWaitTimedOut = "queue_wait_timed_out"
@@ -38,7 +37,7 @@ extension RefreshCodeIssues {
         case upstreamUnavailable = "upstream_unavailable"
         case invalidUpstreamResponse = "invalid_upstream_response"
 
-        package var finalState: RefreshCodeIssues.RequestState {
+        var finalState: RefreshCodeIssues.RequestState {
             switch self {
             case .success:
                 return .completed
@@ -52,7 +51,7 @@ extension RefreshCodeIssues {
         }
     }
 
-    package enum RequestState: String, Sendable {
+    enum RequestState: String, Sendable {
         case waitingForPermit = "waiting_for_permit"
         case running
         case completed
@@ -61,7 +60,7 @@ extension RefreshCodeIssues {
         case failed
     }
 
-    package enum Step: Sendable, Equatable {
+    enum Step: Sendable, Equatable {
         case waitingForPermit
         case permitAcquired
         case requestTimeoutExhausted
@@ -90,7 +89,7 @@ extension RefreshCodeIssues {
         case upstreamInvalidRequest
         case upstreamInvalidResponse
 
-        package var rawValue: String {
+        var rawValue: String {
             switch self {
             case .waitingForPermit:
                 return "waiting_for_permit"
@@ -150,21 +149,21 @@ extension RefreshCodeIssues {
         }
     }
 
-    package struct RequestSnapshot: Codable, Sendable {
-        package let id: String
-        package let sessionID: String
-        package let queueKey: String
-        package let tabIdentifier: String?
-        package let filePath: String?
-        package let mode: String
-        package let state: String
-        package let step: String
-        package let startedAt: Date
-        package let lastUpdatedAt: Date
-        package let lastQueuePosition: Int?
-        package let metadata: [String: String]
+    struct RequestSnapshot: Codable, Sendable {
+        let id: String
+        let sessionID: String
+        let queueKey: String
+        let tabIdentifier: String?
+        let filePath: String?
+        let mode: String
+        let state: String
+        let step: String
+        let startedAt: Date
+        let lastUpdatedAt: Date
+        let lastQueuePosition: Int?
+        let metadata: [String: String]
 
-        package init(
+        init(
             id: String,
             sessionID: String,
             queueKey: String,
@@ -193,22 +192,22 @@ extension RefreshCodeIssues {
         }
     }
 
-    package struct CompletedRequestSnapshot: Codable, Sendable {
-        package let id: String
-        package let sessionID: String
-        package let queueKey: String
-        package let tabIdentifier: String?
-        package let filePath: String?
-        package let mode: String
-        package let finalState: String
-        package let finalStep: String
-        package let startedAt: Date
-        package let completedAt: Date
-        package let lastQueuePosition: Int?
-        package let outcome: String
-        package let metadata: [String: String]
+    struct CompletedRequestSnapshot: Codable, Sendable {
+        let id: String
+        let sessionID: String
+        let queueKey: String
+        let tabIdentifier: String?
+        let filePath: String?
+        let mode: String
+        let finalState: String
+        let finalStep: String
+        let startedAt: Date
+        let completedAt: Date
+        let lastQueuePosition: Int?
+        let outcome: String
+        let metadata: [String: String]
 
-        package init(
+        init(
             id: String,
             sessionID: String,
             queueKey: String,
@@ -239,12 +238,12 @@ extension RefreshCodeIssues {
         }
     }
 
-    package struct DebugSnapshot: Codable, Sendable {
-        package let queue: RefreshCodeIssues.QueueSnapshot
-        package let activeRequests: [RefreshCodeIssues.RequestSnapshot]
-        package let recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot]
+    struct DebugSnapshot: Codable, Sendable {
+        let queue: RefreshCodeIssues.QueueSnapshot
+        let activeRequests: [RefreshCodeIssues.RequestSnapshot]
+        let recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot]
 
-        package init(
+        init(
             queue: RefreshCodeIssues.QueueSnapshot,
             activeRequests: [RefreshCodeIssues.RequestSnapshot],
             recentCompletedRequests: [RefreshCodeIssues.CompletedRequestSnapshot]
@@ -255,7 +254,7 @@ extension RefreshCodeIssues {
         }
     }
 
-    package final class DebugState: @unchecked Sendable {
+    final class DebugState: @unchecked Sendable {
         private struct RequestRecord: Sendable {
             let id: String
             let sessionID: String
@@ -290,7 +289,7 @@ extension RefreshCodeIssues {
         private let clock: ClockClient
         private var cancelledActiveRequestCountWaiterIDs: Set<UUID> = []
 
-        package init(
+        init(
             defaultRequestTimeoutSeconds: Double,
             recentCompletedLimit: Int = 20,
             clock: ClockClient = .liveValue
@@ -300,7 +299,7 @@ extension RefreshCodeIssues {
             self.clock = clock
         }
 
-        package func beginRequest(
+        func beginRequest(
             sessionID: String,
             queueKey: String,
             tabIdentifier: String?,
@@ -329,7 +328,7 @@ extension RefreshCodeIssues {
             return requestID
         }
 
-        package func markPermitAcquired(
+        func markPermitAcquired(
             requestID: String,
             queuePosition: Int,
             pendingForKey: Int,
@@ -345,7 +344,7 @@ extension RefreshCodeIssues {
             }
         }
 
-        package func updateStep(
+        func updateStep(
             requestID: String,
             step: RefreshCodeIssues.Step,
             state overrideState: RefreshCodeIssues.RequestState? = nil,
@@ -363,7 +362,7 @@ extension RefreshCodeIssues {
             }
         }
 
-        package func finishRequest(
+        func finishRequest(
             requestID: String,
             outcome: RefreshCodeIssues.Outcome,
             metadata: [String: String] = [:]
@@ -403,7 +402,7 @@ extension RefreshCodeIssues {
             lock.unlock()
         }
 
-        package func snapshot() -> RefreshCodeIssues.DebugSnapshot {
+        func snapshot() -> RefreshCodeIssues.DebugSnapshot {
             lock.lock()
             let activeRecords = Array(state.activeRequests.values)
             let recentCompleted = state.recentCompletedRequests
@@ -461,7 +460,7 @@ extension RefreshCodeIssues {
             )
         }
 
-        package func waitForActiveRequestCount(_ count: Int) async throws {
+        func waitForActiveRequestCount(_ count: Int) async throws {
             guard count > 0 else {
                 return
             }
@@ -497,7 +496,7 @@ extension RefreshCodeIssues {
             }
         }
 
-        package func reset() {
+        func reset() {
             let waiters: [ActiveRequestCountWaiter]
             lock.lock()
             waiters = state.activeRequestCountWaiters

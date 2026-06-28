@@ -1,13 +1,13 @@
 import Foundation
 import NIO
 
-package struct XcodeWindowQueryService {
-    package typealias ToolCaller =
+struct XcodeWindowQueryService {
+    typealias ToolCaller =
         @Sendable (_ name: String, _ arguments: [String: Any], _ sessionID: String, _ eventLoop: EventLoop) async throws -> [String: Any]?
 
-    package init() {}
+    init() {}
 
-    package func listWindows(
+    func listWindows(
         sessionID: String,
         eventLoop: EventLoop,
         toolCaller: ToolCaller
@@ -20,7 +20,7 @@ package struct XcodeWindowQueryService {
         return parseXcodeListWindowsMessage(message)
     }
 
-    package func extractToolMessage(from result: [String: Any]) -> String? {
+    func extractToolMessage(from result: [String: Any]) -> String? {
         if let structuredContent = result["structuredContent"] as? [String: Any],
             let message = structuredContent["message"] as? String,
             message.isEmpty == false
@@ -49,7 +49,7 @@ package struct XcodeWindowQueryService {
         return fallbackText
     }
 
-    package func parseWindowsResult(_ result: Any) -> [XcodeWindowInfo]? {
+    func parseWindowsResult(_ result: Any) -> [XcodeWindowInfo]? {
         guard let object = result as? [String: Any],
             let message = extractToolMessage(from: object)
         else {
@@ -58,7 +58,7 @@ package struct XcodeWindowQueryService {
         return parseXcodeListWindowsMessage(message)
     }
 
-    package func parseXcodeListWindowsMessage(_ message: String) -> [XcodeWindowInfo] {
+    func parseXcodeListWindowsMessage(_ message: String) -> [XcodeWindowInfo] {
         XcodeListWindowsMessageParser.parse(message)
             .map { entry in
                 XcodeWindowInfo(

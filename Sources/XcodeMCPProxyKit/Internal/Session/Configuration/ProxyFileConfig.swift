@@ -3,19 +3,19 @@ import Logging
 import TOMLDecoder
 
 extension ProxyConfig.File {
-    package enum Number: Sendable, Equatable {
+    enum Number: Sendable, Equatable {
         case int(Int64)
         case double(Double)
     }
 
-    package enum Value: Sendable, Equatable {
+    enum Value: Sendable, Equatable {
         case object([String: ProxyConfig.File.Value])
         case array([ProxyConfig.File.Value])
         case string(String)
         case number(ProxyConfig.File.Number)
         case bool(Bool)
 
-        package init?(any value: Any) {
+        init?(any value: Any) {
             switch value {
             case let value as Bool:
                 self = .bool(value)
@@ -49,13 +49,13 @@ extension ProxyConfig.File {
         }
     }
 
-    package struct InitializeHandshakeOverride: Sendable, Equatable {
-        package let protocolVersion: String?
-        package let clientName: String?
-        package let clientVersion: String?
-        package let capabilities: [String: ProxyConfig.File.Value]?
+    struct InitializeHandshakeOverride: Sendable, Equatable {
+        let protocolVersion: String?
+        let clientName: String?
+        let clientVersion: String?
+        let capabilities: [String: ProxyConfig.File.Value]?
 
-        package var isEmpty: Bool {
+        var isEmpty: Bool {
             protocolVersion == nil
                 && clientName == nil
                 && clientVersion == nil
@@ -145,8 +145,8 @@ private struct ProxyToolsConfig: Decodable, Sendable, Equatable {
 }
 
 extension ProxyConfig.File {
-    package enum Loader {
-        package static func loadInitializeParamsOverride(
+    enum Loader {
+        static func loadInitializeParamsOverride(
             configPath: String?,
             logger: Logger
         ) -> ProxyConfig.File.InitializeHandshakeOverride? {
@@ -193,7 +193,7 @@ extension ProxyConfig.File {
             }
         }
 
-        package static func loadDisabledToolNames(
+        static func loadDisabledToolNames(
             configPath: String?,
             logger: Logger
         ) -> Set<String> {

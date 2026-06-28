@@ -2,7 +2,7 @@ import XcodeMCPCore
 import XcodeMCPProcessRuntime
 import Foundation
 
-package actor ManagedUpstreamSlot: UpstreamSlotControlling {
+actor ManagedUpstreamSlot: UpstreamSlotControlling {
     private final class StartAttempt: @unchecked Sendable {
         let task: Task<any UpstreamSession, Error>
 
@@ -20,14 +20,14 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
     }
 
-    package nonisolated let events: AsyncStream<Upstream.Event>
+    nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let factory: any UpstreamSessionFactory
     private var pendingStart: StartAttempt?
     private var current: RunningSessionBox?
     private var isShutdown = false
 
-    package init(factory: any UpstreamSessionFactory) {
+    init(factory: any UpstreamSessionFactory) {
         self.factory = factory
 
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
@@ -37,11 +37,11 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         self.continuation = streamContinuation
     }
 
-    package func start() async {
+    func start() async {
         beginStartIfNeeded()
     }
 
-    package func stop() async {
+    func stop() async {
         isShutdown = true
 
         let running = current
@@ -58,7 +58,7 @@ package actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
     }
 
-    package func send(_ data: Data) async -> Upstream.SendResult {
+    func send(_ data: Data) async -> Upstream.SendResult {
         guard !isShutdown else {
             return .unavailable(.shuttingDown)
         }

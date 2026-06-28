@@ -2,46 +2,45 @@ import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package final class ProcessToolCatalogRegistry: Sendable {
-    package struct Catalog: Sendable {
-        package let target: XcodeProcessTarget
-        package let upstreamIndex: Int
-        package let rawResult: JSONValue
-        package let toolsByName: [String: JSONValue]
-        package let fingerprintsByName: [String: String]
-        package let ownerBoundToolNames: Set<String>
+final class ProcessToolCatalogRegistry: Sendable {
+    struct Catalog: Sendable {
+        let target: XcodeProcessTarget
+        let upstreamIndex: Int
+        let rawResult: JSONValue
+        let toolsByName: [String: JSONValue]
+        let fingerprintsByName: [String: String]
+        let ownerBoundToolNames: Set<String>
 
-        package var toolNames: Set<String> {
+        var toolNames: Set<String> {
             Set(toolsByName.keys)
         }
     }
 
-    package struct AvailableToolCatalog: Sendable {
-        package let rawResult: JSONValue
-        package let sourceUpstream: Int?
-        package let processIDs: Set<pid_t>
+    struct AvailableToolCatalog: Sendable {
+        let rawResult: JSONValue
+        let sourceUpstream: Int?
+        let processIDs: Set<pid_t>
 
-        package var isEmpty: Bool {
+        var isEmpty: Bool {
             processIDs.isEmpty
         }
     }
 
-    package struct DebugSnapshot: Codable, Sendable {
-        package let processID: Int32
-        package let appPath: String
-        package let xcodeVersion: String
-        package let upstreamIndex: Int
-        package let toolCount: Int
-        package let ownerBoundToolCount: Int
-        package let tabOwnerCount: Int
-        package let workspaceOwnerCount: Int
-        package let isCanonicalSource: Bool
-        package let exposurePolicy: String
-        package let missingFromExposedCatalog: [String]
-        package let extraBeyondExposedCatalog: [String]
-        package let schemaConflicts: [String]
+    struct DebugSnapshot: Codable, Sendable {
+        let processID: Int32
+        let appPath: String
+        let xcodeVersion: String
+        let upstreamIndex: Int
+        let toolCount: Int
+        let ownerBoundToolCount: Int
+        let tabOwnerCount: Int
+        let workspaceOwnerCount: Int
+        let isCanonicalSource: Bool
+        let exposurePolicy: String
+        let missingFromExposedCatalog: [String]
+        let extraBeyondExposedCatalog: [String]
+        let schemaConflicts: [String]
     }
 
     private struct State: Sendable {
@@ -51,9 +50,9 @@ package final class ProcessToolCatalogRegistry: Sendable {
 
     private let state = NIOLockedValueBox(State())
 
-    package init() {}
+    init() {}
 
-    package func record(
+    func record(
         target: XcodeProcessTarget,
         upstreamIndex: Int,
         associatedUpstreamIndices: [Int] = [],
@@ -76,14 +75,14 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func reset() {
+    func reset() {
         state.withLockedValue { state in
             state.catalogsByProcessID.removeAll()
             state.processIDByUpstreamIndex.removeAll()
         }
     }
 
-    package func removeCatalog(forUpstreamIndex upstreamIndex: Int) {
+    func removeCatalog(forUpstreamIndex upstreamIndex: Int) {
         state.withLockedValue { state in
             guard let processID = state.processIDByUpstreamIndex[upstreamIndex]
             else { return }
@@ -94,7 +93,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func removeUpstreamMapping(
+    func removeUpstreamMapping(
         forUpstreamIndex upstreamIndex: Int,
         replacementUpstreamIndex: Int? = nil
     ) {
@@ -120,7 +119,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func removeCatalog(forProcessID processID: pid_t) {
+    func removeCatalog(forProcessID processID: pid_t) {
         state.withLockedValue { state in
             state.catalogsByProcessID.removeValue(forKey: processID)
             state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
@@ -129,7 +128,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func catalog(forUpstreamIndex upstreamIndex: Int) -> Catalog? {
+    func catalog(forUpstreamIndex upstreamIndex: Int) -> Catalog? {
         state.withLockedValue { state in
             guard let processID = state.processIDByUpstreamIndex[upstreamIndex] else {
                 return nil
@@ -138,19 +137,19 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func catalog(forProcessID processID: pid_t) -> Catalog? {
+    func catalog(forProcessID processID: pid_t) -> Catalog? {
         state.withLockedValue { state in
             state.catalogsByProcessID[processID]
         }
     }
 
-    package func unionToolsListResult() -> JSONValue? {
+    func unionToolsListResult() -> JSONValue? {
         state.withLockedValue { state in
             Self.unionToolsListResult(from: Array(state.catalogsByProcessID.values))
         }
     }
 
-    package func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
+    func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
         state.withLockedValue { state in
             let catalogs = state.catalogsByProcessID.values.filter { catalog in
                 processIDs?.contains(catalog.target.processID) ?? true
@@ -166,13 +165,13 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func representativeSourceUpstream() -> Int? {
+    func representativeSourceUpstream() -> Int? {
         state.withLockedValue { state in
             state.catalogsByProcessID.values.sorted(by: Self.catalogSort).first?.upstreamIndex
         }
     }
 
-    package func isOwnerBoundTool(_ toolName: String) -> Bool {
+    func isOwnerBoundTool(_ toolName: String) -> Bool {
         state.withLockedValue { state in
             state.catalogsByProcessID.values.contains {
                 $0.ownerBoundToolNames.contains(toolName)
@@ -180,7 +179,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func processIDsHavingTool(_ toolName: String) -> Set<pid_t> {
+    func processIDsHavingTool(_ toolName: String) -> Set<pid_t> {
         state.withLockedValue { state in
             Set(
                 state.catalogsByProcessID.compactMap { processID, catalog in
@@ -190,25 +189,25 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package func processIDsWithCatalog() -> Set<pid_t> {
+    func processIDsWithCatalog() -> Set<pid_t> {
         state.withLockedValue { state in
             Set(state.catalogsByProcessID.keys)
         }
     }
 
-    package func hasTool(_ toolName: String, upstreamIndex: Int) -> Bool {
+    func hasTool(_ toolName: String, upstreamIndex: Int) -> Bool {
         catalog(forUpstreamIndex: upstreamIndex)?.toolsByName[toolName] != nil
     }
 
-    package func hasTool(_ toolName: String, processID: pid_t) -> Bool {
+    func hasTool(_ toolName: String, processID: pid_t) -> Bool {
         catalog(forProcessID: processID)?.toolsByName[toolName] != nil
     }
 
-    package func toolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
+    func toolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
         catalog(forUpstreamIndex: upstreamIndex)?.rawResult
     }
 
-    package func debugSnapshots(
+    func debugSnapshots(
         exposedCatalog: JSONValue?,
         canonicalSourceUpstream: Int?,
         tabOwnerCountsByProcessID: [pid_t: Int],
@@ -243,7 +242,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    package static func toolsByName(in result: JSONValue?) -> [String: JSONValue] {
+    static func toolsByName(in result: JSONValue?) -> [String: JSONValue] {
         guard let result,
               case .object(let object) = result,
               case .array(let tools)? = object["tools"] else {
@@ -260,7 +259,7 @@ package final class ProcessToolCatalogRegistry: Sendable {
         return toolsByName
     }
 
-    package static func isOwnerBoundTool(_ tool: JSONValue) -> Bool {
+    static func isOwnerBoundTool(_ tool: JSONValue) -> Bool {
         guard case .object(let toolObject) = tool,
               case .object(let inputSchema)? = toolObject["inputSchema"] else {
             return false

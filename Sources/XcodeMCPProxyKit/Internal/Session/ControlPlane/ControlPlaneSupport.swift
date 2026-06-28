@@ -2,16 +2,15 @@ import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package enum ControlPlane {}
+enum ControlPlane {}
 
 extension ControlPlane {
-    package enum Route: Hashable, Sendable {
+    enum Route: Hashable, Sendable {
         case anyHealthy
         case pinnedUpstream(Int)
 
-        package var debugLabel: String {
+        var debugLabel: String {
             switch self {
             case .anyHealthy:
                 return "any_healthy"
@@ -22,12 +21,12 @@ extension ControlPlane {
     }
 }
 
-package struct CanonicalToolsCatalogLoadResult: Sendable {
-    package let rawResult: JSONValue
-    package let sourceUpstream: Int?
-    package let durationMilliseconds: Int
+struct CanonicalToolsCatalogLoadResult: Sendable {
+    let rawResult: JSONValue
+    let sourceUpstream: Int?
+    let durationMilliseconds: Int
 
-    package init(rawResult: JSONValue, sourceUpstream: Int?, durationMilliseconds: Int) {
+    init(rawResult: JSONValue, sourceUpstream: Int?, durationMilliseconds: Int) {
         self.rawResult = rawResult
         self.sourceUpstream = sourceUpstream
         self.durationMilliseconds = durationMilliseconds
@@ -35,28 +34,28 @@ package struct CanonicalToolsCatalogLoadResult: Sendable {
 }
 
 extension ControlPlane {
-    package struct WaiterCounts: Codable, Sendable {
-        package let initialize: Int
-        package let toolsCatalog: Int
-        package let windows: Int
+    struct WaiterCounts: Codable, Sendable {
+        let initialize: Int
+        let toolsCatalog: Int
+        let windows: Int
     }
 }
 
 extension ControlPlane {
-    package struct DebugSnapshot: Codable, Sendable {
-        package let phase: String
-        package let canonicalInitializeSourceUpstream: Int?
-        package let canonicalToolsSourceUpstream: Int?
-        package let canonicalReady: Bool
-        package let upstreamHandshakeStates: [String: String]
-        package let waiterCounts: ControlPlane.WaiterCounts
-        package let inFlightControlPlaneRequests: [String]
-        package let lastIncompatibility: CanonicalBrokerState.Incompatibility?
+    struct DebugSnapshot: Codable, Sendable {
+        let phase: String
+        let canonicalInitializeSourceUpstream: Int?
+        let canonicalToolsSourceUpstream: Int?
+        let canonicalReady: Bool
+        let upstreamHandshakeStates: [String: String]
+        let waiterCounts: ControlPlane.WaiterCounts
+        let inFlightControlPlaneRequests: [String]
+        let lastIncompatibility: CanonicalBrokerState.Incompatibility?
     }
 }
 
 extension ControlPlane {
-    package final class DebugMirror: Sendable {
+    final class DebugMirror: Sendable {
         private struct Waiter {
             let id: UUID
             let predicate: @Sendable (ControlPlane.DebugSnapshot) -> Bool
@@ -70,13 +69,13 @@ extension ControlPlane {
 
         private let state = NIOLockedValueBox(State())
 
-        package init() {}
+        init() {}
 
-        package func snapshot() -> ControlPlane.DebugSnapshot? {
+        func snapshot() -> ControlPlane.DebugSnapshot? {
             state.withLockedValue { $0.snapshot }
         }
 
-        package func overwrite(_ snapshot: ControlPlane.DebugSnapshot?) {
+        func overwrite(_ snapshot: ControlPlane.DebugSnapshot?) {
             let resumptions = state.withLockedValue { state -> [Waiter] in
                 state.snapshot = snapshot
                 guard let snapshot else {
@@ -102,7 +101,7 @@ extension ControlPlane {
             }
         }
 
-        package func waitForSnapshot(
+        func waitForSnapshot(
             matching predicate: @escaping @Sendable (ControlPlane.DebugSnapshot) -> Bool
         ) async throws -> ControlPlane.DebugSnapshot {
             if let snapshot = self.snapshot(), predicate(snapshot) {
@@ -148,12 +147,12 @@ extension ControlPlane {
 }
 
 extension ControlPlane {
-    package struct RPCCancelSnapshot: Sendable {
-        package let registrationToken: UUID?
-        package let upstreamIndex: Int?
-        package let requestIDKey: String?
+    struct RPCCancelSnapshot: Sendable {
+        let registrationToken: UUID?
+        let upstreamIndex: Int?
+        let requestIDKey: String?
 
-        package init(
+        init(
             registrationToken: UUID?,
             upstreamIndex: Int?,
             requestIDKey: String?
@@ -166,8 +165,8 @@ extension ControlPlane {
 }
 
 extension ControlPlane {
-    package final class RPCHandle: Sendable {
-        package enum State: Sendable {
+    final class RPCHandle: Sendable {
+        enum State: Sendable {
             case queued
             case registered(registrationToken: UUID, upstreamIndex: Int)
             case assigned(registrationToken: UUID, upstreamIndex: Int, requestIDKey: String)
@@ -182,9 +181,9 @@ extension ControlPlane {
 
         private let state = NIOLockedValueBox(HandleState())
 
-        package init() {}
+        init() {}
 
-        package func installCancel(
+        func installCancel(
             _ onCancel: @escaping @Sendable (ControlPlane.RPCCancelSnapshot) -> Void
         ) {
             let snapshot = state.withLockedValue { state -> ControlPlane.RPCCancelSnapshot? in
@@ -199,7 +198,7 @@ extension ControlPlane {
             }
         }
 
-        package func markRegistered(
+        func markRegistered(
             registrationToken: UUID,
             upstreamIndex: Int
         ) -> Bool {
@@ -217,7 +216,7 @@ extension ControlPlane {
             }
         }
 
-        package func markAssigned(
+        func markAssigned(
             registrationToken: UUID,
             upstreamIndex: Int,
             requestIDKey: String
@@ -241,7 +240,7 @@ extension ControlPlane {
             }
         }
 
-        package func markFinished() {
+        func markFinished() {
             state.withLockedValue { state in
                 switch state.state {
                 case .queued, .registered, .assigned:
@@ -252,7 +251,7 @@ extension ControlPlane {
             }
         }
 
-        package func cancel() {
+        func cancel() {
             let cancellation = state.withLockedValue {
                 state -> (
                     (@Sendable (ControlPlane.RPCCancelSnapshot) -> Void),
@@ -292,7 +291,7 @@ extension ControlPlane {
             }
         }
 
-        package func isCancelled() -> Bool {
+        func isCancelled() -> Bool {
             state.withLockedValue { state in
                 if case .cancelled = state.state {
                     return true

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import XcodeMCPProxyKit
+@testable import XcodeMCPProxyKit
 
 @Suite
 struct InstallCommandTests {

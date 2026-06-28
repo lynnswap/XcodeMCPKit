@@ -3,19 +3,18 @@ import Logging
 import NIO
 import XcodeMCPCore
 import XcodeMCPProcessRuntime
-import XcodeMCPProxyRuntime
 
-package actor ControlPlaneCoordinator {
-    package typealias ToolsCatalogLoader =
+actor ControlPlaneCoordinator {
+    typealias ToolsCatalogLoader =
         @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlane.RPCHandle) async throws
             -> CanonicalToolsCatalogLoadResult
-    package typealias WindowsLoader =
+    typealias WindowsLoader =
         @Sendable (
             _ route: ControlPlane.Route,
             _ requestTimeout: TimeAmount?,
             _ rpcHandle: ControlPlane.RPCHandle
         ) async throws -> JSONValue
-    package typealias UpstreamHandshakeStatesProvider = @Sendable () -> [String: String]
+    typealias UpstreamHandshakeStatesProvider = @Sendable () -> [String: String]
 
     enum Phase: String, Sendable {
         case idle
@@ -84,7 +83,7 @@ package actor ControlPlaneCoordinator {
     var prewarmToolsCatalogLoad: ToolsCatalogLoadState?
     var windowLoads: [ControlPlane.Route: WindowLoadState] = [:]
 
-    package init(
+    init(
         brokerState: CanonicalBrokerState,
         debugMirror: ControlPlane.DebugMirror,
         toolsCatalogLoader: @escaping ToolsCatalogLoader,
@@ -104,7 +103,7 @@ package actor ControlPlaneCoordinator {
         self.clock = clock
     }
 
-    package func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
+    func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
         cancelInvalidatedLoads()
         if let rawResult = brokerState.toolsCatalogRaw() {
             return rawResult
@@ -137,7 +136,7 @@ package actor ControlPlaneCoordinator {
         }
     }
 
-    package func listWindows(
+    func listWindows(
         route: ControlPlane.Route,
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
@@ -170,7 +169,7 @@ package actor ControlPlaneCoordinator {
         }
     }
 
-    package func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async -> JSONValue? {
+    func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async -> JSONValue? {
         cancelInvalidatedLoads()
         if let rawResult = brokerState.toolsCatalogRaw() {
             syncDebug()
@@ -210,7 +209,7 @@ package actor ControlPlaneCoordinator {
         }
     }
 
-    package func invalidate(
+    func invalidate(
         reason _: String,
         clearInitialize: Bool = false,
         clearToolsCatalog: Bool = true
@@ -238,7 +237,7 @@ package actor ControlPlaneCoordinator {
         syncDebug()
     }
 
-    package func cancelLoadsStartedBeforeGeneration(
+    func cancelLoadsStartedBeforeGeneration(
         _ generation: UInt64,
         reason _: String
     ) {
