@@ -107,6 +107,12 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport, @uncheck
                 return .continue
             }
         } catch let error as StreamableHTTPMCPClientError {
+            if case .httpStatus(_, _, let payloads) = error, payloads.isEmpty == false {
+                for payload in payloads {
+                    streamContinuation.yield(.message(payload))
+                }
+                return
+            }
             throw Self.runtimeError(from: error)
         }
         await client.startEventStreamIfReady()

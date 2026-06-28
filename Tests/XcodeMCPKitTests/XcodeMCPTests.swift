@@ -985,6 +985,36 @@ struct XcodeMCPTests {
             )
         }
     }
+
+    @Test func streamableHTTPPreservesInitializeServerErrorFromHTTPStatus() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            initializeError: true,
+            initializeErrorStatusCode: 503
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let transport = StreamableHTTPXcodeMCPTransport(
+            endpoint: endpoint,
+            urlSession: session,
+            requestTimeout: .seconds(2)
+        )
+        await #expect(throws: XcodeMCPError.serverError(
+            code: -32000,
+            message: "initialize rejected",
+            data: nil
+        )) {
+            _ = try await XcodeMCP(
+                config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                transport: transport
+            )
+        }
+    }
 }
 
 private final class DeinitProbe: @unchecked Sendable {}
@@ -1524,6 +1554,7 @@ private actor FakeStreamableHTTPServer {
     private let sessionID: String?
     private let eventStreamFinishesImmediately: Bool
     private let initializeError: Bool
+    private let initializeErrorStatusCode: Int
     private let postSSEFinishesLoading: Bool
     private let initializeUsesSSE: Bool
     private let initializeFinishesLoading: Bool
@@ -1536,6 +1567,7 @@ private actor FakeStreamableHTTPServer {
         sessionID: String? = "session-http-1",
         eventStreamFinishesImmediately: Bool = false,
         initializeError: Bool = false,
+        initializeErrorStatusCode: Int = 200,
         postSSEFinishesLoading: Bool = true,
         initializeUsesSSE: Bool = false,
         initializeFinishesLoading: Bool = true
@@ -1544,6 +1576,7 @@ private actor FakeStreamableHTTPServer {
         self.sessionID = sessionID
         self.eventStreamFinishesImmediately = eventStreamFinishesImmediately
         self.initializeError = initializeError
+        self.initializeErrorStatusCode = initializeErrorStatusCode
         self.postSSEFinishesLoading = postSSEFinishesLoading
         self.initializeUsesSSE = initializeUsesSSE
         self.initializeFinishesLoading = initializeFinishesLoading
@@ -1607,6 +1640,7 @@ private actor FakeStreamableHTTPServer {
         case "initialize":
             if initializeError {
                 return FakeURLProtocolResponse(
+                    statusCode: initializeErrorStatusCode,
                     headers: ["Content-Type": "application/json"],
                     chunks: [jsonData([
                         "jsonrpc": "2.0",
