@@ -2,9 +2,11 @@
 
 ## Module Layout
 
-- `XcodeMCPRuntime`
-  - JSON-RPC / MCP value types, stdio framing, timeout dispatch, request
-    inspection, and low-level process execution primitives.
+- `XcodeMCPKit`
+  - Public client SDK facade, MCP value types, initialized single-client
+    session, configured client transports, and internal/package-scoped
+    JSON-RPC, stdio framing, timeout dispatch, request inspection, and local
+    process runtime primitives.
 - `XcodeMCPProxyKit`
   - Public proxy facades plus internal session lifecycle, proxy config state,
     initialize handshake, upstream process pool, leases, routing,
@@ -24,12 +26,14 @@
 
 ## Dependency Direction
 
-- `XcodeMCPRuntime` owns shared protocol/runtime primitives and must not depend on proxy-only modules.
-  Avoid introducing gateway/session/Xcode knowledge here.
-- `XcodeMCPProxyKit` depends on `XcodeMCPRuntime` and owns proxy
-  session/config state, public proxy facades, CLI composition, installer
-  helpers, and HTTP gateway internals. Session implementation files live under
-  `Sources/XcodeMCPProxyKit/Internal/Session`.
+- `XcodeMCPKit` owns SDK protocol/runtime primitives and must not depend on
+  proxy-only modules. Avoid introducing gateway/session/Xcode proxy knowledge
+  here.
+- `XcodeMCPProxyKit` depends on `XcodeMCPKit` and owns proxy session/config
+  state, public proxy facades, CLI composition, installer helpers, and HTTP
+  gateway internals. Low-level proxy implementation files live under
+  `Sources/XcodeMCPProxyKit/Internal`, including session implementation files
+  under `Sources/XcodeMCPProxyKit/Internal/Session`.
 - Executable targets depend on `XcodeMCPProxyKit` only.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
