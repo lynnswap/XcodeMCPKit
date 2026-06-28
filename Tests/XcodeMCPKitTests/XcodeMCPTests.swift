@@ -2219,20 +2219,74 @@ private func waitWithTimeout<T: Sendable>(
     timeout: Duration = .seconds(2),
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
+    let race = XcodeMCPTestTimeoutRace<T>()
     let clock = ContinuousClock()
-
-    return try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask {
-            try await operation()
+    let operationTask = Task {
+        do {
+            race.complete(.success(try await operation()))
+        } catch {
+            race.complete(.failure(error))
         }
-        group.addTask {
+    }
+    let timeoutTask = Task {
+        do {
             try await clock.sleep(until: clock.now.advanced(by: timeout))
-            throw XcodeMCPError.invalidResponse(description)
+            race.complete(.failure(XcodeMCPError.invalidResponse(description)))
+        } catch {
+            return
         }
+    }
 
-        let result = try await group.next()!
-        group.cancelAll()
-        return result
+    return try await withTaskCancellationHandler {
+        defer {
+            operationTask.cancel()
+            timeoutTask.cancel()
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            race.install(continuation)
+        }
+    } onCancel: {
+        operationTask.cancel()
+        timeoutTask.cancel()
+        race.complete(.failure(CancellationError()))
+    }
+}
+
+private final class XcodeMCPTestTimeoutRace<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+    private var result: Result<T, Error>?
+
+    func install(_ continuation: CheckedContinuation<T, Error>) {
+        let result: Result<T, Error>? = withLock {
+            guard let storedResult = self.result else {
+                self.continuation = continuation
+                return nil
+            }
+            return storedResult
+        }
+        if let result {
+            continuation.resume(with: result)
+        }
+    }
+
+    func complete(_ result: Result<T, Error>) {
+        let continuation = withLock {
+            guard self.result == nil else {
+                return nil as CheckedContinuation<T, Error>?
+            }
+            self.result = result
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        continuation?.resume(with: result)
+    }
+
+    private func withLock<Value>(_ body: () -> Value) -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
 

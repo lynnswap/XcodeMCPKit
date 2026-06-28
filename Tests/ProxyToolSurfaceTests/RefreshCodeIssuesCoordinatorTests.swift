@@ -167,7 +167,7 @@ struct RefreshCodeIssuesCoordinatorTests {
         }
 
         _ = try await nextQueuedKey(queuedKeys, at: 0, "waiting for timed waiter to queue")
-        await clock.sleep(untilSuspendedBy: 1)
+        try await clock.sleep(untilSuspendedBy: 1)
         clock.advance(by: .milliseconds(50))
         _ = try await nextRecorded(outcomes, at: 0, "waiting for timed-out waiter to finish")
         #expect(await outcomes.snapshot() == ["timed-out"])

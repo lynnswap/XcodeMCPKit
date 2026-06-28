@@ -277,7 +277,7 @@ struct XcodeMCPProxyServerTests {
 
         try? await server.shutdown()
         try? await blocker.close().get()
-        await shutdown(blockerGroup)
+        try await shutdown(blockerGroup)
     }
 
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {

@@ -230,52 +230,37 @@ struct PublicProductContractTests {
         ],
         timeoutSeconds: TimeInterval = 180
     ) throws -> CommandResult {
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        let output = try FileHandle(forWritingTo: logURL)
-        var outputClosed = false
-        func closeOutput() {
-            guard !outputClosed else {
-                return
-            }
-            outputClosed = true
-            try? output.close()
+        let outputFD = unsafe open(logURL.path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
+        guard outputFD >= 0 else {
+            throw POSIXCommandError(operation: "open \(logURL.path)", code: errno)
+        }
+        defer {
+            close(outputFD)
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [
-            "swift",
-            "build",
-            "--package-path",
-            packageURL.path,
-        ] + targets.flatMap { ["--target", $0] } + [
-            "-Xswiftc",
-            "-strict-concurrency=minimal",
-        ]
-        process.standardOutput = output
-        process.standardError = output
-
-        let exitSemaphore = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in
-            exitSemaphore.signal()
-        }
-
-        try process.run()
-        let timedOut = exitSemaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut
-        if timedOut {
-            terminate(process, exitSemaphore: exitSemaphore)
-        }
-        closeOutput()
-        let exitCode: Int32 = process.isRunning ? -1 : process.terminationStatus
+        let process = try SpawnedProcessGroup.spawn(
+            executable: "/usr/bin/env",
+            arguments: [
+                "env",
+                "swift",
+                "build",
+                "--package-path",
+                packageURL.path,
+            ] + targets.flatMap { ["--target", $0] } + [
+                "-Xswiftc",
+                "-strict-concurrency=minimal",
+            ],
+            outputFD: outputFD
+        )
+        let waitResult = process.wait(timeoutSeconds: timeoutSeconds)
 
         return CommandResult(
-            exitCode: exitCode,
+            exitCode: waitResult.exitCode,
             output: (try? String(contentsOf: logURL, encoding: .utf8)) ?? "",
-            timedOut: timedOut,
+            timedOut: waitResult.timedOut,
             timeoutSeconds: timeoutSeconds
         )
     }
-
     private func expectBuildSucceeded(_ result: CommandResult, context: String) {
         if result.timedOut {
             Issue.record(
@@ -365,18 +350,167 @@ struct PublicProductContractTests {
         #expect(reportedExpectedFailure)
     }
 
-    private func terminate(_ process: Process, exitSemaphore: DispatchSemaphore) {
-        guard process.isRunning else {
+}
+
+private final class SpawnedProcessGroup: @unchecked Sendable {
+    private let pid: pid_t
+    private let exitSemaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var waitStatus: Int32?
+
+    private init(pid: pid_t) {
+        self.pid = pid
+        DispatchQueue.global(qos: .utility).async {
+            self.reap()
+        }
+    }
+
+    static func spawn(
+        executable: String,
+        arguments: [String],
+        outputFD: CInt
+    ) throws -> SpawnedProcessGroup {
+        var fileActions: posix_spawn_file_actions_t?
+        var attr: posix_spawnattr_t?
+
+        try checkPOSIX(
+            unsafe posix_spawn_file_actions_init(&fileActions),
+            operation: "posix_spawn_file_actions_init"
+        )
+        defer {
+            unsafe posix_spawn_file_actions_destroy(&fileActions)
+        }
+
+        try checkPOSIX(
+            unsafe posix_spawn_file_actions_adddup2(&fileActions, outputFD, STDOUT_FILENO),
+            operation: "posix_spawn_file_actions_adddup2 stdout"
+        )
+        try checkPOSIX(
+            unsafe posix_spawn_file_actions_adddup2(&fileActions, outputFD, STDERR_FILENO),
+            operation: "posix_spawn_file_actions_adddup2 stderr"
+        )
+
+        try checkPOSIX(unsafe posix_spawnattr_init(&attr), operation: "posix_spawnattr_init")
+        defer {
+            unsafe posix_spawnattr_destroy(&attr)
+        }
+
+        try checkPOSIX(
+            unsafe posix_spawnattr_setpgroup(&attr, 0),
+            operation: "posix_spawnattr_setpgroup"
+        )
+        try checkPOSIX(
+            unsafe posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP)),
+            operation: "posix_spawnattr_setflags"
+        )
+
+        var cArguments: [UnsafeMutablePointer<CChar>] = []
+        for argument in arguments {
+            guard let cArgument = unsafe strdup(argument) else {
+                for cArgument in unsafe cArguments {
+                    free(cArgument)
+                }
+                throw POSIXCommandError(operation: "strdup argument", code: ENOMEM)
+            }
+            cArguments.append(cArgument)
+        }
+        defer {
+            for cArgument in unsafe cArguments {
+                free(cArgument)
+            }
+        }
+        var argv = unsafe cArguments.map { Optional($0) }
+        argv.append(nil)
+
+        var pid: pid_t = 0
+        let spawnResult = executable.withCString { executablePath in
+            argv.withUnsafeMutableBufferPointer { argvBuffer in
+                unsafe posix_spawnp(
+                    &pid,
+                    executablePath,
+                    &fileActions,
+                    &attr,
+                    argvBuffer.baseAddress,
+                    environ
+                )
+            }
+        }
+        try checkPOSIX(spawnResult, operation: "posix_spawnp \(executable)")
+        return SpawnedProcessGroup(pid: pid)
+    }
+
+    func wait(timeoutSeconds: TimeInterval) -> (exitCode: Int32, timedOut: Bool) {
+        let timedOut = exitSemaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut
+        if timedOut {
+            terminateProcessGroup()
+        }
+        return (Self.exitCode(from: currentWaitStatus()), timedOut)
+    }
+
+    private func reap() {
+        var status: Int32 = 0
+        let waitedPID = unsafe waitpid(pid, &status, 0)
+        if waitedPID == pid {
+            lock.lock()
+            waitStatus = status
+            lock.unlock()
+        }
+        exitSemaphore.signal()
+    }
+
+    private func terminateProcessGroup() {
+        guard currentWaitStatus() == nil else {
             return
         }
 
-        process.terminate()
+        signalProcessGroup(SIGTERM)
         if exitSemaphore.wait(timeout: .now() + 5) == .success {
             return
         }
 
-        kill(process.processIdentifier, SIGKILL)
+        signalProcessGroup(SIGKILL)
         _ = exitSemaphore.wait(timeout: .now() + 5)
+    }
+
+    private func signalProcessGroup(_ signal: Int32) {
+        if kill(-pid, signal) == -1, errno != ESRCH {
+            kill(pid, signal)
+        }
+    }
+
+    private func currentWaitStatus() -> Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return waitStatus
+    }
+
+    private static func exitCode(from waitStatus: Int32?) -> Int32 {
+        guard let waitStatus else {
+            return -1
+        }
+        let status = waitStatus & 0x7f
+        if status == 0 {
+            return (waitStatus >> 8) & 0xff
+        }
+        if status != 0x7f {
+            return 128 + status
+        }
+        return -1
+    }
+
+    private static func checkPOSIX(_ result: Int32, operation: String) throws {
+        guard result == 0 else {
+            throw POSIXCommandError(operation: operation, code: result)
+        }
+    }
+}
+
+private struct POSIXCommandError: Error, CustomStringConvertible {
+    let operation: String
+    let code: Int32
+
+    var description: String {
+        "\(operation) failed: \(unsafe String(cString: strerror(code)))"
     }
 }
 

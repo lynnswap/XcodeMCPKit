@@ -140,7 +140,7 @@ struct StdioAdapterFacadeIntegrationTests {
                 _ = try await waitWithTimeout("waiting for hanging DELETE") {
                     try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
                 }
-                await shutdownClocks.timeoutClock.sleep(untilSuspendedBy: 1)
+                try await shutdownClocks.timeoutClock.sleep(untilSuspendedBy: 1)
                 advanceStdioAdapterShutdownClocks(shutdownClocks, by: .milliseconds(250))
             }
         )
@@ -240,7 +240,7 @@ struct StdioAdapterFacadeIntegrationTests {
                 _ = try await waitWithTimeout("waiting for long-running tools/call") {
                     try await server.recorder.nextRequest { $0.bodyMethod == "tools/call" }
                 }
-                await shutdownClocks.timeoutClock.sleep(untilSuspendedBy: 1)
+                try await shutdownClocks.timeoutClock.sleep(untilSuspendedBy: 1)
                 advanceStdioAdapterShutdownClocks(shutdownClocks, by: .seconds(1))
                 _ = try await waitWithTimeout("waiting for DELETE after drain timeout") {
                     try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }

@@ -868,7 +868,7 @@ struct RuntimeCoordinatorTests {
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
 
         await upstream.overloadNextInitializedNotificationSend()
-        await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(150))
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
@@ -877,7 +877,7 @@ struct RuntimeCoordinatorTests {
         let retriedInitialize = try #require(await upstream.sentValue(at: 2))
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
-        await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(180))
         await upstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
@@ -1328,7 +1328,7 @@ struct RuntimeCoordinatorTests {
         )
         #expect((await upstream.sent()).count == 1)
 
-        await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .seconds(1))
         await #expect(throws: TimeoutError.self) {
             try await future.get()
@@ -1402,7 +1402,7 @@ struct RuntimeCoordinatorTests {
             "waiting for initialize timeout sleeper",
             timeout: .seconds(2)
         ) {
-            await timeoutClock.sleep(untilSuspendedBy: 1)
+            try await timeoutClock.sleep(untilSuspendedBy: 1)
         }
 
         manager.removeSession(id: sessionID)
@@ -1513,7 +1513,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(5)
@@ -1533,7 +1533,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(5)
@@ -1894,7 +1894,7 @@ struct RuntimeCoordinatorTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(5),
@@ -1914,7 +1914,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(5)
@@ -2013,7 +2013,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/call")
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(5)
@@ -2033,7 +2033,7 @@ struct RuntimeCoordinatorTests {
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/call")
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .seconds(5)
@@ -2694,7 +2694,7 @@ struct RuntimeCoordinatorTests {
         }
 
         _ = try await sentValue(from: firstUpstream, at: 0, timeout: .seconds(2))
-        await advanceRuntimeCoordinatorTimeout(
+        try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
             by: .milliseconds(100)
@@ -5595,7 +5595,7 @@ struct RuntimeCoordinatorTests {
             count: 1,
             description: "waiting for eager initialize request"
         )
-        await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await timeoutClock.sleep(untilSuspendedBy: 1)
         timeoutClock.advance(by: .milliseconds(100))
         try await initializeCleanupCompleted.wait(
             description: "waiting for eager initialize timeout cleanup"
