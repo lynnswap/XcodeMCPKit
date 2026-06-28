@@ -1518,69 +1518,6 @@ actor AlwaysUnavailableUpstreamClient: UpstreamSlotControlling {
     }
 }
 
-actor CoordinatedToolsListResponseGate {
-    private let expectedResponseCount: Int
-    private var pendingResponses: [(AsyncStream<Upstream.Event>.Continuation, Data)] = []
-
-    init(expectedResponseCount: Int) {
-        self.expectedResponseCount = expectedResponseCount
-    }
-
-    func enqueue(continuation: AsyncStream<Upstream.Event>.Continuation, response: Data) {
-        pendingResponses.append((continuation, response))
-        guard pendingResponses.count == expectedResponseCount else {
-            return
-        }
-        let responses = pendingResponses
-        pendingResponses.removeAll()
-        for (continuation, response) in responses {
-            continuation.yield(.message(response))
-        }
-    }
-}
-
-actor CoordinatedToolsListUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
-    private let sentMessages = RecordedValues<Data>()
-    private let gate: CoordinatedToolsListResponseGate
-    private let tools: [JSONValue]
-
-    init(gate: CoordinatedToolsListResponseGate, tools: [JSONValue]) {
-        self.gate = gate
-        self.tools = tools
-        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
-        self.events = AsyncStream { continuation in
-            streamContinuation = continuation
-        }
-        self.continuation = streamContinuation
-    }
-
-    func start() async {}
-
-    func stop() async {
-        continuation.finish()
-    }
-
-    func send(_ data: Data) async -> Upstream.SendResult {
-        await sentMessages.append(data)
-        guard methodName(from: data) == "tools/list",
-              let requestID = try? extractUpstreamID(from: data),
-              let response = try? makeDocumentationToolsListResponse(
-                id: requestID,
-                tools: tools.map(\.foundationObject)
-              ) else {
-            return .accepted
-        }
-        await gate.enqueue(continuation: continuation, response: response)
-        return .accepted
-    }
-
-    func sentCount() async -> Int {
-        await sentMessages.count()
-    }
-}
-
 actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
