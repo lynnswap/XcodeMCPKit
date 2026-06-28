@@ -1,7 +1,6 @@
 import Foundation
 import Logging
 import NIO
-import NIOConcurrencyHelpers
 import XcodeMCPKit
 
 enum LocalPostHandling {
@@ -18,28 +17,23 @@ enum LocalPostHandling {
 struct LocalMCPResponder {
     private typealias LocalResultOperation = @Sendable () async throws -> JSONValue
 
-    private struct EmbeddedTestResolutionError: Error {}
-
     private let sessionManager: any RuntimeClientLocalMCPResponderPort
     private let refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
     private let disabledToolNames: Set<String>
-    /// EmbeddedChannel-based tests cannot complete promises from another
-    /// thread, so they opt in to a synchronous resolution path explicitly
-    /// instead of production code sniffing the event-loop type.
-    private let usesSynchronousLocalResolution: Bool
+    private let eventLoopCompletionExecutor: EventLoopCompletionExecutor
     private let logger: Logger
 
     init(
         sessionManager: any RuntimeClientLocalMCPResponderPort,
         refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode,
         disabledToolNames: Set<String>,
-        usesSynchronousLocalResolution: Bool = false,
+        eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = disabledToolNames
-        self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
+        self.eventLoopCompletionExecutor = eventLoopCompletionExecutor
         self.logger = logger
     }
 
@@ -190,36 +184,22 @@ struct LocalMCPResponder {
         eventLoop: EventLoop,
         operation: @escaping LocalResultOperation
     ) -> LocalPostHandling {
-        if usesSynchronousLocalResolution {
-            do {
-                let result = try Self.waitForAsyncResult(operation)
-                let data = try Self.encodeResultData(id: originalID, result: result)
-                return .immediateResponse(data: data, sessionID: sessionID)
-            } catch {
-                let data = try? Self.encodeErrorData(id: originalID, error: error)
-                if let data {
-                    return .immediateResponse(data: data, sessionID: sessionID)
-                }
-                return Self.fallbackLocalError(id: originalID, sessionID: sessionID)
-            }
-        }
-
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         Task {
             do {
                 let result = try await operation()
                 let buffer = try Self.encodeResultBuffer(id: originalID, result: result)
-                eventLoop.execute {
+                eventLoopCompletionExecutor.execute(on: eventLoop) {
                     promise.succeed(buffer)
                 }
             } catch {
                 do {
                     let buffer = try Self.encodeErrorBuffer(id: originalID, error: error)
-                    eventLoop.execute {
+                    eventLoopCompletionExecutor.execute(on: eventLoop) {
                         promise.succeed(buffer)
                     }
                 } catch {
-                    eventLoop.execute {
+                    eventLoopCompletionExecutor.execute(on: eventLoop) {
                         promise.fail(error)
                     }
                 }
@@ -272,41 +252,4 @@ struct LocalMCPResponder {
         )
     }
 
-    private static func fallbackLocalError(
-        id: JSONRPC.ID,
-        sessionID: String
-    ) -> LocalPostHandling {
-        .mcpError(
-            id: id,
-            code: -32000,
-            message: "upstream timeout",
-            sessionID: sessionID
-        )
-    }
-
-    private static func waitForAsyncResult<Output: Sendable>(
-        _ operation: @escaping @Sendable () async throws -> Output
-    ) throws -> Output {
-        let semaphore = DispatchSemaphore(value: 0)
-        let resultBox = NIOLockedValueBox<Result<Output, Error>?>(nil)
-        Task {
-            let result: Result<Output, Error>
-            do {
-                result = .success(try await operation())
-            } catch {
-                result = .failure(error)
-            }
-            resultBox.withLockedValue { stored in
-                stored = result
-            }
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return try resultBox.withLockedValue { stored in
-            guard let stored else {
-                throw EmbeddedTestResolutionError()
-            }
-            return try stored.get()
-        }
-    }
 }

@@ -279,7 +279,12 @@ package final class TestClock: Clock, @unchecked Sendable {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 var shouldCancel = false
+                var shouldResume = false
                 let continuations = state.withLockedValue { state -> [CheckedContinuation<Void, Error>] in
+                    guard deadline > state.now else {
+                        shouldResume = true
+                        return []
+                    }
                     guard Task.isCancelled == false else {
                         shouldCancel = true
                         return []
@@ -289,6 +294,10 @@ package final class TestClock: Clock, @unchecked Sendable {
                 }
                 if shouldCancel {
                     continuation.resume(throwing: CancellationError())
+                    return
+                }
+                if shouldResume {
+                    continuation.resume(returning: ())
                     return
                 }
                 for continuation in continuations {

@@ -23,7 +23,7 @@ struct ProcessRunnerTests {
             task.cancel()
         }
 
-        let request = await fakeDriver.nextStartedRequest()
+        let request = try await fakeDriver.nextStartedRequest()
         #expect(request.label == "fake-output")
         #expect(request.executablePath == "/fake/tool")
         #expect(request.arguments == ["--flag"])
@@ -59,9 +59,9 @@ struct ProcessRunnerTests {
             task.cancel()
         }
 
-        _ = await fakeDriver.nextStartedRequest()
-        #expect(await fakeDriver.nextInputWrite() == "request-body")
-        _ = await fakeDriver.nextStdinClose()
+        _ = try await fakeDriver.nextStartedRequest()
+        #expect(try await fakeDriver.nextInputWrite() == "request-body")
+        _ = try await fakeDriver.nextStdinClose()
         #expect(fakeDriver.snapshot().closeStdinCount == 1)
 
         fakeDriver.emitTermination(status: 0)
@@ -95,7 +95,7 @@ struct ProcessRunnerTests {
             task.cancel()
         }
 
-        _ = await fakeDriver.nextStartedRequest()
+        _ = try await fakeDriver.nextStartedRequest()
         let timeout = try await scheduler.nextScheduled(.timeout)
         #expect(timeout.delayNanoseconds == timeoutNanoseconds)
         timeout.fire()
@@ -131,7 +131,7 @@ struct ProcessRunnerTests {
             )
         }
 
-        _ = await fakeDriver.nextStartedRequest()
+        _ = try await fakeDriver.nextStartedRequest()
         task.cancel()
 
         await #expect(throws: CancellationError.self) {
@@ -302,16 +302,16 @@ private final class FakeProcessRunnerDriver: ProcessRunnerProcessDriving, @unche
         stderrContinuation.finish()
     }
 
-    func nextStartedRequest() async -> ProcessRequest {
-        await startedRequests.nextValue(at: 0)
+    func nextStartedRequest() async throws -> ProcessRequest {
+        try await startedRequests.nextValue(at: 0)
     }
 
-    func nextInputWrite() async -> String {
-        await inputWrites.nextValue(at: 0)
+    func nextInputWrite() async throws -> String {
+        try await inputWrites.nextValue(at: 0)
     }
 
-    func nextStdinClose() async -> Int {
-        await stdinCloses.nextValue(at: 0)
+    func nextStdinClose() async throws -> Int {
+        try await stdinCloses.nextValue(at: 0)
     }
 
     func snapshot() -> Snapshot {
@@ -373,6 +373,18 @@ private final class TestProcessRunnerDelayScheduler: ProcessRunnerDelaySchedulin
     }
 
     fileprivate func nextScheduled(
+        _ kind: ProcessRunnerScheduledDelayKind,
+        timeout: Duration = .seconds(2)
+    ) async throws -> ScheduledDelay {
+        try await waitWithTimeout(
+            "timed out waiting for scheduled \(kind) delay",
+            timeout: timeout
+        ) {
+            try await self.waitForScheduled(kind)
+        }
+    }
+
+    private func waitForScheduled(
         _ kind: ProcessRunnerScheduledDelayKind
     ) async throws -> ScheduledDelay {
         if let scheduledDelay = removeScheduledDelay(kind) {
@@ -382,11 +394,30 @@ private final class TestProcessRunnerDelayScheduler: ProcessRunnerDelaySchedulin
         let waiterID = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                var shouldCancel = false
                 if let scheduledDelay = removeScheduledDelay(kind) {
                     continuation.resume(returning: scheduledDelay)
                     return
                 }
-                appendWaiter(Waiter(id: waiterID, kind: kind, continuation: continuation))
+                let scheduledDelay = locked { () -> ScheduledDelay? in
+                    if let index = scheduledDelays.firstIndex(where: { $0.kind == kind }) {
+                        return scheduledDelays.remove(at: index)
+                    } else if Task.isCancelled {
+                        shouldCancel = true
+                    } else {
+                        waiters.append(
+                            Waiter(id: waiterID, kind: kind, continuation: continuation)
+                        )
+                    }
+                    return nil
+                }
+                if let scheduledDelay {
+                    continuation.resume(returning: scheduledDelay)
+                    return
+                }
+                if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                }
             }
         } onCancel: {
             self.cancelWaiter(id: waiterID)
@@ -417,12 +448,6 @@ private final class TestProcessRunnerDelayScheduler: ProcessRunnerDelaySchedulin
                 return nil
             }
             return scheduledDelays.remove(at: index)
-        }
-    }
-
-    private func appendWaiter(_ waiter: Waiter) {
-        locked {
-            waiters.append(waiter)
         }
     }
 

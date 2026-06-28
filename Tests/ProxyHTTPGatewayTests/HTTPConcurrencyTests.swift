@@ -163,8 +163,7 @@ struct HTTPConcurrencyTests {
             refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
                 defaultRequestTimeoutSeconds: config.requestTimeout
             ),
-            deadlineClock: deadlineClock.client,
-            usesSynchronousLocalResolution: true
+            deadlineClock: deadlineClock.client
         )
         let sessionID = "session-queued-timeout-budget"
 
@@ -1812,12 +1811,11 @@ private func addEmbeddedHTTPHandler(
     config: ProxyConfig,
     sessionManager: any RuntimeCoordinating
 ) throws {
-    let handler = HTTPHandler(
+    try addHTTPHandler(
+        to: channel,
         config: config,
-        sessionManager: sessionManager,
-        usesSynchronousLocalResolution: true
+        sessionManager: sessionManager
     )
-    try channel.pipeline.addHandler(handler).wait()
 }
 
 private func postEmbeddedJSON(
@@ -1843,6 +1841,11 @@ private func postEmbeddedJSON(
 private func collectEmbeddedResponse(
     from channel: EmbeddedChannel
 ) throws -> (head: HTTPResponseHead, body: String) {
+    drainEmbeddedCompletions(for: channel)
+    channel.embeddedEventLoop.run()
+    drainEmbeddedCompletions(for: channel)
+    channel.embeddedEventLoop.run()
+
     var responseHead: HTTPResponseHead?
     var bodyBuffer = channel.allocator.buffer(capacity: 0)
 

@@ -90,7 +90,7 @@ extension ClientMCPRequestExecutor {
                         cancellationHandle: cancellationHandle
                     )
                     let wasCancelled = Task.isCancelled
-                    eventLoop.execute {
+                    eventLoopCompletionExecutor.execute(on: eventLoop) {
                         if wasCancelled {
                             cancellationHandle?.markCompleted()
                             promise.succeed(.empty(status: .accepted, sessionID: sessionID))
@@ -212,7 +212,7 @@ extension ClientMCPRequestExecutor {
 
                 let wasCancelled = Task.isCancelled
                 let mergedPayloadInputs = payloads + [localResponseData]
-                eventLoop.execute {
+                eventLoopCompletionExecutor.execute(on: eventLoop) {
                     if wasCancelled {
                         cancellationHandle?.markCompleted()
                         promise.succeed(.empty(status: .accepted, sessionID: sessionID))

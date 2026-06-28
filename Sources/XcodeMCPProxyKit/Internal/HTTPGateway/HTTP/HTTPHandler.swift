@@ -41,7 +41,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil,
         refreshCodeIssuesClock: ClockClient = .liveValue,
-        usesSynchronousLocalResolution: Bool = false
+        eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop
     ) {
         let refreshCoordinator =
             refreshCodeIssuesCoordinator
@@ -64,7 +64,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
             refreshCodeIssuesDebugState: refreshDebugState,
             refreshCodeIssuesClock: refreshCodeIssuesClock,
-            usesSynchronousLocalResolution: usesSynchronousLocalResolution,
+            eventLoopCompletionExecutor: eventLoopCompletionExecutor,
             logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))

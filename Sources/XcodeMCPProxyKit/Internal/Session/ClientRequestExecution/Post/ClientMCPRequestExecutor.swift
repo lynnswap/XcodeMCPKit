@@ -50,10 +50,10 @@ final class ClientMCPRequestExecutor: Sendable {
 
     let sessionManager: any RuntimeClientMCPRequestPort
     let disabledToolNames: Set<String>
-    let usesSynchronousLocalResolution: Bool
     let localResponder: LocalMCPResponder
     let forwardingService: MCPForwardingService
     let refreshWorkflow: RefreshCodeIssues.Workflow
+    let eventLoopCompletionExecutor: EventLoopCompletionExecutor
     let requestTimeoutSeconds: TimeInterval
     let deadlineClock: ClockClient
     let logger: Logger
@@ -66,19 +66,19 @@ final class ClientMCPRequestExecutor: Sendable {
         refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,
         refreshCodeIssuesClock: ClockClient = .liveValue,
         deadlineClock: ClockClient = .liveValue,
-        usesSynchronousLocalResolution: Bool = false,
+        eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop,
         logger: Logger = ProxyLogging.make("http")
     ) {
         self.requestTimeoutSeconds = config.requestTimeout
         self.deadlineClock = deadlineClock
         self.sessionManager = sessionManager
         self.disabledToolNames = config.disabledToolNames
-        self.usesSynchronousLocalResolution = usesSynchronousLocalResolution
+        self.eventLoopCompletionExecutor = eventLoopCompletionExecutor
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
             refreshCodeIssuesMode: config.refreshCodeIssuesMode,
             disabledToolNames: config.disabledToolNames,
-            usesSynchronousLocalResolution: usesSynchronousLocalResolution,
+            eventLoopCompletionExecutor: eventLoopCompletionExecutor,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
@@ -687,7 +687,7 @@ final class ClientMCPRequestExecutor: Sendable {
                             )
                         }
                     }
-                    eventLoop.execute {
+                    eventLoopCompletionExecutor.execute(on: eventLoop) {
                         cancellationHandle.markCompleted()
                         self.sessionManager.completeRequestLease(leaseID)
                         promise.succeed(
@@ -726,7 +726,7 @@ final class ClientMCPRequestExecutor: Sendable {
         let routingTask = Task { [self] in
             let routingTimeout = remainingRequestTimeout(until: forwardingDeadline)
             if forwardingDeadline != nil, routingTimeout == nil {
-                eventLoop.execute {
+                eventLoopCompletionExecutor.execute(on: eventLoop) {
                     makeForwardingTimeoutFuture().cascade(to: routingPromise)
                 }
                 return
@@ -735,7 +735,7 @@ final class ClientMCPRequestExecutor: Sendable {
                 for: forwardedRequestJSON,
                 requestTimeoutOverride: routingTimeout
             )
-            eventLoop.execute {
+            eventLoopCompletionExecutor.execute(on: eventLoop) {
                 makeRoutingFuture(decision: decision).cascade(to: routingPromise)
             }
         }

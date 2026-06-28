@@ -963,7 +963,7 @@ extension HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "application/json")
 
@@ -993,7 +993,7 @@ extension HTTPHandlerTests {
         ]]
         try postJSONArray(payload, sessionID: "session-batch-resources", to: channel)
 
-        let response = try collectResponse(from: channel)
+        let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
     }
 }

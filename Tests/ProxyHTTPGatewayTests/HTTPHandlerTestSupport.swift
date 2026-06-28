@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
@@ -14,6 +15,37 @@ enum HTTPTestError: Error {
 }
 
 private let httpTestSessionRegistry = NIOLockedValueBox<[String: any RuntimeCoordinating]>([:])
+private let embeddedCompletionExecutors = NIOLockedValueBox<
+    [ObjectIdentifier: EmbeddedEventLoopCompletionExecutor]
+>([:])
+
+private final class EmbeddedEventLoopCompletionExecutor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operations: [() -> Void] = []
+
+    var executor: EventLoopCompletionExecutor {
+        EventLoopCompletionExecutor { [weak self] _, operation in
+            self?.enqueue(operation)
+        }
+    }
+
+    func enqueue(_ operation: @escaping () -> Void) {
+        lock.withLock {
+            operations.append(operation)
+        }
+    }
+
+    func drain() {
+        let pending = lock.withLock { () -> [() -> Void] in
+            let pending = operations
+            operations.removeAll()
+            return pending
+        }
+        for operation in pending {
+            operation()
+        }
+    }
+}
 
 private func registerHTTPTestServer(
     url: URL,
@@ -28,6 +60,27 @@ private func unregisterHTTPTestServer(url: URL) {
     _ = httpTestSessionRegistry.withLockedValue { registry in
         registry.removeValue(forKey: url.absoluteString)
     }
+}
+
+private func registerEmbeddedCompletionExecutor(
+    _ executor: EmbeddedEventLoopCompletionExecutor,
+    for channel: EmbeddedChannel
+) {
+    embeddedCompletionExecutors.withLockedValue { executors in
+        executors[ObjectIdentifier(channel)] = executor
+    }
+}
+
+private func embeddedCompletionExecutor(
+    for channel: EmbeddedChannel
+) -> EmbeddedEventLoopCompletionExecutor? {
+    embeddedCompletionExecutors.withLockedValue { executors in
+        executors[ObjectIdentifier(channel)]
+    }
+}
+
+func drainEmbeddedCompletions(for channel: EmbeddedChannel) {
+    embeddedCompletionExecutor(for: channel)?.drain()
 }
 
 private func prepareHTTPTestSession(url: URL, sessionID: String) {
@@ -1051,46 +1104,73 @@ func addHTTPHandler(
     refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
     refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil
 ) throws {
+    let completionExecutor = EmbeddedEventLoopCompletionExecutor()
+    registerEmbeddedCompletionExecutor(completionExecutor, for: channel)
     let handler = HTTPHandler(
         config: config,
         sessionManager: sessionManager,
         refreshCodeIssuesCoordinator: refreshCodeIssuesCoordinator,
         refreshCodeIssuesTargetResolver: refreshCodeIssuesTargetResolver,
         refreshCodeIssuesDebugState: refreshCodeIssuesDebugState,
-        usesSynchronousLocalResolution: true
+        eventLoopCompletionExecutor: completionExecutor.executor
     )
     try channel.pipeline.addHandler(handler).wait()
 }
 
-func collectResponse(from channel: EmbeddedChannel) throws -> (
+func collectResponse(
+    from channel: EmbeddedChannel,
+    timeout: Duration = .seconds(2)
+) async throws -> (
     head: HTTPResponseHead, body: String
 ) {
-    channel.embeddedEventLoop.run()
-
     var responseHead: HTTPResponseHead?
     var bodyBuffer = channel.allocator.buffer(capacity: 0)
+    var sawEnd = false
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
 
-    while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
-        switch part {
-        case .head(let head):
-            responseHead = head
-        case .body(let body):
-            switch body {
-            case .byteBuffer(var buffer):
-                bodyBuffer.writeBuffer(&buffer)
-            case .fileRegion:
-                break
+    while true {
+        drainEmbeddedCompletions(for: channel)
+        channel.embeddedEventLoop.run()
+        drainEmbeddedCompletions(for: channel)
+        channel.embeddedEventLoop.run()
+
+        while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
+            switch part {
+            case .head(let head):
+                responseHead = head
+            case .body(let body):
+                switch body {
+                case .byteBuffer(var buffer):
+                    bodyBuffer.writeBuffer(&buffer)
+                case .fileRegion:
+                    break
+                }
+            case .end:
+                sawEnd = true
             }
-        case .end:
-            break
         }
-    }
 
-    guard let responseHead else {
-        throw HTTPTestError.missingResponseHead
+        if let responseHead,
+            sawEnd || SelfContainedHTTPResponse.isOpenSSE(responseHead, bodyBuffer: bodyBuffer)
+        {
+            let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
+            return (responseHead, body)
+        }
+        guard clock.now < deadline else {
+            throw AsyncTestTimeoutError(description: "timed out waiting for embedded HTTP response")
+        }
+        sched_yield()
     }
-    let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
-    return (responseHead, body)
+}
+
+private enum SelfContainedHTTPResponse {
+    static func isOpenSSE(_ head: HTTPResponseHead, bodyBuffer: ByteBuffer) -> Bool {
+        guard head.headers.first(name: "Content-Type") == "text/event-stream" else {
+            return false
+        }
+        return bodyBuffer.readableBytes > 0
+    }
 }
 
 func advanceEventLoopTime(on channel: EmbeddedChannel, by amount: TimeAmount) {
@@ -1383,7 +1463,7 @@ func makeDebugSnapshotURL(from mcpURL: URL, includeSensitive: Bool = false) -> U
 typealias AsyncSignal = TestSignal
 typealias SyncSignal = TestSignal
 
-func initializeHTTPChannel(_ channel: EmbeddedChannel) throws -> String {
+func initializeHTTPChannel(_ channel: EmbeddedChannel) async throws -> String {
     let initPayload: [String: Any] = [
         "jsonrpc": "2.0",
         "id": 1,
@@ -1402,7 +1482,7 @@ func initializeHTTPChannel(_ channel: EmbeddedChannel) throws -> String {
     try channel.writeInbound(HTTPServerRequestPart.body(initBody))
     try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-    let initResponse = try collectResponse(from: channel)
+    let initResponse = try await collectResponse(from: channel)
     return try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
 }
 
