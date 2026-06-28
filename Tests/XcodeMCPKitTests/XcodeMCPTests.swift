@@ -541,6 +541,15 @@ struct XcodeMCPTests {
         #expect(encoded.objectValue?["limit"] == .integer(2))
         #expect(encoded.objectValue?["flags"] == ["exact": true])
 
+        let maxSigned = try MCPJSONValue(jsonObject: NSNumber(value: UInt64(Int64.max)))
+        #expect(maxSigned == .integer(Int64.max))
+
+        #expect(throws: XcodeMCPError.invalidRequest(
+            "value is not a JSON-compatible Foundation object"
+        )) {
+            _ = try MCPJSONValue(jsonObject: NSNumber(value: UInt64(Int64.max) + 1))
+        }
+
         #expect(throws: XcodeMCPError.invalidRequest(
             "value is not a JSON-compatible Foundation object"
         )) {

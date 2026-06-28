@@ -90,7 +90,8 @@ extension MCPJSONValue {
     ///
     /// - Parameter value: A Foundation object that represents a JSON value.
     public init(jsonObject value: Any) throws {
-        guard let jsonValue = JSONValue(any: value),
+        guard Self.isValidFoundationJSON(value),
+              let jsonValue = JSONValue(any: value),
               Self.isValidJSONValue(jsonValue)
         else {
             throw XcodeMCPError.invalidRequest(
@@ -273,6 +274,36 @@ extension MCPJSONValue {
 }
 
 private extension MCPJSONValue {
+    static func isValidFoundationJSON(_ value: Any) -> Bool {
+        switch value {
+        case is NSNull:
+            return true
+        case is String:
+            return true
+        case is Bool:
+            return true
+        case let number as NSNumber:
+            return isValidJSONNumber(number)
+        case let array as [Any]:
+            return array.allSatisfy(isValidFoundationJSON)
+        case let object as [String: Any]:
+            return object.values.allSatisfy(isValidFoundationJSON)
+        default:
+            return false
+        }
+    }
+
+    static func isValidJSONNumber(_ number: NSNumber) -> Bool {
+        if CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return true
+        }
+        if CFNumberIsFloatType(number) {
+            return number.doubleValue.isFinite
+        }
+        return number.compare(NSNumber(value: Int64.min)) != .orderedAscending
+            && number.compare(NSNumber(value: Int64.max)) != .orderedDescending
+    }
+
     static func isValidJSONValue(_ value: JSONValue) -> Bool {
         switch value {
         case .object(let values):
