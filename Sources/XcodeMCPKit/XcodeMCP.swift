@@ -1,5 +1,6 @@
 import Foundation
 import XcodeMCPCore
+import XcodeMCPProcessRuntime
 
 /// A high-level client for Xcode MCP.
 ///
@@ -78,22 +79,21 @@ public actor XcodeMCP {
                 environment: [String: String]
             )
 
-            package var command: String {
+            package var invocation: MCPBridgeInvocation {
                 switch self {
                 case .defaultMCPBridge:
-                    return "/usr/bin/xcrun"
-                case .custom(let command, _, _):
-                    return command
+                    return .defaultMCPBridge
+                case .custom(let command, let arguments, _):
+                    return MCPBridgeInvocation(command: command, arguments: arguments)
                 }
             }
 
+            package var command: String {
+                invocation.command
+            }
+
             package var arguments: [String] {
-                switch self {
-                case .defaultMCPBridge:
-                    return ["mcpbridge"]
-                case .custom(_, let arguments, _):
-                    return arguments
-                }
+                invocation.arguments
             }
 
             package var environment: [String: String] {

@@ -113,22 +113,21 @@ public final class XcodeMCPProxyServer {
                 sessionID: String? = nil
             )
 
-            var command: String {
+            var invocation: MCPBridgeInvocation {
                 switch self {
                 case .defaultMCPBridge:
-                    return "xcrun"
-                case .custom(let command, _, _, _):
-                    return command
+                    return .defaultMCPBridge
+                case .custom(let command, let arguments, _, _):
+                    return MCPBridgeInvocation(command: command, arguments: arguments)
                 }
             }
 
+            var command: String {
+                invocation.command
+            }
+
             var arguments: [String] {
-                switch self {
-                case .defaultMCPBridge:
-                    return ["mcpbridge"]
-                case .custom(_, let arguments, _, _):
-                    return arguments
-                }
+                invocation.arguments
             }
 
             var processesPerXcode: Int {
