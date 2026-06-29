@@ -70,6 +70,10 @@ extension RuntimeCoordinator {
                 routeScope: routeScope
             )
         }
+        let queriedProcessIDs = Set(routes.map(\.target.processID))
+        for skippedProcessID in usableProcessIDs.subtracting(queriedProcessIDs) {
+            removeXcodeWindowOwners(forProcessID: skippedProcessID)
+        }
 
         guard routes.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable

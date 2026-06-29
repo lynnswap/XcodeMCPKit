@@ -4640,6 +4640,87 @@ struct RuntimeCoordinatorTests {
         #expect(message.contains("tab-b"))
     }
 
+    @Test func liveXcodeListWindowsClearsOwnersForCatalogFilteredRoutes() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 626, xcodeVersion: "26.6")
+        let target1 = xcodeProcessTarget(processID: 627, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (target1, 1, [toolDescriptor(name: "XcodeListWindows")]),
+            ]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: stale-tab, workspacePath: /Work/Stale.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 1101,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "stale-tab"]
+                )
+            ) == 0
+        )
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let request = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        #expect(await upstream0.sentCount() == 0)
+
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request),
+                    message: "* tabIdentifier: live-tab, workspacePath: /Work/Live.xcworkspace"
+                )
+            )
+        )
+
+        _ = try await task.value
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 1102,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "stale-tab"]
+                )
+            ) == nil
+        )
+    }
+
     @Test func liveXcodeListWindowsSkipsCatalogedRoutesWithoutTool() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

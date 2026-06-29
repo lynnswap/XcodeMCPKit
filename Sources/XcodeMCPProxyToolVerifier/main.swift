@@ -121,7 +121,7 @@ private struct ProxyToolVerifier {
             }
         }
 
-        let client = try await connectToProxy()
+        let client = try await connectToProxy(server: server)
         defer {
             Task {
                 await client.close()
@@ -235,9 +235,15 @@ private struct ProxyToolVerifier {
         }
     }
 
-    private func connectToProxy() async throws -> XcodeMCP {
+    private func connectToProxy(server: RunningProcess) async throws -> XcodeMCP {
         var lastError: (any Error)?
         for _ in 0..<90 {
+            guard server.isRunning else {
+                throw VerifierFailure(
+                    "debug proxy server exited before becoming ready with status "
+                        + "\(server.terminationStatus)"
+                )
+            }
             do {
                 return try await XcodeMCP(
                     config: .init(
@@ -285,6 +291,7 @@ private struct ProxyToolVerifier {
         guard fileManager.isExecutableFile(atPath: binary.path) else {
             throw VerifierFailure("debug proxy server binary is missing: \(binary.path)")
         }
+        try assertTCPPortAvailable(host: options.host, port: options.port)
         let logURL = outputRoot.appendingPathComponent("proxy-server.log")
         fileManager.createFile(atPath: logURL.path, contents: nil)
         let logHandle = try FileHandle(forWritingTo: logURL)
@@ -302,7 +309,18 @@ private struct ProxyToolVerifier {
         process.environment = environment
         process.standardOutput = logHandle
         process.standardError = logHandle
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            try? logHandle.close()
+            throw error
+        }
+        guard process.isRunning else {
+            try? logHandle.close()
+            throw VerifierFailure(
+                "debug proxy server exited immediately with status \(process.terminationStatus)"
+            )
+        }
         print("Started debug proxy server: \(options.endpoint.absoluteString)")
         print("Proxy log: \(logURL.path)")
         return RunningProcess(process: process, logHandle: logHandle)
@@ -722,6 +740,14 @@ private final class RunningProcess {
     init(process: Process, logHandle: FileHandle) {
         self.process = process
         self.logHandle = logHandle
+    }
+
+    var isRunning: Bool {
+        process.isRunning
+    }
+
+    var terminationStatus: Int32 {
+        process.terminationStatus
     }
 
     func terminate() {
@@ -1190,6 +1216,22 @@ private func runProcess(
             "\(executable) \(arguments.joined(separator: " ")) failed with exit code \(process.terminationStatus)"
         )
     }
+}
+
+private func assertTCPPortAvailable(host: String, port: Int) throws {
+    guard (0...Int(UInt16.max)).contains(port) else {
+        throw VerifierFailure(
+            "verifier endpoint \(host):\(port) is invalid; --port must fit in UInt16"
+        )
+    }
+    guard let port = UInt16(exactly: port),
+          let probe = SocketPort(tcpPort: port) else {
+        throw VerifierFailure(
+            "verifier endpoint \(host):\(port) is already in use; "
+                + "choose --port or stop the existing server"
+        )
+    }
+    probe.invalidate()
 }
 
 private func jsonString(_ value: MCPJSONValue) -> String {
