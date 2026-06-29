@@ -1165,7 +1165,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         switch route {
         case .anyHealthy where xcodeProcessRoutes.isEmpty == false:
             return try await liveXcodeListWindowsAcrossProcessRoutes(
-                deadlineUptimeNs: deadline
+                deadlineUptimeNs: deadline,
+                routeScope: .catalogSurface
             )
         default:
             let result = try await awaitControlPlaneOperation {

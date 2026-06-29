@@ -25,6 +25,11 @@ extension RuntimeCoordinator {
         case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
     }
 
+    enum XcodeListWindowsRouteScope: Sendable {
+        case catalogSurface
+        case ownerDiscovery
+    }
+
     private enum XcodeListWindowsRoutingEligibility {
         case localOnly
         case forwardWholeBatch
@@ -32,10 +37,11 @@ extension RuntimeCoordinator {
     }
 
     func liveXcodeListWindowsAcrossProcessRoutes(
-        deadlineUptimeNs: UInt64?
+        deadlineUptimeNs: UInt64?,
+        routeScope: XcodeListWindowsRouteScope
     ) async throws -> JSONValue {
         let unavailable = unavailableXcodeProcessIDs()
-        let routes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
+        let usableRoutes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
@@ -48,6 +54,25 @@ extension RuntimeCoordinator {
                 target: route.target,
                 upstreamIndices: upstreamIndices
             )
+        }
+        let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
+        let catalogedProcessIDs =
+            processToolCatalogRegistry.processIDsWithCatalog()
+            .intersection(usableProcessIDs)
+        let catalogProcessIDs =
+            processToolCatalogRegistry.processIDsHavingTool("XcodeListWindows")
+            .intersection(usableProcessIDs)
+        let routes = usableRoutes.filter {
+            includesXcodeListWindowsRoute(
+                $0.target,
+                catalogedProcessIDs: catalogedProcessIDs,
+                catalogProcessIDs: catalogProcessIDs,
+                routeScope: routeScope
+            )
+        }
+        let queriedProcessIDs = Set(routes.map(\.target.processID))
+        for skippedProcessID in usableProcessIDs.subtracting(queriedProcessIDs) {
+            removeXcodeWindowOwners(forProcessID: skippedProcessID)
         }
 
         guard routes.isEmpty == false else {
@@ -120,6 +145,27 @@ extension RuntimeCoordinator {
                 throw lastError
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+    }
+
+    private func includesXcodeListWindowsRoute(
+        _ target: XcodeProcessTarget,
+        catalogedProcessIDs: Set<pid_t>,
+        catalogProcessIDs: Set<pid_t>,
+        routeScope: XcodeListWindowsRouteScope
+    ) -> Bool {
+        let processID = target.processID
+        if catalogProcessIDs.contains(processID) {
+            return true
+        }
+        if catalogedProcessIDs.contains(processID) {
+            return false
+        }
+        switch routeScope {
+        case .catalogSurface:
+            return catalogedProcessIDs.isEmpty
+        case .ownerDiscovery:
+            return true
         }
     }
 
@@ -376,8 +422,7 @@ extension RuntimeCoordinator {
             )
         if ownerResolution.unresolved.isEmpty == false {
             if inferredOwnerProcessID == nil {
-                _ = try? await liveXcodeListWindowsResult(
-                    route: .anyHealthy,
+                _ = try? await refreshXcodeWindowOwnersForRouting(
                     requestTimeoutOverride: requestTimeoutOverride
                 )
                 ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
@@ -463,6 +508,22 @@ extension RuntimeCoordinator {
         }
 
         return .forwardAny(preferredUpstreamIndices: ownerUpstreamIndices)
+    }
+
+    private func refreshXcodeWindowOwnersForRouting(
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        let timeout =
+            requestTimeoutOverride
+            ?? MCP.MethodDispatcher.timeoutForMethod(
+                "tools/call",
+                defaultSeconds: config.requestTimeout
+            )
+        let deadline = timeoutDeadline(for: timeout)
+        return try await liveXcodeListWindowsAcrossProcessRoutes(
+            deadlineUptimeNs: deadline,
+            routeScope: .ownerDiscovery
+        )
     }
 
     private func inferredUnambiguousOwnerProcessID(

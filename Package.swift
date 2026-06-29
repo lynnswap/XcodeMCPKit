@@ -39,6 +39,10 @@ let package = Package(
             name: "xcode-mcp-proxy-install",
             targets: ["XcodeMCPProxyInstall"]
         ),
+        .executable(
+            name: "xcode-mcp-proxy-tool-verifier",
+            targets: ["XcodeMCPProxyToolVerifier"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
@@ -132,6 +136,12 @@ let package = Package(
         .executableTarget(
             name: "XcodeMCPProxyInstall",
             dependencies: ["XcodeMCPProxyKit"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .executableTarget(
+            name: "XcodeMCPProxyToolVerifier",
+            dependencies: ["XcodeMCPKit"],
+            exclude: ["README.md"],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
