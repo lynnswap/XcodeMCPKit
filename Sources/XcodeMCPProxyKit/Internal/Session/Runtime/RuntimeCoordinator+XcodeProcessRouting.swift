@@ -41,18 +41,8 @@ extension RuntimeCoordinator {
         routeScope: XcodeListWindowsRouteScope
     ) async throws -> JSONValue {
         let unavailable = unavailableXcodeProcessIDs()
-        let catalogedProcessIDs = processToolCatalogRegistry.processIDsWithCatalog()
-        let catalogProcessIDs = processToolCatalogRegistry.processIDsHavingTool("XcodeListWindows")
-        let routes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
+        let usableRoutes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
             guard unavailable.contains(route.target.processID) == false else {
-                return nil
-            }
-            guard includesXcodeListWindowsRoute(
-                route,
-                catalogedProcessIDs: catalogedProcessIDs,
-                catalogProcessIDs: catalogProcessIDs,
-                routeScope: routeScope
-            ) else {
                 return nil
             }
             let upstreamIndices = usableInitializedUpstreamIndices(in: route)
@@ -63,6 +53,21 @@ extension RuntimeCoordinator {
                 ordinal: ordinal,
                 target: route.target,
                 upstreamIndices: upstreamIndices
+            )
+        }
+        let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
+        let catalogedProcessIDs =
+            processToolCatalogRegistry.processIDsWithCatalog()
+            .intersection(usableProcessIDs)
+        let catalogProcessIDs =
+            processToolCatalogRegistry.processIDsHavingTool("XcodeListWindows")
+            .intersection(usableProcessIDs)
+        let routes = usableRoutes.filter {
+            includesXcodeListWindowsRoute(
+                $0.target,
+                catalogedProcessIDs: catalogedProcessIDs,
+                catalogProcessIDs: catalogProcessIDs,
+                routeScope: routeScope
             )
         }
 
@@ -140,12 +145,12 @@ extension RuntimeCoordinator {
     }
 
     private func includesXcodeListWindowsRoute(
-        _ route: XcodeProcessRoute,
+        _ target: XcodeProcessTarget,
         catalogedProcessIDs: Set<pid_t>,
         catalogProcessIDs: Set<pid_t>,
         routeScope: XcodeListWindowsRouteScope
     ) -> Bool {
-        let processID = route.target.processID
+        let processID = target.processID
         if catalogProcessIDs.contains(processID) {
             return true
         }

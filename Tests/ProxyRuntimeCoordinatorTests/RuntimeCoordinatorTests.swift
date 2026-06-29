@@ -4576,6 +4576,70 @@ struct RuntimeCoordinatorTests {
         #expect(message.contains("tab-a"))
     }
 
+    @Test func liveXcodeListWindowsIgnoresCatalogsFromUnavailableRoutes() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 624, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 625, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [toolDescriptor(name: "DocumentationSearch")]),
+            ]
+        )
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_unavailable"
+        )
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let request = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        #expect(await upstream0.sentCount() == 0)
+
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request),
+                    message: "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
+                )
+            )
+        )
+
+        let result = try await task.value
+        #expect(await upstream0.sentCount() == 0)
+        guard case .object(let object) = result,
+              case .object(let structuredContent)? = object["structuredContent"],
+              case .string(let message)? = structuredContent["message"] else {
+            Issue.record("expected structured XcodeListWindows message")
+            return
+        }
+        #expect(message.contains("tab-b"))
+    }
+
     @Test func liveXcodeListWindowsSkipsCatalogedRoutesWithoutTool() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
