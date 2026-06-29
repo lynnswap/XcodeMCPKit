@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIO
+import NIOConcurrencyHelpers
 import XcodeMCPKit
 
 extension ControlPlane {
@@ -23,11 +24,6 @@ extension ControlPlane {
         let responseData: Data
         let upstreamIndex: Int
     }
-}
-
-private enum EventLoopFutureWaitResult<Output: Sendable>: Sendable {
-    case value(Output)
-    case timedOut
 }
 
 /// The one place that decides which JSON-RPC error a control-plane or
@@ -897,29 +893,30 @@ extension RuntimeCoordinator {
         onTimeout: @escaping @Sendable () -> Void = {}
     ) async throws -> Output {
         if let deadlineUptimeNs, let timeout = timeAmount(until: deadlineUptimeNs) {
-            let clock = clock
-            return try await withThrowingTaskGroup(
-                of: EventLoopFutureWaitResult<Output>.self
-            ) { group in
-                group.addTask {
-                    .value(try await future.get())
+            let timeoutFuture = eventLoop.makePromise(of: Output.self)
+            let didComplete = NIOLockedValueBox(false)
+            let timeoutTask = Task { [clock] in
+                await clock.sleep(.nanoseconds(max(0, timeout.nanoseconds)))
+                let shouldComplete = didComplete.withLockedValue { completed in
+                    guard completed == false else { return false }
+                    completed = true
+                    return true
                 }
-                group.addTask {
-                    await clock.sleep(.nanoseconds(max(0, timeout.nanoseconds)))
-                    try Task.checkCancellation()
-                    return .timedOut
-                }
-                let result = try await group.next()!
-                switch result {
-                case .value(let output):
-                    group.cancelAll()
-                    return output
-                case .timedOut:
-                    onTimeout()
-                    group.cancelAll()
-                    throw TimeoutError()
-                }
+                guard shouldComplete else { return }
+                onTimeout()
+                timeoutFuture.fail(TimeoutError())
             }
+            future.whenComplete { result in
+                let shouldComplete = didComplete.withLockedValue { completed in
+                    guard completed == false else { return false }
+                    completed = true
+                    return true
+                }
+                guard shouldComplete else { return }
+                timeoutTask.cancel()
+                timeoutFuture.completeWith(result)
+            }
+            return try await timeoutFuture.futureResult.get()
         }
         return try await future.get()
     }

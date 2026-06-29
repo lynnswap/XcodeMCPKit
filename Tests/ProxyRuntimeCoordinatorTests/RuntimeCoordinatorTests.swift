@@ -1976,6 +1976,59 @@ struct RuntimeCoordinatorTests {
         #expect(manager.cachedToolsListResult() == nil)
     }
 
+    @Test func processRoutedToolsListRetriesSiblingUpstreamAfterExit() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 713, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-single-xcode-tools-retry",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+
+        let firstRequest = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: firstRequest) == "tools/list")
+
+        manager.handleUpstreamExit(1, upstreamIndex: 0)
+
+        let retryRequest = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: retryRequest) == "tools/list")
+        await upstream1.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: retryRequest),
+                    tools: [
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for process-routed tools/list retry") {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["XcodeListWindows"])
+        #expect(manager.debugSnapshot().controlPlane?.phase == "idle")
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [target.processID])
+    }
+
     @Test func sessionManagerLiveXcodeListWindowsTimeoutStartsFreshControlPlaneLoad()
         async throws
     {
