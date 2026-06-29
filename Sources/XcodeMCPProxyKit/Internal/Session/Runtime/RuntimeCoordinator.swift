@@ -747,15 +747,15 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         documentationPrewarmTask?.cancel()
         upstreamReadinessCoordinator.shutdown()
 
+        let runtimeDrain = runtimeTasks.beginShutdown()
         canonicalBrokerState.reset()
         processToolCatalogRegistry.reset()
-        await controlPlaneCoordinator.invalidate(
+        let controlPlaneDrain = await controlPlaneCoordinator.beginShutdown(
             reason: "shutdown",
             clearInitialize: true,
             clearToolsCatalog: true
         )
 
-        let runtimeDrain = runtimeTasks.beginShutdown()
         await withTaskGroup(of: Void.self) { group in
             for upstream in upstreams {
                 group.addTask {
@@ -774,6 +774,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         }
         await upstreamEventTasks.shutdown()
+        await controlPlaneDrain.wait()
         await runtimeDrain.wait()
     }
 
