@@ -5476,6 +5476,65 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
+    @Test func shutdownDrainsCancelledLiveXcodeListWindowsLoadWithoutUpstreamResponse()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        var didShutdown = false
+        defer {
+            if didShutdown == false {
+                manager.shutdownAndWait()
+            }
+        }
+
+        let initFuture = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let request = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: request) == "tools/call")
+
+        task.cancel()
+        try await waitWithTimeout(
+            "waiting for shutdown to drain cancelled XcodeListWindows load",
+            timeout: .seconds(2)
+        ) {
+            await manager.shutdown()
+        }
+        didShutdown = true
+
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for cancelled XcodeListWindows task",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+            Issue.record("cancelled XcodeListWindows waiter should not complete successfully")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError but received \(error)")
+        }
+    }
+
     @Test func controlPlaneRPCHandleCancelBeforeQueueStartCapturesQueuedState() {
         let handle = ControlPlane.RPCHandle()
         let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)

@@ -15,6 +15,20 @@ actor ControlPlaneCoordinator {
         ) async throws -> JSONValue
     typealias UpstreamHandshakeStatesProvider = @Sendable () -> [String: String]
 
+    struct Drain: Sendable {
+        private let completionTasks: [Task<Void, Never>]
+
+        init(completionTasks: [Task<Void, Never>]) {
+            self.completionTasks = completionTasks
+        }
+
+        func wait() async {
+            for task in completionTasks {
+                await task.value
+            }
+        }
+    }
+
     enum Phase: String, Sendable {
         case idle
         case loadingToolsCatalog = "loading_tools_catalog"
@@ -81,6 +95,8 @@ actor ControlPlaneCoordinator {
     var toolsCatalogLoad: ToolsCatalogLoadState?
     var prewarmToolsCatalogLoad: ToolsCatalogLoadState?
     var windowLoads: [ControlPlane.Route: WindowLoadState] = [:]
+    var completionTasks: [UUID: Task<Void, Never>] = [:]
+    var acceptsNewLoads = true
 
     init(
         brokerState: CanonicalBrokerState,
@@ -103,6 +119,9 @@ actor ControlPlaneCoordinator {
     }
 
     func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
+        guard acceptsNewLoads else {
+            throw CancellationError()
+        }
         cancelInvalidatedLoads()
         if let rawResult = brokerState.toolsCatalogRaw() {
             return rawResult
@@ -139,6 +158,9 @@ actor ControlPlaneCoordinator {
         route: ControlPlane.Route,
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
+        guard acceptsNewLoads else {
+            throw CancellationError()
+        }
         cancelInvalidatedLoads()
         let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)
         let requestedPromotionDeadlineUptimeNs = promotionDeadlineUptimeNs(
@@ -169,6 +191,9 @@ actor ControlPlaneCoordinator {
     }
 
     func prewarmToolsCatalogIfNeeded(deadlineUptimeNs: UInt64?) async -> JSONValue? {
+        guard acceptsNewLoads else {
+            return nil
+        }
         cancelInvalidatedLoads()
         if let rawResult = brokerState.toolsCatalogRaw() {
             syncDebug()
@@ -236,6 +261,20 @@ actor ControlPlaneCoordinator {
         syncDebug()
     }
 
+    func beginShutdown(
+        reason: String,
+        clearInitialize: Bool = false,
+        clearToolsCatalog: Bool = true
+    ) -> Drain {
+        acceptsNewLoads = false
+        invalidate(
+            reason: reason,
+            clearInitialize: clearInitialize,
+            clearToolsCatalog: clearToolsCatalog
+        )
+        return Drain(completionTasks: Array(completionTasks.values))
+    }
+
     func cancelLoadsStartedBeforeGeneration(
         _ generation: UInt64,
         reason _: String
@@ -268,7 +307,7 @@ actor ControlPlaneCoordinator {
         case .prewarm:
             prewarmToolsCatalogLoad = load
         }
-        Task { [loadID] in
+        let completionTask = Task { [loadID] in
             let result: Result<CanonicalToolsCatalogLoadResult, Error>
             do {
                 result = .success(try await task.value)
@@ -276,7 +315,9 @@ actor ControlPlaneCoordinator {
                 result = .failure(error)
             }
             self.completeToolsCatalogLoad(loadID: loadID, result: result)
+            self.finishCompletionTask(loadID: loadID)
         }
+        completionTasks[loadID] = completionTask
         syncDebug()
         return loadID
     }
@@ -300,7 +341,7 @@ actor ControlPlaneCoordinator {
             task: task,
             startGeneration: brokerState.generation()
         )
-        Task { [route, loadID] in
+        let completionTask = Task { [route, loadID] in
             let result: Result<JSONValue, Error>
             do {
                 result = .success(try await task.value)
@@ -308,9 +349,15 @@ actor ControlPlaneCoordinator {
                 result = .failure(error)
             }
             self.completeWindowLoad(route: route, loadID: loadID, result: result)
+            self.finishCompletionTask(loadID: loadID)
         }
+        completionTasks[loadID] = completionTask
         syncDebug()
         return loadID
+    }
+
+    func finishCompletionTask(loadID: UUID) {
+        completionTasks.removeValue(forKey: loadID)
     }
 
     func ensureToolsCatalogForegroundLoad(
