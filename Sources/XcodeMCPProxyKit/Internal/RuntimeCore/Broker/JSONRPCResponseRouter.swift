@@ -141,6 +141,25 @@ final class JSONRPCResponseRouter: Sendable {
         return pending != nil
     }
 
+    @discardableResult
+    func failPending(idKey: String, error: Error) -> Bool {
+        let pending = state.withLockedValue { state -> Pending? in
+            if let pending = state.pendingByID.removeValue(forKey: idKey) {
+                return pending
+            }
+            guard let index = state.pendingBatches.firstIndex(where: { pending in
+                pending.responseIDKeys?.contains(idKey) == true
+            }) else {
+                return nil
+            }
+            return state.pendingBatches.remove(at: index)
+        }
+        if let pending {
+            failOnEventLoop(pending, error: error)
+        }
+        return pending != nil
+    }
+
     func handleIncoming(_ data: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             notify(data)

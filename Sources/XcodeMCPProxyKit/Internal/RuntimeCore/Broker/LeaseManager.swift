@@ -69,12 +69,34 @@ final class LeaseManager: Sendable {
     struct ReleaseAction: Sendable {
         let leaseID: LeaseManager.ID
         let sessionID: String
+        let requestIDKey: String?
         let upstreamIndex: Int?
+        let terminalState: LeaseManager.State?
+        let reason: LeaseManager.ReleaseReason?
 
-        init(leaseID: LeaseManager.ID, sessionID: String, upstreamIndex: Int?) {
+        init(
+            leaseID: LeaseManager.ID,
+            sessionID: String,
+            requestIDKey: String?,
+            upstreamIndex: Int?,
+            terminalState: LeaseManager.State?,
+            reason: LeaseManager.ReleaseReason?
+        ) {
             self.leaseID = leaseID
             self.sessionID = sessionID
+            self.requestIDKey = requestIDKey
             self.upstreamIndex = upstreamIndex
+            self.terminalState = terminalState
+            self.reason = reason
+        }
+
+        var shouldFailPendingRequest: Bool {
+            switch terminalState {
+            case .timedOut, .failed, .abandoned:
+                return true
+            case .queued, .active, .completed, nil:
+                return false
+            }
         }
     }
 
@@ -176,7 +198,10 @@ final class LeaseManager: Sendable {
             return LeaseManager.ReleaseAction(
                 leaseID: leaseID,
                 sessionID: record.descriptor.sessionID,
-                upstreamIndex: upstreamIndex
+                requestIDKey: record.requestIDKey,
+                upstreamIndex: upstreamIndex,
+                terminalState: nil,
+                reason: nil
             )
         }
     }
@@ -214,7 +239,10 @@ final class LeaseManager: Sendable {
                     LeaseManager.ReleaseAction(
                         leaseID: leaseID,
                         sessionID: record.descriptor.sessionID,
-                        upstreamIndex: record.upstreamIndex
+                        requestIDKey: record.requestIDKey,
+                        upstreamIndex: record.upstreamIndex,
+                        terminalState: .abandoned,
+                        reason: reason
                     )
                 )
             }
@@ -261,7 +289,10 @@ final class LeaseManager: Sendable {
                     return LeaseManager.ReleaseAction(
                         leaseID: record.leaseID,
                         sessionID: record.descriptor.sessionID,
-                        upstreamIndex: record.upstreamIndex
+                        requestIDKey: record.requestIDKey,
+                        upstreamIndex: record.upstreamIndex,
+                        terminalState: .failed,
+                        reason: reason
                     )
                 case .completed, .timedOut, .failed, .abandoned:
                     return nil
@@ -349,7 +380,10 @@ final class LeaseManager: Sendable {
                 return LeaseManager.ReleaseAction(
                     leaseID: leaseID,
                     sessionID: record.descriptor.sessionID,
-                    upstreamIndex: record.upstreamIndex
+                    requestIDKey: record.requestIDKey,
+                    upstreamIndex: record.upstreamIndex,
+                    terminalState: terminalState,
+                    reason: reason
                 )
 
             case .completed, .timedOut, .failed, .abandoned:

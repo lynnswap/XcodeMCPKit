@@ -1114,6 +1114,29 @@ extension RuntimeCoordinator {
                     leaseID: action.leaseID
                 )
             }
+            failPendingRequestIfNeeded(for: action)
+        }
+    }
+
+    private func failPendingRequestIfNeeded(for action: LeaseManager.ReleaseAction) {
+        guard action.shouldFailPendingRequest,
+              let requestIDKey = action.requestIDKey,
+              let session = sessionRegistry.contextIfPresent(id: action.sessionID) else {
+            return
+        }
+        _ = session.router.failPending(idKey: requestIDKey, error: pendingRequestError(for: action))
+    }
+
+    private func pendingRequestError(for action: LeaseManager.ReleaseAction) -> Error {
+        switch action.reason {
+        case .timedOut:
+            return TimeoutError()
+        case .clientDisconnected:
+            return CancellationError()
+        case .upstreamUnavailable, .upstreamExit, .upstreamOverloaded, .stdoutProtocolViolation:
+            return UpstreamSlotScheduler.AcquisitionError.unavailable
+        case .invalidUpstreamResponse, .lateResponse, .completed, nil:
+            return ControlPlane.Error.invalidResponse("request released before response")
         }
     }
 }
