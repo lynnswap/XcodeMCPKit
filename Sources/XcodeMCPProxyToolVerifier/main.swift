@@ -1240,6 +1240,11 @@ private func formatSeconds(_ seconds: TimeInterval) -> String {
 }
 
 private func errorDescription(_ error: any Error) -> String {
+    if let localizedError = error as? any LocalizedError,
+       let description = localizedError.errorDescription,
+       description.isEmpty == false {
+        return description
+    }
     let nsError = error as NSError
     if nsError.localizedDescription.isEmpty == false {
         return nsError.localizedDescription
@@ -1247,8 +1252,9 @@ private func errorDescription(_ error: any Error) -> String {
     return String(describing: error)
 }
 
-private struct VerifierFailure: Error, CustomStringConvertible {
+private struct VerifierFailure: LocalizedError, CustomStringConvertible {
     let description: String
+    var errorDescription: String? { description }
 
     init(_ description: String) {
         self.description = description
