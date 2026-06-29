@@ -163,7 +163,7 @@ private struct ProxyToolVerifier {
                 )
                 continue
             }
-            let arguments = state.arguments(for: toolName)
+            let arguments = try state.arguments(for: toolName)
             print("-> [\(index + 1)/\(executionPlan.count)] \(toolName)")
             let record = await call(
                 toolName,
@@ -172,7 +172,7 @@ private struct ProxyToolVerifier {
             )
             print("<- [\(record.status.rawValue)] \(toolName) (\(formatSeconds(record.elapsedSeconds)))")
             records.append(record)
-            state.observe(toolName: toolName, record: record)
+            try state.observe(toolName: toolName, record: record)
             try writeReport(currentReport(), to: reportURL, announce: false)
         }
 
@@ -293,6 +293,7 @@ private struct ProxyToolVerifier {
         process.arguments = [
             "--listen", "\(options.host):\(options.port)",
             "--upstream-processes", "\(options.upstreamProcesses)",
+            "--request-timeout", "\(options.requestTimeoutSeconds)",
             "--auto-approve",
             "--refresh-code-issues-mode", "proxy",
         ]
@@ -379,7 +380,7 @@ private struct ProxyToolVerifier {
 private struct VerificationState {
     let fixture: FixtureLayout
     var availableTools: Set<String> = []
-    var tabIdentifier = "windowtab1"
+    var tabIdentifier: String?
     var schemeName = "ProxyToolVerifierFixture"
     var runDestination = "iPhone 17 (27.0)"
     var testTargetName = "ProxyToolVerifierFixtureTests"
@@ -395,245 +396,231 @@ private struct VerificationState {
         "\(navigatorRoot)/\(path)"
     }
 
-    func arguments(for toolName: String) -> [String: MCPJSONValue] {
+    func arguments(for toolName: String) throws -> [String: MCPJSONValue] {
         switch toolName {
         case "BuildProject":
-            return ["tabIdentifier": .string(tabIdentifier), "buildForTesting": .bool(true)]
+            return try withTab(["buildForTesting": .bool(true)])
         case "DeviceInteractionEndSession":
             return ["interactionSessionKey": .string(interactionSessionKey)]
         case "DeviceInteractionInstallAndRun":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "interactionSessionKey": .string(interactionSessionKey),
-            ]
+            ])
         case "DeviceInteractionStartSession":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "sessionIdentifier": .string(interactionSessionIdentifier),
-            ]
+            ])
         case "DeviceInteractionSynthesize":
             return [
-                "interactSessionKey": .string(interactionSessionKey),
+                "interactionSessionKey": .string(interactionSessionKey),
             ]
         case "DocumentationSearch":
             return ["query": .string("NavigationStack")]
         case "GetBuildLog":
-            return ["tabIdentifier": .string(tabIdentifier), "severity": .string("remark")]
+            return try withTab(["severity": .string("remark")])
         case "GetConsoleOutput":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "outputType": .string("all"),
                 "tailLimit": .integer(100),
-            ]
+            ])
         case "GetCrashIssueLogs":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "signature_name": .string("ProxyVerifierCrashSignature"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("macOS"),
                 "app_version": .string("1.0"),
-            ]
+            ])
         case "GetFieldPerformanceIssueLogs":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "app_version": .string("1.0"),
                 "signature_name": .string("ProxyVerifierPerformanceSignature"),
                 "diagnostic_type": .string("hangs"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("macOS"),
-            ]
+            ])
         case "GetFileCompilerFlags":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "targetName": .string("ProxyToolVerifierFixture"),
                 "filePath": .string(navPath("VerifierCore.swift")),
-            ]
+            ])
         case "GetTestList":
-            return ["tabIdentifier": .string(tabIdentifier)]
+            return try withTab()
         case "GetTopCrashIssues":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "count": .integer(1),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("macOS"),
-            ]
+            ])
         case "GetTopFieldPerformanceIssues":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "diagnostic_type": .string("hangs"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("macOS"),
-            ]
+            ])
         case "InvokeDebuggerCommand":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "command": .string("thread list"),
                 "timeout": .integer(20),
-            ]
+            ])
         case "LocalizationPlanner":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "targetLocaleIdentifier": .string("ja"),
-            ]
+            ])
         case "RenderPreview":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "sourceFilePath": .string(navPath("ContentView.swift")),
                 "timeout": .integer(180),
-            ]
+            ])
         case "RunAllTests":
-            return ["tabIdentifier": .string(tabIdentifier)]
+            return try withTab()
         case "RunCodeSnippet":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "sourceFilePath": .string(navPath("VerifierCore.swift")),
                 "purpose": .string("Proxy verifier snippet"),
                 "codeSnippet": .string(#"print(VerifierCore.message())"#),
                 "timeout": .integer(120),
-            ]
+            ])
         case "RunProject":
-            return ["tabIdentifier": .string(tabIdentifier), "attachDebugger": .bool(true)]
+            return try withTab(["attachDebugger": .bool(true)])
         case "RunSomeTests":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "tests": .array([
                     .object([
                         "targetName": .string(testTargetName),
                         "testIdentifier": .string(testIdentifier),
                     ])
                 ]),
-            ]
+            ])
         case "StopProject":
-            return ["tabIdentifier": .string(tabIdentifier)]
+            return try withTab()
         case "StringCatalogContext":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("Localizable.xcstrings")),
                 "stringKey": .string("verifier.title"),
                 "targetLocaleIdentifier": .string("ja"),
-            ]
+            ])
         case "StringCatalogEdit":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("Localizable.xcstrings")),
                 "stringKey": .string("verifier.title"),
                 "targetLocaleIdentifier": .string("ja"),
                 "translation": .string("Verifier Title JA Updated"),
-            ]
+            ])
         case "StringCatalogRead":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("Localizable.xcstrings")),
                 "targetLocaleIdentifier": .string("ja"),
                 "keyLimit": .integer(20),
-            ]
+            ])
         case "UpdateFileCompilerFlags":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "targetName": .string("ProxyToolVerifierFixture"),
                 "filePath": .string(navPath("VerifierCore.swift")),
                 "compilerFlags": .string("-DPROXY_TOOL_VERIFIER"),
                 "appendValue": .bool(false),
-            ]
+            ])
         case "XcodeGetCurrentFile":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "includeContent": .bool(false),
                 "includeSelection": .bool(true),
-            ]
+            ])
         case "XcodeGlob":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "pattern": .string("**/*.swift"),
-            ]
+            ])
         case "XcodeGrep":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "pattern": .string("VerifierCore"),
                 "outputMode": .string("filesWithMatches"),
                 "headLimit": .integer(10),
-            ]
+            ])
         case "XcodeListNavigatorIssues":
-            return ["tabIdentifier": .string(tabIdentifier), "severity": .string("remark")]
+            return try withTab(["severity": .string("remark")])
         case "XcodeListRunDestinations":
-            return ["tabIdentifier": .string(tabIdentifier), "includeIncompatible": .bool(true)]
+            return try withTab(["includeIncompatible": .bool(true)])
         case "XcodeListSchemes":
-            return ["tabIdentifier": .string(tabIdentifier)]
+            return try withTab()
         case "XcodeListWindows":
             return [:]
         case "XcodeLS":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "path": .string(navigatorRoot),
                 "recursive": .bool(true),
-            ]
+            ])
         case "XcodeMakeDir":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "directoryPath": .string(navPath("VerifierScratch")),
-            ]
+            ])
         case "XcodeMV":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "sourcePath": .string(navPath("VerifierScratch/probe.txt")),
                 "destinationPath": .string(navPath("VerifierScratch/probe-moved.txt")),
                 "operation": .object(["rawValue": .string("move")]),
                 "overwriteExisting": .bool(true),
-            ]
+            ])
         case "XcodeRead":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("VerifierCore.swift")),
                 "limit": .integer(40),
-            ]
+            ])
         case "XcodeRefreshCodeIssuesInFile":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("VerifierCore.swift")),
-            ]
+            ])
         case "XcodeRM":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "path": .string(navPath("VerifierScratch/probe-moved.txt")),
                 "recursive": .bool(false),
                 "deleteFiles": .bool(true),
-            ]
+            ])
         case "XcodeSwitchRunDestination":
-            return ["tabIdentifier": .string(tabIdentifier), "displayTitle": .string(runDestination)]
+            return try withTab(["displayTitle": .string(runDestination)])
         case "XcodeSwitchScheme":
-            return ["tabIdentifier": .string(tabIdentifier), "schemeName": .string(schemeName)]
+            return try withTab(["schemeName": .string(schemeName)])
         case "XcodeUpdate":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("VerifierScratch/probe.txt")),
                 "oldString": .string("initial"),
                 "newString": .string("updated"),
                 "replaceAll": .bool(false),
-            ]
+            ])
         case "XcodeWrite":
-            return [
-                "tabIdentifier": .string(tabIdentifier),
+            return try withTab([
                 "filePath": .string(navPath("VerifierScratch/probe.txt")),
                 "content": .string("proxy verifier initial content\n"),
-            ]
+            ])
         default:
             return [:]
         }
     }
 
-    mutating func observe(toolName: String, record: ToolVerificationRecord) {
+    private func withTab(_ arguments: [String: MCPJSONValue] = [:]) throws -> [String: MCPJSONValue] {
+        guard let tabIdentifier else {
+            throw VerifierFailure(
+                "fixture Xcode tab has not been resolved; refusing to call tab-scoped tool"
+            )
+        }
+        var result = arguments
+        result["tabIdentifier"] = .string(tabIdentifier)
+        return result
+    }
+
+    mutating func observe(toolName: String, record: ToolVerificationRecord) throws {
         guard let rawResult = record.rawResult else { return }
         switch toolName {
         case "XcodeListWindows":
-            if let parsed = parseWindowTab(
+            guard let parsed = parseWindowTab(
                 from: rawResult,
                 fixturePaths: [
                     fixture.rootWorkspaceURL.path,
-                ],
-                fallbackWorkspaceName: "XcodeMCPKit.xcworkspace"
-            ) {
-                tabIdentifier = parsed
+                ]
+            ) else {
+                throw VerifierFailure(
+                    "XcodeListWindows did not report fixture workspace at "
+                        + "\(fixture.rootWorkspaceURL.path); refusing to run tab-scoped tools"
+                )
             }
+            tabIdentifier = parsed
         case "XcodeListSchemes":
             if flattenedText(from: rawResult).contains(schemeName) {
                 break
@@ -995,11 +982,9 @@ private func textContent(from result: MCPToolResult) -> String {
 
 private func parseWindowTab(
     from value: MCPJSONValue,
-    fixturePaths: [String],
-    fallbackWorkspaceName: String
+    fixturePaths: [String]
 ) -> String? {
     let normalizedFixturePaths = fixturePaths.map(normalizePath)
-    var fallbackTab: String?
     for text in allStrings(from: value) {
         for line in text.split(whereSeparator: \.isNewline) {
             let lineText = String(line)
@@ -1017,12 +1002,9 @@ private func parseWindowTab(
             if matchesFixture {
                 return tab
             }
-            if fallbackTab == nil, workspace.contains(fallbackWorkspaceName) {
-                fallbackTab = tab
-            }
         }
     }
-    return fallbackTab
+    return nil
 }
 
 private func parseFirstString(named key: String, from value: MCPJSONValue) -> String? {
