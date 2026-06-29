@@ -6,12 +6,10 @@ on:
       - main
     paths-ignore:
       - README.md
-      - README.ja.md
       - LICENSE
   pull_request:
     paths-ignore:
       - README.md
-      - README.ja.md
       - LICENSE
   workflow_dispatch:
 

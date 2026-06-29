@@ -1,39 +1,27 @@
 # XcodeMCPProxyKit
 
-Swift library API for embedding and composing the Xcode MCP proxy products.
+Swift API for embedding the Xcode MCP proxy server, STDIO adapter, and source
+installer flow.
 
-## Status
+## Overview
 
-`XcodeMCPProxyKit` is the public product kit used by the proxy executables. The
-CLIs hand argv/environment and output sinks to high-level facade types from this
-target, so the package boundary is real and does not rely on private wrappers in
-executable targets.
+Use `XcodeMCPProxyKit` when Swift code needs to host the proxy, build a custom
+launcher around the same command-line behavior as `xcode-mcp-proxy-server`, or
+compose the STDIO adapter and installer flows.
 
-This target owns:
+The public API includes:
 
 - `XcodeMCPProxyServer`, the embeddable proxy server lifecycle object
-- server launch plan resolution and launch runtime orchestration from
-  argv/environment
-- product metadata, version line, dry-run, force-restart, server start/wait, and
-  port-in-use diagnostics for server launchers
-- `XcodeMCPProxyStdioAdapter`, the STDIO compatibility adapter facade
+- `XcodeMCPProxyServer.resolveLaunchPlan(...)` for launcher argv/environment
+  normalization
+- `XcodeMCPProxyStdioAdapter`, the STDIO compatibility adapter
 - `XcodeMCPProxyAdapterEndpointResolver`, the adapter endpoint resolver
-- `XcodeMCPProxyInstaller`, the install plan and copy/build policy facade
-- HTTP channel setup and request handling integration
-- startup, discovery writing, waiting, shutdown, adapter, and installer entry
-  points
+- `XcodeMCPProxyInstaller`, the install plan and copy/build API
 
-External embedders configure the server through
-`XcodeMCPProxyServer.Configuration`, configure the adapter through
-`XcodeMCPProxyStdioAdapter.Configuration`, and compose installs through
-`XcodeMCPProxyInstaller.Configuration`. Lower-level session routing, upstream
-process management, broker/runtime primitives, Xcode support, MCP HTTP
-behavior, and STDIO transport details stay in internal implementation folders
-behind this kit boundary. They are not published as a standalone SwiftPM target.
-
-This target intentionally does not expose the executable CLI parsers, per-tool
-typed wrappers, a public stream API, or direct access to the internal session
-router.
+For most users, the root README's `xcode-mcp-proxy-server` command is simpler.
+Use this API when the proxy has to be embedded in another Swift process or when
+a custom launcher needs the same parsing, dry-run, force-restart, and version
+behavior as the bundled executables.
 
 ## Server Quickstart
 
@@ -129,8 +117,7 @@ after shutdown instead of restarting the same object.
 ## Launch Plans
 
 Launchers that want the same behavior as `xcode-mcp-proxy-server` can resolve a
-high-level launch plan instead of composing the lower-level parser and config
-types:
+high-level launch plan from argv and environment:
 
 ```swift
 let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
@@ -152,16 +139,12 @@ case .start:
 }
 ```
 
-`LaunchPlan` exposes the resolved public server `Configuration`, normalized
+`LaunchPlan` exposes the resolved server `Configuration`, normalized
 `LaunchOptions`, stable dry-run command line, and display text. Port-in-use
 messages are represented by `XcodeMCPProxyServer.PortInUseError`, and product
-version information is available through
-`XcodeMCPProxyServer.productMetadata`.
-The package executable uses a package-level launcher facade to execute the same
-plan, keeping force-restart, start/wait, and port-in-use diagnostics inside this
-target.
+version information is available through `XcodeMCPProxyServer.productMetadata`.
 
-Executable-style hosts can delegate directly to the public runner facade:
+Executable-style hosts can also run the server command behavior directly:
 
 ```swift
 let exitCode = await XcodeMCPProxyServer.run(
@@ -209,12 +192,12 @@ without a session header, subsequent POST/GET/DELETE requests include the
 server-issued `MCP-Session-Id`, and the negotiated
 `MCP-Protocol-Version` is forwarded after initialize.
 
-Command-line hosts can run the same adapter facade with
+Command-line hosts can run the same adapter behavior with
 `XcodeMCPProxyStdioAdapter.run(arguments:environment:stdout:stderr:)`.
 
 ## Installer
 
-`XcodeMCPProxyInstaller` owns the source install composition used by
+`XcodeMCPProxyInstaller` provides the source install composition used by
 `xcode-mcp-proxy-install`. It installs the STDIO adapter and proxy server
 binaries:
 
@@ -236,5 +219,5 @@ print(plan.dryRunLines.joined(separator: "\n"))
 is running from a SwiftPM `.build` directory and then copies
 `XcodeMCPProxyInstaller.binaryNames` into the resolved bin directory.
 
-Command-line hosts can run the installer facade with
+Command-line hosts can run the installer behavior with
 `XcodeMCPProxyInstaller.run(arguments:environment:stdout:stderr:)`.

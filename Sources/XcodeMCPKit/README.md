@@ -1,35 +1,28 @@
 # XcodeMCPKit
 
-Swift client API for talking to Xcode's local MCP bridge from an app or tool.
+Swift client API for calling Xcode MCP from an app or tool.
 
-## Status
+## Overview
 
-`XcodeMCPKit` is the public client-side library target. It connects to the
-configured MCP transport, performs the MCP initialize handshake, and exposes the
-dynamic Xcode MCP tool catalog through a small Swift API. The default transport
-launches `xcrun mcpbridge`; clients can also connect to a proxy Streamable HTTP
-endpoint.
+Use `XcodeMCPKit` when Swift code needs to discover and call Xcode MCP tools.
+The default transport launches `xcrun mcpbridge`; clients can also connect to a
+running `xcode-mcp-proxy-server` Streamable HTTP endpoint.
 
-This target owns:
+The public API is intentionally small:
 
 - `XcodeMCP`, the top-level async client
-- `MCPJSONValue`, the raw JSON value used for dynamic MCP payloads
+- `MCPJSONValue`, for dynamic MCP payloads
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
 - `XcodeMCPError`
-- the initialized single-client session and configured client transports used
-  behind `XcodeMCP`
 
-It intentionally does not expose tool-specific Swift wrappers, JSON-RPC framing,
-transport streams, or server-to-client handlers such as roots, sampling, and
-elicitation.
+Xcode decides the available tools at runtime, so the SDK does not provide
+tool-specific Swift wrappers. Use `listTools()` to discover tools, `callTool`
+to call them, and `request(_:params:)` or `notify(_:params:)` for dynamic MCP
+methods outside `tools/call`.
 
-MCP wire values and process primitives live in internal implementation folders
-inside this target. They are package implementation details, not standalone
-SwiftPM modules that SDK clients can import through the public library product.
-
-Use the separate `XcodeMCPKitTesting` product when tests need deterministic
-tool catalogs, progress notifications, and tool results through the same
-`XcodeMCP` public API without launching `mcpbridge`.
+Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
+notifications, and tool results through the same `XcodeMCP` API without
+launching `mcpbridge`.
 
 ## Quickstart
 
@@ -151,9 +144,9 @@ try await xcode.notify(
 - `requestTimeout` bounds requests when non-`nil`.
 
 Capabilities that require server-to-client handlers are filtered because this
-v1 API does not expose those handlers. For Streamable HTTP, the transport owns
-`MCP-Session-Id`, `MCP-Protocol-Version`, POST response parsing, long-lived SSE
-GET parsing, and best-effort session DELETE during `close()`.
+v1 API does not expose those handlers. For Streamable HTTP, the transport
+handles `MCP-Session-Id`, `MCP-Protocol-Version`, POST response parsing,
+long-lived SSE GET parsing, and best-effort session DELETE during `close()`.
 
 ## Lifecycle
 
@@ -193,6 +186,9 @@ let result = try await xcode.callTool(
 await xcode.close()
 ```
 
-The runtime owns the fake transport and JSON-RPC response loop. Tests can read
-`recordedMessages()` to assert request shape while keeping production code on
-the public SDK surface.
+The runtime provides the fake transport and JSON-RPC response loop. Tests can
+read `recordedMessages()` to assert request shape while keeping production code
+on the public SDK surface.
+
+See [`XcodeMCPKitTesting`](../XcodeMCPKitTesting/README.md) for the focused
+testing API guide.
