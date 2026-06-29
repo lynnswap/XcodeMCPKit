@@ -25,6 +25,11 @@ extension RuntimeCoordinator {
         case failure(target: XcodeProcessTarget, upstreamIndex: Int, error: any Error)
     }
 
+    enum XcodeListWindowsRouteScope: Sendable {
+        case catalogSurface
+        case ownerDiscovery
+    }
+
     private enum XcodeListWindowsRoutingEligibility {
         case localOnly
         case forwardWholeBatch
@@ -32,7 +37,8 @@ extension RuntimeCoordinator {
     }
 
     func liveXcodeListWindowsAcrossProcessRoutes(
-        deadlineUptimeNs: UInt64?
+        deadlineUptimeNs: UInt64?,
+        routeScope: XcodeListWindowsRouteScope
     ) async throws -> JSONValue {
         let unavailable = unavailableXcodeProcessIDs()
         let catalogedProcessIDs = processToolCatalogRegistry.processIDsWithCatalog()
@@ -41,7 +47,12 @@ extension RuntimeCoordinator {
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            guard catalogedProcessIDs.isEmpty || catalogProcessIDs.contains(route.target.processID) else {
+            guard includesXcodeListWindowsRoute(
+                route,
+                catalogedProcessIDs: catalogedProcessIDs,
+                catalogProcessIDs: catalogProcessIDs,
+                routeScope: routeScope
+            ) else {
                 return nil
             }
             let upstreamIndices = usableInitializedUpstreamIndices(in: route)
@@ -125,6 +136,27 @@ extension RuntimeCoordinator {
                 throw lastError
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+    }
+
+    private func includesXcodeListWindowsRoute(
+        _ route: XcodeProcessRoute,
+        catalogedProcessIDs: Set<pid_t>,
+        catalogProcessIDs: Set<pid_t>,
+        routeScope: XcodeListWindowsRouteScope
+    ) -> Bool {
+        let processID = route.target.processID
+        if catalogProcessIDs.contains(processID) {
+            return true
+        }
+        if catalogedProcessIDs.contains(processID) {
+            return false
+        }
+        switch routeScope {
+        case .catalogSurface:
+            return catalogedProcessIDs.isEmpty
+        case .ownerDiscovery:
+            return true
         }
     }
 
@@ -381,8 +413,7 @@ extension RuntimeCoordinator {
             )
         if ownerResolution.unresolved.isEmpty == false {
             if inferredOwnerProcessID == nil {
-                _ = try? await liveXcodeListWindowsResult(
-                    route: .anyHealthy,
+                _ = try? await refreshXcodeWindowOwnersForRouting(
                     requestTimeoutOverride: requestTimeoutOverride
                 )
                 ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
@@ -468,6 +499,22 @@ extension RuntimeCoordinator {
         }
 
         return .forwardAny(preferredUpstreamIndices: ownerUpstreamIndices)
+    }
+
+    private func refreshXcodeWindowOwnersForRouting(
+        requestTimeoutOverride: TimeAmount?
+    ) async throws -> JSONValue {
+        let timeout =
+            requestTimeoutOverride
+            ?? MCP.MethodDispatcher.timeoutForMethod(
+                "tools/call",
+                defaultSeconds: config.requestTimeout
+            )
+        let deadline = timeoutDeadline(for: timeout)
+        return try await liveXcodeListWindowsAcrossProcessRoutes(
+            deadlineUptimeNs: deadline,
+            routeScope: .ownerDiscovery
+        )
     }
 
     private func inferredUnambiguousOwnerProcessID(

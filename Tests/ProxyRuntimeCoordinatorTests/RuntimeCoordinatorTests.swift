@@ -3814,8 +3814,22 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
         #expect(
@@ -3903,8 +3917,22 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
         manager.markXcodeProcessRouteUnavailable(
@@ -3964,7 +3992,14 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
 
@@ -4110,8 +4145,22 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
         #expect(
@@ -4808,8 +4857,22 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
 
@@ -4855,6 +4918,67 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
+    @Test func ownerBoundRefreshUsesUncatalogedRoutesForOwnerDiscovery() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 625, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 626, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+
+        let task = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 109,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "tab-uncataloged"]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let request1 = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        #expect(await upstream0.sentCount() == 0)
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request1),
+                    message: "* tabIdentifier: tab-uncataloged, "
+                        + "workspacePath: /Work/Uncataloged.xcworkspace"
+                )
+            )
+        )
+
+        let decision = await task.value
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected uncataloged owner discovery route to forward")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
+    }
+
     @Test func ownerBoundToolRejectsWhenOwnerCannotBeResolvedAfterRefresh() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -4879,8 +5003,22 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
 
