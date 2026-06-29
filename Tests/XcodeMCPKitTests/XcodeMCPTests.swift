@@ -688,8 +688,14 @@ struct XcodeMCPTests {
             transport: transport
         )
 
+        let get = try await waitWithTimeout("event stream GET was not opened") {
+            try await server.nextRequest { $0.httpMethod == "GET" }
+        }
         _ = try await xcode.listTools()
         await xcode.close()
+        let delete = try await waitWithTimeout("session DELETE was not sent") {
+            try await server.nextRequest { $0.httpMethod == "DELETE" }
+        }
 
         let requests = await server.recordedRequests()
         let initialize = try #require(requests.firstJSONRPC(method: "initialize"))
@@ -709,13 +715,11 @@ struct XcodeMCPTests {
         #expect(list.header("MCP-Session-Id") == "session-http-1")
         #expect(list.header("MCP-Protocol-Version") == "2025-06-18")
 
-        let get = try #require(requests.first(where: { $0.httpMethod == "GET" }))
         #expect(get.timeoutInterval.isInfinite)
         #expect(get.header("Accept") == "text/event-stream")
         #expect(get.header("MCP-Session-Id") == "session-http-1")
         #expect(get.header("MCP-Protocol-Version") == "2025-06-18")
 
-        let delete = try #require(requests.first(where: { $0.httpMethod == "DELETE" }))
         #expect(delete.header("MCP-Session-Id") == "session-http-1")
         #expect(delete.header("MCP-Protocol-Version") == "2025-06-18")
     }

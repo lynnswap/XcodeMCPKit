@@ -281,7 +281,20 @@ struct StdioAdapterFacadeIntegrationTests {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: responseMode,
             stdinLines: [initializeRequest, toolsListRequest],
-            timeoutDescription: "STDIO adapter should finish after stdin closes"
+            timeoutDescription: "STDIO adapter should finish after stdin closes",
+            closeInputBeforeRunning: false,
+            whileRunning: { server in
+                _ = try await waitWithTimeout(
+                    "waiting for SSE GET before closing stdin"
+                ) {
+                    try await server.recorder.nextRequest { $0.httpMethod == "GET" }
+                }
+            },
+            afterInputClosed: { server in
+                _ = try await waitWithTimeout("waiting for session DELETE") {
+                    try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
+                }
+            }
         )
 
         #expect(result.exitCode == 0)
