@@ -143,7 +143,7 @@ struct XcodeMCPProxyServerTests {
             refreshCodeIssuesMode: .upstream
         )
 
-        let config = XcodeMCPProxyServer.Configuration(serverProxyConfig: proxyConfig)
+        let config = XcodeMCPProxyServerConfiguration(serverProxyConfig: proxyConfig)
 
         #expect(config.listenHost == "127.0.0.1")
         #expect(config.listenPort == 9876)

@@ -246,7 +246,7 @@ private struct ProxyToolVerifier {
             }
             do {
                 return try await XcodeMCP(
-                    config: .init(
+                        configuration: .init(
                         transport: .streamableHTTP(endpoint: options.endpoint),
                         clientName: "XcodeMCPProxyToolVerifier",
                         clientVersion: "dev",

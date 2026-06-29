@@ -11,7 +11,7 @@ struct InstallerFacadeIntegrationTests {
         let output = CapturedLines()
         let bindir = tempDir.url.appendingPathComponent("bin", isDirectory: true)
         try XcodeMCPProxyInstaller(
-            configuration: .init(prefix: nil, bindir: bindir.path, dryRun: true)
+            configuration: .init(prefix: nil, binaryDirectory: bindir.path, dryRun: true)
         ).install(
             executableURL: tempDir.url.appendingPathComponent("xcode-mcp-proxy-install"),
             fileManager: .default,
@@ -44,7 +44,7 @@ struct InstallerFacadeIntegrationTests {
         let output = CapturedLines()
         let buildCalls = Counter()
         try XcodeMCPProxyInstaller(
-            configuration: .init(prefix: nil, bindir: installDir.url.path, dryRun: false)
+            configuration: .init(prefix: nil, binaryDirectory: installDir.url.path, dryRun: false)
         ).install(
             executableURL: installerURL,
             fileManager: .default,

@@ -53,8 +53,8 @@ struct ServerLauncherIntegrationTests {
         #expect(exitCode == 0)
         #expect(restarted.snapshot() == ["127.0.0.1:8766"])
         let config = try #require(fakeServer.recordedConfig())
-        #expect(config.bind.host == "127.0.0.1")
-        #expect(config.bind.port == 8766)
+        #expect(config.bindAddress.host == "127.0.0.1")
+        #expect(config.bindAddress.port == 8766)
         #expect(config.limits.requestTimeout == 12)
         #expect(fakeServer.startCount() == 1)
         #expect(fakeServer.waitCount() == 1)
@@ -65,7 +65,7 @@ private func makeIntegrationServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
-    makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
+    makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
         IntegrationRecordingProxyServer()
     }
 ) -> XcodeMCPProxyServer.Launcher {
@@ -81,11 +81,11 @@ private func makeIntegrationServerLauncher(
 
 private final class IntegrationRecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
     private let lock = NSLock()
-    private var config: XcodeMCPProxyServer.Configuration?
+    private var config: XcodeMCPProxyServerConfiguration?
     private var started = 0
     private var waited = 0
 
-    func record(config: XcodeMCPProxyServer.Configuration) {
+    func record(config: XcodeMCPProxyServerConfiguration) {
         withLock {
             self.config = config
         }
@@ -102,7 +102,7 @@ private final class IntegrationRecordingProxyServer: XcodeMCPProxyServer.LaunchS
         incrementWaitCount()
     }
 
-    func recordedConfig() -> XcodeMCPProxyServer.Configuration? {
+    func recordedConfig() -> XcodeMCPProxyServerConfiguration? {
         withLock { config }
     }
 

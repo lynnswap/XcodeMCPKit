@@ -53,7 +53,7 @@ enum MCPBridgeRuntime {
                         xcodeTarget: target
                     )
                     upstreams.append(
-                        ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
+                        ManagedUpstreamSlot(factory: UpstreamProcess(configuration: upstreamConfig))
                     )
                     slotIDs.append(UpstreamSlotID(rawValue: upstreamIndex))
                 }
@@ -70,7 +70,7 @@ enum MCPBridgeRuntime {
                     xcodeTarget: nil
                 )
                 upstreams.append(
-                    ManagedUpstreamSlot(factory: UpstreamProcess(config: upstreamConfig))
+                    ManagedUpstreamSlot(factory: UpstreamProcess(configuration: upstreamConfig))
                 )
             }
         }
@@ -95,7 +95,7 @@ enum MCPBridgeRuntime {
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> any UpstreamSessionFactory {
-        UpstreamProcess(config: makeDefaultUpstreamConfig(
+        UpstreamProcess(configuration: makeDefaultUpstreamConfig(
             config: config,
             xcodeTarget: xcodeTarget,
             baseEnvironment: baseEnvironment

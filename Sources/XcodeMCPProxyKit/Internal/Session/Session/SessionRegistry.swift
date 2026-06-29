@@ -18,8 +18,8 @@ final class SessionRegistry: Sendable {
     private let state = NIOLockedValueBox(State())
     private let config: ProxyConfig
 
-    init(config: ProxyConfig) {
-        self.config = config
+    init(configuration: ProxyConfig) {
+        self.config = configuration
     }
 
     func session(id: String) -> SessionContext {

@@ -8,7 +8,7 @@ struct XcodeMCPKitTestingTests {
         let runtime = XcodeMCPTestRuntime()
 
         let client = try await runtime.makeClient(
-            config: .init(
+                configuration: .init(
                 clientName: "TestingClient",
                 clientVersion: "1.0",
                 capabilities: [
@@ -229,9 +229,9 @@ struct XcodeMCPKitTestingTests {
             )
         }
 
-        let config = XcodeMCP.Configuration(requestTimeout: .seconds(1))
-        let firstClient = try await runtime.makeClient(config: config)
-        let secondClient = try await runtime.makeClient(config: config)
+        let config = XcodeMCPConfiguration(requestTimeout: .seconds(1))
+        let firstClient = try await runtime.makeClient(configuration: config)
+        let secondClient = try await runtime.makeClient(configuration: config)
         defer {
             Task {
                 await firstClient.close()

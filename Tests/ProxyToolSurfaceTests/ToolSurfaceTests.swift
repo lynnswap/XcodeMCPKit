@@ -8,7 +8,7 @@ import XcodeMCPKit
 @Suite(.serialized)
 struct ToolSurfaceTests {
     @Test func toolSurfaceNormalizesStructuredContentFromTextJSON() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         sessionManager.setCachedToolsListResult(
             try #require(
                 JSONValue(any: [
@@ -60,7 +60,7 @@ struct ToolSurfaceTests {
     }
 
     @Test func toolSurfaceIgnoresNonTextContentDuringNormalization() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         sessionManager.setCachedToolsListResult(
             try #require(
                 JSONValue(any: [
@@ -111,7 +111,7 @@ struct ToolSurfaceTests {
     }
 
     @Test func toolSurfaceNormalizesMissingGetBuildLogLines() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         sessionManager.setCachedToolsListResult(
             try #require(
                 JSONValue(any: [
@@ -172,7 +172,7 @@ struct ToolSurfaceTests {
     @Test func toolSurfaceRewritesToolsListAndExtractsCanonicalCatalog() throws {
         var config = makeToolSurfaceConfig()
         config.disabledToolNames = ["RunAllTests"]
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: config)
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
         let surface = ToolSurface(config: config, sessionManager: sessionManager)
 
         let upstreamData = try JSONSerialization.data(
@@ -217,7 +217,7 @@ struct ToolSurfaceTests {
     }
 
     @Test func toolSurfaceNormalizesMixedBatchUsingCatalogFromSamePayload() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         let surface = ToolSurface(
             config: makeToolSurfaceConfig(),
             sessionManager: sessionManager
@@ -280,7 +280,7 @@ struct ToolSurfaceTests {
     }
 
     @Test func toolSurfaceSeedsCanonicalCatalogFromFirstToolsListInBatch() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         let surface = ToolSurface(
             config: makeToolSurfaceConfig(),
             sessionManager: sessionManager
@@ -343,7 +343,7 @@ struct ToolSurfaceTests {
     }
 
     @Test func toolSurfaceNormalizesUsingSourceProcessCatalog() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         sessionManager.setCachedToolsListResult(
             try #require(
                 JSONValue(any: [
@@ -424,7 +424,7 @@ struct ToolSurfaceTests {
     }
 
     @Test func toolSurfaceTreatsOnlySyntheticOverloadErrorAsBackpressure() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(config: makeToolSurfaceConfig())
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         let surface = ToolSurface(
             config: makeToolSurfaceConfig(),
             sessionManager: sessionManager
@@ -474,8 +474,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     private var cachedToolsList: JSONValue?
     private var cachedToolsListsByUpstream: [Int: JSONValue] = [:]
 
-    init(config: ProxyConfig) {
-        self.config = config
+    init(configuration: ProxyConfig) {
+        self.config = configuration
     }
 
     func session(id: String) -> SessionContext { SessionContext(id: id, config: config) }

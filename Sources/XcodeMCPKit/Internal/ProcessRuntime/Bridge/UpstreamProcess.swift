@@ -306,12 +306,12 @@ package struct UpstreamProcess: UpstreamSessionFactory {
 
     private let config: Config
 
-    package init(config: Config) {
-        self.config = config
+    package init(configuration: Config) {
+        self.config = configuration
     }
 
     package func startSession() async throws -> any UpstreamSession {
-        try await ProcessBackedUpstreamSession.start(config: config)
+        try await ProcessBackedUpstreamSession.start(configuration: config)
     }
 }
 
@@ -338,14 +338,16 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private var didFinishEvents = false
     private var isStopping = false
 
-    package static func start(config: UpstreamProcess.Config) async throws -> ProcessBackedUpstreamSession {
-        let session = ProcessBackedUpstreamSession(config: config)
+    package static func start(
+        configuration: UpstreamProcess.Config
+    ) async throws -> ProcessBackedUpstreamSession {
+        let session = ProcessBackedUpstreamSession(configuration: configuration)
         try await session.runProcess()
         return session
     }
 
-    private init(config: UpstreamProcess.Config) {
-        self.config = config
+    private init(configuration: UpstreamProcess.Config) {
+        self.config = configuration
 
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
         self.events = AsyncStream { continuation in

@@ -19,7 +19,7 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
     private let bridgeTask: Task<Void, Never>
 
     package static func start(config: UpstreamProcess.Config) async throws -> UpstreamProcessXcodeMCPTransport {
-        let session = try await UpstreamProcess(config: config).startSession()
+        let session = try await UpstreamProcess(configuration: config).startSession()
         return UpstreamProcessXcodeMCPTransport(session: session)
     }
 

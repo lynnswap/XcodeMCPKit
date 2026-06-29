@@ -1,5 +1,150 @@
 import Foundation
 
+/// Settings used to connect to and initialize an MCP endpoint.
+///
+/// The default configuration starts `xcrun mcpbridge` with the current process
+/// environment and a conservative per-request timeout. Use
+/// ``XcodeMCPConfiguration/Transport/streamableHTTP(endpoint:)`` to connect to
+/// a proxy Streamable HTTP endpoint instead.
+public struct XcodeMCPConfiguration: Equatable, Sendable {
+    /// Upstream bridge process policy.
+    public enum Bridge: Equatable, Sendable {
+        /// Use Xcode's default `xcrun mcpbridge` invocation.
+        case defaultMCPBridge
+
+        /// Use an explicit upstream bridge command.
+        case custom(
+            command: String,
+            arguments: [String],
+            environment: [String: String]
+        )
+
+        package var invocation: MCPBridgeInvocation {
+            switch self {
+            case .defaultMCPBridge:
+                return .defaultMCPBridge
+            case .custom(let command, let arguments, _):
+                return MCPBridgeInvocation(command: command, arguments: arguments)
+            }
+        }
+
+        package var command: String {
+            invocation.command
+        }
+
+        package var arguments: [String] {
+            invocation.arguments
+        }
+
+        package var environment: [String: String] {
+            switch self {
+            case .defaultMCPBridge:
+                return ProcessInfo.processInfo.environment
+            case .custom(_, _, let environment):
+                return environment
+            }
+        }
+
+        package var maxQueuedWriteBytes: Int {
+            4 * 1024 * 1024
+        }
+    }
+
+    /// Transport used to reach the Xcode MCP server.
+    public struct Transport: Equatable, Sendable {
+        package enum Storage: Equatable, Sendable {
+            case localBridge(Bridge)
+            case streamableHTTP(endpoint: URL)
+            case streamableHTTPDiscoveryFile(URL)
+        }
+
+        package let storage: Storage
+
+        package init(storage: Storage) {
+            self.storage = storage
+        }
+
+        /// Launch and talk to a local bridge process over stdio.
+        public static func localBridge(_ bridge: Bridge = .defaultMCPBridge) -> Self {
+            Self(storage: .localBridge(bridge))
+        }
+
+        /// Connect to a concrete Streamable HTTP MCP endpoint.
+        public static func streamableHTTP(endpoint: URL) -> Self {
+            Self(storage: .streamableHTTP(endpoint: endpoint))
+        }
+
+        /// Connect to the Streamable HTTP endpoint recorded in a proxy
+        /// discovery file.
+        ///
+        /// The discovery file uses the same shape written by
+        /// `xcode-mcp-proxy-server startAndWriteDiscovery()`.
+        public static func streamableHTTP(discoveryFile: URL) -> Self {
+            Self(storage: .streamableHTTPDiscoveryFile(discoveryFile))
+        }
+
+        /// Connect to the Streamable HTTP proxy endpoint discovered from the
+        /// standard proxy discovery file location.
+        ///
+        /// The file path honors `XCODE_MCP_PROXY_DISCOVERY_FILE` first, then
+        /// `XCODE_MCP_PROXY_CACHE_ROOT`, and otherwise uses the default user
+        /// caches location used by `xcode-mcp-proxy-server`.
+        ///
+        /// - Parameter environment: Environment used to resolve proxy discovery
+        ///   overrides.
+        public static func streamableHTTPProxyDiscovery(
+            environment: [String: String] = ProcessInfo.processInfo.environment
+        ) -> Self {
+            .streamableHTTP(discoveryFile: Discovery.defaultFileURL(environment: environment))
+        }
+    }
+
+    /// Transport used to reach the Xcode MCP server.
+    public var transport: Transport
+
+    /// Client name sent in the MCP `initialize` request.
+    public var clientName: String
+
+    /// Client version sent in the MCP `initialize` request.
+    public var clientVersion: String
+
+    /// Additional MCP client capabilities sent during initialization.
+    ///
+    /// Values are encoded as raw MCP JSON. Capabilities that require
+    /// server-to-client handlers, such as `roots`, `sampling`, and
+    /// `elicitation`, are intentionally not exposed by this API.
+    public var capabilities: [String: MCPJSONValue]
+
+    /// Maximum duration to wait for each request.
+    ///
+    /// Set this to `nil` to disable client-side request timeouts.
+    public var requestTimeout: Duration?
+
+    /// Creates a configuration for the selected transport.
+    ///
+    /// - Parameters:
+    ///   - transport: Transport used to reach the Xcode MCP server.
+    ///   - clientName: Client name sent in the MCP `initialize` request.
+    ///   - clientVersion: Client version sent in the MCP `initialize` request.
+    ///   - capabilities: Additional MCP client capabilities encoded as raw MCP
+    ///     JSON.
+    ///   - requestTimeout: Maximum duration to wait for each request, or `nil`
+    ///     to disable client-side request timeouts.
+    public init(
+        transport: Transport = .localBridge(),
+        clientName: String = "XcodeMCPKit",
+        clientVersion: String = "dev",
+        capabilities: [String: MCPJSONValue] = [:],
+        requestTimeout: Duration? = .seconds(60)
+    ) {
+        self.transport = transport
+        self.clientName = clientName
+        self.clientVersion = clientVersion
+        self.capabilities = capabilities
+        self.requestTimeout = requestTimeout
+    }
+}
+
 /// A high-level client for Xcode MCP.
 ///
 /// `XcodeMCP` connects through the configured transport, performs the MCP
@@ -36,182 +181,6 @@ import Foundation
 /// await xcode.close()
 /// ```
 public actor XcodeMCP {
-    /// Settings used to connect to and initialize an MCP endpoint.
-    ///
-    /// The default configuration starts `xcrun mcpbridge` with the current
-    /// process environment and a conservative per-request timeout. Use
-    /// ``Transport/streamableHTTP(endpoint:)`` to connect to a proxy
-    /// Streamable HTTP endpoint instead.
-    public struct Configuration: Equatable, Sendable {
-        /// Transport used to reach the Xcode MCP server.
-        public enum Transport: Equatable, Sendable {
-            /// Launch and talk to a local bridge process over stdio.
-            case localBridge(Bridge)
-
-            /// Connect to a concrete Streamable HTTP MCP endpoint.
-            case streamableHTTP(endpoint: URL)
-
-            /// Connect to the Streamable HTTP endpoint recorded in a proxy
-            /// discovery file.
-            case streamableHTTPDiscoveryFile(URL)
-
-            /// Connect to the Streamable HTTP endpoint recorded in a proxy
-            /// discovery file.
-            ///
-            /// The discovery file uses the same shape written by
-            /// `xcode-mcp-proxy-server startAndWriteDiscovery()`.
-            public static func streamableHTTP(discoveryFile: URL) -> Self {
-                .streamableHTTPDiscoveryFile(discoveryFile)
-            }
-
-            /// Connect to the Streamable HTTP proxy endpoint discovered from
-            /// the standard proxy discovery file location.
-            ///
-            /// The file path honors `XCODE_MCP_PROXY_DISCOVERY_FILE` first,
-            /// then `XCODE_MCP_PROXY_CACHE_ROOT`, and otherwise uses the
-            /// default user caches location used by `xcode-mcp-proxy-server`.
-            ///
-            /// - Parameter environment: Environment used to resolve proxy
-            ///   discovery overrides.
-            public static func streamableHTTPProxyDiscovery(
-                environment: [String: String] = ProcessInfo.processInfo.environment
-            ) -> Self {
-                .streamableHTTP(discoveryFile: Discovery.defaultFileURL(environment: environment))
-            }
-        }
-
-        /// Upstream bridge process policy.
-        public enum Bridge: Equatable, Sendable {
-            /// Use Xcode's default `xcrun mcpbridge` invocation.
-            case defaultMCPBridge
-
-            /// Use an explicit upstream bridge command.
-            case custom(
-                command: String,
-                arguments: [String],
-                environment: [String: String]
-            )
-
-            package var invocation: MCPBridgeInvocation {
-                switch self {
-                case .defaultMCPBridge:
-                    return .defaultMCPBridge
-                case .custom(let command, let arguments, _):
-                    return MCPBridgeInvocation(command: command, arguments: arguments)
-                }
-            }
-
-            package var command: String {
-                invocation.command
-            }
-
-            package var arguments: [String] {
-                invocation.arguments
-            }
-
-            package var environment: [String: String] {
-                switch self {
-                case .defaultMCPBridge:
-                    return ProcessInfo.processInfo.environment
-                case .custom(_, _, let environment):
-                    return environment
-                }
-            }
-
-            package var maxQueuedWriteBytes: Int {
-                4 * 1024 * 1024
-            }
-        }
-
-        /// Transport used to reach the Xcode MCP server.
-        public var transport: Transport
-
-        /// Bridge process policy.
-        ///
-        /// This compatibility property reads and writes the local bridge used
-        /// by ``Transport/localBridge(_:)``. Setting it switches the
-        /// configuration back to local process transport.
-        public var bridge: Bridge {
-            get {
-                guard case .localBridge(let bridge) = transport else {
-                    return .defaultMCPBridge
-                }
-                return bridge
-            }
-            set {
-                transport = .localBridge(newValue)
-            }
-        }
-
-        /// Client name sent in the MCP `initialize` request.
-        public var clientName: String
-
-        /// Client version sent in the MCP `initialize` request.
-        public var clientVersion: String
-
-        /// Additional MCP client capabilities sent during initialization.
-        ///
-        /// Values are encoded as raw MCP JSON. Capabilities that require
-        /// server-to-client handlers, such as `roots`, `sampling`, and
-        /// `elicitation`, are intentionally not exposed by this API.
-        public var capabilities: [String: MCPJSONValue]
-
-        /// Maximum duration to wait for each request.
-        ///
-        /// Set this to `nil` to disable client-side request timeouts.
-        public var requestTimeout: Duration?
-
-        /// Creates a local bridge configuration.
-        ///
-        /// - Parameters:
-        ///   - bridge: Upstream bridge process policy.
-        ///   - clientName: Client name sent in the MCP `initialize` request.
-        ///   - clientVersion: Client version sent in the MCP `initialize`
-        ///     request.
-        ///   - capabilities: Additional MCP client capabilities encoded as raw
-        ///     MCP JSON.
-        ///   - requestTimeout: Maximum duration to wait for each request, or
-        ///     `nil` to disable client-side request timeouts.
-        public init(
-            bridge: Bridge = .defaultMCPBridge,
-            clientName: String = "XcodeMCPKit",
-            clientVersion: String = "dev",
-            capabilities: [String: MCPJSONValue] = [:],
-            requestTimeout: Duration? = .seconds(60)
-        ) {
-            self.transport = .localBridge(bridge)
-            self.clientName = clientName
-            self.clientVersion = clientVersion
-            self.capabilities = capabilities
-            self.requestTimeout = requestTimeout
-        }
-
-        /// Creates a configuration for the selected transport.
-        ///
-        /// - Parameters:
-        ///   - transport: Transport used to reach the Xcode MCP server.
-        ///   - clientName: Client name sent in the MCP `initialize` request.
-        ///   - clientVersion: Client version sent in the MCP `initialize`
-        ///     request.
-        ///   - capabilities: Additional MCP client capabilities encoded as raw
-        ///     MCP JSON.
-        ///   - requestTimeout: Maximum duration to wait for each request, or
-        ///     `nil` to disable client-side request timeouts.
-        public init(
-            transport: Transport,
-            clientName: String = "XcodeMCPKit",
-            clientVersion: String = "dev",
-            capabilities: [String: MCPJSONValue] = [:],
-            requestTimeout: Duration? = .seconds(60)
-        ) {
-            self.transport = transport
-            self.clientName = clientName
-            self.clientVersion = clientVersion
-            self.capabilities = capabilities
-            self.requestTimeout = requestTimeout
-        }
-    }
-
     private let session: InitializedMCPClientSession
 
     /// Connects to the configured MCP transport and returns an initialized
@@ -223,21 +192,21 @@ public actor XcodeMCP {
     /// `notifications/initialized`. If initialization fails, the transport is
     /// closed before the error is rethrown.
     ///
-    /// - Parameter config: Connection and initialization settings.
-    public init(config: Configuration = Configuration()) async throws {
+    /// - Parameter configuration: Connection and initialization settings.
+    public init(configuration: XcodeMCPConfiguration = XcodeMCPConfiguration()) async throws {
         try await self.init(
-            config: config,
+            configuration: configuration,
             streamableHTTPDiscoveryResolver: .liveValue
         )
     }
 
     package init(
-        config: Configuration = Configuration(),
+        configuration: XcodeMCPConfiguration = XcodeMCPConfiguration(),
         streamableHTTPDiscoveryResolver: StreamableHTTPDiscoveryResolver
     ) async throws {
         do {
             let transport: any XcodeMCPTransport
-            switch config.transport {
+            switch configuration.transport.storage {
             case .localBridge(let bridge):
                 transport = try await UpstreamProcessXcodeMCPTransport.start(
                     command: bridge.command,
@@ -248,30 +217,33 @@ public actor XcodeMCP {
             case .streamableHTTP(let endpoint):
                 transport = try await StreamableHTTPXcodeMCPTransport.start(
                     endpoint: endpoint,
-                    requestTimeout: config.requestTimeout
+                    requestTimeout: configuration.requestTimeout
                 )
             case .streamableHTTPDiscoveryFile(let discoveryFile):
                 transport = try await StreamableHTTPXcodeMCPTransport.start(
                     discoveryFile: discoveryFile,
-                    requestTimeout: config.requestTimeout,
+                    requestTimeout: configuration.requestTimeout,
                     discoveryResolver: streamableHTTPDiscoveryResolver
                 )
             }
-            try await self.init(config: config, transport: transport)
+            try await self.init(configuration: configuration, transport: transport)
         } catch {
             throw Self.publicError(from: error)
         }
     }
 
-    package init(config: Configuration = Configuration(), transport: any XcodeMCPTransport) async throws {
+    package init(
+        configuration: XcodeMCPConfiguration = XcodeMCPConfiguration(),
+        transport: any XcodeMCPTransport
+    ) async throws {
         do {
             self.session = try await InitializedMCPClientSession(
                 transport: transport,
                 configuration: InitializedMCPClientSession.Configuration(
-                    clientName: config.clientName,
-                    clientVersion: config.clientVersion,
-                    capabilities: config.capabilities.mapValues(\.jsonValue),
-                    requestTimeout: config.requestTimeout
+                    clientName: configuration.clientName,
+                    clientVersion: configuration.clientVersion,
+                    capabilities: configuration.capabilities.mapValues(\.jsonValue),
+                    requestTimeout: configuration.requestTimeout
                 )
             )
         } catch {

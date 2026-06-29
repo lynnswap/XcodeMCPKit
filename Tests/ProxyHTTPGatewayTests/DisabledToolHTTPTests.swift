@@ -26,7 +26,7 @@ extension HTTPHandlerTests {
         """.write(to: configURL, atomically: true, encoding: .utf8)
 
         let publicServer = XcodeMCPProxyServer(
-            config: .init(
+            configuration: .init(
                 configurationFilePath: configURL.path,
                 toolPolicy: .init(disabledToolNames: [" RunAllTests ", ""])
             )

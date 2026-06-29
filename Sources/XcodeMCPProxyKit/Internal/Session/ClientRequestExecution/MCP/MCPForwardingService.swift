@@ -17,11 +17,11 @@ struct MCPForwardingService: Sendable {
     private let upstreamRuntime: ProxyUpstreamRequestRuntime
     private let toolSurface: ToolSurface
 
-    init(config: ProxyConfig, sessionManager: any RuntimeMCPForwardingPort) {
-        self.config = config
+    init(configuration: ProxyConfig, sessionManager: any RuntimeMCPForwardingPort) {
+        self.config = configuration
         self.sessionManager = sessionManager
         self.upstreamRuntime = ProxyUpstreamRequestRuntime(port: sessionManager)
-        self.toolSurface = ToolSurface(config: config, sessionManager: sessionManager)
+        self.toolSurface = ToolSurface(config: configuration, sessionManager: sessionManager)
     }
 
     func prepareRequest(

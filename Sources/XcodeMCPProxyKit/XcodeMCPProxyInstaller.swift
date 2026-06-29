@@ -1,5 +1,28 @@
 import Foundation
 
+/// Destination and mode settings for a source install.
+public struct XcodeMCPProxyInstallerConfiguration: Equatable, Sendable {
+    /// Install prefix used when ``binaryDirectory`` is not set.
+    public var prefix: String?
+
+    /// Explicit binary directory. This takes precedence over ``prefix``.
+    public var binaryDirectory: String?
+
+    /// Whether to only compute and print the install plan.
+    public var dryRun: Bool
+
+    /// Creates installer configuration.
+    public init(
+        prefix: String? = nil,
+        binaryDirectory: String? = nil,
+        dryRun: Bool = false
+    ) {
+        self.prefix = prefix
+        self.binaryDirectory = binaryDirectory
+        self.dryRun = dryRun
+    }
+}
+
 /// Installer facade for Xcode MCP proxy executables.
 public struct XcodeMCPProxyInstaller: Sendable {
     /// Top-level action for an installer invocation.
@@ -32,7 +55,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
 
         /// Installer configuration. This is present for `.install` plans and
         /// absent for display-only plans.
-        public let configuration: Configuration?
+        public let configuration: XcodeMCPProxyInstallerConfiguration?
 
         /// Normalized launch options.
         public let options: LaunchOptions
@@ -46,7 +69,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
         /// Creates an installer launch plan.
         public init(
             action: LaunchAction,
-            configuration: Configuration?,
+            configuration: XcodeMCPProxyInstallerConfiguration?,
             options: LaunchOptions,
             usage: String,
             versionLine: String
@@ -56,25 +79,6 @@ public struct XcodeMCPProxyInstaller: Sendable {
             self.options = options
             self.usage = usage
             self.versionLine = versionLine
-        }
-    }
-
-    /// Destination and mode settings for a source install.
-    public struct Configuration: Equatable, Sendable {
-        /// Install prefix used when ``bindir`` is not set.
-        public var prefix: String?
-
-        /// Explicit binary directory. This takes precedence over ``prefix``.
-        public var bindir: String?
-
-        /// Whether to only compute and print the install plan.
-        public var dryRun: Bool
-
-        /// Creates installer configuration.
-        public init(prefix: String? = nil, bindir: String? = nil, dryRun: Bool = false) {
-            self.prefix = prefix
-            self.bindir = bindir
-            self.dryRun = dryRun
         }
     }
 
@@ -144,10 +148,13 @@ public struct XcodeMCPProxyInstaller: Sendable {
     ]
 
     /// Installer configuration.
-    public var configuration: Configuration
+    public var configuration: XcodeMCPProxyInstallerConfiguration
 
     /// Creates an installer facade.
-    public init(configuration: Configuration = Configuration()) {
+    public init(
+        configuration: XcodeMCPProxyInstallerConfiguration =
+            XcodeMCPProxyInstallerConfiguration()
+    ) {
         self.configuration = configuration
     }
 
@@ -223,10 +230,10 @@ public struct XcodeMCPProxyInstaller: Sendable {
     package static func parseLaunchConfiguration(
         _ arguments: [String],
         environment: [String: String]
-    ) throws -> Configuration {
-        var configuration = Configuration(
+    ) throws -> XcodeMCPProxyInstallerConfiguration {
+        var configuration = XcodeMCPProxyInstallerConfiguration(
             prefix: environment["PREFIX"],
-            bindir: environment["BINDIR"],
+            binaryDirectory: environment["BINDIR"],
             dryRun: false
         )
 
@@ -246,7 +253,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
                 guard index + 1 < arguments.count else {
                     throw Error.message("\(argument) requires a value")
                 }
-                configuration.bindir = arguments[index + 1]
+                configuration.binaryDirectory = arguments[index + 1]
                 index += 2
             case "--dry-run":
                 configuration.dryRun = true
@@ -267,7 +274,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
         let sourceDirectory = executableURL.deletingLastPathComponent()
         let binDirectory = Self.resolveBinDirectory(
             prefix: configuration.prefix,
-            bindir: configuration.bindir
+            binaryDirectory: configuration.binaryDirectory
         )
         let binaries = Self.binaryNames.map { name in
             Binary(
@@ -285,8 +292,8 @@ public struct XcodeMCPProxyInstaller: Sendable {
 
     /// Builds release products when needed and installs the proxy executables.
     ///
-    /// When ``Configuration/dryRun`` is true this method prints the dry-run plan
-    /// and does not create directories or copy files.
+    /// When ``XcodeMCPProxyInstallerConfiguration/dryRun`` is true this method
+    /// prints the dry-run plan and does not create directories or copy files.
     public func install(
         executableURL: URL,
         stdout: (String) -> Void = { print($0) }
@@ -344,11 +351,11 @@ public struct XcodeMCPProxyInstaller: Sendable {
 
     /// Resolves the destination binary directory.
     ///
-    /// `bindir` takes precedence over `prefix`; otherwise this returns
+    /// `binaryDirectory` takes precedence over `prefix`; otherwise this returns
     /// `~/.local/bin`.
-    public static func resolveBinDirectory(prefix: String?, bindir: String?) -> URL {
-        if let bindir {
-            return URL(fileURLWithPath: expandPath(bindir), isDirectory: true)
+    public static func resolveBinDirectory(prefix: String?, binaryDirectory: String?) -> URL {
+        if let binaryDirectory {
+            return URL(fileURLWithPath: expandPath(binaryDirectory), isDirectory: true)
         }
 
         let defaultPrefix = prefix ?? "\(NSHomeDirectory())/.local"
@@ -399,12 +406,12 @@ extension XcodeMCPProxyInstaller {
         package struct Dependencies {
             package var executableURL: () -> URL?
             package var install:
-                (XcodeMCPProxyInstaller.Configuration, URL, (String) -> Void) throws -> Void
+                (XcodeMCPProxyInstallerConfiguration, URL, (String) -> Void) throws -> Void
 
             package init(
                 executableURL: @escaping () -> URL?,
                 install: @escaping (
-                    XcodeMCPProxyInstaller.Configuration,
+                    XcodeMCPProxyInstallerConfiguration,
                     URL,
                     (String) -> Void
                 ) throws -> Void
