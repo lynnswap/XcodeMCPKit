@@ -895,7 +895,8 @@ extension RuntimeCoordinator {
         if let deadlineUptimeNs, let timeout = timeAmount(until: deadlineUptimeNs) {
             let timeoutFuture = eventLoop.makePromise(of: Output.self)
             let didComplete = NIOLockedValueBox(false)
-            let timeoutTask = eventLoop.scheduleTask(in: timeout) {
+            let timeoutTask = Task { [clock] in
+                await clock.sleep(.nanoseconds(max(0, timeout.nanoseconds)))
                 let shouldComplete = didComplete.withLockedValue { completed in
                     guard completed == false else { return false }
                     completed = true
