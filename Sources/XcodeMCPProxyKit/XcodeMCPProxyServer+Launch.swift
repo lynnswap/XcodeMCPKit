@@ -1,35 +1,35 @@
 import Foundation
 
-extension XcodeMCPProxyServer {
-    /// Product metadata exposed by the server-side kit.
-    public struct ProductMetadata: Equatable, Sendable {
-        /// Product name shown in server startup summaries.
-        public let name: String
+/// Product metadata exposed by `XcodeMCPProxyKit`.
+public struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
+    /// Product name shown in startup summaries.
+    public let name: String
 
-        /// Resolved package version.
-        public let version: String
+    /// Resolved package version.
+    public let version: String
 
-        /// Creates product metadata.
-        public init(name: String = "XcodeMCPProxyKit", version: String) {
-            self.name = name
-            self.version = version
-        }
-
-        /// Formats a CLI-compatible version line.
-        public func versionLine(arguments: [String], defaultExecutableName: String) -> String {
-            "\(executableName(arguments: arguments, defaultExecutableName: defaultExecutableName)) \(version)"
-        }
-
-        private func executableName(arguments: [String], defaultExecutableName: String) -> String {
-            guard let rawExecutable = arguments.first, !rawExecutable.isEmpty else {
-                return defaultExecutableName
-            }
-
-            let name = URL(fileURLWithPath: rawExecutable).lastPathComponent
-            return name.isEmpty ? defaultExecutableName : name
-        }
+    /// Creates product metadata.
+    public init(name: String = "XcodeMCPProxyKit", version: String) {
+        self.name = name
+        self.version = version
     }
 
+    /// Formats a CLI-compatible version line.
+    public func versionLine(arguments: [String], defaultExecutableName: String) -> String {
+        "\(executableName(arguments: arguments, defaultExecutableName: defaultExecutableName)) \(version)"
+    }
+
+    private func executableName(arguments: [String], defaultExecutableName: String) -> String {
+        guard let rawExecutable = arguments.first, !rawExecutable.isEmpty else {
+            return defaultExecutableName
+        }
+
+        let name = URL(fileURLWithPath: rawExecutable).lastPathComponent
+        return name.isEmpty ? defaultExecutableName : name
+    }
+}
+
+extension XcodeMCPProxyServer {
     /// Resolved top-level action for a server launch invocation.
     public enum LaunchAction: Equatable, Sendable {
         /// Print usage and exit.
@@ -71,7 +71,7 @@ extension XcodeMCPProxyServer {
 
         /// Public server configuration. This is present for `.start` and
         /// `.dryRun` plans and absent for display-only plans.
-        public let configuration: Configuration?
+        public let configuration: XcodeMCPProxyServerConfiguration?
 
         /// Normalized launch options.
         public let options: LaunchOptions
@@ -88,7 +88,7 @@ extension XcodeMCPProxyServer {
         /// Creates a launch plan.
         public init(
             action: LaunchAction,
-            configuration: Configuration?,
+            configuration: XcodeMCPProxyServerConfiguration?,
             options: LaunchOptions,
             resolvedDryRunCommandLine: String?,
             usage: String,
@@ -145,8 +145,8 @@ extension XcodeMCPProxyServer {
     }
 
     /// Resolved XcodeMCPProxyKit product metadata.
-    public static var productMetadata: ProductMetadata {
-        ProductMetadata(version: ProxyBuildInfo.version)
+    public static var productMetadata: XcodeMCPProxyProductMetadata {
+        XcodeMCPProxyProductMetadata(version: ProxyBuildInfo.version)
     }
 
     /// CLI usage for `xcode-mcp-proxy-server`.
@@ -242,7 +242,7 @@ extension XcodeMCPProxyServer {
             )
         }
 
-        let configuration = Configuration(serverProxyConfig: proxyConfig)
+        let configuration = XcodeMCPProxyServerConfiguration(serverProxyConfig: proxyConfig)
         let dryRun = parsed.dryRun || isTruthy(environment["DRY_RUN"])
         let options = LaunchOptions(
             executableName: displayOptions.executableName,
@@ -328,17 +328,17 @@ extension XcodeMCPProxyServer {
 
     package static func resolvedDryRunCommandLine(
         options: ParsedLaunchOptions,
-        configuration: Configuration
+        configuration: XcodeMCPProxyServerConfiguration
     ) -> String {
         var parts = ["xcode-mcp-proxy-server"] + options.forwardedArguments
         if options.hasConfigFlag == false, let configPath = configuration.configurationFilePath {
             parts += ["--config", configPath]
         }
         if options.hasRefreshCodeIssuesModeFlag == false,
-           configuration.features.refreshCodeIssuesMode != .proxy {
+           configuration.featurePolicy.refreshCodeIssuesMode != .proxy {
             parts += [
                 "--refresh-code-issues-mode",
-                configuration.features.refreshCodeIssuesMode.rawValue,
+                configuration.featurePolicy.refreshCodeIssuesMode.rawValue,
             ]
         }
         return parts.joined(separator: " ")

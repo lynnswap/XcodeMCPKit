@@ -4,13 +4,336 @@ import NIO
 import NIOHTTP1
 import XcodeMCPKit
 
+/// Public configuration for an embedded Xcode MCP proxy server.
+///
+/// This type is the stable server configuration surface for
+/// `XcodeMCPProxyKit`. Lower-level parser, discovery, filesystem, and
+/// session-routing types stay internal to the targets that own them.
+public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
+    /// Address that the Streamable HTTP server binds.
+    public struct BindAddress: Equatable, Sendable {
+        /// Hostname or IP address for the server socket.
+        public var host: String
+
+        /// TCP port for the server socket.
+        ///
+        /// Use `0` to request an ephemeral port from the operating system.
+        public var port: Int
+
+        /// Creates a bind address.
+        public init(host: String = "localhost", port: Int = 8765) {
+            self.host = host
+            self.port = port
+        }
+
+        /// Creates a loopback bind address.
+        public static func localhost(port: Int = 8765) -> Self {
+            Self(host: "localhost", port: port)
+        }
+    }
+
+    /// Upstream `mcpbridge` process policy.
+    public enum Upstream: Equatable, Sendable {
+        /// Use Xcode's default `xcrun mcpbridge` invocation.
+        case defaultMCPBridge(processesPerXcode: Int = 1, sessionID: String? = nil)
+
+        /// Use an explicit upstream command and arguments.
+        case custom(
+            command: String,
+            arguments: [String],
+            processesPerXcode: Int = 1,
+            sessionID: String? = nil
+        )
+
+        var invocation: MCPBridgeInvocation {
+            switch self {
+            case .defaultMCPBridge:
+                return .defaultMCPBridge
+            case .custom(let command, let arguments, _, _):
+                return MCPBridgeInvocation(command: command, arguments: arguments)
+            }
+        }
+
+        var command: String {
+            invocation.command
+        }
+
+        var arguments: [String] {
+            invocation.arguments
+        }
+
+        var processesPerXcode: Int {
+            switch self {
+            case .defaultMCPBridge(let count, _), .custom(_, _, let count, _):
+                return count
+            }
+        }
+
+        var sessionID: String? {
+            switch self {
+            case .defaultMCPBridge(_, let sessionID), .custom(_, _, _, let sessionID):
+                return sessionID
+            }
+        }
+    }
+
+    /// Request and payload limits enforced by the proxy.
+    public struct Limits: Equatable, Sendable {
+        /// Maximum accepted HTTP request body size in bytes.
+        public var maxBodyBytes: Int
+
+        /// Request timeout in seconds.
+        public var requestTimeout: TimeInterval
+
+        /// Creates proxy request limits.
+        public init(maxBodyBytes: Int = 1_048_576, requestTimeout: TimeInterval = 300) {
+            self.maxBodyBytes = maxBodyBytes
+            self.requestTimeout = requestTimeout
+        }
+
+        /// Default proxy limits.
+        public static let `default` = Self()
+    }
+
+    /// Endpoint discovery file policy.
+    public struct Discovery: Equatable, Sendable {
+        /// Optional discovery file URL.
+        ///
+        /// `nil` uses the default discovery location.
+        public var fileURL: URL?
+
+        /// Creates a discovery policy.
+        public init(fileURL: URL? = nil) {
+            self.fileURL = fileURL
+        }
+
+        /// Uses the default discovery file location.
+        public static let `default` = Self()
+    }
+
+    /// Xcode permission dialog automation policy.
+    public enum ApprovalPolicy: Equatable, Sendable {
+        /// Do not automate the Xcode permission dialog.
+        case manual
+
+        /// Try to approve the Xcode permission dialog automatically.
+        ///
+        /// This requires macOS Accessibility permission for the host process.
+        case automatic
+    }
+
+    /// How `XcodeRefreshCodeIssuesInFile` requests are served.
+    public enum RefreshCodeIssuesMode: String, Equatable, Sendable {
+        /// Serve refresh-code-issues requests through proxy diagnostics.
+        case proxy
+
+        /// Forward refresh-code-issues requests to the upstream Xcode MCP
+        /// bridge.
+        case upstream
+    }
+
+    /// Optional proxy features that affect tool behavior.
+    public struct FeaturePolicy: Equatable, Sendable {
+        /// Whether the proxy should prewarm the upstream tools list.
+        public var prewarmToolsList: Bool
+
+        /// Refresh-code-issues handling mode.
+        public var refreshCodeIssuesMode: RefreshCodeIssuesMode
+
+        /// Creates a feature policy.
+        public init(
+            prewarmToolsList: Bool = true,
+            refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
+        ) {
+            self.prewarmToolsList = prewarmToolsList
+            self.refreshCodeIssuesMode = refreshCodeIssuesMode
+        }
+
+        /// Default feature policy.
+        public static let `default` = Self()
+    }
+
+    /// Tool visibility policy applied by the proxy.
+    public struct ToolPolicy: Equatable, Sendable {
+        /// Tool names hidden from `tools/list` results and rejected for
+        /// `tools/call` requests.
+        ///
+        /// Names are normalized when the server builds its runtime config:
+        /// surrounding whitespace is trimmed and empty names are ignored.
+        public var disabledToolNames: Set<String>
+
+        /// Creates a tool policy.
+        public init(disabledToolNames: Set<String> = []) {
+            self.disabledToolNames = disabledToolNames
+        }
+
+        /// Default tool policy.
+        public static let `default` = Self()
+    }
+
+    /// Initialize handshake overrides sent from the proxy to upstream
+    /// `mcpbridge` processes.
+    ///
+    /// Non-`nil` properties override the matching values loaded from
+    /// ``configurationFilePath``. Properties left as `nil` keep the file value
+    /// when present, otherwise the proxy's built-in default is used.
+    public struct InitializeHandshake: Equatable, Sendable {
+        /// Upstream client information for the initialize handshake.
+        public struct ClientInfo: Equatable, Sendable {
+            /// Client name to advertise to the upstream MCP bridge.
+            public var name: String?
+
+            /// Client version to advertise to the upstream MCP bridge.
+            public var version: String?
+
+            /// Creates upstream client information.
+            public init(name: String? = nil, version: String? = nil) {
+                self.name = name
+                self.version = version
+            }
+        }
+
+        /// Protocol version to send in initialize params.
+        public var protocolVersion: String?
+
+        /// Client info to send in initialize params.
+        public var clientInfo: ClientInfo?
+
+        /// Capability object to send in initialize params.
+        public var capabilities: [String: MCPJSONValue]?
+
+        /// Creates initialize handshake overrides.
+        public init(
+            protocolVersion: String? = nil,
+            clientInfo: ClientInfo? = nil,
+            capabilities: [String: MCPJSONValue]? = nil
+        ) {
+            self.protocolVersion = protocolVersion
+            self.clientInfo = clientInfo
+            self.capabilities = capabilities
+        }
+    }
+
+    /// HTTP bind address.
+    public var bindAddress: BindAddress
+
+    /// Upstream bridge process policy.
+    public var upstream: Upstream
+
+    /// Request and payload limits.
+    public var limits: Limits
+
+    /// Optional TOML configuration path for initialize overrides and disabled
+    /// tools.
+    public var configurationFilePath: String?
+
+    /// Explicit tool visibility policy.
+    ///
+    /// `nil` keeps disabled tools loaded from ``configurationFilePath``. A
+    /// non-`nil` policy overrides the file's `[tools].disabled` list.
+    public var toolPolicy: ToolPolicy?
+
+    /// Explicit initialize handshake override.
+    ///
+    /// Non-`nil` fields override the matching file-backed
+    /// `[upstream_handshake]` fields. Fields left `nil` keep the file value
+    /// when present, otherwise the built-in default is used.
+    public var initializeHandshake: InitializeHandshake?
+
+    /// Endpoint discovery policy.
+    public var discovery: Discovery
+
+    /// Permission dialog automation policy.
+    public var approvalPolicy: ApprovalPolicy
+
+    /// Optional proxy feature policy.
+    public var featurePolicy: FeaturePolicy
+
+    /// Creates a public proxy server configuration.
+    ///
+    /// - Parameters:
+    ///   - bindAddress: HTTP bind address.
+    ///   - upstream: Upstream bridge process policy.
+    ///   - limits: Request and payload limits.
+    ///   - configurationFilePath: Optional TOML configuration path.
+    ///   - discovery: Endpoint discovery policy.
+    ///   - approvalPolicy: Permission dialog automation policy.
+    ///   - featurePolicy: Optional proxy feature policy.
+    ///   - toolPolicy: Explicit tool visibility policy.
+    ///   - initializeHandshake: Explicit upstream initialize handshake override.
+    public init(
+        bindAddress: BindAddress = .localhost(),
+        upstream: Upstream = .defaultMCPBridge(),
+        limits: Limits = .default,
+        configurationFilePath: String? = nil,
+        discovery: Discovery = .default,
+        approvalPolicy: ApprovalPolicy = .manual,
+        featurePolicy: FeaturePolicy = .default,
+        toolPolicy: ToolPolicy? = nil,
+        initializeHandshake: InitializeHandshake? = nil
+    ) {
+        self.bindAddress = bindAddress
+        self.upstream = upstream
+        self.limits = limits
+        self.configurationFilePath = configurationFilePath
+        self.toolPolicy = toolPolicy
+        self.initializeHandshake = initializeHandshake
+        self.discovery = discovery
+        self.approvalPolicy = approvalPolicy
+        self.featurePolicy = featurePolicy
+    }
+
+    init(serverProxyConfig proxyConfig: ProxyConfig) {
+        self.init(
+            bindAddress: BindAddress(
+                host: proxyConfig.listenHost,
+                port: proxyConfig.listenPort
+            ),
+            upstream: .custom(
+                command: proxyConfig.upstreamCommand,
+                arguments: proxyConfig.upstreamArgs,
+                processesPerXcode: proxyConfig.upstreamProcessCount,
+                sessionID: proxyConfig.upstreamSessionID
+            ),
+            limits: Limits(
+                maxBodyBytes: proxyConfig.maxBodyBytes,
+                requestTimeout: proxyConfig.requestTimeout
+            ),
+            configurationFilePath: proxyConfig.configPath,
+            discovery: Discovery(fileURL: proxyConfig.discoveryFileURL),
+            approvalPolicy: proxyConfig.autoApproveXcodeDialog ? .automatic : .manual,
+            featurePolicy: FeaturePolicy(
+                prewarmToolsList: proxyConfig.prewarmToolsList,
+                refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
+            )
+        )
+    }
+
+    var listenHost: String { bindAddress.host }
+    var listenPort: Int { bindAddress.port }
+    var upstreamCommand: String { upstream.command }
+    var upstreamArguments: [String] { upstream.arguments }
+    var upstreamProcessCount: Int { upstream.processesPerXcode }
+    var upstreamSessionID: String? { upstream.sessionID }
+    var maxBodyBytes: Int { limits.maxBodyBytes }
+    var requestTimeout: TimeInterval { limits.requestTimeout }
+    var configPath: String? { configurationFilePath }
+    var discoveryFileURL: URL? { discovery.fileURL }
+    var prewarmToolsList: Bool { featurePolicy.prewarmToolsList }
+    var autoApproveXcodeDialog: Bool { approvalPolicy == .automatic }
+    var refreshCodeIssuesMode: RefreshCodeIssuesMode {
+        featurePolicy.refreshCodeIssuesMode
+    }
+}
+
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.
 ///
 /// `XcodeMCPProxyServer` is the library boundary used by the
-/// `xcode-mcp-proxy-server` executable. Construct it with ``Configuration``,
-/// call ``startAndWriteDiscovery()`` or ``start()``, then keep the process
-/// alive with ``wait()`` until your application decides to call ``shutdown()``.
-/// Both start methods return the resolved endpoint.
+/// `xcode-mcp-proxy-server` executable. Construct it with
+/// ``XcodeMCPProxyServerConfiguration``, call ``startAndWriteDiscovery()`` or
+/// ``start()``, then keep the process alive with ``wait()`` until your
+/// application decides to call ``shutdown()``. Both start methods return the
+/// resolved endpoint.
 ///
 /// The server exposes the proxy lifecycle. CLI parsing, STDIO adapter behavior,
 /// and internal session routing are intentionally handled outside this public
@@ -68,330 +391,6 @@ public final class XcodeMCPProxyServer {
 
         /// The server is already shutting down.
         case shutdownInProgress
-    }
-
-    /// Public configuration for an embedded Xcode MCP proxy server.
-    ///
-    /// This type is the stable server configuration surface for
-    /// `XcodeMCPProxyKit`. Lower-level parser, discovery, filesystem, and
-    /// session-routing types stay internal to the targets that own
-    /// them.
-    public struct Configuration: Equatable, Sendable {
-        /// Address that the Streamable HTTP server binds.
-        public struct BindAddress: Equatable, Sendable {
-            /// Hostname or IP address for the server socket.
-            public var host: String
-
-            /// TCP port for the server socket.
-            ///
-            /// Use `0` to request an ephemeral port from the operating system.
-            public var port: Int
-
-            /// Creates a bind address.
-            public init(host: String = "localhost", port: Int = 8765) {
-                self.host = host
-                self.port = port
-            }
-
-            /// Creates a loopback bind address.
-            public static func localhost(port: Int = 8765) -> Self {
-                Self(host: "localhost", port: port)
-            }
-        }
-
-        /// Upstream `mcpbridge` process policy.
-        public enum Upstream: Equatable, Sendable {
-            /// Use Xcode's default `xcrun mcpbridge` invocation.
-            case defaultMCPBridge(processesPerXcode: Int = 1, sessionID: String? = nil)
-
-            /// Use an explicit upstream command and arguments.
-            case custom(
-                command: String,
-                arguments: [String],
-                processesPerXcode: Int = 1,
-                sessionID: String? = nil
-            )
-
-            var invocation: MCPBridgeInvocation {
-                switch self {
-                case .defaultMCPBridge:
-                    return .defaultMCPBridge
-                case .custom(let command, let arguments, _, _):
-                    return MCPBridgeInvocation(command: command, arguments: arguments)
-                }
-            }
-
-            var command: String {
-                invocation.command
-            }
-
-            var arguments: [String] {
-                invocation.arguments
-            }
-
-            var processesPerXcode: Int {
-                switch self {
-                case .defaultMCPBridge(let count, _), .custom(_, _, let count, _):
-                    return count
-                }
-            }
-
-            var sessionID: String? {
-                switch self {
-                case .defaultMCPBridge(_, let sessionID), .custom(_, _, _, let sessionID):
-                    return sessionID
-                }
-            }
-        }
-
-        /// Request and payload limits enforced by the proxy.
-        public struct Limits: Equatable, Sendable {
-            /// Maximum accepted HTTP request body size in bytes.
-            public var maxBodyBytes: Int
-
-            /// Request timeout in seconds.
-            public var requestTimeout: TimeInterval
-
-            /// Creates proxy request limits.
-            public init(maxBodyBytes: Int = 1_048_576, requestTimeout: TimeInterval = 300) {
-                self.maxBodyBytes = maxBodyBytes
-                self.requestTimeout = requestTimeout
-            }
-
-            /// Default proxy limits.
-            public static let `default` = Self()
-        }
-
-        /// Endpoint discovery file policy.
-        public struct Discovery: Equatable, Sendable {
-            /// Optional discovery file URL.
-            ///
-            /// `nil` uses the default discovery location.
-            public var fileURL: URL?
-
-            /// Creates a discovery policy.
-            public init(fileURL: URL? = nil) {
-                self.fileURL = fileURL
-            }
-
-            /// Uses the default discovery file location.
-            public static let `default` = Self()
-        }
-
-        /// Xcode permission dialog automation policy.
-        public enum ApprovalPolicy: Equatable, Sendable {
-            /// Do not automate the Xcode permission dialog.
-            case manual
-
-            /// Try to approve the Xcode permission dialog automatically.
-            ///
-            /// This requires macOS Accessibility permission for the host process.
-            case automatic
-        }
-
-        /// How `XcodeRefreshCodeIssuesInFile` requests are served.
-        public enum RefreshCodeIssuesMode: String, Equatable, Sendable {
-            /// Serve refresh-code-issues requests through proxy diagnostics.
-            case proxy
-
-            /// Forward refresh-code-issues requests to the upstream Xcode MCP
-            /// bridge.
-            case upstream
-        }
-
-        /// Optional proxy features that affect tool behavior.
-        public struct FeaturePolicy: Equatable, Sendable {
-            /// Whether the proxy should prewarm the upstream tools list.
-            public var prewarmToolsList: Bool
-
-            /// Refresh-code-issues handling mode.
-            public var refreshCodeIssuesMode: RefreshCodeIssuesMode
-
-            /// Creates a feature policy.
-            public init(
-                prewarmToolsList: Bool = true,
-                refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
-            ) {
-                self.prewarmToolsList = prewarmToolsList
-                self.refreshCodeIssuesMode = refreshCodeIssuesMode
-            }
-
-            /// Default feature policy.
-            public static let `default` = Self()
-        }
-
-        /// Tool visibility policy applied by the proxy.
-        public struct ToolPolicy: Equatable, Sendable {
-            /// Tool names hidden from `tools/list` results and rejected for
-            /// `tools/call` requests.
-            ///
-            /// Names are normalized when the server builds its runtime config:
-            /// surrounding whitespace is trimmed and empty names are ignored.
-            public var disabledToolNames: Set<String>
-
-            /// Creates a tool policy.
-            public init(disabledToolNames: Set<String> = []) {
-                self.disabledToolNames = disabledToolNames
-            }
-
-            /// Default tool policy.
-            public static let `default` = Self()
-        }
-
-        /// Initialize handshake overrides sent from the proxy to upstream
-        /// `mcpbridge` processes.
-        ///
-        /// Non-`nil` properties override the matching values loaded from
-        /// ``configurationFilePath``. Properties left as `nil` keep the file
-        /// value when present, otherwise the proxy's built-in default is used.
-        public struct InitializeHandshake: Equatable, Sendable {
-            /// Upstream client information for the initialize handshake.
-            public struct ClientInfo: Equatable, Sendable {
-                /// Client name to advertise to the upstream MCP bridge.
-                public var name: String?
-
-                /// Client version to advertise to the upstream MCP bridge.
-                public var version: String?
-
-                /// Creates upstream client information.
-                public init(name: String? = nil, version: String? = nil) {
-                    self.name = name
-                    self.version = version
-                }
-            }
-
-            /// Protocol version to send in initialize params.
-            public var protocolVersion: String?
-
-            /// Client info to send in initialize params.
-            public var clientInfo: ClientInfo?
-
-            /// Capability object to send in initialize params.
-            public var capabilities: [String: MCPJSONValue]?
-
-            /// Creates initialize handshake overrides.
-            public init(
-                protocolVersion: String? = nil,
-                clientInfo: ClientInfo? = nil,
-                capabilities: [String: MCPJSONValue]? = nil
-            ) {
-                self.protocolVersion = protocolVersion
-                self.clientInfo = clientInfo
-                self.capabilities = capabilities
-            }
-        }
-
-        /// HTTP bind address.
-        public var bind: BindAddress
-
-        /// Upstream bridge process policy.
-        public var upstream: Upstream
-
-        /// Request and payload limits.
-        public var limits: Limits
-
-        /// Optional TOML configuration path for initialize overrides and
-        /// disabled tools.
-        public var configurationFilePath: String?
-
-        /// Explicit tool visibility policy.
-        ///
-        /// `nil` keeps disabled tools loaded from ``configurationFilePath``.
-        /// A non-`nil` policy overrides the file's `[tools].disabled` list.
-        public var toolPolicy: ToolPolicy?
-
-        /// Explicit initialize handshake override.
-        ///
-        /// Non-`nil` fields override the matching file-backed
-        /// `[upstream_handshake]` fields. Fields left `nil` keep the file
-        /// value when present, otherwise the built-in default is used.
-        public var initializeHandshake: InitializeHandshake?
-
-        /// Endpoint discovery policy.
-        public var discovery: Discovery
-
-        /// Permission dialog automation policy.
-        public var approval: ApprovalPolicy
-
-        /// Optional proxy feature policy.
-        public var features: FeaturePolicy
-
-        /// Creates a public proxy server configuration.
-        ///
-        /// - Parameters:
-        ///   - bind: HTTP bind address.
-        ///   - upstream: Upstream bridge process policy.
-        ///   - limits: Request and payload limits.
-        ///   - configurationFilePath: Optional TOML configuration path.
-        ///   - discovery: Endpoint discovery policy.
-        ///   - approval: Permission dialog automation policy.
-        ///   - features: Optional proxy feature policy.
-        ///   - toolPolicy: Explicit tool visibility policy.
-        ///   - initializeHandshake: Explicit upstream initialize handshake
-        ///     override.
-        public init(
-            bind: BindAddress = .localhost(),
-            upstream: Upstream = .defaultMCPBridge(),
-            limits: Limits = .default,
-            configurationFilePath: String? = nil,
-            discovery: Discovery = .default,
-            approval: ApprovalPolicy = .manual,
-            features: FeaturePolicy = .default,
-            toolPolicy: ToolPolicy? = nil,
-            initializeHandshake: InitializeHandshake? = nil
-        ) {
-            self.bind = bind
-            self.upstream = upstream
-            self.limits = limits
-            self.configurationFilePath = configurationFilePath
-            self.toolPolicy = toolPolicy
-            self.initializeHandshake = initializeHandshake
-            self.discovery = discovery
-            self.approval = approval
-            self.features = features
-        }
-
-        init(serverProxyConfig proxyConfig: ProxyConfig) {
-            self.init(
-                bind: BindAddress(
-                    host: proxyConfig.listenHost,
-                    port: proxyConfig.listenPort
-                ),
-                upstream: .custom(
-                    command: proxyConfig.upstreamCommand,
-                    arguments: proxyConfig.upstreamArgs,
-                    processesPerXcode: proxyConfig.upstreamProcessCount,
-                    sessionID: proxyConfig.upstreamSessionID
-                ),
-                limits: Limits(
-                    maxBodyBytes: proxyConfig.maxBodyBytes,
-                    requestTimeout: proxyConfig.requestTimeout
-                ),
-                configurationFilePath: proxyConfig.configPath,
-                discovery: Discovery(fileURL: proxyConfig.discoveryFileURL),
-                approval: proxyConfig.autoApproveXcodeDialog ? .automatic : .manual,
-                features: FeaturePolicy(
-                    prewarmToolsList: proxyConfig.prewarmToolsList,
-                    refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
-                )
-            )
-        }
-
-        var listenHost: String { bind.host }
-        var listenPort: Int { bind.port }
-        var upstreamCommand: String { upstream.command }
-        var upstreamArguments: [String] { upstream.arguments }
-        var upstreamProcessCount: Int { upstream.processesPerXcode }
-        var upstreamSessionID: String? { upstream.sessionID }
-        var maxBodyBytes: Int { limits.maxBodyBytes }
-        var requestTimeout: TimeInterval { limits.requestTimeout }
-        var configPath: String? { configurationFilePath }
-        var discoveryFileURL: URL? { discovery.fileURL }
-        var prewarmToolsList: Bool { features.prewarmToolsList }
-        var autoApproveXcodeDialog: Bool { approval == .automatic }
-        var refreshCodeIssuesMode: RefreshCodeIssuesMode {
-            features.refreshCodeIssuesMode
-        }
     }
 
     struct Dependencies: Sendable {
@@ -480,10 +479,13 @@ public final class XcodeMCPProxyServer {
 
     /// Creates a proxy server with live runtime dependencies.
     ///
-    /// - Parameter config: Public HTTP, upstream bridge, discovery, and
+    /// - Parameter configuration: Public HTTP, upstream bridge, discovery, and
     ///   lifecycle settings.
-    public convenience init(config: Configuration = Configuration()) {
-        let proxyConfig = ProxyConfig(config)
+    public convenience init(
+        configuration: XcodeMCPProxyServerConfiguration =
+            XcodeMCPProxyServerConfiguration()
+    ) {
+        let proxyConfig = ProxyConfig(configuration)
         self.init(proxyConfig: proxyConfig, dependencies: .live(config: proxyConfig))
     }
 
@@ -502,8 +504,8 @@ public final class XcodeMCPProxyServer {
     ///
     /// This is the usual entry point for embedded users. It binds HTTP
     /// channels, starts the proxy runtime, writes the discovery file configured
-    /// by ``Configuration/discovery``, logs a startup summary, and returns the
-    /// resolved endpoint.
+    /// by ``XcodeMCPProxyServerConfiguration/discovery``, logs a startup
+    /// summary, and returns the resolved endpoint.
     ///
     /// Each server instance can be started once. A second call to this method
     /// or to ``start()`` throws ``LifecycleError/alreadyStarted``.
@@ -774,7 +776,7 @@ public final class XcodeMCPProxyServer {
 }
 
 private extension ProxyConfig {
-    init(_ config: XcodeMCPProxyServer.Configuration) {
+    init(_ config: XcodeMCPProxyServerConfiguration) {
         self.init(
             listenHost: config.listenHost,
             listenPort: config.listenPort,
@@ -798,7 +800,7 @@ private extension ProxyConfig {
 }
 
 private extension ProxyConfig.File.InitializeHandshakeOverride {
-    init(_ handshake: XcodeMCPProxyServer.Configuration.InitializeHandshake) {
+    init(_ handshake: XcodeMCPProxyServerConfiguration.InitializeHandshake) {
         self.init(
             protocolVersion: handshake.protocolVersion,
             clientName: handshake.clientInfo?.name,
@@ -830,7 +832,7 @@ private extension ProxyConfig.File.Value {
 }
 
 private extension ProxyConfig.RefreshCodeIssuesMode {
-    init(_ mode: XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode) {
+    init(_ mode: XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode) {
         switch mode {
         case .proxy:
             self = .proxy
@@ -840,7 +842,7 @@ private extension ProxyConfig.RefreshCodeIssuesMode {
     }
 }
 
-private extension XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode {
+private extension XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode {
     init(_ mode: ProxyConfig.RefreshCodeIssuesMode) {
         switch mode {
         case .proxy:

@@ -599,8 +599,8 @@ func compileOnlyClientDomainSurface() throws {
         ],
     ]
 
-    let config = XcodeMCP.Configuration(
-        bridge: .defaultMCPBridge,
+    let config = XcodeMCPConfiguration(
+        transport: .localBridge(),
         clientName: "PublicContractClient",
         clientVersion: "1.0",
         capabilities: [
@@ -610,25 +610,25 @@ func compileOnlyClientDomainSurface() throws {
         ],
         requestTimeout: .seconds(1)
     )
-    let customBridgeConfig = XcodeMCP.Configuration(
-        bridge: .custom(
+    let customBridgeConfig = XcodeMCPConfiguration(
+        transport: .localBridge(.custom(
             command: "/usr/bin/env",
             arguments: ["printf"],
             environment: ["PUBLIC_CONTRACT": "1"]
-        )
+        ))
     )
 
     let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
-    let httpConfig = XcodeMCP.Configuration(
+    let httpConfig = XcodeMCPConfiguration(
         transport: .streamableHTTP(endpoint: endpoint),
         clientName: "PublicHTTPContractClient",
         clientVersion: "1.0",
         requestTimeout: .seconds(1)
     )
-    let discoveryConfig = XcodeMCP.Configuration(
+    let discoveryConfig = XcodeMCPConfiguration(
         transport: .streamableHTTP(discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json"))
     )
-    let proxyDiscoveryConfig = XcodeMCP.Configuration(
+    let proxyDiscoveryConfig = XcodeMCPConfiguration(
         transport: .streamableHTTPProxyDiscovery(
             environment: [
                 "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/xcode-mcp/proxy-endpoint.json",
@@ -742,8 +742,8 @@ func compileOnlyClientDomainSurface() throws {
     )
 }
 
-func compileOnlyClientLifecycleSurface(config: XcodeMCP.Configuration) async throws {
-    let client = try await XcodeMCP(config: config)
+func compileOnlyClientLifecycleSurface(config: XcodeMCPConfiguration) async throws {
+    let client = try await XcodeMCP(configuration: config)
     _ = try await client.listTools()
     _ = try await client.callTool(
         "DocumentationSearch",
@@ -829,8 +829,8 @@ private let xcodeMCPProxyKitOnlyClientSource = """
 import XcodeMCPProxyKit
 
 func compileOnlyProxyProductOnlySurface() {
-    let config = XcodeMCPProxyServer.Configuration()
-    let server = XcodeMCPProxyServer(config: config)
+    let config = XcodeMCPProxyServerConfiguration()
+    let server = XcodeMCPProxyServer(configuration: config)
     let installer = XcodeMCPProxyInstaller()
 
     _ = (
@@ -848,8 +848,8 @@ import XcodeMCPKit
 import XcodeMCPProxyKit
 
 func compileOnlyProxyConfigurationSurface() {
-    let config = XcodeMCPProxyServer.Configuration(
-        bind: .init(host: "127.0.0.1", port: 0),
+    let config = XcodeMCPProxyServerConfiguration(
+        bindAddress: .init(host: "127.0.0.1", port: 0),
         upstream: .defaultMCPBridge(
             processesPerXcode: 1,
             sessionID: "session-1"
@@ -857,8 +857,8 @@ func compileOnlyProxyConfigurationSurface() {
         limits: .init(maxBodyBytes: 1_048_576, requestTimeout: 120),
         configurationFilePath: "/tmp/xcode-mcp-config.toml",
         discovery: .init(fileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
-        approval: .manual,
-        features: .init(
+        approvalPolicy: .manual,
+        featurePolicy: .init(
             prewarmToolsList: false,
             refreshCodeIssuesMode: .proxy
         ),
@@ -880,7 +880,7 @@ func compileOnlyProxyConfigurationSurface() {
             ]
         )
     )
-    let customUpstreamConfig = XcodeMCPProxyServer.Configuration(
+    let customUpstreamConfig = XcodeMCPProxyServerConfiguration(
         upstream: .custom(
             command: "/usr/bin/env",
             arguments: ["printf"],
@@ -893,19 +893,19 @@ func compileOnlyProxyConfigurationSurface() {
     let typedHandshake = config.initializeHandshake
     let typedCapabilities: [String: MCPJSONValue]? = typedHandshake?.capabilities
     let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
-    let upstreamMode = XcodeMCPProxyServer.Configuration.RefreshCodeIssuesMode.upstream
-    let server = XcodeMCPProxyServer(config: config)
-    let endpointConfig = XcodeMCPProxyAdapterEndpointResolver.Configuration(
+    let upstreamMode = XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode.upstream
+    let server = XcodeMCPProxyServer(configuration: config)
+    let endpointConfig = XcodeMCPProxyAdapterEndpointResolutionOptions(
         explicitURL: "http://localhost:8765/mcp",
         environment: [:]
     )
     let endpoint = try? XcodeMCPProxyAdapterEndpointResolver().resolve(endpointConfig)
-    let adapterConfig = XcodeMCPProxyStdioAdapter.Configuration(
+    let adapterConfig = XcodeMCPProxyStdioAdapterConfiguration(
         endpoint: endpointConfig,
         requestTimeout: 30
     )
     let installer = XcodeMCPProxyInstaller(
-        configuration: .init(prefix: "/tmp/xcode-mcp", bindir: nil, dryRun: true)
+        configuration: .init(prefix: "/tmp/xcode-mcp", binaryDirectory: nil, dryRun: true)
     )
     let plan = installer.plan(
         executableURL: URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-proxy-install")

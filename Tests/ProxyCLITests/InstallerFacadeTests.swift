@@ -48,12 +48,12 @@ struct InstallerFacadeTests {
         let options = try #require(plan.configuration)
 
         #expect(options.prefix == "/tmp/prefix")
-        #expect(options.bindir == "/tmp/bin")
+        #expect(options.binaryDirectory == "/tmp/bin")
         #expect(options.dryRun == true)
         #expect(
             XcodeMCPProxyInstaller.resolveBinDirectory(
                 prefix: options.prefix,
-                bindir: options.bindir
+                binaryDirectory: options.binaryDirectory
             ).path == "/tmp/bin"
         )
     }
@@ -62,7 +62,7 @@ struct InstallerFacadeTests {
         let home = NSHomeDirectory()
         let resolved = XcodeMCPProxyInstaller.resolveBinDirectory(
             prefix: "~/custom",
-            bindir: nil
+            binaryDirectory: nil
         )
 
         #expect(resolved.path == "\(home)/custom/bin")
@@ -85,7 +85,7 @@ struct InstallerFacadeTests {
 
         #expect(throws: XcodeMCPProxyInstaller.Error.self) {
             try XcodeMCPProxyInstaller(
-                configuration: .init(prefix: nil, bindir: tempDir.path, dryRun: false)
+                configuration: .init(prefix: nil, binaryDirectory: tempDir.path, dryRun: false)
             ).install(
                 executableURL: executableURL,
                 fileManager: .default,
@@ -135,7 +135,7 @@ struct InstallerFacadeTests {
     @Test func installerPlanUsesBinaryListAndBindirPriority() throws {
         let executableURL = URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-proxy-install")
         let installer = XcodeMCPProxyInstaller(
-            configuration: .init(prefix: "/tmp/prefix", bindir: "/tmp/bin", dryRun: true)
+            configuration: .init(prefix: "/tmp/prefix", binaryDirectory: "/tmp/bin", dryRun: true)
         )
         let plan = installer.plan(executableURL: executableURL)
 

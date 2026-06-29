@@ -2520,7 +2520,7 @@ struct HTTPHandlerTests {
         let config = makeConfig()
         let sessionManager = TestRuntimeCoordinator(config: config)
         let forwardingService = MCPForwardingService(
-            config: config,
+            configuration: config,
             sessionManager: sessionManager
         )
 

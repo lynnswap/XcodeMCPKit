@@ -8,7 +8,7 @@ struct XcodeMCPTests {
     @Test func asyncInitializerPerformsMCPHandshake() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(
-            config: .init(
+                configuration: .init(
                 clientName: "UnitTestClient",
                 clientVersion: "1.2.3",
                 capabilities: [
@@ -342,7 +342,7 @@ struct XcodeMCPTests {
     @Test func cancelledRequestCancelsInFlightTransportSend() async throws {
         let transport = HangingSendXcodeMCPTransport()
         let xcode = try await XcodeMCP(
-            config: .init(requestTimeout: nil),
+                configuration: .init(requestTimeout: nil),
             transport: transport
         )
 
@@ -603,7 +603,7 @@ struct XcodeMCPTests {
     }
 
     @Test func streamableHTTPProxyDiscoveryUsesStandardProxyDiscoveryEnvironment() throws {
-        let explicitDiscovery = XcodeMCP.Configuration.Transport.streamableHTTPProxyDiscovery(
+        let explicitDiscovery = XcodeMCPConfiguration.Transport.streamableHTTPProxyDiscovery(
             environment: [
                 "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/public-contract/endpoint.json",
                 "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/ignored-cache-root",
@@ -615,7 +615,7 @@ struct XcodeMCPTests {
             )
         )
 
-        let cacheRootDiscovery = XcodeMCP.Configuration.Transport.streamableHTTPProxyDiscovery(
+        let cacheRootDiscovery = XcodeMCPConfiguration.Transport.streamableHTTPProxyDiscovery(
             environment: [
                 "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/public-contract-cache",
             ]
@@ -655,7 +655,7 @@ struct XcodeMCPTests {
             "Streamable HTTP discovery file is missing, stale, or invalid: \(fileURL.path)"
         )) {
             _ = try await XcodeMCP(
-                config: .init(
+                    configuration: .init(
                     transport: .streamableHTTP(discoveryFile: fileURL),
                     requestTimeout: .seconds(2)
                 ),
@@ -680,7 +680,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-            config: .init(
+                configuration: .init(
                 transport: .streamableHTTP(endpoint: endpoint),
                 clientName: "HTTPContractClient",
                 requestTimeout: .seconds(2)
@@ -735,7 +735,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -783,7 +783,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -822,7 +822,7 @@ struct XcodeMCPTests {
         )
         let xcode = try await waitWithTimeout("SSE initialize response was not delivered") {
             try await XcodeMCP(
-                config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                    configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
                 transport: transport
             )
         }
@@ -848,7 +848,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -892,7 +892,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -933,7 +933,7 @@ struct XcodeMCPTests {
             }
         )
         let xcode = try await XcodeMCP(
-            config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
         defer {
@@ -980,7 +980,7 @@ struct XcodeMCPTests {
             data: nil
         )) {
             _ = try await XcodeMCP(
-                config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                    configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
                 transport: transport
             )
         }
@@ -1010,7 +1010,7 @@ struct XcodeMCPTests {
             data: nil
         )) {
             _ = try await XcodeMCP(
-                config: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                    configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
                 transport: transport
             )
         }

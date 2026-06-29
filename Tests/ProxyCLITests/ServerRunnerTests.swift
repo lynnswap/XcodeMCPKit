@@ -23,10 +23,10 @@ struct ServerRunnerTests {
         #expect(plan.action == .dryRun)
         #expect(plan.options.forceRestart == true)
         #expect(plan.options.dryRun == true)
-        #expect(config.bind.host == "127.0.0.1")
-        #expect(config.bind.port == 9000)
-        #expect(config.approval == .automatic)
-        #expect(config.features.refreshCodeIssuesMode == .upstream)
+        #expect(config.bindAddress.host == "127.0.0.1")
+        #expect(config.bindAddress.port == 9000)
+        #expect(config.approvalPolicy == .automatic)
+        #expect(config.featurePolicy.refreshCodeIssuesMode == .upstream)
         #expect(
             plan.resolvedDryRunCommandLine ==
                 "xcode-mcp-proxy-server --listen 127.0.0.1:9000 --auto-approve --refresh-code-issues-mode upstream"
@@ -46,10 +46,10 @@ struct ServerRunnerTests {
 
         let config = try #require(plan.configuration)
         #expect(plan.action == .start)
-        #expect(config.bind.host == "127.0.0.1")
-        #expect(config.bind.port == 9999)
+        #expect(config.bindAddress.host == "127.0.0.1")
+        #expect(config.bindAddress.port == 9999)
         #expect(config.configurationFilePath == "/tmp/proxy-config.toml")
-        #expect(config.features.refreshCodeIssuesMode == .upstream)
+        #expect(config.featurePolicy.refreshCodeIssuesMode == .upstream)
         #expect(
             plan.resolvedDryRunCommandLine ==
                 "xcode-mcp-proxy-server --listen 127.0.0.1:9999 --config /tmp/proxy-config.toml --refresh-code-issues-mode upstream"
@@ -88,8 +88,8 @@ struct ServerRunnerTests {
         )
 
         let config = try #require(plan.configuration)
-        #expect(config.bind.host == "127.0.0.1")
-        #expect(config.bind.port == 9999)
+        #expect(config.bindAddress.host == "127.0.0.1")
+        #expect(config.bindAddress.port == 9999)
     }
 
     @Test func serverRunnerPrintsVersionBeforeValidation() async throws {
@@ -207,8 +207,8 @@ struct ServerRunnerTests {
         #expect(exitCode == 0)
         #expect(restarted.snapshot() == ["127.0.0.1:9000"])
         let config = try #require(fakeServer.recordedConfig())
-        #expect(config.bind.host == "127.0.0.1")
-        #expect(config.bind.port == 9000)
+        #expect(config.bindAddress.host == "127.0.0.1")
+        #expect(config.bindAddress.port == 9000)
         #expect(fakeServer.startCount() == 1)
         #expect(fakeServer.waitCount() == 1)
     }
@@ -352,7 +352,7 @@ private func makeServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
-    makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
+    makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
         RecordingProxyServer()
     },
     isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool = { _ in false },
@@ -388,10 +388,10 @@ private final class FailingProxyServer: XcodeMCPProxyServer.LaunchServer {
 
 private final class RecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
     private let state = LockedBox(
-        (config: Optional<XcodeMCPProxyServer.Configuration>.none, startCount: 0, waitCount: 0)
+        (config: Optional<XcodeMCPProxyServerConfiguration>.none, startCount: 0, waitCount: 0)
     )
 
-    func record(config: XcodeMCPProxyServer.Configuration) {
+    func record(config: XcodeMCPProxyServerConfiguration) {
         state.withValue { value in
             value.config = config
         }
@@ -410,7 +410,7 @@ private final class RecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
         }
     }
 
-    func recordedConfig() -> XcodeMCPProxyServer.Configuration? {
+    func recordedConfig() -> XcodeMCPProxyServerConfiguration? {
         state.snapshot().config
     }
 

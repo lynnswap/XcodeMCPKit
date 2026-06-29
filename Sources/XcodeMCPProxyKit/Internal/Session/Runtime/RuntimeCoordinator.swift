@@ -527,7 +527,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let brokerState = CanonicalBrokerState()
         self.canonicalBrokerState = brokerState
         self.initializeManager = InitializeManager(brokerState: brokerState)
-        self.sessionRegistry = SessionRegistry(config: config)
+        self.sessionRegistry = SessionRegistry(configuration: config)
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.leaseManager = LeaseManager()
         self.upstreamRouter = UpstreamRouter(upstreamCount: upstreams.count)

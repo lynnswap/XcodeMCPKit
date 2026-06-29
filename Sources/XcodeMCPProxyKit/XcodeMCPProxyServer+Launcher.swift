@@ -6,13 +6,13 @@ extension XcodeMCPProxyServer {
 
     package struct Launcher {
         package struct Dependencies {
-            package var makeServer: (XcodeMCPProxyServer.Configuration) -> any LaunchServer
+            package var makeServer: (XcodeMCPProxyServerConfiguration) -> any LaunchServer
             package var isAddressAlreadyInUse: (Swift.Error) -> Bool
             package var forceRestartExistingServer: (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool
             package var detectExistingServerProcessIDs: (_ host: String, _ port: Int) -> [Int]
 
             package init(
-                makeServer: @escaping (XcodeMCPProxyServer.Configuration) -> any LaunchServer,
+                makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any LaunchServer,
                 isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
                 forceRestartExistingServer: @escaping (
                     _ host: String,
@@ -31,7 +31,7 @@ extension XcodeMCPProxyServer {
                 let existingServerController = XcodeMCPProxyServer.ExistingServerController.liveValue
                 return Self(
                     makeServer: { config in
-                        XcodeMCPProxyServer(config: config)
+                        XcodeMCPProxyServer(configuration: config)
                     },
                     isAddressAlreadyInUse: XcodeMCPProxyServer.isAddressAlreadyInUse,
                     forceRestartExistingServer: { host, port, stderr in
@@ -102,10 +102,10 @@ extension XcodeMCPProxyServer {
                 )
             }
 
-            if plan.options.forceRestart, serverConfig.bind.port > 0 {
+            if plan.options.forceRestart, serverConfig.bindAddress.port > 0 {
                 _ = dependencies.forceRestartExistingServer(
-                    serverConfig.bind.host,
-                    serverConfig.bind.port,
+                    serverConfig.bindAddress.host,
+                    serverConfig.bindAddress.port,
                     stderr
                 )
             }
@@ -116,13 +116,13 @@ extension XcodeMCPProxyServer {
                 try await server.wait()
                 return 0
             } catch {
-                if serverConfig.bind.port > 0, dependencies.isAddressAlreadyInUse(error) {
+                if serverConfig.bindAddress.port > 0, dependencies.isAddressAlreadyInUse(error) {
                     let diagnostic = XcodeMCPProxyServer.PortInUseError(
-                        host: serverConfig.bind.host,
-                        port: serverConfig.bind.port,
+                        host: serverConfig.bindAddress.host,
+                        port: serverConfig.bindAddress.port,
                         processIdentifiers: dependencies.detectExistingServerProcessIDs(
-                            serverConfig.bind.host,
-                            serverConfig.bind.port
+                            serverConfig.bindAddress.host,
+                            serverConfig.bindAddress.port
                         )
                     )
                     stderr(diagnostic.description)

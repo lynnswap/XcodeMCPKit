@@ -156,11 +156,11 @@ public actor XcodeMCPTestRuntime {
     /// `notifications/initialized` handshake. Tests can inspect
     /// ``recordedMessages()`` to assert request shape.
     public func makeClient(
-        config: XcodeMCP.Configuration = XcodeMCP.Configuration()
+        configuration: XcodeMCPConfiguration = XcodeMCPConfiguration()
     ) async throws -> XcodeMCP {
         let transport = XcodeMCPTestTransport(runtime: self)
         transportContinuations[transport.id] = transport.continuation
-        return try await XcodeMCP(config: config, transport: transport)
+        return try await XcodeMCP(configuration: configuration, transport: transport)
     }
 
     /// Replaces the tool catalog returned from `tools/list`.

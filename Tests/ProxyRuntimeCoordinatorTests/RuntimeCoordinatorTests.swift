@@ -5804,9 +5804,9 @@ struct RuntimeCoordinatorTests {
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
         let publicServer = XcodeMCPProxyServer(
-            config: .init(
+            configuration: .init(
                 configurationFilePath: configPath,
-                features: .init(prewarmToolsList: false),
+                featurePolicy: .init(prewarmToolsList: false),
                 initializeHandshake: .init(
                     clientInfo: .init(name: "typed-proxy"),
                     capabilities: [

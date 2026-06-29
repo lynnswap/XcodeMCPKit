@@ -82,7 +82,7 @@ final class ClientMCPRequestExecutor: Sendable {
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
-            config: config,
+            configuration: config,
             sessionManager: sessionManager
         )
         self.refreshWorkflow = RefreshCodeIssues.Workflow(

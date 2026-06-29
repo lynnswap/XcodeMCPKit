@@ -11,6 +11,7 @@ running `xcode-mcp-proxy-server` Streamable HTTP endpoint.
 The public API is intentionally small:
 
 - `XcodeMCP`, the top-level async client
+- `XcodeMCPConfiguration`, for transport and initialize settings
 - `MCPJSONValue`, for dynamic MCP payloads
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
 - `XcodeMCPError`
@@ -31,13 +32,12 @@ Add the `XcodeMCPKit` product to your target, then construct a client:
 ```swift
 import XcodeMCPKit
 
-let config = XcodeMCP.Configuration(
-    transport: .localBridge(.defaultMCPBridge),
+let config = XcodeMCPConfiguration(
     clientName: "MyApp",
     clientVersion: "1.0"
 )
 
-let xcode = try await XcodeMCP(config: config)
+let xcode = try await XcodeMCP(configuration: config)
 let tools = try await xcode.listTools()
 
 if tools.contains(where: { $0.name == "DocumentationSearch" }) {
@@ -63,7 +63,7 @@ await xcode.close()
 To use a running `xcode-mcp-proxy-server`, configure Streamable HTTP:
 
 ```swift
-let config = XcodeMCP.Configuration(
+let config = XcodeMCPConfiguration(
     transport: .streamableHTTP(
         endpoint: URL(string: "http://127.0.0.1:8765/mcp")!
     ),
@@ -71,13 +71,13 @@ let config = XcodeMCP.Configuration(
     clientVersion: "1.0"
 )
 
-let xcode = try await XcodeMCP(config: config)
+let xcode = try await XcodeMCP(configuration: config)
 ```
 
 Discovery files written by the proxy are supported as well:
 
 ```swift
-let config = XcodeMCP.Configuration(
+let config = XcodeMCPConfiguration(
     transport: .streamableHTTP(
         discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json")
     )
@@ -88,7 +88,7 @@ For the standard proxy discovery location, including
 `XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT` overrides, use:
 
 ```swift
-let config = XcodeMCP.Configuration(
+let config = XcodeMCPConfiguration(
     transport: .streamableHTTPProxyDiscovery()
 )
 ```
@@ -132,14 +132,13 @@ try await xcode.notify(
 
 ## Configuration
 
-`XcodeMCP.Configuration` controls transport selection and MCP initialization:
+`XcodeMCPConfiguration` controls transport selection and MCP initialization:
 
 - `transport` chooses `.localBridge(...)`, `.streamableHTTP(endpoint:)`,
   `.streamableHTTP(discoveryFile:)`, or `.streamableHTTPProxyDiscovery()`.
-- The compatibility `bridge` property still chooses the upstream bridge for
-  local process transport. The default is Xcode's `/usr/bin/xcrun mcpbridge`.
-- Use bridge `.custom(command:arguments:environment:)` only when embedding a
-  non-default bridge command.
+- The default transport is Xcode's `/usr/bin/xcrun mcpbridge`.
+- Use `.localBridge(.custom(command:arguments:environment:))` only when
+  embedding a non-default bridge command.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
 - `requestTimeout` bounds requests when non-`nil`.
 

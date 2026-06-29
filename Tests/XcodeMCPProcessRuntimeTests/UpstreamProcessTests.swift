@@ -278,14 +278,14 @@ private func makeFakeUpstreamSession(
         clock: clock,
         driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
     )
-    return try await UpstreamProcess(config: config).startSession()
+    return try await UpstreamProcess(configuration: config).startSession()
 }
 
 private func withLiveUpstreamSession<T: Sendable>(
     config: UpstreamProcess.Config,
     _ body: @escaping @Sendable (any UpstreamSession) async throws -> T
 ) async throws -> T {
-    let session = try await UpstreamProcess(config: config).startSession()
+    let session = try await UpstreamProcess(configuration: config).startSession()
     do {
         let result = try await body(session)
         await session.stop()

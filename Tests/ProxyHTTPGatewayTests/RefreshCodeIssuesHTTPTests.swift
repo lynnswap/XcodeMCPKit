@@ -2299,7 +2299,7 @@ extension HTTPHandlerTests {
         )
         sessionManager.setInitialized(true)
         let forwardingService = MCPForwardingService(
-            config: config,
+            configuration: config,
             sessionManager: sessionManager
         )
         let eventLoop = EmbeddedEventLoop()
@@ -2435,7 +2435,7 @@ extension HTTPHandlerTests {
         sessionManager.setAvailableUpstreamIndices([1])
 
         let forwardingService = MCPForwardingService(
-            config: config,
+            configuration: config,
             sessionManager: sessionManager
         )
 
@@ -2484,7 +2484,7 @@ extension HTTPHandlerTests {
         sessionManager.setPreferredUpstreamIndex(0)
 
         let forwardingService = MCPForwardingService(
-            config: config,
+            configuration: config,
             sessionManager: sessionManager
         )
 
@@ -2535,7 +2535,7 @@ extension HTTPHandlerTests {
         sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: 0))
 
         let forwardingService = MCPForwardingService(
-            config: config,
+            configuration: config,
             sessionManager: sessionManager
         )
 

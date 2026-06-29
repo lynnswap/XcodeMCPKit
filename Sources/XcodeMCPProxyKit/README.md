@@ -12,10 +12,13 @@ compose the STDIO adapter and installer flows.
 The public API includes:
 
 - `XcodeMCPProxyServer`, the embeddable proxy server lifecycle object
+- `XcodeMCPProxyServerConfiguration`, the embeddable server configuration
 - `XcodeMCPProxyServer.resolveLaunchPlan(...)` for launcher argv/environment
   normalization
 - `XcodeMCPProxyStdioAdapter`, the STDIO compatibility adapter
+- `XcodeMCPProxyStdioAdapterConfiguration`, the adapter configuration
 - `XcodeMCPProxyAdapterEndpointResolver`, the adapter endpoint resolver
+- `XcodeMCPProxyAdapterEndpointResolutionOptions`, endpoint resolution inputs
 - `XcodeMCPProxyInstaller`, the install plan and copy/build API
 
 For most users, the root README's `xcode-mcp-proxy-server` command is simpler.
@@ -31,15 +34,15 @@ directly:
 ```swift
 import XcodeMCPProxyKit
 
-let config = XcodeMCPProxyServer.Configuration(
-    bind: .localhost(port: 8765),
+let config = XcodeMCPProxyServerConfiguration(
+    bindAddress: .localhost(port: 8765),
     upstream: .defaultMCPBridge(processesPerXcode: 1),
     limits: .init(maxBodyBytes: 1_048_576, requestTimeout: 300),
     discovery: .init(fileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-proxy.json")),
-    approval: .manual
+    approvalPolicy: .manual
 )
 
-let server = XcodeMCPProxyServer(config: config)
+let server = XcodeMCPProxyServer(configuration: config)
 let endpoint = try server.startAndWriteDiscovery()
 print("Listening on \(endpoint.url)")
 
@@ -58,14 +61,14 @@ look up the running HTTP endpoint.
 
 ## Configuration
 
-Use `XcodeMCPProxyServer.Configuration` to configure the server:
+Use `XcodeMCPProxyServerConfiguration` to configure the server:
 
-- `bind` chooses the HTTP bind address.
+- `bindAddress` chooses the HTTP bind address.
 - `upstream` chooses the upstream MCP bridge and process count.
 - `limits` bounds request timeout and body size.
 - `discovery` overrides the endpoint discovery file.
-- `approval` controls Xcode permission dialog automation.
-- `features.refreshCodeIssuesMode` selects proxy diagnostics or upstream
+- `approvalPolicy` controls Xcode permission dialog automation.
+- `featurePolicy.refreshCodeIssuesMode` selects proxy diagnostics or upstream
   forwarding for `XcodeRefreshCodeIssuesInFile`.
 - `toolPolicy.disabledToolNames` hides tools from `tools/list` and rejects
   matching `tools/call` requests locally.
@@ -81,7 +84,7 @@ initialize handshake fields.
 import XcodeMCPKit
 import XcodeMCPProxyKit
 
-let config = XcodeMCPProxyServer.Configuration(
+let config = XcodeMCPProxyServerConfiguration(
     configurationFilePath: "/etc/xcode-mcp/proxy.toml",
     toolPolicy: .init(
         disabledToolNames: ["RunAllTests", "RunSomeTests"]
@@ -133,13 +136,13 @@ case .showVersion:
 case .dryRun:
     print(plan.resolvedDryRunCommandLine ?? "")
 case .start:
-    let server = XcodeMCPProxyServer(config: plan.configuration!)
+    let server = XcodeMCPProxyServer(configuration: plan.configuration!)
     _ = try server.startAndWriteDiscovery()
     try await server.wait()
 }
 ```
 
-`LaunchPlan` exposes the resolved server `Configuration`, normalized
+`LaunchPlan` exposes the resolved server `XcodeMCPProxyServerConfiguration`, normalized
 `LaunchOptions`, stable dry-run command line, and display text. Port-in-use
 messages are represented by `XcodeMCPProxyServer.PortInUseError`, and product
 version information is available through `XcodeMCPProxyServer.productMetadata`.
