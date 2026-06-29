@@ -35,12 +35,13 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?
     ) async throws -> JSONValue {
         let unavailable = unavailableXcodeProcessIDs()
+        let catalogedProcessIDs = processToolCatalogRegistry.processIDsWithCatalog()
         let catalogProcessIDs = processToolCatalogRegistry.processIDsHavingTool("XcodeListWindows")
         let routes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            guard catalogProcessIDs.isEmpty || catalogProcessIDs.contains(route.target.processID) else {
+            guard catalogedProcessIDs.isEmpty || catalogProcessIDs.contains(route.target.processID) else {
                 return nil
             }
             let upstreamIndices = usableInitializedUpstreamIndices(in: route)

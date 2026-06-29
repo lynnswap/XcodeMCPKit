@@ -4527,6 +4527,45 @@ struct RuntimeCoordinatorTests {
         #expect(message.contains("tab-a"))
     }
 
+    @Test func liveXcodeListWindowsSkipsCatalogedRoutesWithoutTool() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 622, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 623, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [toolDescriptor(name: "DocumentationSearch")]),
+                (target1, 1, [toolDescriptor(name: "BuildProject")]),
+            ]
+        )
+
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.unavailable) {
+            _ = try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        #expect(await upstream0.sentCount() == 0)
+        #expect(await upstream1.sentCount() == 0)
+    }
+
     @Test func publicXcodeListWindowsMixedNonToolBatchIsRejected() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

@@ -1003,7 +1003,7 @@ private func parseWindowTab(
     for text in allStrings(from: value) {
         for line in text.split(whereSeparator: \.isNewline) {
             let lineText = String(line)
-            guard let tab = extractValue(after: "tabIdentifier:", before: ",", in: lineText),
+            guard let tab = extractValue(after: "tabIdentifier:", before: ", workspacePath: ", in: lineText),
                   let workspace = extractValue(after: "workspacePath:", before: nil, in: lineText)
             else {
                 continue
