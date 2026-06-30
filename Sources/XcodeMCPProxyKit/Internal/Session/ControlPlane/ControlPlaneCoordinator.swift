@@ -484,7 +484,6 @@ actor ControlPlaneCoordinator {
             load.foregroundWaiterCount = max(0, load.foregroundWaiterCount - 1)
         }
         let shouldCancel = shouldCancelToolsCatalogLoadAfterWaiterRemoval(load)
-        waiter.continuation.resume(throwing: error)
         if shouldCancel {
             clearToolsCatalogLoadState(loadID: loadID)
             cancelToolsCatalogLoad(load, error: CancellationError())
@@ -492,6 +491,7 @@ actor ControlPlaneCoordinator {
             setToolsCatalogLoadState(load)
         }
         syncDebug()
+        waiter.continuation.resume(throwing: error)
     }
 
     func cancelToolsCatalogWaiter(waiterID: WaiterID) {
@@ -534,7 +534,6 @@ actor ControlPlaneCoordinator {
         guard var load = windowLoads[route], load.loadID == loadID else { return }
         guard let waiter = load.waiters.removeValue(forKey: waiterID) else { return }
         waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(throwing: error)
         if load.waiters.isEmpty {
             windowLoads.removeValue(forKey: route)
             cancelWindowLoad(load, error: CancellationError())
@@ -542,6 +541,7 @@ actor ControlPlaneCoordinator {
             windowLoads[route] = load
         }
         syncDebug()
+        waiter.continuation.resume(throwing: error)
     }
 
     func cancelWindowWaiter(
@@ -570,6 +570,9 @@ actor ControlPlaneCoordinator {
         let waiters = Array(load.waiters.values)
         for waiter in waiters {
             waiter.timeoutTask?.cancel()
+        }
+        syncDebug()
+        for waiter in waiters {
             switch (result, completedUnderCurrentGeneration) {
             case (.success(let loaded), true):
                 waiter.continuation.resume(returning: loaded.rawResult)
@@ -579,7 +582,6 @@ actor ControlPlaneCoordinator {
                 waiter.continuation.resume(throwing: error)
             }
         }
-        syncDebug()
     }
 
     func completeWindowLoad(
@@ -593,6 +595,9 @@ actor ControlPlaneCoordinator {
         let waiters = Array(load.waiters.values)
         for waiter in waiters {
             waiter.timeoutTask?.cancel()
+        }
+        syncDebug()
+        for waiter in waiters {
             switch (result, completedUnderCurrentGeneration) {
             case (.success(let loaded), true):
                 waiter.continuation.resume(returning: loaded)
@@ -602,6 +607,5 @@ actor ControlPlaneCoordinator {
                 waiter.continuation.resume(throwing: error)
             }
         }
-        syncDebug()
     }
 }
