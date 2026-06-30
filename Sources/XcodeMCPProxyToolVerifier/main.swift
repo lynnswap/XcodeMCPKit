@@ -430,7 +430,9 @@ private struct VerificationState {
             ])
         case "DeviceInteractionSynthesize":
             return [
-                "interactionSessionKey": .string(interactionSessionKey),
+                // Xcode returns interactionSessionKey from StartSession, but
+                // Synthesize's input schema names the argument interactSessionKey.
+                "interactSessionKey": .string(interactionSessionKey),
             ]
         case "DocumentationSearch":
             return ["query": .string("NavigationStack")]

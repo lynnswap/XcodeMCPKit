@@ -184,6 +184,10 @@ screenshot and UI hierarchy.
 - Optional arguments: `interactionCommand`
 - Main result fields: `thumbnailScreenshotPath`, `screenshotPath`, `hierarchyPath`, `logsPath`, `applicationState`
 
+Pass the `interactionSessionKey` value returned by
+`DeviceInteractionStartSession` as this tool's `interactSessionKey` argument.
+The field names differ in Xcode 27's tool schema.
+
 The tool supports taps, swipes and scrolling, typing, hardware buttons,
 orientation changes, and state capture. Coordinates should be derived from the
 latest hierarchy dump, not guessed from screenshots alone.
