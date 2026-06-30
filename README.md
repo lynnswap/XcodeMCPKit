@@ -205,6 +205,7 @@ Edit the draft release notes, then publish the release manually.
 - [Troubleshooting](Docs/troubleshooting.md)
 - [MCP / Xcode MCP Benchmark Notes](Docs/mcp-benchmark.md)
 - [MCP Connection Permission Dialog Investigation](Docs/mcp-permission-dialog-investigation.md)
+- [Xcode 27 mcpbridge Tool Additions](Docs/xcode-27-mcpbridge-tools.md)
 
 ## License
 
