@@ -151,6 +151,81 @@ package actor RecordedValues<Value: Sendable> {
     }
 }
 
+package enum TestResourceGate {
+    private static let processHeavyStdioAdapterGate = AsyncResourceGate()
+
+    package static func withProcessHeavyStdioAdapterAccess<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        try await processHeavyStdioAdapterGate.withAccess(operation)
+    }
+}
+
+private final class AsyncResourceGate: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private struct State {
+        var isAvailable = true
+        var waiters: [Waiter] = []
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    func withAccess<T>(_ operation: () async throws -> T) async throws -> T {
+        try await acquire()
+        defer {
+            release()
+        }
+        try Task.checkCancellation()
+        return try await operation()
+    }
+
+    private func acquire() async throws {
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let shouldResume = state.withLockedValue { state -> Bool in
+                    if state.isAvailable {
+                        state.isAvailable = false
+                        return true
+                    }
+                    state.waiters.append(Waiter(id: waiterID, continuation: continuation))
+                    return false
+                }
+                if shouldResume {
+                    continuation.resume(returning: ())
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter(id: waiterID)
+        }
+    }
+
+    private func release() {
+        let waiter = state.withLockedValue { state -> Waiter? in
+            guard !state.waiters.isEmpty else {
+                state.isAvailable = true
+                return nil
+            }
+            return state.waiters.removeFirst()
+        }
+        waiter?.continuation.resume(returning: ())
+    }
+
+    private func cancelWaiter(id: UUID) {
+        let waiter = state.withLockedValue { state -> Waiter? in
+            guard let index = state.waiters.firstIndex(where: { $0.id == id }) else {
+                return nil
+            }
+            return state.waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(throwing: CancellationError())
+    }
+}
+
 @discardableResult
 package func waitWithTimeout<T: Sendable>(
     _ description: String = "timed out waiting for async operation",

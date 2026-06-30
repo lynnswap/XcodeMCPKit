@@ -415,6 +415,51 @@ private struct StdioAdapterFacadeHarness {
         whileRunning: ((StubMCPHTTPServer) async throws -> Void)? = nil,
         afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)? = nil
     ) async throws -> StdioAdapterFacadeRunResult {
+        // Avoid false 5s timeouts when nested swift build contract tests run concurrently.
+        try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
+            try await runUnlocked(
+                responseMode: responseMode,
+                gatedResponseMethods: gatedResponseMethods,
+                hangingResponseMethod: hangingResponseMethod,
+                initializeProtocolVersion: initializeProtocolVersion,
+                hangsDELETE: hangsDELETE,
+                httpErrorResponsesByMethod: httpErrorResponsesByMethod,
+                openPostSSEMethods: openPostSSEMethods,
+                postSSEPreludeEventsByMethod: postSSEPreludeEventsByMethod,
+                getSSEEvents: getSSEEvents,
+                stdinLines: stdinLines,
+                proxyArguments: proxyArguments,
+                timeoutDescription: timeoutDescription,
+                timeout: timeout,
+                environment: environment,
+                adapterShutdownPolicy: adapterShutdownPolicy,
+                closeInputBeforeRunning: closeInputBeforeRunning,
+                whileRunning: whileRunning,
+                afterInputClosed: afterInputClosed
+            )
+        }
+    }
+
+    private static func runUnlocked(
+        responseMode: StubMCPHTTPResponseMode,
+        gatedResponseMethods: Set<String>,
+        hangingResponseMethod: String?,
+        initializeProtocolVersion: String?,
+        hangsDELETE: Bool,
+        httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse],
+        openPostSSEMethods: Set<String>,
+        postSSEPreludeEventsByMethod: [String: [[String: Any]]],
+        getSSEEvents: [[String: Any]],
+        stdinLines: [String],
+        proxyArguments: [String],
+        timeoutDescription: String,
+        timeout: Duration,
+        environment: [String: String],
+        adapterShutdownPolicy: StdioAdapterShutdownPolicy,
+        closeInputBeforeRunning: Bool,
+        whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
+        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
+    ) async throws -> StdioAdapterFacadeRunResult {
         let server = try StubMCPHTTPServer.start(
             responseMode: responseMode,
             gatedResponseMethods: gatedResponseMethods,

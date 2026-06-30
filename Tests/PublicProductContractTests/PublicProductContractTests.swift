@@ -1,10 +1,20 @@
+// swift-format-ignore-file
+
 import Darwin
 import Foundation
 import Testing
+import XcodeMCPCoreTestSupport
 
 @Suite
 struct PublicProductContractTests {
     @Test func publicProductsCompileFromExternalSwiftPMTargets() async throws {
+        // Avoid false 5s STDIO adapter timeouts while this test runs nested swift build processes.
+        try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
+            try await runPublicProductsCompileFromExternalSwiftPMTargets()
+        }
+    }
+
+    private func runPublicProductsCompileFromExternalSwiftPMTargets() async throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()

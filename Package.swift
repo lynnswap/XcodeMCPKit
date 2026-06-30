@@ -184,7 +184,9 @@ let package = Package(
         ),
         .testTarget(
             name: "PublicProductContractTests",
-            dependencies: [],
+            dependencies: [
+                "XcodeMCPCoreTestSupport",
+            ],
             path: "Tests/PublicProductContractTests",
             swiftSettings: strictSwiftSettings
         ),

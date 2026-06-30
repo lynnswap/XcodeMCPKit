@@ -7,6 +7,7 @@ import XcodeMCPCoreTestSupport
 
 package typealias AsyncTestTimeoutError = XcodeMCPCoreTestSupport.AsyncTestTimeoutError
 package typealias RecordedValues<Value: Sendable> = XcodeMCPCoreTestSupport.RecordedValues<Value>
+package typealias TestResourceGate = XcodeMCPCoreTestSupport.TestResourceGate
 package typealias TestClock = XcodeMCPCoreTestSupport.TestClock
 
 package final class LockedRecordedValues<Value: Sendable>: @unchecked Sendable {

@@ -7,6 +7,15 @@ import XcodeMCPProxyTestSupport
 @Suite(.serialized)
 struct StdioAdapterContractTests {
     @Test func eofWithInFlightStalledRequestClosesAndCancelsClientAfterDrainTimeout() async throws {
+        // Avoid false 5s timeouts when nested swift build contract tests run concurrently.
+        try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
+            try await runEOFWithInFlightStalledRequestClosesAndCancelsClientAfterDrainTimeout()
+        }
+    }
+
+    private func runEOFWithInFlightStalledRequestClosesAndCancelsClientAfterDrainTimeout()
+        async throws
+    {
         let shutdownClocks = makeStdioAdapterShutdownClocks()
         let client = StalledStdioAdapterHTTPClient()
         let inputPipe = Pipe()
@@ -75,6 +84,15 @@ struct StdioAdapterContractTests {
     }
 
     @Test func fatalInputProtocolViolationCancelsClientAndFinishesWaitWithoutSendingUpstream() async throws {
+        // Avoid false 5s timeouts when nested swift build contract tests run concurrently.
+        try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
+            try await runFatalInputProtocolViolationCancelsClientAndFinishesWaitWithoutSendingUpstream()
+        }
+    }
+
+    private func runFatalInputProtocolViolationCancelsClientAndFinishesWaitWithoutSendingUpstream()
+        async throws
+    {
         let client = StalledStdioAdapterHTTPClient()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
