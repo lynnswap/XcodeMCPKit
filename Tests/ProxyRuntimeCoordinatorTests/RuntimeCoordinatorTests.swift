@@ -1708,6 +1708,11 @@ struct RuntimeCoordinatorTests {
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
+        _ = try await waitWithTimeout("waiting for cancelled tools/list waiter cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
@@ -1837,6 +1842,12 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted waiter but received \(error)")
         }
 
+        _ = try await waitWithTimeout("waiting for first promoted tools/list waiter cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
+
         secondTask.cancel()
         do {
             _ = try await secondTask.value
@@ -1846,6 +1857,11 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted waiter but received \(error)")
         }
 
+        _ = try await waitWithTimeout("waiting for promoted tools/list waiter cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
@@ -5459,6 +5475,11 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError but received \(error)")
         }
 
+        _ = try await waitWithTimeout("waiting for cancelled XcodeListWindows waiter cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
@@ -5517,6 +5538,12 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted XcodeListWindows waiter but received \(error)")
         }
 
+        _ = try await waitWithTimeout("waiting for first promoted XcodeListWindows waiter cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 1
+            }
+        }
+
         secondTask.cancel()
         do {
             _ = try await secondTask.value
@@ -5526,6 +5553,11 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected CancellationError for promoted XcodeListWindows waiter but received \(error)")
         }
 
+        _ = try await waitWithTimeout("waiting for promoted XcodeListWindows waiter cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
