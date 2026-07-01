@@ -1,6 +1,8 @@
 import Foundation
 import Logging
 import NIO
+import SQLite3
+import XcodeMCPDocumentationSearchPrivate
 import XcodeMCPKit
 
 enum DocumentationProvider {}
@@ -418,24 +420,30 @@ struct DocumentationSearchInstalledAsset: Sendable, Equatable {
     let assetURL: URL
     let configURL: URL
     let indexURL: URL
+    let databaseDirectoryURL: URL
     let xcodeVersion: String
     let osVersion: String
     let documentationRelease: Int?
+    let embeddingModelName: String
 
     init(
         assetURL: URL,
         configURL: URL,
         indexURL: URL,
+        databaseDirectoryURL: URL,
         xcodeVersion: String,
         osVersion: String,
-        documentationRelease: Int?
+        documentationRelease: Int?,
+        embeddingModelName: String
     ) {
         self.assetURL = assetURL
         self.configURL = configURL
         self.indexURL = indexURL
+        self.databaseDirectoryURL = databaseDirectoryURL
         self.xcodeVersion = xcodeVersion
         self.osVersion = osVersion
         self.documentationRelease = documentationRelease
+        self.embeddingModelName = embeddingModelName
     }
 }
 
@@ -521,6 +529,9 @@ enum DocumentationSearchAssetLocator {
         let configURL = assetURL
             .appendingPathComponent("AssetData", isDirectory: true)
             .appendingPathComponent("config.json", isDirectory: false)
+        let databaseDirectoryURL = assetURL
+            .appendingPathComponent("AssetData", isDirectory: true)
+            .appendingPathComponent("documentation-db", isDirectory: true)
         let indexURL = assetURL
             .appendingPathComponent("AssetData", isDirectory: true)
             .appendingPathComponent("documentation-db", isDirectory: true)
@@ -546,14 +557,18 @@ enum DocumentationSearchAssetLocator {
             return .rejected("info_plist_decode_failed")
         }
         let properties = plist.mobileAssetProperties
+        let config = (try? JSONDecoder().decode(AssetConfig.self, from: Data(contentsOf: configURL)))
+            ?? AssetConfig()
 
         return .asset(DocumentationSearchInstalledAsset(
             assetURL: assetURL,
             configURL: configURL,
             indexURL: indexURL,
+            databaseDirectoryURL: databaseDirectoryURL,
             xcodeVersion: properties.xcodeVersion,
             osVersion: properties.osVersion,
-            documentationRelease: properties.documentationRelease
+            documentationRelease: properties.documentationRelease,
+            embeddingModelName: config.embeddingModelName ?? "md7v2"
         ))
     }
 
@@ -744,6 +759,14 @@ enum DocumentationSearchAssetLocator {
             return nil
         }
     }
+
+    private struct AssetConfig: Decodable {
+        let embeddingModelName: String?
+
+        init(embeddingModelName: String? = nil) {
+            self.embeddingModelName = embeddingModelName
+        }
+    }
 }
 
 struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
@@ -833,90 +856,6 @@ struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairi
     }
 }
 
-private final class ProcessOutputTimeoutWaiter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<ProcessOutput, Error>?
-    private var tasks: [Task<Void, Never>] = []
-    private var resolved = false
-
-    func wait(
-        for task: Task<ProcessOutput, Error>,
-        timeout: TimeAmount,
-        clock: ClockClient
-    ) async throws -> ProcessOutput {
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                setContinuation(continuation)
-                addTask(Task {
-                    do {
-                        let output = try await task.value
-                        self.resume(.success(output))
-                    } catch {
-                        self.resume(.failure(error))
-                    }
-                })
-                addTask(Task {
-                    await clock.sleep(.nanoseconds(timeout.nanoseconds))
-                    guard Task.isCancelled == false else {
-                        return
-                    }
-                    task.cancel()
-                    self.resume(.failure(TimeoutError()))
-                })
-            }
-        } onCancel: {
-            task.cancel()
-            resume(.failure(CancellationError()))
-        }
-    }
-
-    private func setContinuation(_ continuation: CheckedContinuation<ProcessOutput, Error>) {
-        lock.lock()
-        if resolved {
-            lock.unlock()
-            continuation.resume(throwing: CancellationError())
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-    }
-
-    private func addTask(_ task: Task<Void, Never>) {
-        lock.lock()
-        if resolved {
-            lock.unlock()
-            task.cancel()
-            return
-        }
-        tasks.append(task)
-        lock.unlock()
-    }
-
-    private func resume(_ result: Result<ProcessOutput, Error>) {
-        lock.lock()
-        guard resolved == false else {
-            lock.unlock()
-            return
-        }
-        resolved = true
-        let continuation = continuation
-        self.continuation = nil
-        let tasks = tasks
-        self.tasks.removeAll()
-        lock.unlock()
-
-        for task in tasks {
-            task.cancel()
-        }
-        switch result {
-        case .success(let output):
-            continuation?.resume(returning: output)
-        case .failure(let error):
-            continuation?.resume(throwing: error)
-        }
-    }
-}
-
 private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable {
     struct Result: Sendable {
         let repairResult: DocumentationSearchServiceRepairResult?
@@ -997,6 +936,372 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
     }
 }
 
+struct DocumentationAssetSemanticSearchResult: Sendable, Decodable, Equatable {
+    let assetID: String
+    let score: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case assetID = "asset_id"
+        case score
+    }
+}
+
+protocol DocumentationAssetSemanticSearching: Sendable {
+    func isAvailable() -> Bool
+    func search(
+        asset: DocumentationSearchInstalledAsset,
+        query: String,
+        limit: Int,
+        timeout: TimeAmount?
+    ) async throws -> [DocumentationAssetSemanticSearchResult]
+}
+
+struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearching {
+    init() {}
+
+    func isAvailable() -> Bool {
+        XCDocSemanticSearchRuntimeAvailable() != 0
+    }
+
+    func search(
+        asset: DocumentationSearchInstalledAsset,
+        query: String,
+        limit: Int,
+        timeout: TimeAmount?
+    ) async throws -> [DocumentationAssetSemanticSearchResult] {
+        guard timeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+        let timeoutSeconds: Double
+        if let timeout, timeout.nanoseconds > 0 {
+            timeoutSeconds = Double(timeout.nanoseconds) / 1_000_000_000.0
+        } else {
+            timeoutSeconds = 30
+        }
+        let databaseDirectoryPath = asset.databaseDirectoryURL.path
+        let embeddingModelName = asset.embeddingModelName
+        return try await Task.detached {
+            let json = try unsafe Self.copyResultJSON(
+                databaseDirectoryPath: databaseDirectoryPath,
+                embeddingModelName: embeddingModelName,
+                query: query,
+                limit: limit,
+                timeoutSeconds: timeoutSeconds
+            )
+            guard let data = json.data(using: .utf8) else {
+                return []
+            }
+            return try JSONDecoder().decode(
+                [DocumentationAssetSemanticSearchResult].self,
+                from: data
+            )
+        }.value
+    }
+
+    @unsafe private static func copyResultJSON(
+        databaseDirectoryPath: String,
+        embeddingModelName: String,
+        query: String,
+        limit: Int,
+        timeoutSeconds: Double
+    ) throws -> String {
+        var errorPointer: UnsafeMutablePointer<CChar>?
+        let resultPointer = unsafe databaseDirectoryPath.withCString { databasePathPointer in
+            unsafe embeddingModelName.withCString { embeddingModelNamePointer in
+                unsafe query.withCString { queryPointer in
+                    unsafe XCDocSemanticSearchCopyResultJSON(
+                        databasePathPointer,
+                        embeddingModelNamePointer,
+                        queryPointer,
+                        Int32(limit),
+                        timeoutSeconds,
+                        &errorPointer
+                    )
+                }
+            }
+        }
+        defer {
+            if let errorPointer = unsafe errorPointer {
+                unsafe XCDocSemanticSearchFree(errorPointer)
+            }
+            if let resultPointer = unsafe resultPointer {
+                unsafe XCDocSemanticSearchFree(resultPointer)
+            }
+        }
+        guard let resultPointer = unsafe resultPointer else {
+            let message: String
+            if let errorPointer = unsafe errorPointer {
+                message = unsafe String(cString: errorPointer)
+            } else {
+                message = "private semantic DocumentationSearch failed"
+            }
+            throw ControlPlane.Error.invalidResponse(message)
+        }
+        return unsafe String(cString: resultPointer)
+    }
+}
+
+private struct DocumentationAssetSearchRow: Sendable, Equatable {
+    let assetID: String?
+    let type: String?
+    let framework: String?
+    let title: String?
+    let content: String?
+    let score: Double?
+}
+
+private actor DocumentationAssetSelectionCache {
+    private struct RootSignature: Equatable {
+        let path: String
+        let modificationDate: Date?
+    }
+
+    private var cachedRootSignature: RootSignature?
+    private var cachedAsset: DocumentationSearchInstalledAsset?
+
+    func latestInstalledAsset(assetRoot: URL) -> DocumentationSearchInstalledAsset? {
+        let signature = Self.rootSignature(for: assetRoot)
+        if cachedRootSignature == signature, let cachedAsset {
+            return cachedAsset
+        }
+        guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        else {
+            return nil
+        }
+        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
+            return nil
+        }
+        cachedRootSignature = signature
+        cachedAsset = asset
+        return asset
+    }
+
+    private static func rootSignature(for assetRoot: URL) -> RootSignature {
+        let modificationDate = (try? FileManager.default.attributesOfItem(
+            atPath: assetRoot.path
+        )[.modificationDate]) as? Date
+        return RootSignature(path: assetRoot.path, modificationDate: modificationDate)
+    }
+}
+
+private actor DocumentationAssetSQLiteMaterializer {
+    @safe private final class Connection {
+        let path: String
+        private var database: OpaquePointer?
+
+        @unsafe init(path: String) throws {
+            self.path = path
+            var openedDatabase: OpaquePointer?
+            let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
+            guard unsafe sqlite3_open_v2(path, &openedDatabase, flags, nil) == SQLITE_OK else {
+                let message = unsafe Self.errorMessage(openedDatabase)
+                if let openedDatabase = unsafe openedDatabase {
+                    unsafe sqlite3_close_v2(openedDatabase)
+                }
+                throw ControlPlane.Error.invalidResponse(
+                    "local DocumentationSearch sqlite open failed: \(message)"
+                )
+            }
+            unsafe database = openedDatabase
+            try unsafe execute("PRAGMA temp_store = MEMORY")
+            try unsafe execute("""
+                CREATE TEMP TABLE IF NOT EXISTS xcode_mcp_ranked_doc_results (
+                    rank INTEGER PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    score REAL NOT NULL
+                )
+                """)
+        }
+
+        deinit {
+            if let database = unsafe database {
+                unsafe sqlite3_close_v2(database)
+            }
+        }
+
+        @unsafe func rows(
+            rankedResults: [DocumentationAssetSemanticSearchResult],
+            frameworks: [String],
+            limit: Int
+        ) throws -> [DocumentationAssetSearchRow] {
+            guard rankedResults.isEmpty == false else {
+                return []
+            }
+            try unsafe execute("DELETE FROM temp.xcode_mcp_ranked_doc_results")
+            try unsafe insertRankedResults(rankedResults)
+
+            let frameworkFilter = Set(frameworks.filter { $0.isEmpty == false })
+            var rows: [DocumentationAssetSearchRow] = []
+            let statement = try unsafe prepare("""
+                SELECT a.asset_id AS asset_id,
+                       a.type AS type,
+                       a.framework AS framework,
+                       a.title AS title,
+                       substr(a.content, 1, 4000) AS content,
+                       r.score AS score
+                FROM temp.xcode_mcp_ranked_doc_results r
+                JOIN attributes a
+                  ON a.asset_id = r.asset_id
+                 AND a.vector_id = (
+                   SELECT MIN(a2.vector_id)
+                   FROM attributes a2
+                   WHERE a2.asset_id = r.asset_id
+                     AND a2.title IS NOT NULL
+                     AND a2.content IS NOT NULL
+                 )
+                WHERE a.title IS NOT NULL
+                  AND a.content IS NOT NULL
+                ORDER BY r.rank
+                """)
+            defer { unsafe sqlite3_finalize(statement) }
+
+            var stepResult = unsafe sqlite3_step(statement)
+            while stepResult == SQLITE_ROW {
+                let framework = unsafe Self.stringColumn(statement, 2)
+                if frameworkFilter.isEmpty == false,
+                   framework.map({ frameworkFilter.contains($0) }) != true
+                {
+                    stepResult = unsafe sqlite3_step(statement)
+                    continue
+                }
+                let score: Double?
+                if unsafe sqlite3_column_type(statement, 5) == SQLITE_NULL {
+                    score = nil
+                } else {
+                    score = unsafe sqlite3_column_double(statement, 5)
+                }
+                rows.append(DocumentationAssetSearchRow(
+                    assetID: unsafe Self.stringColumn(statement, 0),
+                    type: unsafe Self.stringColumn(statement, 1),
+                    framework: framework,
+                    title: unsafe Self.stringColumn(statement, 3),
+                    content: unsafe Self.stringColumn(statement, 4),
+                    score: score
+                ))
+                if rows.count >= limit {
+                    break
+                }
+                stepResult = unsafe sqlite3_step(statement)
+            }
+            guard stepResult == SQLITE_DONE || rows.count >= limit
+            else {
+                throw ControlPlane.Error.invalidResponse(
+                    "local DocumentationSearch sqlite query failed: \(unsafe Self.errorMessage(database))"
+                )
+            }
+            return rows
+        }
+
+        @unsafe private func insertRankedResults(
+            _ rankedResults: [DocumentationAssetSemanticSearchResult]
+        ) throws {
+            let statement = try unsafe prepare("""
+                INSERT INTO temp.xcode_mcp_ranked_doc_results(rank, asset_id, score)
+                VALUES (?1, ?2, ?3)
+                """)
+            defer { unsafe sqlite3_finalize(statement) }
+
+            for (index, result) in rankedResults.enumerated() {
+                unsafe sqlite3_reset(statement)
+                unsafe sqlite3_clear_bindings(statement)
+                unsafe sqlite3_bind_int64(statement, 1, Int64(index))
+                try unsafe bind(result.assetID, to: statement, index: 2)
+                unsafe sqlite3_bind_double(statement, 3, result.score.isFinite ? result.score : 0)
+                guard unsafe sqlite3_step(statement) == SQLITE_DONE else {
+                    throw ControlPlane.Error.invalidResponse(
+                        "local DocumentationSearch sqlite insert failed: \(unsafe Self.errorMessage(database))"
+                    )
+                }
+            }
+        }
+
+        @unsafe private func execute(_ sql: String) throws {
+            var errorMessage: UnsafeMutablePointer<CChar>?
+            defer {
+                if let errorMessage = unsafe errorMessage {
+                    unsafe sqlite3_free(errorMessage)
+                }
+            }
+            guard unsafe sqlite3_exec(database, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+                let message: String
+                if let errorMessage = unsafe errorMessage {
+                    message = unsafe String(cString: errorMessage)
+                } else {
+                    message = unsafe Self.errorMessage(database)
+                }
+                throw ControlPlane.Error.invalidResponse(
+                    "local DocumentationSearch sqlite exec failed: \(message)"
+                )
+            }
+        }
+
+        @unsafe private func prepare(_ sql: String) throws -> OpaquePointer? {
+            var statement: OpaquePointer?
+            guard unsafe sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw ControlPlane.Error.invalidResponse(
+                    "local DocumentationSearch sqlite prepare failed: \(unsafe Self.errorMessage(database))"
+                )
+            }
+            return unsafe statement
+        }
+
+        @unsafe private func bind(_ value: String, to statement: OpaquePointer?, index: Int32) throws {
+            let transient = unsafe unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            let result = unsafe value.withCString { valuePointer in
+                unsafe sqlite3_bind_text(statement, index, valuePointer, -1, transient)
+            }
+            guard result == SQLITE_OK else {
+                throw ControlPlane.Error.invalidResponse(
+                    "local DocumentationSearch sqlite bind failed: \(unsafe Self.errorMessage(database))"
+                )
+            }
+        }
+
+        @unsafe private static func stringColumn(
+            _ statement: OpaquePointer?,
+            _ index: Int32
+        ) -> String? {
+            guard let text = unsafe sqlite3_column_text(statement, index) else {
+                return nil
+            }
+            return unsafe String(cString: text)
+        }
+
+        @unsafe private static func errorMessage(_ database: OpaquePointer?) -> String {
+            guard let database = unsafe database,
+                  let message = unsafe sqlite3_errmsg(database)
+            else {
+                return "unknown sqlite error"
+            }
+            return unsafe String(cString: message)
+        }
+    }
+
+    private var connections: [String: Connection] = [:]
+
+    func rows(
+        asset: DocumentationSearchInstalledAsset,
+        rankedResults: [DocumentationAssetSemanticSearchResult],
+        frameworks: [String],
+        limit: Int
+    ) throws -> [DocumentationAssetSearchRow] {
+        let path = asset.indexURL.path
+        let connection: Connection
+        if let cached = connections[path] {
+            connection = cached
+        } else {
+            let opened = try unsafe Connection(path: path)
+            connections[path] = opened
+            connection = opened
+        }
+        return try unsafe connection.rows(
+            rankedResults: rankedResults,
+            frameworks: frameworks,
+            limit: limit
+        )
+    }
+}
+
 struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
     private struct SearchArguments {
         let requestID: JSONRPC.ID
@@ -1005,38 +1310,24 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         let limit: Int
     }
 
-    private struct SearchRow: Decodable {
-        let assetID: String?
-        let type: String?
-        let framework: String?
-        let title: String?
-        let content: String?
-
-        private enum CodingKeys: String, CodingKey {
-            case assetID = "asset_id"
-            case type
-            case framework
-            case title
-            case content
-        }
-    }
-
     private let assetRoot: URL
-    private let processRunner: any ProcessRunning
-    private let clock: ClockClient
+    private let semanticSearcher: any DocumentationAssetSemanticSearching
+    private let assetCache: DocumentationAssetSelectionCache
+    private let sqliteMaterializer: DocumentationAssetSQLiteMaterializer
 
     init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
-        processRunner: any ProcessRunning = ProcessRunner(),
-        clock: ClockClient = .liveValue
+        semanticSearcher: any DocumentationAssetSemanticSearching =
+            LiveDocumentationAssetSemanticSearcher()
     ) {
         self.assetRoot = assetRoot
-        self.processRunner = processRunner
-        self.clock = clock
+        self.semanticSearcher = semanticSearcher
+        assetCache = DocumentationAssetSelectionCache()
+        sqliteMaterializer = DocumentationAssetSQLiteMaterializer()
     }
 
-    func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
-        guard installedAsset(for: target) != nil else {
+    func descriptor(for _: XcodeProcessTarget) async -> JSONValue? {
+        guard await latestInstalledAsset() != nil, semanticSearcher.isAvailable() else {
             return nil
         }
         return Self.descriptor
@@ -1051,10 +1342,24 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
             throw TimeoutError()
         }
         let arguments = try Self.searchArguments(from: requestData)
-        guard let asset = installedAsset(for: target) else {
+        guard let asset = await latestInstalledAsset() else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let rows = try await searchRows(arguments: arguments, asset: asset, timeout: timeout)
+        guard semanticSearcher.isAvailable() else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let rankedResults = try await semanticSearcher.search(
+            asset: asset,
+            query: arguments.query,
+            limit: Self.semanticSearchLimit(for: arguments),
+            timeout: timeout
+        )
+        let rows = try await searchRows(
+            arguments: arguments,
+            asset: asset,
+            rankedResults: rankedResults,
+            timeout: timeout
+        )
         return try Self.makeResponse(
             requestID: arguments.requestID,
             query: arguments.query,
@@ -1063,65 +1368,25 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         )
     }
 
-    private func installedAsset(
-        for target: XcodeProcessTarget
-    ) -> DocumentationSearchInstalledAsset? {
-        guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
-        else {
-            return nil
-        }
-        return DocumentationSearchAssetLocator.latestAsset(from: scan.assets)
+    private func latestInstalledAsset() async -> DocumentationSearchInstalledAsset? {
+        await assetCache.latestInstalledAsset(assetRoot: assetRoot)
     }
 
     private func searchRows(
         arguments: SearchArguments,
         asset: DocumentationSearchInstalledAsset,
+        rankedResults: [DocumentationAssetSemanticSearchResult],
         timeout: TimeAmount?
-    ) async throws -> [SearchRow] {
-        let sql = Self.searchSQL(arguments: arguments)
-        let timeoutNanoseconds = timeout.flatMap { timeout in
-            timeout.nanoseconds > 0 ? timeout.nanoseconds : nil
+    ) async throws -> [DocumentationAssetSearchRow] {
+        guard rankedResults.isEmpty == false else {
+            return []
         }
-        let request = ProcessRequest(
-            label: "documentation-search-local",
-            executablePath: "/usr/bin/sqlite3",
-            arguments: [
-                "-readonly",
-                "-json",
-                asset.indexURL.path,
-                sql,
-            ],
-            input: nil,
-            timeoutNanoseconds: timeoutNanoseconds
+        return try await sqliteMaterializer.rows(
+            asset: asset,
+            rankedResults: rankedResults,
+            frameworks: arguments.frameworks,
+            limit: arguments.limit
         )
-        let output: ProcessOutput
-        do {
-            if let timeout, timeout.nanoseconds > 0 {
-                output = try await ProcessOutputTimeoutWaiter().wait(
-                    for: Task {
-                        try await processRunner.run(request)
-                    },
-                    timeout: timeout,
-                    clock: clock
-                )
-            } else {
-                output = try await processRunner.run(request)
-            }
-        } catch is ProcessTimeoutError {
-            throw TimeoutError()
-        }
-        guard output.terminationStatus == 0 else {
-            throw ControlPlane.Error.invalidResponse(
-                "local DocumentationSearch sqlite failed: \(output.stderr)"
-            )
-        }
-        guard let data = output.stdout.data(using: .utf8) else {
-            return []
-        }
-        guard output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-            return []
-        }
-        return try JSONDecoder().decode([SearchRow].self, from: data)
     }
 
     private static var descriptor: JSONValue {
@@ -1150,6 +1415,10 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
                 ]),
             ]),
         ])
+    }
+
+    private static func semanticSearchLimit(for arguments: SearchArguments) -> Int {
+        min(max(arguments.limit * 8, 40), 200)
     }
 
     private static func searchArguments(from data: Data) throws -> SearchArguments {
@@ -1188,65 +1457,11 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         return array.compactMap { $0 as? String }.filter { $0.isEmpty == false }
     }
 
-    private static func searchSQL(arguments: SearchArguments) -> String {
-        let loweredQuery = arguments.query.lowercased()
-        let terms = loweredQuery
-            .split { character in
-                character.isWhitespace || character.isNewline
-            }
-            .prefix(6)
-            .map(String.init)
-        let termClauses = terms.isEmpty
-            ? [likeClause(for: loweredQuery)]
-            : terms.map(likeClause(for:))
-        var filters = termClauses
-        if arguments.frameworks.isEmpty == false {
-            let frameworks = arguments.frameworks
-                .map { sqliteStringLiteral($0) }
-                .joined(separator: ",")
-            filters.append("framework IN (\(frameworks))")
-        }
-        let whereClause = filters.joined(separator: " AND ")
-        let queryLiteral = sqliteStringLiteral(loweredQuery)
-        let prefixLiteral = sqliteStringLiteral("\(loweredQuery)%")
-        let containsLiteral = sqliteStringLiteral("%\(loweredQuery)%")
-        return """
-            SELECT asset_id,
-                   type,
-                   framework,
-                   title,
-                   substr(content, 1, 4000) AS content
-            FROM attributes
-            WHERE title IS NOT NULL
-              AND content IS NOT NULL
-              AND \(whereClause)
-            ORDER BY CASE
-                WHEN lower(title) = \(queryLiteral) OR lower(asset_id) = \(queryLiteral) THEN 0
-                WHEN lower(title) LIKE \(prefixLiteral) OR lower(asset_id) LIKE \(prefixLiteral) THEN 1
-                WHEN lower(title) LIKE \(containsLiteral) OR lower(asset_id) LIKE \(containsLiteral) THEN 2
-                WHEN lower(content) LIKE \(prefixLiteral) THEN 3
-                ELSE 4
-              END,
-              CASE type WHEN 'symbol' THEN 0 WHEN 'article' THEN 1 ELSE 2 END,
-              length(content)
-            LIMIT \(arguments.limit)
-            """
-    }
-
-    private static func likeClause(for term: String) -> String {
-        let pattern = sqliteStringLiteral("%\(term)%")
-        return "(lower(title) LIKE \(pattern) OR lower(asset_id) LIKE \(pattern) OR lower(content) LIKE \(pattern))"
-    }
-
-    private static func sqliteStringLiteral(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
-    }
-
     private static func makeResponse(
         requestID: JSONRPC.ID,
         query: String,
         asset: DocumentationSearchInstalledAsset,
-        rows: [SearchRow]
+        rows: [DocumentationAssetSearchRow]
     ) throws -> Data {
         let documents = rows.map { row -> [String: Any] in
             let type = row.type ?? ""
@@ -1265,6 +1480,9 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
             }
             if let framework = row.framework, framework.isEmpty == false {
                 document["framework"] = framework
+            }
+            if let score = row.score {
+                document["score"] = score
             }
             return document
         }
@@ -1785,11 +2003,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             guard startupTimeout?.nanoseconds != 0 else {
                 throw TimeoutError()
             }
-            if preferLocalSearchProvider,
-               let localProfile = await installedDocumentationAssetPrimaryProfile(for: target)
-            {
-                return localProfile
-            }
             let route: DocumentationProviderRoute
             do {
                 route = try await transport.openRoute(
@@ -1800,7 +2013,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                if let localProfile = await installedDocumentationAssetFallbackProfile(for: target) {
+                if let localProfile = await installedDocumentationAssetPrimaryProfile(for: target) {
                     return localProfile
                 }
                 throw error
@@ -1838,29 +2051,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             logger.info(
                 "Using installed documentation asset as primary DocumentationSearch provider",
-                metadata: [
-                    "pid": .string("\(target.processID)"),
-                    "app_path": .string(target.appPath),
-                    "xcode_version": .string(target.xcodeVersion),
-                ]
-            )
-            return CandidateProfile(
-                id: UUID(),
-                target: target,
-                backend: .installedDocumentationAsset(descriptor: descriptor),
-                serverVersion: "installed-documentation-asset",
-                descriptorLookupCompleted: true
-            )
-        }
-
-        private func installedDocumentationAssetFallbackProfile(
-            for target: XcodeProcessTarget
-        ) async -> CandidateProfile? {
-            guard let descriptor = await localSearchProvider.descriptor(for: target) else {
-                return nil
-            }
-            logger.warning(
-                "Using installed documentation asset fallback for DocumentationSearch",
                 metadata: [
                     "pid": .string("\(target.processID)"),
                     "app_path": .string(target.appPath),
@@ -2036,6 +2226,12 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         guard targets.isEmpty == false else {
             return .unavailable
         }
+        if preferLocalSearchProvider {
+            let localUpdate = await installedDocumentationAssetToolListUpdate()
+            if case .available = localUpdate {
+                return localUpdate
+            }
+        }
         for (index, target) in targets.enumerated() {
             guard !Task.isCancelled, !isShutdown else {
                 return .unavailable
@@ -2072,6 +2268,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                         "xcode_version": .string(target.xcodeVersion),
                     ]
                 )
+                permanentlyUnusableProcessIDs.insert(target.processID)
+                await discardPreparedProvider(profile)
                 continue
             } catch is CancellationError {
                 return .unavailable
@@ -2083,7 +2281,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 continue
             }
         }
-        return .unavailable
+        return await installedDocumentationAssetToolListUpdate()
     }
 
     func toolListUpdate(requestTimeout: TimeAmount?) async
@@ -2097,6 +2295,12 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         }
         guard !Task.isCancelled else {
             return .unavailable
+        }
+        if preferLocalSearchProvider {
+            let localUpdate = await installedDocumentationAssetToolListUpdate()
+            if case .available = localUpdate {
+                return localUpdate
+            }
         }
         let cached = toolListUpdateFromCachedState(requestTimeout: requestTimeout)
         if case .unchanged = cached {
@@ -2144,10 +2348,37 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         var rejectedProcessIDs: Set<pid_t> = []
         var invalidatedProvider = false
         var lastCandidateFailure: (any Error)?
+        var attemptedPrimaryInstalledAsset = false
 
         while !Task.isCancelled {
             if let deadline, deadline.hasExpired {
                 return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+            }
+            if preferLocalSearchProvider, attemptedPrimaryInstalledAsset == false {
+                attemptedPrimaryInstalledAsset = true
+                let fallbackCandidateCount = max(orderedTargets(excluding: []).count, 1)
+                let primaryDeadline = makeDeadline(
+                    fromTimeout: timeoutForCandidate(
+                        until: deadline,
+                        remainingCandidateCount: fallbackCandidateCount + 1
+                    )
+                )
+                switch try await lastResortInstalledDocumentationAssetFallback(
+                    requestData: requestData,
+                    deadline: primaryDeadline
+                ) {
+                case .success(let fallback):
+                    return .handled(
+                        fallback.responseData,
+                        invalidatedProvider: invalidatedProvider
+                    )
+                case .unavailable:
+                    break
+                case .requestFailed(let error):
+                    return .failed(error, invalidatedProvider: invalidatedProvider)
+                case .candidateFailed(let error):
+                    lastCandidateFailure = error
+                }
             }
             if let activeProvider,
                 rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false,
@@ -2265,11 +2496,13 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                                 "xcode_version": .string(target.xcodeVersion),
                             ]
                         )
-                        rejectedProcessIDs.insert(target.processID)
+                        rememberRejectedProvider(
+                            processID: target.processID,
+                            permanentlyUnusable: true,
+                            rejectedProcessIDs: &rejectedProcessIDs
+                        )
                         progressed = true
-                        if hasRemainingCandidate {
-                            await discardPreparedProvider(processID: target.processID)
-                        }
+                        await discardPreparedProvider(profile)
                         continue
                     }
                     let provider = ActiveProvider(profile: profile)
@@ -2578,6 +2811,45 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
+    private func lastResortInstalledDocumentationAssetFallback(
+        requestData: Data,
+        deadline: Deadline?
+    ) async throws -> InstalledDocumentationAssetFallbackAttempt {
+        var lastCandidateFailure: (any Error)?
+        for target in orderedTargetsForInstalledDocumentationAssetFallback() {
+            switch try await attemptInstalledDocumentationAssetFallback(
+                requestData: requestData,
+                target: target,
+                deadline: deadline
+            ) {
+            case .success(let fallback):
+                return .success(fallback)
+            case .unavailable:
+                continue
+            case .requestFailed(let error):
+                return .requestFailed(error)
+            case .candidateFailed(let error):
+                lastCandidateFailure = error
+                continue
+            }
+        }
+        if let lastCandidateFailure {
+            return .candidateFailed(lastCandidateFailure)
+        }
+        return .unavailable
+    }
+
+    private func installedDocumentationAssetToolListUpdate() async
+        -> DocumentationProvider.ToolListUpdate
+    {
+        for target in orderedTargetsForInstalledDocumentationAssetFallback() {
+            if let descriptor = await localSearchProvider.descriptor(for: target) {
+                return .available(descriptor)
+            }
+        }
+        return .unavailable
+    }
+
     func invalidate(reason: String) async {
         await invalidate(reason: reason, awaitRouteTermination: false)
     }
@@ -2611,6 +2883,20 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         providerPreparations.removeValue(forKey: processID)?.task.cancel()
         guard let profile = preparedProviders.removeValue(forKey: processID) else {
             return
+        }
+        guard activeProvider?.profile.id != profile.id else {
+            return
+        }
+        await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
+    }
+
+    private func discardPreparedProvider(_ profile: CandidateProfile) async {
+        providerPreparations.removeValue(forKey: profile.target.processID)?.task.cancel()
+        let cached = preparedProviders.removeValue(forKey: profile.target.processID)
+        if let cached, cached.id != profile.id,
+           activeProvider?.profile.id != cached.id
+        {
+            await closeTransportRouteIfPresent(cached, awaitTermination: isShutdown)
         }
         guard activeProvider?.profile.id != profile.id else {
             return
@@ -2915,9 +3201,21 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         let filtered = discovery.runningXcodeTargets().filter {
             excludedProcessIDs.contains($0.processID) == false
         }
+        return sortedDocumentationTargets(filtered)
+    }
+
+    private func orderedTargetsForInstalledDocumentationAssetFallback()
+        -> [XcodeProcessTarget]
+    {
+        sortedDocumentationTargets(discovery.runningXcodeTargets())
+    }
+
+    private func sortedDocumentationTargets(
+        _ targets: [XcodeProcessTarget]
+    ) -> [XcodeProcessTarget] {
         // DocumentationSearch owns provider selection separately from workspace/tab routing.
         // Discovery order is only target enumeration; version and stable identity choose priority.
-        return filtered.sorted { lhs, rhs in
+        targets.sorted { lhs, rhs in
             let versionComparison = Self.compareVersion(lhs.xcodeVersion, rhs.xcodeVersion)
             if versionComparison != .orderedSame {
                 return versionComparison == .orderedDescending
@@ -2950,16 +3248,21 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         guard startupTimeout?.nanoseconds != 0 else {
             throw TimeoutError()
         }
-        if preferLocalSearchProvider,
-           let localProfile = await installedDocumentationAssetPrimaryProfile(for: target)
-        {
-            return localProfile
+        let route: DocumentationProviderRoute
+        do {
+            route = try await transport.openRoute(
+                for: target,
+                requestTimeout: startupTimeout,
+                initializeParams: initializeParams
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if let localProfile = await installedDocumentationAssetPrimaryProfile(for: target) {
+                return localProfile
+            }
+            throw error
         }
-        let route = try await transport.openRoute(
-            for: target,
-            requestTimeout: startupTimeout,
-            initializeParams: initializeParams
-        )
         do {
             try Task.checkCancellation()
             guard !isShutdown else {
@@ -3177,26 +3480,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func repairDocumentationSearch(
-        for target: XcodeProcessTarget,
-        timeout: TimeAmount?
-    ) async -> DocumentationSearchServiceRepairResult? {
-        guard timeout?.nanoseconds != 0 else {
-            return nil
-        }
-        guard let timeout, timeout.nanoseconds > 0 else {
-            return await serviceRepairer.repairDocumentationSearch(for: target)
-        }
-        let result = await DocumentationSearchServiceRepairWaiter().wait(
-            for: Task {
-                await serviceRepairer.repairDocumentationSearch(for: target)
-            },
-            timeout: timeout,
-            clock: clock
-        )
-        return result.repairResult
-    }
-
     private func profileByAddingInstalledDocumentationAssetFallback(
         _ profile: CandidateProfile
     ) async -> CandidateProfile {
@@ -3227,6 +3510,26 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         updated.descriptorLookupCompleted = true
         await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
         return updated
+    }
+
+    private func repairDocumentationSearch(
+        for target: XcodeProcessTarget,
+        timeout: TimeAmount?
+    ) async -> DocumentationSearchServiceRepairResult? {
+        guard timeout?.nanoseconds != 0 else {
+            return nil
+        }
+        guard let timeout, timeout.nanoseconds > 0 else {
+            return await serviceRepairer.repairDocumentationSearch(for: target)
+        }
+        let result = await DocumentationSearchServiceRepairWaiter().wait(
+            for: Task {
+                await serviceRepairer.repairDocumentationSearch(for: target)
+            },
+            timeout: timeout,
+            clock: clock
+        )
+        return result.repairResult
     }
 
     private func callInstalledDocumentationAssetFallback(
