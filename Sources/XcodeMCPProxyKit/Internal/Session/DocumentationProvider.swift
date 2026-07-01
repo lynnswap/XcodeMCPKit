@@ -1039,26 +1039,22 @@ struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearchi
         guard timeout?.nanoseconds != 0 else {
             throw TimeoutError()
         }
-        let operationTask = Task.detached {
-            try operation()
-        }
-        guard let timeout, timeout.nanoseconds > 0 else {
-            return try await operationTask.value
-        }
-
         let waiter = DocumentationSemanticSearchTimeoutWaiter<T>()
-        Task.detached {
+
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                waiter.resume(.success(try await operationTask.value))
+                waiter.resume(.success(try operation()))
             } catch {
                 waiter.resume(.failure(error))
             }
         }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + .nanoseconds(Int(clamping: timeout.nanoseconds))
-        ) {
-            waiter.resume(.failure(TimeoutError()))
-            operationTask.cancel()
+
+        if let timeout, timeout.nanoseconds > 0 {
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + .nanoseconds(Int(clamping: timeout.nanoseconds))
+            ) {
+                waiter.resume(.failure(TimeoutError()))
+            }
         }
 
         return try await withTaskCancellationHandler {
@@ -1067,7 +1063,6 @@ struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearchi
             }
         } onCancel: {
             waiter.resume(.failure(CancellationError()))
-            operationTask.cancel()
         }
     }
 
