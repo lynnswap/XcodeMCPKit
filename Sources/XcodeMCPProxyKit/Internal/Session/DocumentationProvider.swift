@@ -2393,7 +2393,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                         "xcode_version": .string(target.xcodeVersion),
                     ]
                 )
-                permanentlyUnusableProcessIDs.insert(target.processID)
                 await discardPreparedProvider(profile)
                 continue
             } catch is CancellationError {

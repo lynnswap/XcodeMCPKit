@@ -3959,6 +3959,55 @@ struct DocumentationProviderTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
     }
 
+    @Test func documentationProviderBackgroundDiscoveryRetriesDescriptorMissOnLaterPoll()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 115, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 46,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .success
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let firstUpdate = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let firstResult = DocumentationProvider.ToolCatalog.applying(
+            firstUpdate,
+            to: try jsonValue([
+                "tools": [
+                    documentationDescriptor(version: "stale").foundationObject,
+                ],
+            ])
+        )
+        let secondUpdate = await manager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+        let secondResult = DocumentationProvider.ToolCatalog.applying(
+            secondUpdate,
+            to: try jsonValue(["tools": []])
+        )
+
+        #expect(DocumentationProvider.ToolCatalog.descriptor(in: firstResult) == nil)
+        #expect(documentationDescriptorDescription(in: secondResult) == "docs-27.0")
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 0)
+    }
+
     @Test func documentationSearchDoesNotCallCandidateWhileDescriptorFetchIsHanging() async throws {
         let target = xcodeProcessTarget(processID: 114, xcodeVersion: "27.0")
         let clocks = makeRuntimeCoordinatorDeterministicClocks()
