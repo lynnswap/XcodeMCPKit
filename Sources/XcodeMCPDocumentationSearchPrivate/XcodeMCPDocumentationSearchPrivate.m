@@ -5,6 +5,14 @@
 #import <objc/message.h>
 #import <stdint.h>
 
+#if __has_feature(objc_arc)
+#define XCDOC_AUTORELEASE(object) (object)
+#define XCDOC_RELEASE(object)
+#else
+#define XCDOC_AUTORELEASE(object) [(object) autorelease]
+#define XCDOC_RELEASE(object) [(object) release]
+#endif
+
 @interface MADTextInput : NSObject
 - (instancetype)initWithText:(NSString *)text;
 @end
@@ -104,8 +112,8 @@ static VSKClient *XCDocCachedVectorSearchClient(NSString *databasePath, char **e
     static NSMutableDictionary<NSString *, VSKClient *> *clientsByPath;
     static NSLock *lock;
     dispatch_once(&onceToken, ^{
-        clientsByPath = [NSMutableDictionary dictionary];
-        lock = [NSLock new];
+        clientsByPath = [[NSMutableDictionary alloc] init];
+        lock = [[NSLock alloc] init];
     });
 
     [lock lock];
@@ -116,11 +124,11 @@ static VSKClient *XCDocCachedVectorSearchClient(NSString *databasePath, char **e
     }
 
     NSError *error = nil;
-    VSKConfig *config = [[NSClassFromString(@"VSKConfig") alloc]
+    VSKConfig *config = XCDOC_AUTORELEASE([[NSClassFromString(@"VSKConfig") alloc]
         initWithBaseDirectory:[NSURL fileURLWithPath:databasePath isDirectory:YES]
                      readOnly:YES
       perConnectionPeakMemory:nil
-                        error:&error];
+                        error:&error]);
     if (config == nil) {
         if (errorMessage != NULL) {
             *errorMessage = XCDocCopyError([NSString stringWithFormat:@"VectorSearch config failed: %@", error]);
@@ -141,6 +149,7 @@ static VSKClient *XCDocCachedVectorSearchClient(NSString *databasePath, char **e
         clientsByPath[databasePath] = client;
         existingClient = client;
     }
+    XCDOC_RELEASE(client);
     [lock unlock];
     return existingClient;
 }
@@ -254,11 +263,11 @@ static NSData *XCDocCopyQueryEmbedding(
         return nil;
     }
 
-    MADTextEmbeddingRequest *request = [requestClass new];
+    MADTextEmbeddingRequest *request = XCDOC_AUTORELEASE([requestClass new]);
     request.version = version;
     request.extendedContextLength = YES;
     request.allowTruncation = YES;
-    MADTextInput *input = [[inputClass alloc] initWithText:query];
+    MADTextInput *input = XCDOC_AUTORELEASE([[inputClass alloc] initWithText:query]);
     MADService *service = [serviceClass service];
     if (service == nil || input == nil) {
         if (errorMessage != NULL) {

@@ -695,6 +695,7 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     private let timeoutOnceAfterSuccessfulCallCount: Int?
     private var descriptorPIDs: [pid_t] = []
     private var callPIDs: [pid_t] = []
+    private var callTimeoutValues: [TimeAmount?] = []
     private var queries: [String] = []
     private var successfulCallCount = 0
     private var didThrowTimeout = false
@@ -721,9 +722,10 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     func callDocumentationSearch(
         requestData: Data,
         for target: XcodeProcessTarget,
-        timeout _: TimeAmount?
+        timeout: TimeAmount?
     ) async throws -> Data {
         callPIDs.append(target.processID)
+        callTimeoutValues.append(timeout)
         if let query = try documentationSearchQuery(in: requestData) {
             queries.append(query)
         }
@@ -752,6 +754,10 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
 
     func requestedCallPIDs() -> [pid_t] {
         callPIDs
+    }
+
+    func requestedCallTimeouts() -> [TimeAmount?] {
+        callTimeoutValues
     }
 
     func requestedQueries() -> [String] {

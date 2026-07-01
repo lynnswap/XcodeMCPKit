@@ -1220,6 +1220,7 @@ private actor DocumentationAssetSQLiteMaterializer {
                  )
                 WHERE a.title IS NOT NULL
                   AND a.content IS NOT NULL
+                -- Preserve VectorSearch order to match mcpbridge DocumentationSearch ranking.
                 ORDER BY r.rank
                 """)
             defer { unsafe sqlite3_finalize(statement) }
@@ -2089,6 +2090,14 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         let descriptor: JSONValue
     }
 
+    private static let installedDocumentationAssetStandaloneTarget = XcodeProcessTarget(
+        processID: 0,
+        appPath: "installed-documentation-asset",
+        developerDir: "installed-documentation-asset",
+        mcpbridgePath: "installed-documentation-asset",
+        xcodeVersion: "installed-documentation-asset"
+    )
+
     private struct ProviderPreparationContext: Sendable {
         let transport: any DocumentationProviderRouting
         let initializeParams: [String: JSONValue]
@@ -2472,16 +2481,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             }
             if preferLocalSearchProvider, attemptedPrimaryInstalledAsset == false {
                 attemptedPrimaryInstalledAsset = true
-                let fallbackCandidateCount = max(orderedTargets(excluding: []).count, 1)
-                let primaryDeadline = makeDeadline(
-                    fromTimeout: timeoutForCandidate(
-                        until: deadline,
-                        remainingCandidateCount: fallbackCandidateCount + 1
-                    )
-                )
-                switch try await lastResortInstalledDocumentationAssetFallback(
+                switch try await primaryInstalledDocumentationAssetFallback(
                     requestData: requestData,
-                    deadline: primaryDeadline
+                    deadline: deadline
                 ) {
                 case .success(let fallback):
                     return .handled(
@@ -2898,13 +2900,15 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     private func attemptInstalledDocumentationAssetFallback(
         requestData: Data,
         target: XcodeProcessTarget,
-        deadline: Deadline?
+        deadline: Deadline?,
+        isPrimaryAttempt: Bool = false
     ) async throws -> InstalledDocumentationAssetFallbackAttempt {
         do {
             guard let fallback = try await callInstalledDocumentationAssetFallback(
                 requestData: requestData,
                 target: target,
-                deadline: deadline
+                deadline: deadline,
+                isPrimaryAttempt: isPrimaryAttempt
             ) else {
                 return .unavailable
             }
@@ -2927,37 +2931,26 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func lastResortInstalledDocumentationAssetFallback(
+    private func primaryInstalledDocumentationAssetFallback(
         requestData: Data,
         deadline: Deadline?
     ) async throws -> InstalledDocumentationAssetFallbackAttempt {
-        var lastCandidateFailure: (any Error)?
-        for target in orderedTargetsForInstalledDocumentationAssetFallback() {
-            switch try await attemptInstalledDocumentationAssetFallback(
-                requestData: requestData,
-                target: target,
-                deadline: deadline
-            ) {
-            case .success(let fallback):
-                return .success(fallback)
-            case .unavailable:
-                continue
-            case .requestFailed(let error):
-                return .requestFailed(error)
-            case .candidateFailed(let error):
-                lastCandidateFailure = error
-                continue
-            }
-        }
-        if let lastCandidateFailure {
-            return .candidateFailed(lastCandidateFailure)
-        }
-        return .unavailable
+        try await attemptInstalledDocumentationAssetFallback(
+            requestData: requestData,
+            target: Self.installedDocumentationAssetStandaloneTarget,
+            deadline: deadline,
+            isPrimaryAttempt: true
+        )
     }
 
     private func installedDocumentationAssetToolListUpdate() async
         -> DocumentationProvider.ToolListUpdate
     {
+        if let descriptor = await localSearchProvider.descriptor(
+            for: Self.installedDocumentationAssetStandaloneTarget
+        ) {
+            return .available(descriptor)
+        }
         for target in orderedTargetsForInstalledDocumentationAssetFallback() {
             if let descriptor = await localSearchProvider.descriptor(for: target) {
                 return .available(descriptor)
@@ -3651,19 +3644,28 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     private func callInstalledDocumentationAssetFallback(
         requestData: Data,
         target: XcodeProcessTarget,
-        deadline: Deadline?
+        deadline: Deadline?,
+        isPrimaryAttempt: Bool
     ) async throws -> InstalledDocumentationAssetFallback? {
         guard let descriptor = await localSearchProvider.descriptor(for: target) else {
             return nil
         }
-        logger.warning(
-            "Falling back to installed documentation asset for DocumentationSearch",
-            metadata: [
-                "pid": .string("\(target.processID)"),
-                "app_path": .string(target.appPath),
-                "xcode_version": .string(target.xcodeVersion),
-            ]
-        )
+        let metadata: Logger.Metadata = [
+            "pid": .string("\(target.processID)"),
+            "app_path": .string(target.appPath),
+            "xcode_version": .string(target.xcodeVersion),
+        ]
+        if isPrimaryAttempt {
+            logger.info(
+                "Using installed documentation asset as primary DocumentationSearch provider",
+                metadata: metadata
+            )
+        } else {
+            logger.warning(
+                "Falling back to installed documentation asset for DocumentationSearch",
+                metadata: metadata
+            )
+        }
         let responseData = try await localSearchProvider.callDocumentationSearch(
             requestData: requestData,
             for: target,

@@ -95,9 +95,6 @@ let package = Package(
             name: "XcodeMCPDocumentationSearchPrivate",
             path: "Sources/XcodeMCPDocumentationSearchPrivate",
             publicHeadersPath: "include",
-            cSettings: [
-                .unsafeFlags(["-fobjc-arc", "-fblocks"]),
-            ],
             linkerSettings: [
                 .linkedFramework("Foundation"),
             ]
