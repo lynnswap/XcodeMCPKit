@@ -3312,21 +3312,16 @@ struct DocumentationProviderTests {
         let structuredContent = try #require(result["structuredContent"] as? [String: Any])
         #expect(JSONValue(any: structuredContent) == JSONValue(any: payload))
 
-        #expect(payload["source"] as? String == "installed-documentation-asset")
+        #expect(Set(payload.keys) == ["documents"])
         let documents = try #require(payload["documents"] as? [[String: Any]])
         let firstDocument = try #require(documents.first)
         let firstTitle = firstDocument["title"] as? String
         #expect(firstTitle == "UIView")
-        #expect(firstDocument["type"] as? String == "symbol")
+        #expect(Set(firstDocument.keys) == ["contents", "kind", "score", "title", "uri"])
         #expect(firstDocument["kind"] as? String == "symbol")
-        #expect(firstDocument["content"] as? String == "UIView\nClass of UIKit")
         #expect(firstDocument["contents"] as? String == "UIView\nClass of UIKit")
-        #expect(firstDocument["identifier"] as? String == "/documentation/UIKit/UIView")
         #expect(firstDocument["uri"] as? String == "/documentation/UIKit/UIView")
         #expect(firstDocument["score"] as? Double == 0.92)
-        let asset = try #require(payload["asset"] as? [String: Any])
-        #expect(asset["xcodeVersion"] as? String == "26.5")
-        #expect((asset["path"] as? String)?.contains("xcode-26-5.asset") == true)
     }
 
     @Test func liveDocumentationAssetSearchProviderUsesLatestInstalledAsset()
@@ -3382,9 +3377,7 @@ struct DocumentationProviderTests {
         let payload = try #require(
             JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
         )
-        let asset = try #require(payload["asset"] as? [String: Any])
-        #expect(asset["xcodeVersion"] as? String == "27.0")
-        #expect((asset["path"] as? String)?.contains("xcode-27.asset") == true)
+        #expect(Set(payload.keys) == ["documents"])
         let documents = try #require(payload["documents"] as? [[String: Any]])
         #expect(documents.first?["title"] as? String == "TranscriptErrorHandlingPolicy")
     }
@@ -3437,8 +3430,8 @@ struct DocumentationProviderTests {
         let firstPayload = try #require(
             JSONSerialization.jsonObject(with: Data(firstText.utf8), options: []) as? [String: Any]
         )
-        let firstAsset = try #require(firstPayload["asset"] as? [String: Any])
-        #expect(firstAsset["xcodeVersion"] as? String == "26.5")
+        let firstDocuments = try #require(firstPayload["documents"] as? [[String: Any]])
+        #expect(firstDocuments.first?["title"] as? String == "OldAPI")
 
         try makeInstalledDocumentationAsset(
             root: root,
@@ -3475,8 +3468,6 @@ struct DocumentationProviderTests {
         let secondPayload = try #require(
             JSONSerialization.jsonObject(with: Data(secondText.utf8), options: []) as? [String: Any]
         )
-        let secondAsset = try #require(secondPayload["asset"] as? [String: Any])
-        #expect(secondAsset["xcodeVersion"] as? String == "27.0")
         let documents = try #require(secondPayload["documents"] as? [[String: Any]])
         #expect(documents.first?["title"] as? String == "NewAPI")
     }
@@ -3516,7 +3507,7 @@ struct DocumentationProviderTests {
         )
         let documents = try #require(payload["documents"] as? [[String: Any]])
         #expect(documents.isEmpty)
-        #expect(payload["source"] as? String == "installed-documentation-asset")
+        #expect(Set(payload.keys) == ["documents"])
     }
 
     @Test func liveDocumentationAssetSearchProviderHonorsSearchTimeout()

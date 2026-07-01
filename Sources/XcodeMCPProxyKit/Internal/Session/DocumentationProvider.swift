@@ -1362,8 +1362,6 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         )
         return try Self.makeResponse(
             requestID: arguments.requestID,
-            query: arguments.query,
-            asset: asset,
             rows: rows
         )
     }
@@ -1459,8 +1457,6 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
 
     private static func makeResponse(
         requestID: JSONRPC.ID,
-        query: String,
-        asset: DocumentationSearchInstalledAsset,
         rows: [DocumentationAssetSearchRow]
     ) throws -> Data {
         let documents = rows.map { row -> JSONValue in
@@ -1468,36 +1464,18 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
             let content = row.content ?? ""
             var document: [String: JSONValue] = [
                 "title": .string(row.title ?? ""),
-                "type": .string(type),
                 "kind": .string(type),
-                "content": .string(content),
                 "contents": .string(content),
             ]
             if let assetID = row.assetID {
-                document["identifier"] = .string(assetID)
                 document["uri"] = .string(assetID)
-                document["url"] = .string("https://developer.apple.com\(assetID)")
-            }
-            if let framework = row.framework, framework.isEmpty == false {
-                document["framework"] = .string(framework)
             }
             if let score = row.score {
                 document["score"] = .number(.double(score))
             }
             return .object(document)
         }
-        var assetPayload: [String: JSONValue] = [
-            "path": .string(asset.assetURL.path),
-            "xcodeVersion": .string(asset.xcodeVersion),
-            "osVersion": .string(asset.osVersion),
-        ]
-        if let documentationRelease = asset.documentationRelease {
-            assetPayload["documentationRelease"] = .number(.int(Int64(documentationRelease)))
-        }
         let structuredContent = JSONValue.object([
-            "query": .string(query),
-            "source": .string("installed-documentation-asset"),
-            "asset": .object(assetPayload),
             "documents": .array(documents),
         ])
         let payloadData = try JSONSerialization.data(
