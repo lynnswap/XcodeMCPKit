@@ -3628,6 +3628,85 @@ struct DocumentationProviderTests {
         #expect(await recorder.recordedValues() == [40, 80])
     }
 
+    @Test func liveDocumentationAssetSearchProviderExpandsWhenDuplicatesShrinkUnfilteredResults()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        try addInstalledDocumentationAssetRows(
+            root: root,
+            name: "xcode-26-5",
+            rows: [
+                (
+                    vectorID: 1,
+                    assetID: "/documentation/UIKit/UIView",
+                    type: "symbol",
+                    framework: "UIKit",
+                    title: "UIView",
+                    content: "UIView\nClass of UIKit"
+                ),
+                (
+                    vectorID: 41,
+                    assetID: "/documentation/UIKit/UILabel",
+                    type: "symbol",
+                    framework: "UIKit",
+                    title: "UILabel",
+                    content: "UILabel\nClass of UIKit"
+                ),
+            ]
+        )
+        let recorder = SearchLimitRecorder()
+        let provider = LiveDocumentationAssetSearchProvider(
+            assetRoot: root,
+            semanticSearcher: LimitAwareStubDocumentationAssetSemanticSearcher(
+                recorder: recorder,
+                results: { limit in
+                    var results = (0..<min(limit, 40)).map { index in
+                        DocumentationAssetSemanticSearchResult(
+                            assetID: "/documentation/UIKit/UIView",
+                            score: 1.0 - (Double(index) * 0.001)
+                        )
+                    }
+                    if limit > 40 {
+                        results.append(.init(
+                            assetID: "/documentation/UIKit/UILabel",
+                            score: 0.5
+                        ))
+                    }
+                    return results
+                }
+            )
+        )
+        let target = xcodeProcessTarget(processID: 129, xcodeVersion: "26.6")
+
+        let response = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequestWithArguments(
+                id: 129,
+                query: "UIKit views",
+                limit: 2
+            ),
+            for: target,
+            timeout: .seconds(1)
+        )
+
+        let text = try #require(try toolContentText(in: response))
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
+        )
+        let documents = try #require(payload["documents"] as? [[String: Any]])
+        #expect(documents.map { $0["title"] as? String } == ["UIView", "UILabel"])
+        #expect(await recorder.recordedValues() == [40, 80])
+    }
+
     @Test func liveDocumentationAssetSearchProviderPreservesSemanticRankOrder()
         async throws
     {

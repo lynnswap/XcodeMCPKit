@@ -1515,9 +1515,6 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
     }
 
     private static func maxSemanticSearchLimit(for arguments: SearchArguments) -> Int {
-        guard arguments.frameworks.contains(where: { $0.isEmpty == false }) else {
-            return initialSemanticSearchLimit(for: arguments)
-        }
         return min(max(arguments.limit * 128, 1_000), 2_000)
     }
 
@@ -1528,8 +1525,7 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         semanticLimit: Int,
         maxSemanticLimit: Int
     ) -> Bool {
-        arguments.frameworks.contains(where: { $0.isEmpty == false })
-            && rows.count < arguments.limit
+        rows.count < arguments.limit
             && rankedResultCount >= semanticLimit
             && semanticLimit < maxSemanticLimit
     }
