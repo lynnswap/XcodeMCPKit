@@ -256,6 +256,9 @@ extension RuntimeCoordinator {
                     return
                 }
                 self.upstreamSlotScheduler.wake()
+                self.refreshPendingProcessToolsCatalogAfterWarmInitialize(
+                    upstreamIndex: upstreamIndex
+                )
             } onRejected: { [weak self] in
                 self?.handleInitializedNotificationSendOverload(
                     upstreamIndex: upstreamIndex,

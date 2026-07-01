@@ -23,9 +23,14 @@ extension RuntimeCoordinator {
         addRuntimeTask { [weak self, xcodeTargetDiscovery] in
             guard let self else { return }
             while !Task.isCancelled {
+                let hasPendingProcessToolsCatalogRefresh =
+                    self.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                        $0.isEmpty == false
+                    }
                 let isRecovering =
                     self.upstreamHealthManager.initializedHealthyishCount() == 0
                     || self.upstreamHealthManager.anyRecoveryInFlight()
+                    || hasPendingProcessToolsCatalogRefresh
                 let interval: Duration = self.xcodeProcessRoutes.isEmpty
                     || isRecovering
                     ? .seconds(2)
@@ -53,13 +58,21 @@ extension RuntimeCoordinator {
                 self.appendProcessBoundRoute(for: target)
             }
         )
-        guard result.didChange else { return }
+        guard result.didChange else {
+            retryPendingProcessRouteReadiness(reason: reason)
+            return
+        }
 
         for route in result.retiredRoutes {
             retireProcessBoundRoute(route, reason: reason)
         }
 
         if result.addedRoutes.isEmpty == false {
+            pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { processIDs in
+                for route in result.addedRoutes {
+                    processIDs.insert(route.target.processID)
+                }
+            }
             unavailableXcodeProcessRoutes.withLockedValue { unavailable in
                 for route in result.addedRoutes {
                     unavailable.removeValue(forKey: route.target.processID)
@@ -76,6 +89,7 @@ extension RuntimeCoordinator {
             startInitializationForAddedProcessRoutes(result.addedRoutes)
         }
 
+        retryPendingProcessRouteReadiness(reason: reason)
         publishToolsListChangedNotification()
     }
 
@@ -127,6 +141,9 @@ extension RuntimeCoordinator {
             state.removeValue(forKey: route.target.processID)
         }
         xcodeProcessEventMonitor.removeExitObserver(processID: route.target.processID)
+        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.remove(route.target.processID)
+        }
         processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
 
@@ -213,10 +230,51 @@ extension RuntimeCoordinator {
                     startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
                 }
             }
-            refreshToolsListIfNeeded()
             return
         }
         startEagerInitializePrimary()
+    }
+
+    private func retryPendingProcessRouteReadiness(reason: String) {
+        let activeRoutes = xcodeProcessRoutes
+        let activeProcessIDs = Set(activeRoutes.map(\.target.processID))
+        let pendingProcessIDs = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            processIDs -> Set<pid_t> in
+            processIDs = processIDs.filter { processID in
+                activeProcessIDs.contains(processID)
+                && processToolCatalogRegistry.catalog(forProcessID: processID) == nil
+            }
+            return processIDs
+        }
+        guard pendingProcessIDs.isEmpty == false else {
+            return
+        }
+
+        for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
+            for upstreamIndex in route.upstreamIndices {
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            }
+        }
+        refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "pending_process_route_\(reason)",
+            processIDs: pendingProcessIDs
+        )
+    }
+
+    func refreshPendingProcessToolsCatalogAfterWarmInitialize(upstreamIndex: Int) {
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+            return
+        }
+        let shouldRefresh = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.contains(route.target.processID)
+        }
+        guard shouldRefresh else {
+            return
+        }
+        refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "warm_initialize_\(upstreamIndex)",
+            processIDs: [route.target.processID]
+        )
     }
 
     func publishToolsListChangedNotification() {

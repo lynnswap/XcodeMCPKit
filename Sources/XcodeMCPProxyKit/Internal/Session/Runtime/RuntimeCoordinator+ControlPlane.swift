@@ -252,6 +252,54 @@ extension RuntimeCoordinator {
         }
     }
 
+    func refreshMissingProcessToolsCatalogsIfNeeded(
+        reason: String,
+        processIDs requestedProcessIDs: Set<pid_t>? = nil
+    ) {
+        guard processRoutingEnabled, isInitialized() else {
+            return
+        }
+        let unavailable = unavailableXcodeProcessIDs()
+        let routes = xcodeProcessRoutes.compactMap { route -> AvailableToolsCatalogRoute? in
+            guard unavailable.contains(route.target.processID) == false else {
+                return nil
+            }
+            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            guard upstreamIndices.isEmpty == false else {
+                return nil
+            }
+            return AvailableToolsCatalogRoute(target: route.target, upstreamIndices: upstreamIndices)
+        }
+        let missingRoutes = routes.filter {
+            if let requestedProcessIDs,
+               requestedProcessIDs.contains($0.target.processID) == false {
+                return false
+            }
+            return processToolCatalogRegistry.catalog(forProcessID: $0.target.processID) == nil
+        }
+        guard missingRoutes.isEmpty == false else {
+            return
+        }
+        logger.debug(
+            "Refreshing missing process tools/list catalogs",
+            metadata: [
+                "reason": .string(reason),
+                "process_ids": .string(
+                    missingRoutes
+                        .map { "\($0.target.processID)" }
+                        .joined(separator: ",")
+                ),
+            ]
+        )
+        scheduleAvailableToolsCatalogCompletion(
+            missingRoutes,
+            requestTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
+                defaultSeconds: config.requestTimeout
+            ),
+            exposedProcessIDs: Set(routes.map { $0.target.processID })
+        )
+    }
+
     private func availableToolsCatalogSurfaceResult(
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>,
@@ -289,6 +337,9 @@ extension RuntimeCoordinator {
             }?.upstreamIndices ?? [],
             rawResult: result.rawResult
         )
+        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.remove(target.processID)
+        }
         if hadProcessCatalog == false {
             publishToolsListChangedNotification()
         }

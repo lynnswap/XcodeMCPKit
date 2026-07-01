@@ -543,25 +543,47 @@ extension RuntimeCoordinator {
             allSessionIDs: sessionRegistry.sessionIDs()
         )
         let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
+        let processToolCatalogs = processToolCatalogRegistry.debugSnapshots(
+            exposedCatalog: brokerSnapshot.toolsCatalogRaw,
+            canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
+            tabOwnerCountsByProcessID: ownerCountsByProcessID(
+                tabOwnerProcessIDs.withLockedValue { $0 }
+            ),
+            workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
+                workspaceOwnerProcessIDs.withLockedValue { $0 }
+            )
+        )
+        let processIDsWithToolCatalog = Set(processToolCatalogs.map(\.processID))
+        let pendingToolCatalogProcessIDs =
+            pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0 }
+        let unavailableProcessIDs = unavailableXcodeProcessIDs()
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
-            processRoutes: xcodeProcessRegistry.debugSnapshots { [weak self] route in
-                guard let self else { return 0 }
-                return self.usableInitializedUpstreamIndices(in: route).count
-            },
-            processToolCatalogs: processToolCatalogRegistry.debugSnapshots(
-                exposedCatalog: brokerSnapshot.toolsCatalogRaw,
-                canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-                tabOwnerCountsByProcessID: ownerCountsByProcessID(
-                    tabOwnerProcessIDs.withLockedValue { $0 }
-                ),
-                workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
-                    workspaceOwnerProcessIDs.withLockedValue { $0 }
-                )
+            processRoutes: xcodeProcessRegistry.debugSnapshots(
+                usableSlotCount: { [weak self] route in
+                    guard let self else { return 0 }
+                    return self.usableInitializedUpstreamIndices(in: route).count
+                },
+                toolsCatalogState: { route, routeState in
+                    guard routeState == "active" else {
+                        return "retired"
+                    }
+                    if processIDsWithToolCatalog.contains(route.target.processID) {
+                        return "available"
+                    }
+                    if unavailableProcessIDs.contains(route.target.processID) {
+                        return "unavailable"
+                    }
+                    if pendingToolCatalogProcessIDs.contains(route.target.processID) {
+                        return "pending"
+                    }
+                    return "missing"
+                }
             ),
+            processToolCatalogs: processToolCatalogs,
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,

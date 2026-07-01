@@ -166,13 +166,15 @@ final class XcodeProcessRegistry: Sendable {
     }
 
     func debugSnapshots(
-        usableSlotCount: @Sendable (XcodeProcessRoute) -> Int
+        usableSlotCount: @Sendable (XcodeProcessRoute) -> Int,
+        toolsCatalogState: @Sendable (XcodeProcessRoute, String) -> String
     ) -> [ProxyDebug.ProcessRouteSnapshot] {
         state.withLockedValue { state in
             state.order.compactMap { key in
                 guard let record = state.recordsByKey[key] else { return nil }
+                let routeState = record.state.rawValue
                 return ProxyDebug.ProcessRouteSnapshot(
-                    state: record.state.rawValue,
+                    state: routeState,
                     processID: record.route.target.processID,
                     appPath: record.route.target.appPath,
                     developerDir: record.route.target.developerDir,
@@ -180,6 +182,7 @@ final class XcodeProcessRegistry: Sendable {
                     xcodeVersion: record.route.target.xcodeVersion,
                     upstreamIndices: record.route.upstreamIndices,
                     usableSlotCount: usableSlotCount(record.route),
+                    toolsCatalogState: toolsCatalogState(record.route, routeState),
                     firstSeenGeneration: record.firstSeenGeneration,
                     lastSeenGeneration: record.lastSeenGeneration,
                     lastSeenUptimeNs: record.lastSeenUptimeNs,

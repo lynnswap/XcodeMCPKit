@@ -220,6 +220,12 @@ struct RuntimeCoordinatorTests {
         let manager = fixture.manager
 
         _ = try await fixture.initializePrimary(on: olderUpstream)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (olderTarget, 0, [toolDescriptor(name: "Only26")]),
+            ]
+        )
         manager.reconcileXcodeProcessTargets(
             [olderTarget, newerTarget],
             reason: "test_add_late_xcode"
@@ -229,10 +235,38 @@ struct RuntimeCoordinatorTests {
         let warmInitialize = try await sentValue(from: newerUpstream, at: 0, timeout: .seconds(2))
         let warmUpstreamID = try extractUpstreamID(from: warmInitialize)
         await newerUpstream.yield(.message(try makeInitializeResponse(id: warmUpstreamID)))
-        _ = try await sentValue(from: newerUpstream, at: 1, timeout: .seconds(2))
+        let initializedNotification = try await sentValue(
+            from: newerUpstream,
+            at: 1,
+            timeout: .seconds(2)
+        )
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        let toolsRequest = try await sentValue(
+            from: newerUpstream,
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" },
+            timeout: .seconds(2),
+            description: "waiting for late-added process tools/list"
+        )
+        await newerUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: toolsRequest),
+                    tools: [
+                        toolDescriptor(name: "Only27"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout("waiting for late process catalog sync") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
 
         let snapshot = manager.debugSnapshot()
         #expect(snapshot.processRoutes.map(\.state) == ["active", "active"])
+        #expect(snapshot.processRoutes.map(\.toolsCatalogState) == ["available", "available"])
         #expect(snapshot.processRoutes.map(\.processID) == [
             olderTarget.processID,
             newerTarget.processID,
@@ -240,6 +274,111 @@ struct RuntimeCoordinatorTests {
         #expect(manager.documentationCandidateProcessIDs() == Set([
             olderTarget.processID,
             newerTarget.processID,
+        ]))
+        #expect(Set(snapshot.processToolCatalogs.map(\.processID)) == Set([
+            olderTarget.processID,
+            newerTarget.processID,
+        ]))
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "Only26",
+            "Only27",
+        ]))
+    }
+
+    @Test func processRoutingRetriesLateXcodeUntilMCPBridgeCanConnect() async throws {
+        let olderUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 26611, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27011, xcodeVersion: "27.0")
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [olderUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        _ = try await fixture.initializePrimary(on: olderUpstream)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (olderTarget, 0, [toolDescriptor(name: "Only26")]),
+            ]
+        )
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_add_late_xcode_before_workspace"
+        )
+
+        let newerUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let firstInitialize = try await sentValue(
+            from: newerUpstream,
+            at: 0,
+            timeout: .seconds(2)
+        )
+        manager.handleUpstreamInitTimeout(
+            upstreamIndex: 1,
+            upstreamID: try extractUpstreamID(from: firstInitialize)
+        )
+        let pendingSnapshot = manager.debugSnapshot()
+        #expect(pendingSnapshot.processRoutes.map(\.toolsCatalogState) == [
+            "available",
+            "pending",
+        ])
+
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_workspace_opened"
+        )
+        let retriedInitialize = try await sentValue(
+            from: newerUpstream,
+            at: 1,
+            timeout: .seconds(2)
+        )
+        await newerUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retriedInitialize)))
+        )
+        _ = try await sentValue(from: newerUpstream, at: 2, timeout: .seconds(2))
+        let toolsRequest = try await sentValue(
+            from: newerUpstream,
+            startingAt: 3,
+            matching: { methodName(from: $0) == "tools/list" },
+            timeout: .seconds(2),
+            description: "waiting for retried late process tools/list"
+        )
+        await newerUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: toolsRequest),
+                    tools: [
+                        toolDescriptor(name: "Only27"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout("waiting for retried process catalog sync") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
+
+        let snapshot = manager.debugSnapshot()
+        #expect(snapshot.processRoutes.map(\.toolsCatalogState) == ["available", "available"])
+        #expect(Set(snapshot.processToolCatalogs.map(\.processID)) == Set([
+            olderTarget.processID,
+            newerTarget.processID,
+        ]))
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "Only26",
+            "Only27",
         ]))
     }
 

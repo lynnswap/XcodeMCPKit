@@ -126,6 +126,7 @@ extension ProxyDebug {
         let xcodeVersion: String
         let upstreamIndices: [Int]
         let usableSlotCount: Int
+        let toolsCatalogState: String
         let firstSeenGeneration: UInt64
         let lastSeenGeneration: UInt64
         let lastSeenUptimeNs: UInt64?
