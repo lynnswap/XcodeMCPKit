@@ -67,6 +67,7 @@ final class XcodeProcessEventMonitor: @unchecked Sendable {
             queue: DispatchQueue.global()
         )
         exitSources[processID] = source
+        let sourceIdentity = ObjectIdentifier(source as AnyObject)
         lock.unlock()
 
         source.setEventHandler {
@@ -75,7 +76,10 @@ final class XcodeProcessEventMonitor: @unchecked Sendable {
         source.setCancelHandler { [weak self] in
             guard let self else { return }
             self.lock.lock()
-            self.exitSources.removeValue(forKey: processID)
+            if let currentSource = self.exitSources[processID],
+               ObjectIdentifier(currentSource as AnyObject) == sourceIdentity {
+                self.exitSources.removeValue(forKey: processID)
+            }
             self.lock.unlock()
         }
         source.resume()
