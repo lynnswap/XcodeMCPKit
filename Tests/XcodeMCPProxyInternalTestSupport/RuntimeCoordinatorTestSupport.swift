@@ -3,6 +3,7 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
+import SQLite3
 import Testing
 import XcodeMCPKit
 @testable import XcodeMCPProxyKit
@@ -218,9 +219,153 @@ func makeInstalledDocumentationAsset(
     try Data("{}".utf8).write(
         to: assetDataURL.appendingPathComponent("config.json", isDirectory: false)
     )
-    try Data("-- sqlite index placeholder".utf8).write(
-        to: databaseURL.appendingPathComponent("index.sql", isDirectory: false)
+    try createInstalledDocumentationIndex(
+        at: databaseURL.appendingPathComponent("index.sql", isDirectory: false)
     )
+}
+
+func addInstalledDocumentationAssetRows(
+    root: URL,
+    name: String,
+    rows: [(
+        vectorID: Int64,
+        assetID: String,
+        type: String,
+        framework: String?,
+        title: String,
+        content: String
+    )]
+) throws {
+    let indexURL = root
+        .appendingPathComponent("\(name).asset", isDirectory: true)
+        .appendingPathComponent("AssetData", isDirectory: true)
+        .appendingPathComponent("documentation-db", isDirectory: true)
+        .appendingPathComponent("index.sql", isDirectory: false)
+    try withDocumentationIndexDatabase(at: indexURL) { database in
+        let insert = try prepareStatement(
+            database,
+            """
+            INSERT INTO attributes(vector_id, asset_id, type, framework, title, content)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            """
+        )
+        defer { sqlite3_finalize(insert) }
+        for row in rows {
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+            sqlite3_bind_int64(insert, 1, row.vectorID)
+            try bind(row.assetID, to: insert, index: 2, database: database)
+            try bind(row.type, to: insert, index: 3, database: database)
+            if let framework = row.framework {
+                try bind(framework, to: insert, index: 4, database: database)
+            } else {
+                sqlite3_bind_null(insert, 4)
+            }
+            try bind(row.title, to: insert, index: 5, database: database)
+            try bind(row.content, to: insert, index: 6, database: database)
+            guard sqlite3_step(insert) == SQLITE_DONE else {
+                throw sqliteError(database, message: "insert documentation asset row failed")
+            }
+        }
+    }
+}
+
+private func createInstalledDocumentationIndex(at url: URL) throws {
+    try withDocumentationIndexDatabase(at: url) { database in
+        try executeSQL(
+            database,
+            """
+            CREATE TABLE attributes(
+                vector_id INTEGER NOT NULL,
+                asset_id TEXT NOT NULL,
+                type TEXT,
+                framework TEXT,
+                title TEXT,
+                content TEXT
+            );
+            CREATE INDEX attributes_asset_id_index ON attributes(asset_id);
+            """
+        )
+    }
+}
+
+private func withDocumentationIndexDatabase(
+    at url: URL,
+    _ body: (OpaquePointer?) throws -> Void
+) throws {
+    var database: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+        let message = database.map { sqliteErrorMessage($0) } ?? "unknown sqlite error"
+        if let database {
+            sqlite3_close_v2(database)
+        }
+        throw NSError(
+            domain: "XcodeMCPKitTests.SQLite",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
+    }
+    defer {
+        sqlite3_close_v2(database)
+    }
+    try body(database)
+}
+
+private func executeSQL(_ database: OpaquePointer?, _ sql: String) throws {
+    var errorMessage: UnsafeMutablePointer<CChar>?
+    defer {
+        if let errorMessage {
+            sqlite3_free(errorMessage)
+        }
+    }
+    guard sqlite3_exec(database, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+        throw NSError(
+            domain: "XcodeMCPKitTests.SQLite",
+            code: 2,
+            userInfo: [
+                NSLocalizedDescriptionKey: errorMessage.map { String(cString: $0) }
+                    ?? sqliteErrorMessage(database),
+            ]
+        )
+    }
+}
+
+private func prepareStatement(_ database: OpaquePointer?, _ sql: String) throws -> OpaquePointer? {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw sqliteError(database, message: "prepare failed")
+    }
+    return statement
+}
+
+private func bind(
+    _ value: String,
+    to statement: OpaquePointer?,
+    index: Int32,
+    database: OpaquePointer?
+) throws {
+    let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    let result = value.withCString { valuePointer in
+        sqlite3_bind_text(statement, index, valuePointer, -1, transient)
+    }
+    guard result == SQLITE_OK else {
+        throw sqliteError(database, message: "bind failed")
+    }
+}
+
+private func sqliteError(_ database: OpaquePointer?, message: String) -> NSError {
+    NSError(
+        domain: "XcodeMCPKitTests.SQLite",
+        code: Int(sqlite3_errcode(database)),
+        userInfo: [NSLocalizedDescriptionKey: "\(message): \(sqliteErrorMessage(database))"]
+    )
+}
+
+private func sqliteErrorMessage(_ database: OpaquePointer?) -> String {
+    guard let database, let message = sqlite3_errmsg(database) else {
+        return "unknown sqlite error"
+    }
+    return String(cString: message)
 }
 
 func makeDocumentationSearchRequest(id: Int64, query: String) throws -> Data {
@@ -550,6 +695,7 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     private let timeoutOnceAfterSuccessfulCallCount: Int?
     private var descriptorPIDs: [pid_t] = []
     private var callPIDs: [pid_t] = []
+    private var callTimeoutValues: [TimeAmount?] = []
     private var queries: [String] = []
     private var successfulCallCount = 0
     private var didThrowTimeout = false
@@ -576,9 +722,10 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     func callDocumentationSearch(
         requestData: Data,
         for target: XcodeProcessTarget,
-        timeout _: TimeAmount?
+        timeout: TimeAmount?
     ) async throws -> Data {
         callPIDs.append(target.processID)
+        callTimeoutValues.append(timeout)
         if let query = try documentationSearchQuery(in: requestData) {
             queries.append(query)
         }
@@ -607,6 +754,10 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
 
     func requestedCallPIDs() -> [pid_t] {
         callPIDs
+    }
+
+    func requestedCallTimeouts() -> [TimeAmount?] {
+        callTimeoutValues
     }
 
     func requestedQueries() -> [String] {
