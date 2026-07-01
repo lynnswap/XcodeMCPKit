@@ -75,7 +75,7 @@ extension RuntimeCoordinator {
                 defaultSeconds: config.requestTimeout
             )
         let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
-        if xcodeProcessRoutes.isEmpty == false {
+        if processRoutingEnabled {
             return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
                 requestTimeout: effectiveRequestTimeout,
                 deadlineUptimeNs: requestDeadlineUptimeNs,
@@ -279,6 +279,8 @@ extension RuntimeCoordinator {
         guard let sourceUpstream = result.sourceUpstream else {
             return result
         }
+        let hadProcessCatalog =
+            processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil
         processToolCatalogRegistry.record(
             target: target,
             upstreamIndex: sourceUpstream,
@@ -287,6 +289,9 @@ extension RuntimeCoordinator {
             }?.upstreamIndices ?? [],
             rawResult: result.rawResult
         )
+        if hadProcessCatalog == false {
+            publishToolsListChangedNotification()
+        }
         let surface = processToolCatalogRegistry.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
         )

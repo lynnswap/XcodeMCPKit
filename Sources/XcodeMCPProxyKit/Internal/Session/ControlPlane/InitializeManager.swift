@@ -162,7 +162,7 @@ final class InitializeManager: Sendable {
         sessionID: String,
         sessionGeneration: UInt64,
         originalID: JSONRPC.ID,
-        primaryUpstreamIndex: Int,
+        primaryUpstreamIndex: Int?,
         on eventLoop: EventLoop
     ) -> RegisterDecision {
         state.withLockedValue { state in
@@ -203,6 +203,16 @@ final class InitializeManager: Sendable {
                     cachedResult: nil,
                     shouldSendRequest: false,
                     shouldScheduleTimeout: false,
+                    isShuttingDown: false
+                )
+            }
+
+            guard let primaryUpstreamIndex else {
+                return RegisterDecision(
+                    promise: promise,
+                    cachedResult: nil,
+                    shouldSendRequest: false,
+                    shouldScheduleTimeout: true,
                     isShuttingDown: false
                 )
             }

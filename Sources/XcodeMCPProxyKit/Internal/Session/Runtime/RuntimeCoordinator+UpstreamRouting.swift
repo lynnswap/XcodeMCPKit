@@ -548,6 +548,10 @@ extension RuntimeCoordinator {
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
+            processRoutes: xcodeProcessRegistry.debugSnapshots { [weak self] route in
+                guard let self else { return 0 }
+                return self.usableInitializedUpstreamIndices(in: route).count
+            },
             processToolCatalogs: processToolCatalogRegistry.debugSnapshots(
                 exposedCatalog: brokerSnapshot.toolsCatalogRaw,
                 canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
@@ -1106,7 +1110,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
+    func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
         for action in actions {
             if let upstreamIndex = action.upstreamIndex {
                 upstreamSlotScheduler.releaseUpstreamSlot(

@@ -163,6 +163,150 @@ struct RuntimeCoordinatorTests {
         #expect(response["result"] != nil)
     }
 
+    @Test func processRoutingWaitsForLateXcodeBeforeCompletingInitialize()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 27002, xcodeVersion: "27.0")
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let future = fixture.registerInitialize(requestID: 1)
+        #expect(manager.testStateSnapshot().initInFlight == false)
+
+        manager.reconcileXcodeProcessTargets([target], reason: "test_late_xcode")
+
+        let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let initializeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: initializeRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+
+        let response = try decodeJSON(from: try await future.get())
+        #expect(response["result"] != nil)
+        let snapshot = manager.debugSnapshot()
+        #expect(snapshot.processRoutes.map(\.processID) == [target.processID])
+        #expect(snapshot.processRoutes.map(\.state) == ["active"])
+    }
+
+    @Test func processRoutingAddsLateXcodeProcessWithoutRestart() async throws {
+        let olderUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 26610, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27010, xcodeVersion: "27.0")
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [olderUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        _ = try await fixture.initializePrimary(on: olderUpstream)
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_add_late_xcode"
+        )
+
+        let newerUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let warmInitialize = try await sentValue(from: newerUpstream, at: 0, timeout: .seconds(2))
+        let warmUpstreamID = try extractUpstreamID(from: warmInitialize)
+        await newerUpstream.yield(.message(try makeInitializeResponse(id: warmUpstreamID)))
+        _ = try await sentValue(from: newerUpstream, at: 1, timeout: .seconds(2))
+
+        let snapshot = manager.debugSnapshot()
+        #expect(snapshot.processRoutes.map(\.state) == ["active", "active"])
+        #expect(snapshot.processRoutes.map(\.processID) == [
+            olderTarget.processID,
+            newerTarget.processID,
+        ])
+        #expect(manager.documentationCandidateProcessIDs() == Set([
+            olderTarget.processID,
+            newerTarget.processID,
+        ]))
+    }
+
+    @Test func processRoutingRetiresCrashedPIDAndAddsRelaunchedPID() async throws {
+        let oldUpstream = TestUpstreamClient()
+        let oldTarget = xcodeProcessTarget(processID: 27020, xcodeVersion: "27.0")
+        let relaunchedTarget = xcodeProcessTarget(processID: 27021, xcodeVersion: "27.0")
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [oldUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        _ = try await fixture.initializePrimary(on: oldUpstream)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (oldTarget, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        #expect(manager.recordXcodeWindowOwners(
+            from: try jsonValue([
+                "structuredContent": [
+                    "message": "* tabIdentifier: old-tab, workspacePath: /Old/App.xcworkspace",
+                ],
+            ]),
+            upstreamIndex: 0
+        ))
+
+        manager.reconcileXcodeProcessTargets(
+            [relaunchedTarget],
+            reason: "test_relaunch"
+        )
+        manager.drainRuntimeTasksAndWaitForTesting()
+
+        let relaunchedUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let initialize = try await sentValue(
+            from: relaunchedUpstream,
+            at: 0,
+            timeout: .seconds(2)
+        )
+        let upstreamID = try extractUpstreamID(from: initialize)
+        await relaunchedUpstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        _ = try await sentValue(from: relaunchedUpstream, at: 1, timeout: .seconds(2))
+
+        let snapshot = manager.debugSnapshot()
+        #expect(snapshot.processRoutes.map(\.state) == ["retired", "active"])
+        #expect(snapshot.processRoutes.map(\.processID) == [
+            oldTarget.processID,
+            relaunchedTarget.processID,
+        ])
+        #expect(snapshot.processToolCatalogs.isEmpty)
+        #expect(await oldUpstream.stopCount() == 1)
+        #expect(manager.documentationCandidateProcessIDs() == Set([relaunchedTarget.processID]))
+    }
+
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterError()
         async throws
     {

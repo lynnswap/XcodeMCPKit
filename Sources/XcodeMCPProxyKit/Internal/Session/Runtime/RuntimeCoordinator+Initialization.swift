@@ -77,7 +77,7 @@ extension RuntimeCoordinator {
     }
 
     func primaryInitializeUpstreamIndex(excluding excludedUpstreamIndices: Set<Int> = []) -> Int? {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return excludedUpstreamIndices.contains(0) ? nil : 0
         }
 
@@ -150,7 +150,7 @@ extension RuntimeCoordinator {
         failedUpstreamID: Int64?,
         reason: String
     ) -> Bool {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return false
         }
         guard let retryUpstreamIndex = primaryInitializeRetryUpstreamIndex(
@@ -192,7 +192,7 @@ extension RuntimeCoordinator {
         )
         let handlesPrimaryInitialize = isPrimaryInitialize
             || (
-                xcodeProcessRoutes.isEmpty
+                !processRoutingEnabled
                     && isCurrentPrimaryInitializeUpstream(upstreamIndex)
                     && initializeManager.activePrimaryInitializeUpstreamIndex() == nil
             )
@@ -404,7 +404,7 @@ extension RuntimeCoordinator {
         let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
         let handlesPrimaryInitialize = activePrimaryUpstreamIndex == upstreamIndex
             || (
-                xcodeProcessRoutes.isEmpty
+                !processRoutingEnabled
                     && isCurrentPrimaryInitializeUpstream(upstreamIndex)
                     && activePrimaryUpstreamIndex == nil
             )

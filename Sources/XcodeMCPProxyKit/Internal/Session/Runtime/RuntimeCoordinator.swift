@@ -70,6 +70,9 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     }
 }
 
+typealias XcodeProcessUpstreamFactory =
+    @Sendable (_ target: XcodeProcessTarget) -> [any UpstreamSlotControlling]
+
 /// The single routing decision for a DocumentationSearch tools/call:
 /// either the provider produced the response, or proxy-managed
 /// DocumentationSearch is unavailable.
@@ -363,7 +366,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let upstreamRouter: UpstreamRouter
     let config: ProxyConfig
     let logger: Logger = ProxyLogging.make("session")
-    let upstreams: [any UpstreamSlotControlling]
+    let upstreamsBox: NIOLockedValueBox<[any UpstreamSlotControlling]>
+    var upstreams: [any UpstreamSlotControlling] {
+        upstreamsBox.withLockedValue { $0 }
+    }
     let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     let canonicalBrokerState: CanonicalBrokerState
     let controlPlaneDebugMirror = ControlPlane.DebugMirror()
@@ -380,7 +386,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             RuntimeScheduledTimeout
     let controlPlaneCoordinator: ControlPlaneCoordinator
     let documentationProviderManager: (any DocumentationProviderManaging)?
-    let xcodeProcessRoutes: [XcodeProcessRoute]
+    let processRoutingEnabled: Bool
+    let xcodeProcessRegistry: XcodeProcessRegistry
+    let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
+    let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
+    let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?
+    var xcodeProcessRoutes: [XcodeProcessRoute] {
+        xcodeProcessRegistry.activeRoutes()
+    }
     let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
@@ -448,6 +461,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
             xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
+            processRoutingEnabled: xcodeProcessRoutingEnabled,
+            xcodeTargetDiscovery: xcodeTargetDiscovery,
+            dynamicUpstreamFactory: { target in
+                MCPBridgeRuntime.makeProcessBoundUpstreamSlots(
+                    config: bridgeRuntimeConfig,
+                    xcodeTarget: target
+                )
+            },
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
             startImmediately: startImmediately,
@@ -496,13 +517,21 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 RuntimeScheduledTimeout
         )? = nil,
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
+        processRoutingEnabled: Bool? = nil,
+        xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
+        dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
         startImmediately: Bool = true,
         runtimeBox providedRuntimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
-        precondition(!upstreams.isEmpty, "upstreams must not be empty")
+        let resolvedProcessRoutingEnabled =
+            processRoutingEnabled ?? (xcodeProcessRoutes.isEmpty == false)
+        precondition(
+            !upstreams.isEmpty || resolvedProcessRoutingEnabled,
+            "upstreams must not be empty outside process-bound routing mode"
+        )
         let runtimeBox = providedRuntimeBox ?? WeakRuntimeCoordinatorBox()
         let uptimeProvider = nowUptimeNanoseconds ?? clock.uptimeNanoseconds
         let runtimeClock = ClockClient(
@@ -522,7 +551,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         self.config = config
         self.eventLoop = eventLoop
-        self.upstreams = upstreams
+        self.upstreamsBox = NIOLockedValueBox(upstreams)
         self.clock = runtimeClock
         let brokerState = CanonicalBrokerState()
         self.canonicalBrokerState = brokerState
@@ -535,7 +564,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
-        self.xcodeProcessRoutes = xcodeProcessRoutes
+        self.processRoutingEnabled = resolvedProcessRoutingEnabled
+        self.xcodeProcessRegistry = XcodeProcessRegistry(
+            initialRoutes: xcodeProcessRoutes,
+            nowUptimeNs: uptimeProvider(),
+            reason: "startup"
+        )
+        self.xcodeTargetDiscovery = xcodeTargetDiscovery
+        self.dynamicUpstreamFactory = dynamicUpstreamFactory
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         self.testHooks = testHooks
         let resolvedReadinessGate =
@@ -622,27 +658,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         runtimeBox.value = self
 
         for (upstreamIndex, upstream) in upstreams.enumerated() {
-            upstreamEventTasks.run { [weak self, upstream] in
-                guard let self else { return }
-                for await event in upstream.events {
-                    switch event {
-                    case .message(let data):
-                        self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
-                    case .stderr(let message):
-                        self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
-                    case .stdoutProtocolViolation(let protocolViolation):
-                        self.handleUpstreamProtocolViolation(
-                            protocolViolation,
-                            upstreamIndex: upstreamIndex
-                        )
-                    case .stdoutBufferSize(let size):
-                        self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
-                    case .exit(let status):
-                        self.handleUpstreamExit(status, upstreamIndex: upstreamIndex)
-                    }
-                    self.testHooks.upstreamEventHandled?(upstreamIndex)
-                }
-            }
+            observeUpstreamEvents(upstream, upstreamIndex: upstreamIndex)
         }
 
         if startImmediately {
@@ -657,9 +673,52 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return true
         }
         guard shouldStart else { return }
+        if processRoutingEnabled {
+            xcodeProcessEventMonitor.startWorkspaceNotifications { [weak self] reason in
+                self?.triggerXcodeProcessReconcile(reason: reason)
+            }
+            for route in xcodeProcessRoutes {
+                xcodeProcessEventMonitor.observeExit(processID: route.target.processID) {
+                    [weak self] reason in
+                    self?.triggerXcodeProcessReconcile(reason: reason)
+                }
+            }
+            triggerXcodeProcessReconcile(reason: "startup")
+            startXcodeProcessReconciliationLoop()
+        }
         startEagerInitializePrimary()
         if prewarmDocumentationProviderOnStartup {
             prewarmDocumentationProvider()
+        }
+    }
+
+    func observeUpstreamEvents(
+        _ upstream: any UpstreamSlotControlling,
+        upstreamIndex: Int
+    ) {
+        upstreamEventTasks.run { [weak self, upstream] in
+            guard let self else { return }
+            for await event in upstream.events {
+                switch event {
+                case .message(let data):
+                    self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+                case .stderr(let message):
+                    self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
+                case .stdoutProtocolViolation(let protocolViolation):
+                    self.handleUpstreamProtocolViolation(
+                        protocolViolation,
+                        upstreamIndex: upstreamIndex
+                    )
+                case .stdoutBufferSize(let size):
+                    self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
+                case .exit(let status):
+                    self.handleUpstreamExit(status, upstreamIndex: upstreamIndex)
+                    if self.processRoutingEnabled {
+                        self.triggerXcodeProcessReconcile(reason: "upstream_exit_\(status)")
+                    }
+                }
+                self.testHooks.upstreamEventHandled?(upstreamIndex)
+            }
         }
     }
 
@@ -746,6 +805,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         documentationPrewarmTask?.cancel()
         upstreamReadinessCoordinator.shutdown()
+        xcodeProcessEventMonitor.stop()
 
         let runtimeDrain = runtimeTasks.beginShutdown()
         canonicalBrokerState.reset()
@@ -803,7 +863,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamIndex removedUpstreamIndex: Int,
         processID removedProcessID: pid_t? = nil
     ) {
-        guard xcodeProcessRoutes.isEmpty == false,
+        guard processRoutingEnabled,
               canonicalBrokerState.toolsCatalogRaw() != nil else {
             return
         }
@@ -1041,7 +1101,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
         let primaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
             ?? primaryInitializeUpstreamIndex()
-        guard primaryUpstreamIndex != nil || initializeManager.isInitialized() else {
+        guard primaryUpstreamIndex != nil || initializeManager.isInitialized() || processRoutingEnabled else {
             return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
 
@@ -1049,7 +1109,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             sessionID: sessionID,
             sessionGeneration: sessionGeneration,
             originalID: originalID,
-            primaryUpstreamIndex: primaryUpstreamIndex ?? 0,
+            primaryUpstreamIndex: primaryUpstreamIndex,
             on: eventLoop
         )
         let cachedResult = decision.cachedResult
@@ -1164,7 +1224,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
         let deadline = timeoutDeadline(for: timeout)
         switch route {
-        case .anyHealthy where xcodeProcessRoutes.isEmpty == false:
+        case .anyHealthy where processRoutingEnabled:
             return try await liveXcodeListWindowsAcrossProcessRoutes(
                 deadlineUptimeNs: deadline,
                 routeScope: .catalogSurface
@@ -1235,9 +1295,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let summary = ToolCatalogStartupLogFormatter.summary(
             from: result,
             process: toolCatalogSourceProcess(),
-            exposurePolicy: xcodeProcessRoutes.isEmpty
-                ? nil
-                : "available_route_catalog_surface"
+            exposurePolicy: processRoutingEnabled
+                ? "available_route_catalog_surface"
+                : nil
         )
         logger.info("\(summary)")
     }

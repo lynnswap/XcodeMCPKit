@@ -142,6 +142,13 @@ final class UpstreamHealthManager: Sendable {
         ))
     }
 
+    func appendUpstreams(count: Int) {
+        guard count > 0 else { return }
+        state.withLockedValue { state in
+            state.upstreamStates.append(contentsOf: Array(repeating: UpstreamState(), count: count))
+        }
+    }
+
     func statesSnapshot() -> [UpstreamState] {
         state.withLockedValue { $0.upstreamStates }
     }

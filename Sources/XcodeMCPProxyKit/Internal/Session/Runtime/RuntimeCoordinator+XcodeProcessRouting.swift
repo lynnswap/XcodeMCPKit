@@ -220,7 +220,7 @@ extension RuntimeCoordinator {
     }
 
     func documentationCandidateProcessIDs() -> Set<pid_t>? {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return nil
         }
         let unavailable = unavailableXcodeProcessIDs()
@@ -340,7 +340,7 @@ extension RuntimeCoordinator {
     }
 
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return nil
         }
         let indices = preferredUpstreamIndices(in: requestJSON)
@@ -364,7 +364,7 @@ extension RuntimeCoordinator {
     }
 
     func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return .forward(preferredUpstreamIndex: nil)
         }
         let requests = toolRoutingRequests(in: requestJSON)
