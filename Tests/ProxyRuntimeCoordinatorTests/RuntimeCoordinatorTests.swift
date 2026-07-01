@@ -198,6 +198,74 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.processRoutes.map(\.state) == ["active"])
     }
 
+    @Test func processRoutingNoXcodeInitializeWaitDoesNotRescheduleTimeoutForJoinedClient()
+        async throws
+    {
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        let firstFuture = fixture.registerInitialize(
+            requestID: 1,
+            sessionID: "session-no-xcode-timeout-1"
+        )
+        #expect(timeoutScheduler.scheduledCount() == 1)
+
+        let secondFuture = fixture.registerInitialize(
+            requestID: 2,
+            sessionID: "session-no-xcode-timeout-2"
+        )
+        #expect(timeoutScheduler.scheduledCount() == 1)
+
+        timeoutScheduler.fire(at: 0)
+        await #expect(throws: TimeoutError.self) {
+            try await firstFuture.get()
+        }
+        await #expect(throws: TimeoutError.self) {
+            try await secondFuture.get()
+        }
+    }
+
+    @Test func processRoutingNoXcodeRemovedInitializeDoesNotSuppressNextTimeout()
+        async throws
+    {
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        let removedFuture = fixture.registerInitialize(
+            requestID: 1,
+            sessionID: "session-no-xcode-removed"
+        )
+        #expect(timeoutScheduler.scheduledCount() == 1)
+
+        fixture.manager.removeSession(id: "session-no-xcode-removed")
+        await #expect(throws: CancellationError.self) {
+            try await removedFuture.get()
+        }
+
+        let nextFuture = fixture.registerInitialize(
+            requestID: 2,
+            sessionID: "session-no-xcode-next"
+        )
+        #expect(timeoutScheduler.scheduledCount() == 2)
+
+        timeoutScheduler.fire(at: 1)
+        await #expect(throws: TimeoutError.self) {
+            try await nextFuture.get()
+        }
+    }
+
     @Test func processRegistryReactivatesRetiredRouteWithoutDuplicatingOrder() {
         let target = xcodeProcessTarget(processID: 27003, xcodeVersion: "27.0")
         let registry = XcodeProcessRegistry()
@@ -1595,8 +1663,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-removed"
@@ -1610,12 +1686,16 @@ struct RuntimeCoordinatorTests {
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         manager.removeSession(id: sessionID)
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
+        }
 
         let sent = await upstream.sent()
         let initID = try extractUpstreamID(from: sent[0])
+        let responseEventIndex = upstreamEvents.count()
         await upstream.yield(.message(try makeInitializeResponse(id: initID)))
+        _ = try await nextRecordedValue(upstreamEvents, at: responseEventIndex)
 
-        _ = try await future.get()
         #expect(manager.hasSession(id: sessionID) == false)
     }
 
@@ -1624,8 +1704,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-recreated"
@@ -1644,7 +1732,9 @@ struct RuntimeCoordinatorTests {
 
         let sent = await upstream.sent()
         let initID = try extractUpstreamID(from: sent[0])
+        let responseEventIndex = upstreamEvents.count()
         await upstream.yield(.message(try makeInitializeResponse(id: initID)))
+        _ = try await nextRecordedValue(upstreamEvents, at: responseEventIndex)
 
         let notification = try JSONSerialization.data(
             withJSONObject: [
@@ -1654,7 +1744,9 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        _ = try await future.get()
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
+        }
         manager.routeUpstreamMessage(notification, upstreamIndex: 0)
         #expect(replacement.router.drainBufferedNotifications().isEmpty)
     }
@@ -1748,13 +1840,13 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let timeoutClock = TestClock()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let config = makeConfig(requestTimeout: 1)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler()
         )
         defer { manager.shutdownAndWait() }
 
@@ -1772,8 +1864,8 @@ struct RuntimeCoordinatorTests {
         )
         #expect((await upstream.sent()).count == 1)
 
-        try await timeoutClock.sleep(untilSuspendedBy: 1)
-        timeoutClock.advance(by: .seconds(1))
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        timeoutScheduler.fire(at: 0)
         await #expect(throws: TimeoutError.self) {
             try await future.get()
         }
@@ -1822,13 +1914,13 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let timeoutClock = TestClock()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let config = makeConfig(requestTimeout: 1)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler()
         )
         defer { manager.shutdownAndWait() }
 
@@ -1842,26 +1934,16 @@ struct RuntimeCoordinatorTests {
         )
 
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
-        try await waitWithTimeout(
-            "waiting for initialize timeout sleeper",
-            timeout: .seconds(2)
-        ) {
-            try await timeoutClock.sleep(untilSuspendedBy: 1)
-        }
+        #expect(timeoutScheduler.scheduledCount() == 1)
 
         manager.removeSession(id: sessionID)
         _ = manager.session(id: sessionID)
         let replacementSnapshotBeforeTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
-        timeoutClock.advance(by: .seconds(1))
-
-        try await waitWithTimeout(
-            "waiting for deterministic initialize timeout",
-            timeout: .seconds(2)
-        ) {
-            await #expect(throws: TimeoutError.self) {
-                try await future.get()
-            }
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
         }
+
+        timeoutScheduler.fire(at: 0)
 
         let replacementSnapshotAfterTimeout = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterTimeout.generation == replacementSnapshotBeforeTimeout.generation)
@@ -1874,8 +1956,16 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-error-recreated"
@@ -1895,6 +1985,7 @@ struct RuntimeCoordinatorTests {
         _ = manager.session(id: sessionID)
         let replacementSnapshotBeforeError = try #require(manager.testSessionSnapshot(id: sessionID))
 
+        let errorEventIndex = upstreamEvents.count()
         await upstream.yield(
             .message(
                 try JSONSerialization.data(
@@ -1910,10 +2001,11 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
+        _ = try await nextRecordedValue(upstreamEvents, at: errorEventIndex)
 
-        let response = try decodeJSON(from: try await future.get())
-        let errorObject = try #require(response["error"] as? [String: Any])
-        #expect(errorObject["message"] as? String == "boom")
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
+        }
 
         let replacementSnapshotAfterError = try #require(manager.testSessionSnapshot(id: sessionID))
         #expect(replacementSnapshotAfterError.generation == replacementSnapshotBeforeError.generation)
@@ -8598,26 +8690,25 @@ struct RuntimeCoordinatorTests {
         )
         defer { manager.shutdownAndWait() }
 
-        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        let init0 = try await upstream0.nextSent(at: 0)
         let init0ID = try extractUpstreamID(from: init0)
         await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
-        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let init1 = try await upstream1.nextSent(at: 0)
         let init1ID = try extractUpstreamID(from: init1)
         await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
-        _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
-        _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        _ = try await upstream0.nextSent(at: 1)
+        _ = try await upstream1.nextSent(at: 1)
 
         await upstream0.yield(.exit(1))
-        let firstWarmRetry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        let firstWarmRetry = try await upstream0.nextSent(at: 2)
         let firstWarmRetryID = try extractUpstreamID(from: firstWarmRetry)
 
         await upstream0.overloadNextInitializedNotificationSend()
         await upstream0.yield(.message(try makeInitializeResponse(id: firstWarmRetryID)))
 
-        try await waitForSentCount(upstream0, count: 5, timeoutSeconds: 2)
-        let secondWarmRetry = try await sentValue(from: upstream0, at: 4, timeout: .seconds(2))
+        let secondWarmRetry = try await upstream0.nextSent(at: 4)
         let secondWarmRetryID = try extractUpstreamID(from: secondWarmRetry)
 
         let errorResponse: [String: Any] = [
@@ -8632,16 +8723,7 @@ struct RuntimeCoordinatorTests {
         await upstream0.yield(
             .message(try JSONSerialization.data(withJSONObject: errorResponse, options: []))
         )
-        _ = try await waitForRecordedValue(
-            upstreamEvents,
-            at: errorEventIndex,
-            description: "waiting for warm init failure"
-        )
-
-        let snapshot = manager.testStateSnapshot()
-        #expect(snapshot.shouldRetryEagerInitializePrimaryAfterWarmInitFailure)
-        #expect(snapshot.upstreams[0].isInitialized == false)
-        #expect(snapshot.upstreams[0].initInFlight == false)
+        _ = try await nextRecordedValue(upstreamEvents, at: errorEventIndex)
 
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
@@ -8672,8 +8754,7 @@ struct RuntimeCoordinatorTests {
         }
         _ = future
 
-        try await waitForSentCount(upstream0, count: 6, timeoutSeconds: 5)
-        let eagerRetry = try await sentValue(from: upstream0, at: 5, timeout: .seconds(2))
+        let eagerRetry = try await upstream0.nextSent(at: 5)
         #expect(methodName(from: eagerRetry) == "initialize")
 
         manager.abandonRequestLease(

@@ -3288,28 +3288,19 @@ struct DocumentationProviderTests {
                 timeout: .milliseconds(20)
             )
         }
-        try await waitWithTimeout("waiting for local DocumentationSearch process to suspend") {
-            try await runGate.waitUntilWaiting(for: 1, count: 1)
-        }
+        try await runGate.waitUntilWaiting(for: 1, count: 1)
         try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: timeoutClock,
             uptimeClock: uptimeClock,
             by: .milliseconds(20)
         )
         await #expect(throws: TimeoutError.self) {
-            _ = try await waitWithTimeout(
-                "local DocumentationSearch should honor the caller timeout",
-                timeout: .milliseconds(500)
-            ) {
-                try await searchTask.value
-            }
+            try await searchTask.value
         }
         let requests = await runner.recordedRequests()
         #expect(requests.count == 1)
         #expect(requests.first?.timeoutNanoseconds == 20_000_000)
-        _ = try await waitWithTimeout("waiting for local search process cancellation") {
-            try await runner.nextCancelledRunCount(at: 0)
-        }
+        _ = try await runner.nextCancelledRunCount(at: 0)
         #expect(await runner.cancelledRunCount() == 1)
     }
 

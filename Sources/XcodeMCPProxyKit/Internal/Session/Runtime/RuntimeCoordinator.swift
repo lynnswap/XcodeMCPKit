@@ -762,6 +762,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func removeSession(id: String) {
         let context = sessionRegistry.removeSession(id: id)
         context?.notificationHub.closeAll()
+        let pendingInitializes = initializeManager.removePendingInitializes(sessionID: id)
+        for pending in pendingInitializes {
+            pending.eventLoop.execute {
+                pending.promise.fail(CancellationError())
+            }
+        }
     }
 
     func debugReset() {

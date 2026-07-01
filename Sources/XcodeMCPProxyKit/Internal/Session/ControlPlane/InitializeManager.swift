@@ -122,6 +122,17 @@ final class InitializeManager: Sendable {
         }
     }
 
+    func removePendingInitializes(sessionID: String) -> [PendingInitialize] {
+        state.withLockedValue { state in
+            let removed = state.initPending.filter { $0.sessionID == sessionID }
+            guard removed.isEmpty == false else {
+                return []
+            }
+            state.initPending.removeAll { $0.sessionID == sessionID }
+            return removed
+        }
+    }
+
     func isInitialized() -> Bool {
         brokerState.initializeResult() != nil
     }
@@ -186,6 +197,7 @@ final class InitializeManager: Sendable {
                 )
             }
 
+            let hadPendingInitialize = state.initPending.isEmpty == false
             let promise = eventLoop.makePromise(of: ByteBuffer.self)
             state.initPending.append(
                 PendingInitialize(
@@ -212,7 +224,7 @@ final class InitializeManager: Sendable {
                     promise: promise,
                     cachedResult: nil,
                     shouldSendRequest: false,
-                    shouldScheduleTimeout: true,
+                    shouldScheduleTimeout: !hadPendingInitialize,
                     isShuttingDown: false
                 )
             }
@@ -222,7 +234,7 @@ final class InitializeManager: Sendable {
                 promise: promise,
                 cachedResult: nil,
                 shouldSendRequest: true,
-                shouldScheduleTimeout: true,
+                shouldScheduleTimeout: !hadPendingInitialize,
                 isShuttingDown: false
             )
         }

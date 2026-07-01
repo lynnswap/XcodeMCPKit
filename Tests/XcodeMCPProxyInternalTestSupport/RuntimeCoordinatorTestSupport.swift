@@ -2188,6 +2188,30 @@ func makeDeterministicRuntimeTimeoutScheduler(
     }
 }
 
+final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
+    private let operations = NIOLockedValueBox<[@Sendable () -> Void]>([])
+
+    func scheduler() -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
+        { _, operation in
+            self.operations.withLockedValue {
+                $0.append(operation)
+            }
+            return RuntimeScheduledTimeout {}
+        }
+    }
+
+    func scheduledCount() -> Int {
+        operations.withLockedValue(\.count)
+    }
+
+    func fire(at index: Int) {
+        let operation = operations.withLockedValue { operations in
+            operations[index]
+        }
+        operation()
+    }
+}
+
 func makeDeterministicClockClient(
     timeoutClock: TestClock,
     uptimeClock: TestUptimeClock
@@ -2266,6 +2290,13 @@ func waitForRecordedValue<Value: Sendable>(
     try await waitWithTimeout(description, timeout: timeout) {
         try await values.nextValue(at: index)
     }
+}
+
+func nextRecordedValue<Value: Sendable>(
+    _ values: LockedRecordedValues<Value>,
+    at index: Int
+) async throws -> Value {
+    try await values.nextValue(at: index)
 }
 
 func methodName(from data: Data) -> String? {
