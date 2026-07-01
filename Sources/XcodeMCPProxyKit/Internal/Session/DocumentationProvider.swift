@@ -2615,7 +2615,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                         )
                         rememberRejectedProvider(
                             processID: target.processID,
-                            permanentlyUnusable: true,
+                            permanentlyUnusable: false,
                             rejectedProcessIDs: &rejectedProcessIDs
                         )
                         progressed = true

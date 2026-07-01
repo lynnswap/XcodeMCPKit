@@ -4481,6 +4481,56 @@ struct DocumentationProviderTests {
         #expect(await factory.documentationQueries(for: xcode26.processID) == ["SwiftUI"])
     }
 
+    @Test func documentationProviderManagerRetriesDescriptorMissOnLaterCall() async throws {
+        let target = xcodeProcessTarget(processID: 612, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 46,
+                        includesDocumentationSearch: false,
+                        firstDocumentationResponse: .success
+                    ),
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"recovered\"}")
+                    ),
+                ],
+            ]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 85, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .unavailable(let reason) = firstOutcome else {
+            Issue.record("expected unavailable outcome, got \(firstOutcome)")
+            return
+        }
+
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 86, query: "Observation"),
+            requestTimeoutOverride: .seconds(1)
+        )
+        guard case .handled(let responseData, _) = secondOutcome else {
+            Issue.record("expected handled outcome, got \(secondOutcome)")
+            return
+        }
+
+        #expect(reason.message == DocumentationProvider.UnavailableReason.userFacingMessage)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"recovered\"}")
+        #expect(await factory.startedPIDs() == [target.processID, target.processID])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/list") == 2)
+        #expect(await factory.documentationQueries(for: target.processID) == ["Observation"])
+    }
+
     @Test func documentationProviderManagerRetriesActualRequestWhenNewestIsNotEnabled() async throws {
         let xcode26 = xcodeProcessTarget(processID: 420, xcodeVersion: "26.6")
         let xcode27 = xcodeProcessTarget(processID: 421, xcodeVersion: "27.0")
