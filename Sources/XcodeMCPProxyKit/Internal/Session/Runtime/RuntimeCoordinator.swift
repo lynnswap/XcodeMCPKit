@@ -552,7 +552,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         self.config = config
         self.eventLoop = eventLoop
-        self.upstreamsBox = NIOLockedValueBox(upstreams)
+        let upstreamStore = NIOLockedValueBox(upstreams)
+        self.upstreamsBox = upstreamStore
         self.clock = runtimeClock
         let brokerState = CanonicalBrokerState()
         self.canonicalBrokerState = brokerState
@@ -561,16 +562,18 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
         self.leaseManager = LeaseManager()
         self.upstreamRouter = UpstreamRouter(upstreamCount: upstreams.count)
-        self.upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
+        let upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
+        self.upstreamHealthManager = upstreamHealthManager
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
         self.processRoutingEnabled = resolvedProcessRoutingEnabled
-        self.xcodeProcessRegistry = XcodeProcessRegistry(
+        let xcodeProcessRegistry = XcodeProcessRegistry(
             initialRoutes: xcodeProcessRoutes,
             nowUptimeNs: uptimeProvider(),
             reason: "startup"
         )
+        self.xcodeProcessRegistry = xcodeProcessRegistry
         self.xcodeTargetDiscovery = xcodeTargetDiscovery
         self.dynamicUpstreamFactory = dynamicUpstreamFactory
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
@@ -583,11 +586,25 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             gate: resolvedReadinessGate,
             logger: ProxyLogging.make("upstream.readiness")
         )
+        let activeProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = {
+            guard resolvedProcessRoutingEnabled else { return [] }
+            return Set(xcodeProcessRegistry.activeRoutes().flatMap(\.upstreamIndices))
+        }
+        let inactiveProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = {
+            guard resolvedProcessRoutingEnabled else { return [] }
+            let active = activeProcessBoundUpstreamIndices()
+            let upstreamCount = upstreamStore.withLockedValue { $0.count }
+            return Set(0..<upstreamCount).subtracting(active)
+        }
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             canUseUpstream: {
-                [weak upstreamHealthManager = self.upstreamHealthManager] upstreamIndex in
+                [weak upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
                 guard let upstreamHealthManager else {
+                    return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
+                }
+                if resolvedProcessRoutingEnabled,
+                   activeProcessBoundUpstreamIndices().contains(upstreamIndex) == false {
                     return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
                 }
                 return upstreamHealthManager.evaluateUsableInitialized(
@@ -595,11 +612,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     nowUptimeNs: nowUptimeNs
                 )
             },
-            selectUpstream: { [weak upstreamHealthManager = self.upstreamHealthManager] occupied in
+            selectUpstream: { [weak upstreamHealthManager] occupied in
                 let nowUptimeNs = uptimeProvider()
                 return upstreamHealthManager?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
-                    occupiedUpstreams: occupied
+                    occupiedUpstreams: occupied.union(inactiveProcessBoundUpstreamIndices())
                 ) ?? UpstreamHealthManager.SelectionResult(upstreamIndex: nil, effects: [])
             },
             applyHealthEffects: { [runtimeBox] effects in
@@ -972,6 +989,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func chooseUpstreamIndex() -> Int? {
         let nowUptimeNs = nowUptimeNanoseconds()
         let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
+            .union(inactiveProcessBoundUpstreamIndices())
 
         let chooseResult = upstreamHealthManager.chooseBestInitializedUpstream(
             nowUptimeNs: nowUptimeNs,
@@ -1037,13 +1055,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         preferredUpstreamIndices: [Int]?,
         starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
-        let hasHealthyUpstream = upstreamHealthManager.initializedHealthyishCount() > 0
-        var recoveryInFlight = upstreamHealthManager.anyRecoveryInFlight()
+        let hasHealthyUpstream = activeInitializedHealthyishCount() > 0
+        var recoveryInFlight = anyActiveRecoveryInFlight()
         if hasHealthyUpstream == false, recoveryInFlight == false,
             initializeManager.consumeWarmInitRecoveryIntent(policy: .regardlessOfCachedInitialize)
         {
             startPrimaryEagerRetry()
-            recoveryInFlight = upstreamHealthManager.anyRecoveryInFlight()
+            recoveryInFlight = anyActiveRecoveryInFlight()
         }
         guard hasHealthyUpstream || recoveryInFlight else {
             _ = chooseUpstreamIndex()

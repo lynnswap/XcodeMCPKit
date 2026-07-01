@@ -8,6 +8,7 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     private let sentMessages = RecordedValues<Data>()
+    private let stopEvents = RecordedValues<Int>()
     private var startCountValue = 0
     private var stopCountValue = 0
 
@@ -25,6 +26,7 @@ actor TestUpstreamClient: UpstreamSlotControlling {
 
     func stop() async {
         stopCountValue += 1
+        await stopEvents.append(stopCountValue)
         continuation.finish()
     }
 
@@ -72,6 +74,10 @@ actor TestUpstreamClient: UpstreamSlotControlling {
 
     func stopCount() async -> Int {
         stopCountValue
+    }
+
+    func nextStopCount(at index: Int = 0) async throws -> Int {
+        try await stopEvents.nextValue(at: index)
     }
 }
 

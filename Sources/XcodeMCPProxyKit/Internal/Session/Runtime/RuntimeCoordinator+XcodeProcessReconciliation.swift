@@ -28,8 +28,8 @@ extension RuntimeCoordinator {
                         $0.isEmpty == false
                     }
                 let isRecovering =
-                    self.upstreamHealthManager.initializedHealthyishCount() == 0
-                    || self.upstreamHealthManager.anyRecoveryInFlight()
+                    self.activeInitializedHealthyishCount() == 0
+                    || self.anyActiveRecoveryInFlight()
                     || hasPendingProcessToolsCatalogRefresh
                 let interval: Duration = self.xcodeProcessRoutes.isEmpty
                     || isRecovering
@@ -196,8 +196,16 @@ extension RuntimeCoordinator {
                 reason: .upstreamExit
             )
         )
+        let upstreamToStop = upstreamsBox.withLockedValue { upstreams in
+            upstreamIndex >= 0 && upstreamIndex < upstreams.count ? upstreams[upstreamIndex] : nil
+        }
+        if let upstreamToStop {
+            addRuntimeTask {
+                await upstreamToStop.stop()
+            }
+        }
 
-        if globalInit?.hadGlobalInit == true, upstreamHealthManager.anyInitialized() == false {
+        if globalInit?.hadGlobalInit == true, anyActiveInitializedUpstream() == false {
             resetInitialize = true
             initializeManager.resetWarmSecondaryForRetry()
         }
@@ -209,14 +217,6 @@ extension RuntimeCoordinator {
                reason: "xcode_process_removed_\(reason)"
            ) {
             return
-        }
-
-        if let upstream = upstreamsBox.withLockedValue({ upstreams in
-            upstreamIndex >= 0 && upstreamIndex < upstreams.count ? upstreams[upstreamIndex] : nil
-        }) {
-            addRuntimeTask {
-                await upstream.stop()
-            }
         }
     }
 

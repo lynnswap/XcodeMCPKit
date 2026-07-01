@@ -780,6 +780,71 @@ extension RuntimeCoordinator {
         xcodeProcessRoutes.first { $0.upstreamIndices.contains(upstreamIndex) }
     }
 
+    func isActiveProcessBoundUpstream(_ upstreamIndex: Int) -> Bool {
+        guard processRoutingEnabled else { return true }
+        return xcodeProcessRoute(forUpstreamIndex: upstreamIndex) != nil
+    }
+
+    func activeProcessBoundUpstreamIndices() -> Set<Int> {
+        guard processRoutingEnabled else {
+            return Set(upstreams.indices)
+        }
+        return Set(xcodeProcessRoutes.flatMap(\.upstreamIndices))
+    }
+
+    func inactiveProcessBoundUpstreamIndices() -> Set<Int> {
+        guard processRoutingEnabled else { return [] }
+        return Set(upstreams.indices).subtracting(activeProcessBoundUpstreamIndices())
+    }
+
+    func secondaryUpstreamIndices(excluding upstreamIndex: Int) -> [Int] {
+        let candidates = processRoutingEnabled
+            ? xcodeProcessRoutes.flatMap(\.upstreamIndices)
+            : Array(upstreams.indices)
+        return candidates.filter { $0 != upstreamIndex }
+    }
+
+    func activeInitializedHealthyishCount() -> Int {
+        guard processRoutingEnabled else {
+            return upstreamHealthManager.initializedHealthyishCount()
+        }
+        let states = upstreamHealthManager.statesSnapshot()
+        return activeProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
+            guard upstreamIndex >= 0, upstreamIndex < states.count else { return }
+            let upstream = states[upstreamIndex]
+            guard upstream.isInitialized else { return }
+            switch upstream.healthState {
+            case .healthy, .degraded:
+                count += 1
+            case .quarantined:
+                break
+            }
+        }
+    }
+
+    func anyActiveInitializedUpstream() -> Bool {
+        guard processRoutingEnabled else {
+            return upstreamHealthManager.anyInitialized()
+        }
+        let states = upstreamHealthManager.statesSnapshot()
+        return activeProcessBoundUpstreamIndices().contains { upstreamIndex in
+            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
+            return states[upstreamIndex].isInitialized
+        }
+    }
+
+    func anyActiveRecoveryInFlight() -> Bool {
+        guard processRoutingEnabled else {
+            return upstreamHealthManager.anyRecoveryInFlight()
+        }
+        let states = upstreamHealthManager.statesSnapshot()
+        return activeProcessBoundUpstreamIndices().contains { upstreamIndex in
+            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
+            let upstream = states[upstreamIndex]
+            return upstream.initInFlight || upstream.healthProbeInFlight
+        }
+    }
+
     private func processID(forUpstreamIndex upstreamIndex: Int) -> pid_t? {
         xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.target.processID
     }

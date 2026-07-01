@@ -173,6 +173,7 @@ extension RuntimeCoordinator {
     }
 
     func startUpstreamWarmInitialize(upstreamIndex: Int, applyBackoff: Bool = false) {
+        guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         runWhenUpstreamReady(
             reason: "warm_initialize_\(upstreamIndex)",
             applyBackoff: applyBackoff
@@ -182,6 +183,7 @@ extension RuntimeCoordinator {
     }
 
     private func startUpstreamWarmInitializeWhenReady(upstreamIndex: Int) {
+        guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         guard upstreamHealthManager.beginWarmInitialize(upstreamIndex: upstreamIndex) else { return }
 
         let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)

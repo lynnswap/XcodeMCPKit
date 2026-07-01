@@ -262,7 +262,12 @@ struct RuntimeCoordinatorTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        _ = try await fixture.initializePrimary(on: olderUpstream)
+        let olderInitializeFuture = fixture.registerInitialize(requestID: 1)
+        let olderInitialize = try await olderUpstream.nextSent(at: 0)
+        await olderUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: olderInitialize)))
+        )
+        _ = try await olderInitializeFuture.get()
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -340,7 +345,12 @@ struct RuntimeCoordinatorTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        _ = try await fixture.initializePrimary(on: olderUpstream)
+        let olderInitializeFuture = fixture.registerInitialize(requestID: 1)
+        let olderInitialize = try await olderUpstream.nextSent(at: 0)
+        await olderUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: olderInitialize)))
+        )
+        _ = try await olderInitializeFuture.get()
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -424,7 +434,12 @@ struct RuntimeCoordinatorTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        _ = try await fixture.initializePrimary(on: oldUpstream)
+        let oldInitializeFuture = fixture.registerInitialize(requestID: 1)
+        let oldInitialize = try await oldUpstream.nextSent(at: 0)
+        await oldUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: oldInitialize)))
+        )
+        _ = try await oldInitializeFuture.get()
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -444,7 +459,7 @@ struct RuntimeCoordinatorTests {
             [relaunchedTarget],
             reason: "test_relaunch"
         )
-        manager.drainRuntimeTasksAndWaitForTesting()
+        _ = try await oldUpstream.nextStopCount()
 
         let relaunchedUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
         let initialize = try await relaunchedUpstream.nextSent(at: 0)
@@ -461,6 +476,94 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.processToolCatalogs.isEmpty)
         #expect(await oldUpstream.stopCount() == 1)
         #expect(manager.documentationCandidateProcessIDs() == Set([relaunchedTarget.processID]))
+
+        let oldSentCountAfterRetire = await oldUpstream.sentCount()
+        manager.warmUpSecondaryUpstreams(excluding: 1)
+        #expect(await oldUpstream.sentCount() == oldSentCountAfterRetire)
+    }
+
+    @Test func processRoutingRetiresInFlightPrimaryStopsOldSlotAndRetriesActiveRoute()
+        async throws
+    {
+        let oldUpstream = TestUpstreamClient()
+        let activeUpstream = TestUpstreamClient()
+        let oldTarget = xcodeProcessTarget(processID: 27022, xcodeVersion: "27.0")
+        let activeTarget = xcodeProcessTarget(processID: 26622, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [oldUpstream, activeUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
+            ],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let initializeFuture = fixture.registerInitialize(requestID: 1)
+        _ = try await oldUpstream.nextSent(at: 0)
+
+        manager.reconcileXcodeProcessTargets([activeTarget], reason: "test_remove_inflight")
+        _ = try await oldUpstream.nextStopCount()
+
+        let retriedInitialize = try await activeUpstream.nextSent(at: 0)
+        await activeUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retriedInitialize)))
+        )
+
+        let response = try decodeJSON(from: try await initializeFuture.get())
+        #expect(response["result"] != nil)
+        #expect(await oldUpstream.stopCount() == 1)
+        #expect(manager.debugSnapshot().processRoutes.map(\.state) == ["retired", "active"])
+    }
+
+    @Test func processRoutingDoesNotSelectRetiredSlotEvenIfHealthLooksInitialized()
+        async throws
+    {
+        let retiredUpstream = TestUpstreamClient()
+        let activeUpstream = TestUpstreamClient()
+        let retiredTarget = xcodeProcessTarget(processID: 27023, xcodeVersion: "27.0")
+        let activeTarget = xcodeProcessTarget(processID: 26623, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [retiredUpstream, activeUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: retiredTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
+            ],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.reconcileXcodeProcessTargets([activeTarget], reason: "test_retire_slot")
+        _ = try await retiredUpstream.nextStopCount()
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-retired-slot",
+            label: "tools/call:GenericTool",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let selectedUpstream = NIOLockedValueBox<Int?>(nil)
+        let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: leaseID,
+            descriptor: descriptor,
+            on: fixture.eventLoop
+        ) { upstreamIndex in
+            selectedUpstream.withLockedValue { $0 = upstreamIndex }
+            return fixture.eventLoop.makeSucceededFuture(())
+        }
+
+        _ = try await future.get()
+        #expect(selectedUpstream.withLockedValue { $0 } == 1)
+        manager.completeRequestLease(leaseID)
     }
 
     @Test func sessionManagerRetriesProcessPrimaryInitializeOnNextXcodeProcessAfterError()

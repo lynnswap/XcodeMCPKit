@@ -700,17 +700,15 @@ extension RuntimeCoordinator {
     }
 
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
-        guard upstreams.count > 1 else { return }
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        for upstreamIndex in upstreams.indices where upstreamIndex != resolvedPrimaryUpstreamIndex {
+        for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }
 
     func resetSecondaryUpstreamsForPrimaryRetry(excluding primaryUpstreamIndex: Int? = nil) {
-        guard upstreams.count > 1 else { return }
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        for upstreamIndex in upstreams.indices where upstreamIndex != resolvedPrimaryUpstreamIndex {
+        for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
             clearUpstreamState(upstreamIndex: upstreamIndex)
         }
     }
@@ -730,8 +728,10 @@ extension RuntimeCoordinator {
 
     func hasUsableInitializedSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) -> Bool {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        return upstreamHealthManager.statesSnapshot().enumerated().contains { upstreamIndex, upstream in
-            guard upstreamIndex != resolvedPrimaryUpstreamIndex else { return false }
+        let states = upstreamHealthManager.statesSnapshot()
+        return secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex).contains { upstreamIndex in
+            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
+            let upstream = states[upstreamIndex]
             guard upstream.isInitialized else { return false }
             switch upstream.healthState {
             case .healthy, .degraded:

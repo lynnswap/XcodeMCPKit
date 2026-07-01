@@ -5,11 +5,11 @@ import XcodeMCPKit
 
 extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
-        guard upstreamHealthManager.initializedHealthyishCount() == 0 else { return }
-        guard upstreamHealthManager.anyRecoveryInFlight() == false else { return }
+        guard activeInitializedHealthyishCount() == 0 else { return }
+        guard anyActiveRecoveryInFlight() == false else { return }
         if initializeManager.consumeWarmInitRecoveryIntent(policy: .regardlessOfCachedInitialize) {
             startPrimaryEagerRetry()
-            if upstreamHealthManager.anyRecoveryInFlight() {
+            if anyActiveRecoveryInFlight() {
                 return
             }
         }
@@ -255,7 +255,7 @@ extension RuntimeCoordinator {
     /// upstream can still vouch for an equivalent catalog.
     func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
         canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !upstreamHealthManager.anyInitialized()
+            && !anyActiveInitializedUpstream()
     }
 
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
@@ -305,7 +305,7 @@ extension RuntimeCoordinator {
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
-            shouldResetGlobalInit = !upstreamHealthManager.anyInitialized()
+            shouldResetGlobalInit = !anyActiveInitializedUpstream()
         } else {
             shouldResetGlobalInit = false
         }
