@@ -198,6 +198,49 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.processRoutes.map(\.state) == ["active"])
     }
 
+    @Test func processRegistryReactivatesRetiredRouteWithoutDuplicatingOrder() {
+        let target = xcodeProcessTarget(processID: 27003, xcodeVersion: "27.0")
+        let registry = XcodeProcessRegistry()
+        var nextUpstreamIndex = 0
+        let makeRoute: (XcodeProcessTarget) -> XcodeProcessRoute = { target in
+            defer { nextUpstreamIndex += 1 }
+            return XcodeProcessRoute(target: target, upstreamIndices: [nextUpstreamIndex])
+        }
+
+        var result = registry.reconcile(
+            targets: [target],
+            reason: "initial_seen",
+            nowUptimeNs: 1,
+            makeRoute: makeRoute
+        )
+        #expect(result.addedRoutes.map(\.upstreamIndices) == [[0]])
+        #expect(registry.activeRoutes().map(\.upstreamIndices) == [[0]])
+
+        result = registry.reconcile(
+            targets: [],
+            reason: "transient_missing",
+            nowUptimeNs: 2,
+            makeRoute: makeRoute
+        )
+        #expect(result.retiredRoutes.map(\.upstreamIndices) == [[0]])
+        #expect(registry.activeRoutes().isEmpty)
+
+        result = registry.reconcile(
+            targets: [target],
+            reason: "seen_again",
+            nowUptimeNs: 3,
+            makeRoute: makeRoute
+        )
+        #expect(result.addedRoutes.map(\.upstreamIndices) == [[1]])
+        #expect(registry.activeRoutes().map(\.upstreamIndices) == [[1]])
+        let snapshots = registry.debugSnapshots(
+            usableSlotCount: { $0.upstreamIndices.count },
+            toolsCatalogState: { _, state in state }
+        )
+        #expect(snapshots.map(\.processID) == [target.processID])
+        #expect(snapshots.map(\.state) == ["active"])
+    }
+
     @Test func processRoutingAddsLateXcodeProcessWithoutRestart() async throws {
         let olderUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 26610, xcodeVersion: "26.6")

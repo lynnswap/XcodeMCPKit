@@ -132,7 +132,9 @@ final class XcodeProcessRegistry: Sendable {
                     lastReconcileReason: reason
                 )
                 state.recordsByKey[key] = record
-                state.order.append(key)
+                if state.order.contains(key) == false {
+                    state.order.append(key)
+                }
                 addedRoutes.append(route)
             }
 

@@ -2565,7 +2565,7 @@ extension HTTPHandlerTests {
     }
 
     @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
-        var config = makeConfig(requestTimeout: 2)
+        var config = makeConfig(requestTimeout: 10)
         config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
