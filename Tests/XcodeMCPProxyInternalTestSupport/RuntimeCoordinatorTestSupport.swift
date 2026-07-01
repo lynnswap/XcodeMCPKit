@@ -35,6 +35,10 @@ extension RuntimeCoordinator {
             description: "timed out waiting for RuntimeCoordinator runtime task drain"
         )
     }
+
+    func drainRuntimeTasksForTesting() async {
+        await runtimeTasks.drainCurrentTasks().wait()
+    }
 }
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {

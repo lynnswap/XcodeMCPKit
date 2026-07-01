@@ -518,6 +518,47 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().processRoutes.map(\.state) == ["retired", "active"])
     }
 
+    @Test func processRoutingRetiringNonPrimaryRouteDoesNotStealPrimaryInitialize()
+        async throws
+    {
+        let primaryUpstream = TestUpstreamClient()
+        let retiringUpstream = TestUpstreamClient()
+        let alternateUpstream = TestUpstreamClient()
+        let primaryTarget = xcodeProcessTarget(processID: 27024, xcodeVersion: "27.0")
+        let retiringTarget = xcodeProcessTarget(processID: 26624, xcodeVersion: "26.6")
+        let alternateTarget = xcodeProcessTarget(processID: 26524, xcodeVersion: "26.5")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [primaryUpstream, retiringUpstream, alternateUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: primaryTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: retiringTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: alternateTarget, upstreamIndices: [2]),
+            ],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let initializeFuture = fixture.registerInitialize(requestID: 1)
+        let primaryInitialize = try await primaryUpstream.nextSent(at: 0)
+
+        manager.reconcileXcodeProcessTargets(
+            [primaryTarget, alternateTarget],
+            reason: "test_remove_non_primary_during_initialize"
+        )
+        _ = try await retiringUpstream.nextStopCount()
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await alternateUpstream.sentCount() == 0)
+
+        await primaryUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: primaryInitialize)))
+        )
+        let response = try decodeJSON(from: try await initializeFuture.get())
+        #expect(response["result"] != nil)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 0)
+    }
+
     @Test func processRoutingDoesNotSelectRetiredSlotEvenIfHealthLooksInitialized()
         async throws
     {

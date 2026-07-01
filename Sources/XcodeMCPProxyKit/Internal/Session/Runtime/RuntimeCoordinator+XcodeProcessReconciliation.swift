@@ -210,7 +210,10 @@ extension RuntimeCoordinator {
             initializeManager.resetWarmSecondaryForRetry()
         }
 
-        if globalInit?.wasInFlight == true,
+        let retiredPrimaryInitialize =
+            globalInit?.wasInFlight == true
+            && globalInit?.primaryInitUpstreamIndex == upstreamIndex
+        if retiredPrimaryInitialize,
            retryPrimaryInitializeOnAlternativeUpstream(
                failedUpstreamIndex: upstreamIndex,
                failedUpstreamID: nil,
