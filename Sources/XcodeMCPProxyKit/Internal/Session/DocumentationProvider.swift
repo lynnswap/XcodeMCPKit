@@ -2347,15 +2347,15 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             return .unavailable
         }
         let deadline = Deadline.fromNow(requestTimeout, clock: clock)
-        let targets = orderedTargets(excluding: [])
-        guard targets.isEmpty == false else {
-            return .unavailable
-        }
         if preferLocalSearchProvider {
             let localUpdate = await installedDocumentationAssetToolListUpdate()
             if case .available = localUpdate {
                 return localUpdate
             }
+        }
+        let targets = orderedTargets(excluding: [])
+        guard targets.isEmpty == false else {
+            return .unavailable
         }
         for (index, target) in targets.enumerated() {
             guard !Task.isCancelled, !isShutdown else {

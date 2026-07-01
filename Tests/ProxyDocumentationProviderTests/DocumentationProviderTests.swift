@@ -341,6 +341,27 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI"])
     }
 
+    @Test func documentationProviderBackgroundDiscoveryUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()
+        async throws
+    {
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: Data()
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            preferLocalSearchProvider: true
+        )
+
+        let update = await manager.startBackgroundDiscovery(requestTimeout: TimeAmount.seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
+        #expect(await localProvider.requestedDescriptorPIDs() == [0])
+    }
+
     @Test func documentationProviderGivesPrimaryInstalledAssetFullCallerTimeout()
         async throws
     {
