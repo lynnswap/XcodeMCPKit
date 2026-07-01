@@ -1463,44 +1463,47 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         asset: DocumentationSearchInstalledAsset,
         rows: [DocumentationAssetSearchRow]
     ) throws -> Data {
-        let documents = rows.map { row -> [String: Any] in
+        let documents = rows.map { row -> JSONValue in
             let type = row.type ?? ""
             let content = row.content ?? ""
-            var document: [String: Any] = [
-                "title": row.title ?? "",
-                "type": type,
-                "kind": type,
-                "content": content,
-                "contents": content,
+            var document: [String: JSONValue] = [
+                "title": .string(row.title ?? ""),
+                "type": .string(type),
+                "kind": .string(type),
+                "content": .string(content),
+                "contents": .string(content),
             ]
             if let assetID = row.assetID {
-                document["identifier"] = assetID
-                document["uri"] = assetID
-                document["url"] = "https://developer.apple.com\(assetID)"
+                document["identifier"] = .string(assetID)
+                document["uri"] = .string(assetID)
+                document["url"] = .string("https://developer.apple.com\(assetID)")
             }
             if let framework = row.framework, framework.isEmpty == false {
-                document["framework"] = framework
+                document["framework"] = .string(framework)
             }
             if let score = row.score {
-                document["score"] = score
+                document["score"] = .number(.double(score))
             }
-            return document
+            return .object(document)
         }
-        var assetPayload: [String: Any] = [
-            "path": asset.assetURL.path,
-            "xcodeVersion": asset.xcodeVersion,
-            "osVersion": asset.osVersion,
+        var assetPayload: [String: JSONValue] = [
+            "path": .string(asset.assetURL.path),
+            "xcodeVersion": .string(asset.xcodeVersion),
+            "osVersion": .string(asset.osVersion),
         ]
         if let documentationRelease = asset.documentationRelease {
-            assetPayload["documentationRelease"] = documentationRelease
+            assetPayload["documentationRelease"] = .number(.int(Int64(documentationRelease)))
         }
-        let payload: [String: Any] = [
-            "query": query,
-            "source": "installed-documentation-asset",
-            "asset": assetPayload,
-            "documents": documents,
-        ]
-        let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let structuredContent = JSONValue.object([
+            "query": .string(query),
+            "source": .string("installed-documentation-asset"),
+            "asset": .object(assetPayload),
+            "documents": .array(documents),
+        ])
+        let payloadData = try JSONSerialization.data(
+            withJSONObject: structuredContent.foundationObject,
+            options: [.sortedKeys]
+        )
         let payloadText = String(decoding: payloadData, as: UTF8.self)
         return try JSONRPC.Wire.resultResponseData(
             id: requestID,
@@ -1511,6 +1514,7 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
                         "text": .string(payloadText),
                     ])
                 ]),
+                "structuredContent": structuredContent,
                 "isError": .bool(false),
             ])
         )

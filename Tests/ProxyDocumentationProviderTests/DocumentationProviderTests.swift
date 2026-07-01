@@ -3305,6 +3305,13 @@ struct DocumentationProviderTests {
         let payload = try #require(
             JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
         )
+        let responseObject = try #require(
+            JSONSerialization.jsonObject(with: response, options: []) as? [String: Any]
+        )
+        let result = try #require(responseObject["result"] as? [String: Any])
+        let structuredContent = try #require(result["structuredContent"] as? [String: Any])
+        #expect(JSONValue(any: structuredContent) == JSONValue(any: payload))
+
         #expect(payload["source"] as? String == "installed-documentation-asset")
         let documents = try #require(payload["documents"] as? [[String: Any]])
         let firstDocument = try #require(documents.first)
