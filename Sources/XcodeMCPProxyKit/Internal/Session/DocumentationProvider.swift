@@ -946,6 +946,43 @@ struct DocumentationAssetSemanticSearchResult: Sendable, Decodable, Equatable {
     }
 }
 
+private final class DocumentationSemanticSearchTimeoutWaiter<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+    private var result: Result<T, Error>?
+
+    func setContinuation(_ continuation: CheckedContinuation<T, Error>) {
+        let resultToResume: Result<T, Error>?
+        lock.lock()
+        if let result {
+            resultToResume = result
+        } else {
+            self.continuation = continuation
+            resultToResume = nil
+        }
+        lock.unlock()
+
+        if let resultToResume {
+            continuation.resume(with: resultToResume)
+        }
+    }
+
+    func resume(_ result: Result<T, Error>) {
+        let continuationToResume: CheckedContinuation<T, Error>?
+        lock.lock()
+        guard self.result == nil else {
+            lock.unlock()
+            return
+        }
+        self.result = result
+        continuationToResume = continuation
+        continuation = nil
+        lock.unlock()
+
+        continuationToResume?.resume(with: result)
+    }
+}
+
 protocol DocumentationAssetSemanticSearching: Sendable {
     func isAvailable() -> Bool
     func search(
@@ -969,9 +1006,6 @@ struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearchi
         limit: Int,
         timeout: TimeAmount?
     ) async throws -> [DocumentationAssetSemanticSearchResult] {
-        guard timeout?.nanoseconds != 0 else {
-            throw TimeoutError()
-        }
         let timeoutSeconds: Double
         if let timeout, timeout.nanoseconds > 0 {
             timeoutSeconds = Double(timeout.nanoseconds) / 1_000_000_000.0
@@ -980,7 +1014,7 @@ struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearchi
         }
         let databaseDirectoryPath = asset.databaseDirectoryURL.path
         let embeddingModelName = asset.embeddingModelName
-        return try await Task.detached {
+        return try await Self.runBlockingSearch(timeout: timeout) {
             let json = try unsafe Self.copyResultJSON(
                 databaseDirectoryPath: databaseDirectoryPath,
                 embeddingModelName: embeddingModelName,
@@ -995,7 +1029,46 @@ struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearchi
                 [DocumentationAssetSemanticSearchResult].self,
                 from: data
             )
-        }.value
+        }
+    }
+
+    static func runBlockingSearch<T: Sendable>(
+        timeout: TimeAmount?,
+        operation: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        guard timeout?.nanoseconds != 0 else {
+            throw TimeoutError()
+        }
+        let operationTask = Task.detached {
+            try operation()
+        }
+        guard let timeout, timeout.nanoseconds > 0 else {
+            return try await operationTask.value
+        }
+
+        let waiter = DocumentationSemanticSearchTimeoutWaiter<T>()
+        Task.detached {
+            do {
+                waiter.resume(.success(try await operationTask.value))
+            } catch {
+                waiter.resume(.failure(error))
+            }
+        }
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + .nanoseconds(Int(clamping: timeout.nanoseconds))
+        ) {
+            waiter.resume(.failure(TimeoutError()))
+            operationTask.cancel()
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiter.setContinuation(continuation)
+            }
+        } onCancel: {
+            waiter.resume(.failure(CancellationError()))
+            operationTask.cancel()
+        }
     }
 
     @unsafe private static func copyResultJSON(
@@ -1127,6 +1200,7 @@ private actor DocumentationAssetSQLiteMaterializer {
             guard rankedResults.isEmpty == false else {
                 return []
             }
+            let rankedResults = Self.deduplicatedRankedResults(rankedResults)
             try unsafe execute("DELETE FROM temp.xcode_mcp_ranked_doc_results")
             try unsafe insertRankedResults(rankedResults)
 
@@ -1190,6 +1264,18 @@ private actor DocumentationAssetSQLiteMaterializer {
                 )
             }
             return rows
+        }
+
+        private static func deduplicatedRankedResults(
+            _ rankedResults: [DocumentationAssetSemanticSearchResult]
+        ) -> [DocumentationAssetSemanticSearchResult] {
+            var seenAssetIDs = Set<String>()
+            var deduplicated: [DocumentationAssetSemanticSearchResult] = []
+            deduplicated.reserveCapacity(rankedResults.count)
+            for result in rankedResults where seenAssetIDs.insert(result.assetID).inserted {
+                deduplicated.append(result)
+            }
+            return deduplicated
         }
 
         @unsafe private func insertRankedResults(
@@ -1348,17 +1434,11 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         guard semanticSearcher.isAvailable() else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let rankedResults = try await semanticSearcher.search(
-            asset: asset,
-            query: arguments.query,
-            limit: Self.semanticSearchLimit(for: arguments),
-            timeout: timeout
-        )
+        let deadline = Self.deadline(for: timeout)
         let rows = try await searchRows(
             arguments: arguments,
             asset: asset,
-            rankedResults: rankedResults,
-            timeout: timeout
+            deadline: deadline
         )
         return try Self.makeResponse(
             requestID: arguments.requestID,
@@ -1373,18 +1453,37 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
     private func searchRows(
         arguments: SearchArguments,
         asset: DocumentationSearchInstalledAsset,
-        rankedResults: [DocumentationAssetSemanticSearchResult],
-        timeout: TimeAmount?
+        deadline: UInt64?
     ) async throws -> [DocumentationAssetSearchRow] {
-        guard rankedResults.isEmpty == false else {
-            return []
+        var semanticLimit = Self.initialSemanticSearchLimit(for: arguments)
+        let maxSemanticLimit = Self.maxSemanticSearchLimit(for: arguments)
+        while true {
+            let rankedResults = try await semanticSearcher.search(
+                asset: asset,
+                query: arguments.query,
+                limit: semanticLimit,
+                timeout: try Self.remainingTimeout(until: deadline)
+            )
+            guard rankedResults.isEmpty == false else {
+                return []
+            }
+            let rows = try await sqliteMaterializer.rows(
+                asset: asset,
+                rankedResults: rankedResults,
+                frameworks: arguments.frameworks,
+                limit: arguments.limit
+            )
+            guard Self.shouldExpandSemanticSearch(
+                arguments: arguments,
+                rows: rows,
+                rankedResultCount: rankedResults.count,
+                semanticLimit: semanticLimit,
+                maxSemanticLimit: maxSemanticLimit
+            ) else {
+                return rows
+            }
+            semanticLimit = min(semanticLimit * 2, maxSemanticLimit)
         }
-        return try await sqliteMaterializer.rows(
-            asset: asset,
-            rankedResults: rankedResults,
-            frameworks: arguments.frameworks,
-            limit: arguments.limit
-        )
     }
 
     private static var descriptor: JSONValue {
@@ -1415,8 +1514,48 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         ])
     }
 
-    private static func semanticSearchLimit(for arguments: SearchArguments) -> Int {
+    private static func initialSemanticSearchLimit(for arguments: SearchArguments) -> Int {
         min(max(arguments.limit * 8, 40), 200)
+    }
+
+    private static func maxSemanticSearchLimit(for arguments: SearchArguments) -> Int {
+        guard arguments.frameworks.contains(where: { $0.isEmpty == false }) else {
+            return initialSemanticSearchLimit(for: arguments)
+        }
+        return min(max(arguments.limit * 128, 1_000), 2_000)
+    }
+
+    private static func shouldExpandSemanticSearch(
+        arguments: SearchArguments,
+        rows: [DocumentationAssetSearchRow],
+        rankedResultCount: Int,
+        semanticLimit: Int,
+        maxSemanticLimit: Int
+    ) -> Bool {
+        arguments.frameworks.contains(where: { $0.isEmpty == false })
+            && rows.count < arguments.limit
+            && rankedResultCount >= semanticLimit
+            && semanticLimit < maxSemanticLimit
+    }
+
+    private static func deadline(for timeout: TimeAmount?) -> UInt64? {
+        guard let timeout, timeout.nanoseconds > 0 else {
+            return nil
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let (deadline, overflow) = now.addingReportingOverflow(UInt64(timeout.nanoseconds))
+        return overflow ? UInt64.max : deadline
+    }
+
+    private static func remainingTimeout(until deadline: UInt64?) throws -> TimeAmount? {
+        guard let deadline else {
+            return nil
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard deadline > now else {
+            throw TimeoutError()
+        }
+        return .nanoseconds(Int64(clamping: deadline - now))
     }
 
     private static func searchArguments(from data: Data) throws -> SearchArguments {
