@@ -187,7 +187,7 @@ struct RuntimeCoordinatorTests {
         manager.reconcileXcodeProcessTargets([target], reason: "test_late_xcode")
 
         let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
-        let initializeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeRequest = try await upstream.nextSent(at: 0)
         let upstreamID = try extractUpstreamID(from: initializeRequest)
         await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
 
@@ -275,21 +275,14 @@ struct RuntimeCoordinatorTests {
         )
 
         let newerUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
-        let warmInitialize = try await sentValue(from: newerUpstream, at: 0, timeout: .seconds(2))
+        let warmInitialize = try await newerUpstream.nextSent(at: 0)
         let warmUpstreamID = try extractUpstreamID(from: warmInitialize)
         await newerUpstream.yield(.message(try makeInitializeResponse(id: warmUpstreamID)))
-        let initializedNotification = try await sentValue(
-            from: newerUpstream,
-            at: 1,
-            timeout: .seconds(2)
-        )
+        let initializedNotification = try await newerUpstream.nextSent(at: 1)
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
-        let toolsRequest = try await sentValue(
-            from: newerUpstream,
+        let toolsRequest = try await newerUpstream.nextSent(
             startingAt: 2,
-            matching: { methodName(from: $0) == "tools/list" },
-            timeout: .seconds(2),
-            description: "waiting for late-added process tools/list"
+            matching: { methodName(from: $0) == "tools/list" }
         )
         await newerUpstream.yield(
             .message(
@@ -301,10 +294,8 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        _ = try await waitWithTimeout("waiting for late process catalog sync") {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
-            }
+        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot {
+            $0.canonicalToolsSourceUpstream == 1
         }
 
         let snapshot = manager.debugSnapshot()
@@ -362,11 +353,7 @@ struct RuntimeCoordinatorTests {
         )
 
         let newerUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
-        let firstInitialize = try await sentValue(
-            from: newerUpstream,
-            at: 0,
-            timeout: .seconds(2)
-        )
+        let firstInitialize = try await newerUpstream.nextSent(at: 0)
         manager.handleUpstreamInitTimeout(
             upstreamIndex: 1,
             upstreamID: try extractUpstreamID(from: firstInitialize)
@@ -381,21 +368,14 @@ struct RuntimeCoordinatorTests {
             [olderTarget, newerTarget],
             reason: "test_workspace_opened"
         )
-        let retriedInitialize = try await sentValue(
-            from: newerUpstream,
-            at: 1,
-            timeout: .seconds(2)
-        )
+        let retriedInitialize = try await newerUpstream.nextSent(at: 1)
         await newerUpstream.yield(
             .message(try makeInitializeResponse(id: try extractUpstreamID(from: retriedInitialize)))
         )
-        _ = try await sentValue(from: newerUpstream, at: 2, timeout: .seconds(2))
-        let toolsRequest = try await sentValue(
-            from: newerUpstream,
+        _ = try await newerUpstream.nextSent(at: 2)
+        let toolsRequest = try await newerUpstream.nextSent(
             startingAt: 3,
-            matching: { methodName(from: $0) == "tools/list" },
-            timeout: .seconds(2),
-            description: "waiting for retried late process tools/list"
+            matching: { methodName(from: $0) == "tools/list" }
         )
         await newerUpstream.yield(
             .message(
@@ -407,10 +387,8 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        _ = try await waitWithTimeout("waiting for retried process catalog sync") {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
-            }
+        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot {
+            $0.canonicalToolsSourceUpstream == 1
         }
 
         let snapshot = manager.debugSnapshot()
@@ -469,14 +447,10 @@ struct RuntimeCoordinatorTests {
         manager.drainRuntimeTasksAndWaitForTesting()
 
         let relaunchedUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
-        let initialize = try await sentValue(
-            from: relaunchedUpstream,
-            at: 0,
-            timeout: .seconds(2)
-        )
+        let initialize = try await relaunchedUpstream.nextSent(at: 0)
         let upstreamID = try extractUpstreamID(from: initialize)
         await relaunchedUpstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
-        _ = try await sentValue(from: relaunchedUpstream, at: 1, timeout: .seconds(2))
+        _ = try await relaunchedUpstream.nextSent(at: 1)
 
         let snapshot = manager.debugSnapshot()
         #expect(snapshot.processRoutes.map(\.state) == ["retired", "active"])

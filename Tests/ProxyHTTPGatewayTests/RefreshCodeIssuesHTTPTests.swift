@@ -2565,7 +2565,7 @@ extension HTTPHandlerTests {
     }
 
     @Test func httpRefreshCodeIssuesRequeuesLeaseAcrossRetryAttempts() async throws {
-        var config = makeConfig(requestTimeout: 10)
+        var config = makeConfig(requestTimeout: 0)
         config.refreshCodeIssuesMode = .upstream
         let attempts = NIOLockedValueBox(0)
         let sessionManager = TestRuntimeCoordinator(
@@ -2616,6 +2616,7 @@ extension HTTPHandlerTests {
             let inFlightLease = try #require(sessionManager.leaseDebugSnapshots().first)
             #expect(inFlightLease.state == .active)
             #expect(inFlightLease.releaseReason == nil)
+            #expect(inFlightLease.timeoutAt == nil)
 
             sessionManager.deliverNextPendingResponse()
 
