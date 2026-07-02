@@ -39,6 +39,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
+    var processToolsCatalogLoadedBeforeRecord:
+        (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamRequestQueued:
         (@Sendable (
@@ -52,6 +54,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
+        processToolsCatalogLoadedBeforeRecord:
+            (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamRequestQueued:
             (@Sendable (
@@ -64,6 +68,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
+        self.processToolsCatalogLoadedBeforeRecord = processToolsCatalogLoadedBeforeRecord
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
@@ -415,9 +420,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
-        let xcodeProcessRoutingEnabled = MCPBridgeRuntime.supportsProcessBoundRouting(
+        let xcodeProcessRoutingSupported = MCPBridgeRuntime.supportsProcessBoundRouting(
             config: bridgeRuntimeConfig
         )
+        let xcodeProcessRoutingEnabled = xcodeProcessRoutingSupported && xcodeTargetDiscovery != nil
         let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
             config: config
         )
@@ -427,7 +433,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             : []
         let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(
             config: bridgeRuntimeConfig,
-            xcodeTargets: xcodeTargets
+            xcodeTargets: xcodeTargets,
+            processBoundRoutingEnabled: xcodeProcessRoutingEnabled
         )
         let clock = ClockClient.liveValue
         let runtimeBox = WeakRuntimeCoordinatorBox()

@@ -29,10 +29,12 @@ enum MCPBridgeRuntime {
 
     static func makeUpstreamPlan(
         config: Configuration,
-        xcodeTargets: [XcodeProcessTarget]
+        xcodeTargets: [XcodeProcessTarget],
+        processBoundRoutingEnabled: Bool? = nil
     ) -> MCPBridgeUpstreamPlan {
         let orderedXcodeTargets = orderedXcodeTargets(xcodeTargets)
-        let canUseProcessBoundXcodeUpstreams = supportsProcessBoundRouting(config: config)
+        let canUseProcessBoundXcodeUpstreams =
+            processBoundRoutingEnabled ?? supportsProcessBoundRouting(config: config)
         var upstreams: [ManagedUpstreamSlot] = []
         var xcodeProcessBindings: [XcodeProcessBinding] = []
         let upstreamCount = config.upstreamProcessCount

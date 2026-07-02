@@ -62,6 +62,7 @@ extension RuntimeCoordinator {
     private enum AvailableToolsCatalogOutcome: Sendable {
         case success(route: AvailableToolsCatalogRoute, result: CanonicalToolsCatalogLoadResult)
         case failure(route: AvailableToolsCatalogRoute, upstreamIndex: Int, error: any Error)
+        case stale
     }
 
     func loadCanonicalToolsCatalog(
@@ -192,14 +193,21 @@ extension RuntimeCoordinator {
                             deadlineUptimeNs: deadlineUptimeNs,
                             startedAt: startedAt
                         )
+                        if let sourceUpstream = result.sourceUpstream,
+                           let hook = self.testHooks.processToolsCatalogLoadedBeforeRecord {
+                            await hook(route.target, sourceUpstream)
+                        }
+                        guard let recordedResult = self.recordAvailableToolsCatalog(
+                            target: route.target,
+                            result: result,
+                            startedAt: startedAt,
+                            exposedProcessIDs: exposedProcessIDs
+                        ) else {
+                            return .stale
+                        }
                         return .success(
                             route: route,
-                            result: self.recordAvailableToolsCatalog(
-                                target: route.target,
-                                result: result,
-                                startedAt: startedAt,
-                                exposedProcessIDs: exposedProcessIDs
-                            )
+                            result: recordedResult
                         )
                     } catch is CancellationError {
                         throw CancellationError()
@@ -232,6 +240,8 @@ extension RuntimeCoordinator {
                     }
                 case .failure(let route, let upstreamIndex, let error):
                     failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
+                case .stale:
+                    continue
                 }
             }
             if let firstSuccess {
@@ -323,18 +333,30 @@ extension RuntimeCoordinator {
         result: CanonicalToolsCatalogLoadResult,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>
-    ) -> CanonicalToolsCatalogLoadResult {
+    ) -> CanonicalToolsCatalogLoadResult? {
         guard let sourceUpstream = result.sourceUpstream else {
             return result
+        }
+        guard let activeRoute = xcodeProcessRoutes.first(where: {
+            $0.target == target && $0.upstreamIndices.contains(sourceUpstream)
+        }) else {
+            logger.debug(
+                "Dropping stale process tools/list catalog",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                    "upstream": .string("\(sourceUpstream)"),
+                ]
+            )
+            return nil
         }
         let hadProcessCatalog =
             processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil
         processToolCatalogRegistry.record(
             target: target,
             upstreamIndex: sourceUpstream,
-            associatedUpstreamIndices: xcodeProcessRoutes.first {
-                $0.target.processID == target.processID
-            }?.upstreamIndices ?? [],
+            associatedUpstreamIndices: activeRoute.upstreamIndices,
             rawResult: result.rawResult
         )
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {

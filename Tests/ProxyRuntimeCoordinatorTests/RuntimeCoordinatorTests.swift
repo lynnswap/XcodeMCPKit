@@ -16,6 +16,21 @@ struct RuntimeCoordinatorTests {
         #expect(environment["MCP_XCODE_PID"] == nil)
     }
 
+    @Test func defaultCoordinatorWithoutDiscoveryUsesStaticFallbackUpstream() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 0),
+            eventLoop: group.next(),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        #expect(manager.processRoutingEnabled == false)
+        #expect(manager.debugSnapshot().upstreams.count == 1)
+        #expect(manager.debugSnapshot().processRoutes.isEmpty)
+    }
+
     @Test func defaultUpstreamsPassThroughInheritedMCPXcodePIDEnvironment() async throws {
         let environment = try withEnvironmentVariables(
             [
@@ -3359,6 +3374,59 @@ struct RuntimeCoordinatorTests {
         }
         #expect(await upstream0.sentCount() == 1)
         #expect(await upstream1.sentCount() == 1)
+    }
+
+    @Test func sessionManagerDropsProcessToolsCatalogLoadedAfterRouteRetires()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80437, xcodeVersion: "27.0")
+        let upstream = AutoToolsListUpstreamClient(toolNames: ["RetiredOnlyTool"])
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let routeRetiredBeforeRecord = LockedRecordedValues<pid_t>()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 0),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0 else {
+                        return
+                    }
+                    _ = runtimeBox.value?.xcodeProcessRegistry.reconcile(
+                        targets: [],
+                        reason: "test_route_retired_before_catalog_record",
+                        nowUptimeNs: 0,
+                        makeRoute: { XcodeProcessRoute(target: $0, upstreamIndices: []) }
+                    )
+                    routeRetiredBeforeRecord.append(loadedTarget.processID)
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        do {
+            _ = try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-stale-after-retire",
+                requestTimeoutOverride: nil
+            )
+            Issue.record("retired route tools/list catalog should not be returned")
+        } catch {
+            #expect(error is UpstreamSlotScheduler.AcquisitionError)
+        }
+        #expect(routeRetiredBeforeRecord.count() == 1)
+        #expect(await upstream.sentCount() == 1)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
@@ -9892,4 +9960,45 @@ struct RuntimeCoordinatorTests {
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 
+}
+
+private actor AutoToolsListUpstreamClient: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let sentMessages = RecordedValues<Data>()
+    private let toolNames: [String]
+
+    init(toolNames: [String]) {
+        self.toolNames = toolNames
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        self.events = AsyncStream { continuation in
+            streamContinuation = continuation
+        }
+        self.continuation = streamContinuation
+    }
+
+    func start() async {}
+
+    func stop() async {
+        continuation.finish()
+    }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        await sentMessages.append(data)
+        guard methodName(from: data) == "tools/list",
+              let upstreamID = try? extractUpstreamID(from: data),
+              let response = try? makeDocumentationToolsListResponse(
+                  id: upstreamID,
+                  tools: toolNames.map { toolDescriptor(name: $0) }
+              )
+        else {
+            return .accepted
+        }
+        continuation.yield(.message(response))
+        return .accepted
+    }
+
+    func sentCount() async -> Int {
+        await sentMessages.count()
+    }
 }
