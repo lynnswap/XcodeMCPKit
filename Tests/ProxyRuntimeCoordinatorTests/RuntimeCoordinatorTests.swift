@@ -16,6 +16,27 @@ struct RuntimeCoordinatorTests {
         #expect(environment["MCP_XCODE_PID"] == nil)
     }
 
+    @Test func upstreamPlanDefaultsToStaticFallbackWhenNoTargetsAreProvided() {
+        let plan = MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 0)),
+            xcodeTargets: []
+        )
+
+        #expect(plan.upstreams.count == 1)
+        #expect(plan.xcodeProcessRoutes.isEmpty)
+    }
+
+    @Test func upstreamPlanExplicitProcessRoutingCanStartWithoutInitialTargets() {
+        let plan = MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 0)),
+            xcodeTargets: [],
+            processBoundRoutingEnabled: true
+        )
+
+        #expect(plan.upstreams.isEmpty)
+        #expect(plan.xcodeProcessRoutes.isEmpty)
+    }
+
     @Test func defaultCoordinatorWithoutDiscoveryUsesStaticFallbackUpstream() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
