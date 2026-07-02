@@ -258,6 +258,10 @@ extension RuntimeCoordinator {
         }
         processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
+        resetProcessRouteActivation(
+            processID: route.target.processID,
+            reason: "route_retired_\(reason)"
+        )
 
         var resetInitialize = false
         for upstreamIndex in route.upstreamIndices {
@@ -368,18 +372,17 @@ extension RuntimeCoordinator {
     }
 
     private func startInitializationForAddedProcessRoutes(_ routes: [XcodeProcessRoute]) {
-        guard routes.contains(where: { $0.upstreamIndices.isEmpty == false }) else {
+        let routesWithUpstreams = routes.filter { $0.upstreamIndices.isEmpty == false }
+        guard routesWithUpstreams.isEmpty == false else {
             return
         }
-        if isInitialized() {
-            for route in routes {
-                for upstreamIndex in route.upstreamIndices {
-                    startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-                }
-            }
+        guard isInitialized() else {
+            startProcessRouteActivation(for: routesWithUpstreams[0])
             return
         }
-        startEagerInitializePrimary()
+        for route in routesWithUpstreams {
+            startProcessRouteActivation(for: route)
+        }
     }
 
     private func retryPendingProcessRouteReadiness(reason: String) {
@@ -409,15 +412,19 @@ extension RuntimeCoordinator {
         }
 
         guard isInitialized() else {
-            clearActiveWarmInitializesBeforePrimaryRestart()
-            startEagerInitializePrimary(applyBackoff: true)
+            guard initializeManager.snapshot().initInFlight == false else {
+                return
+            }
+            if let route = activeRoutes.first(where: {
+                pendingProcessIDs.contains($0.target.processID)
+            }) {
+                startProcessRouteActivation(for: route)
+            }
             return
         }
 
         for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
-            for upstreamIndex in route.upstreamIndices {
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-            }
+            startProcessRouteActivation(for: route)
         }
         refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",

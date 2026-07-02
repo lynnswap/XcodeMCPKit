@@ -4,6 +4,11 @@ import NIOFoundationCompat
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    enum WarmInitializeMode: Sendable, Equatable {
+        case regular
+        case processRouteActivation(processID: pid_t)
+    }
+
     func markRequestSucceeded(upstreamIndex: Int) {
         upstreamHealthManager.markRequestSucceeded(upstreamIndex: upstreamIndex)
     }
@@ -191,23 +196,47 @@ extension RuntimeCoordinator {
         return upstreamIndices
     }
 
-    func startUpstreamWarmInitialize(upstreamIndex: Int, applyBackoff: Bool = false) {
+    func startUpstreamWarmInitialize(
+        upstreamIndex: Int,
+        applyBackoff: Bool = false,
+        mode: WarmInitializeMode = .regular
+    ) {
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         runWhenUpstreamReady(
             reason: "warm_initialize_\(upstreamIndex)",
             applyBackoff: applyBackoff
-        ) { [weak self] in
-            self?.startUpstreamWarmInitializeWhenReady(upstreamIndex: upstreamIndex)
+        ) { [weak self, mode] in
+            self?.startUpstreamWarmInitializeWhenReady(
+                upstreamIndex: upstreamIndex,
+                mode: mode
+            )
         }
     }
 
-    private func startUpstreamWarmInitializeWhenReady(upstreamIndex: Int) {
+    private func startUpstreamWarmInitializeWhenReady(
+        upstreamIndex: Int,
+        mode: WarmInitializeMode
+    ) {
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         guard upstreamHealthManager.beginWarmInitialize(upstreamIndex: upstreamIndex) else { return }
 
         let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
         upstreamHealthManager.setWarmInitializeUpstreamID(upstreamID, for: upstreamIndex)
-        scheduleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+        let activationStart = beginProcessRouteActivationIfNeeded(
+            mode: mode,
+            upstreamIndex: upstreamIndex
+        )
+        if case .processRouteActivation = mode, activationStart == nil {
+            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
+            return
+        }
+        scheduleUpstreamInitTimeout(
+            upstreamIndex: upstreamIndex,
+            upstreamID: upstreamID,
+            mode: mode,
+            activationAttempt: activationStart?.attempt
+        )
 
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONRPC.Wire.data(from: request) {
@@ -217,19 +246,48 @@ extension RuntimeCoordinator {
         }
     }
 
-    func scheduleUpstreamInitTimeout(upstreamIndex: Int, upstreamID: Int64) {
+    func scheduleUpstreamInitTimeout(
+        upstreamIndex: Int,
+        upstreamID: Int64,
+        mode: WarmInitializeMode = .regular,
+        activationAttempt: Int? = nil
+    ) {
         guard
-            let timeoutAmount = MCP.MethodDispatcher.timeoutForInitialize(
-                defaultSeconds: config.requestTimeout)
+            let timeoutAmount = upstreamInitTimeoutAmount(for: mode)
         else {
             return
         }
-        let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
+        let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self, mode] in
             guard let self else { return }
-            self.handleUpstreamInitTimeout(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            switch mode {
+            case .regular:
+                self.handleUpstreamInitTimeout(
+                    upstreamIndex: upstreamIndex,
+                    upstreamID: upstreamID
+                )
+            case .processRouteActivation(let processID):
+                self.handleProcessRouteActivationTimeout(
+                    processID: processID,
+                    upstreamIndex: upstreamIndex,
+                    upstreamID: upstreamID,
+                    attempt: activationAttempt
+                )
+            }
         }
         let previous = upstreamHealthManager.replaceInitTimeout(timeout, upstreamIndex: upstreamIndex)
         previous?.cancel()
+    }
+
+    func upstreamInitTimeoutAmount(for mode: WarmInitializeMode) -> TimeAmount? {
+        switch mode {
+        case .regular:
+            return MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
+        case .processRouteActivation:
+            guard config.autoApproveXcodeDialog else {
+                return MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
+            }
+            return .seconds(3)
+        }
     }
 
     func handleUpstreamInitTimeout(upstreamIndex: Int, upstreamID: Int64) {

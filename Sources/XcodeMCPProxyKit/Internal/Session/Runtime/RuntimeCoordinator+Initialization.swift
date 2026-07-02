@@ -265,7 +265,11 @@ extension RuntimeCoordinator {
         guard let negotiatedProtocolVersion = Self.supportedProtocolVersion(
             fromInitializeResult: result
         ) else {
-            handleUnsupportedInitializeProtocolVersion(result, upstreamIndex: upstreamIndex)
+            handleUnsupportedInitializeProtocolVersion(
+                result,
+                upstreamIndex: upstreamIndex,
+                upstreamID: upstreamID
+            )
             return
         }
 
@@ -431,7 +435,11 @@ extension RuntimeCoordinator {
         return version
     }
 
-    func handleUnsupportedInitializeProtocolVersion(_ result: JSONValue, upstreamIndex: Int) {
+    func handleUnsupportedInitializeProtocolVersion(
+        _ result: JSONValue,
+        upstreamIndex: Int,
+        upstreamID: Int64
+    ) {
         let version = Self.protocolVersion(fromInitializeResult: result)
         let errorObject: [String: Any] = [
             "code": -32000,
@@ -442,13 +450,22 @@ extension RuntimeCoordinator {
             ],
         ]
         let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
+        let canPromoteWarmInitializeToPrimary =
+            processRoutingEnabled
+            && activePrimaryUpstreamIndex == nil
+            && canonicalBrokerState.initializeResult() == nil
+            && processRouteActivationOwnsPrimaryInitialize(upstreamIndex: upstreamIndex)
         let handlesPrimaryInitialize = activePrimaryUpstreamIndex == upstreamIndex
+            || canPromoteWarmInitializeToPrimary
             || (
                 !processRoutingEnabled
                     && isCurrentPrimaryInitializeUpstream(upstreamIndex)
                     && activePrimaryUpstreamIndex == nil
             )
         if handlesPrimaryInitialize {
+            if canPromoteWarmInitializeToPrimary {
+                clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
+            }
             let didRetry = retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
                 failedUpstreamID: nil,
@@ -690,6 +707,7 @@ extension RuntimeCoordinator {
                 upstreamID: initUpstreamID
             )
         }
+        resetProcessRouteActivationIfClearingPreCatalogUpstream(upstreamIndex: upstreamIndex)
         debugRecorder.resetUpstream(upstreamIndex)
         if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
            let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
@@ -721,6 +739,7 @@ extension RuntimeCoordinator {
         }
         result.timeout?.cancel()
         markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+        markProcessRouteActivationInitialized(upstreamIndex: upstreamIndex)
         testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
         return true
@@ -732,6 +751,7 @@ extension RuntimeCoordinator {
         }
         result.timeout?.cancel()
         markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+        markProcessRouteActivationInitialized(upstreamIndex: upstreamIndex)
         testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
     }

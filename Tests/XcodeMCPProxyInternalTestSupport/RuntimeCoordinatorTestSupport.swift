@@ -2341,6 +2341,7 @@ func makeDeterministicRuntimeTimeoutScheduler(
 
 final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
     private struct Operation {
+        let delay: TimeAmount
         let operation: @Sendable () -> Void
         var isCancelled = false
     }
@@ -2348,10 +2349,10 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
     private let operations = NIOLockedValueBox<[Operation]>([])
 
     func scheduler() -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
-        { _, operation in
+        { delay, operation in
             let index = self.operations.withLockedValue { operations in
                 let index = operations.count
-                operations.append(Operation(operation: operation))
+                operations.append(Operation(delay: delay, operation: operation))
                 return index
             }
             return RuntimeScheduledTimeout {
@@ -2371,6 +2372,13 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
         operations.withLockedValue { operations in
             guard operations.indices.contains(index) else { return false }
             return operations[index].isCancelled
+        }
+    }
+
+    func delay(at index: Int) -> TimeAmount? {
+        operations.withLockedValue { operations in
+            guard operations.indices.contains(index) else { return nil }
+            return operations[index].delay
         }
     }
 

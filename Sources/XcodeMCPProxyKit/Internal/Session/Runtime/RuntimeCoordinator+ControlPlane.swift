@@ -359,6 +359,10 @@ extension RuntimeCoordinator {
             associatedUpstreamIndices: activeRoute.upstreamIndices,
             rawResult: result.rawResult
         )
+        markProcessRouteActivationCataloged(
+            target: target,
+            upstreamIndex: sourceUpstream
+        )
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.remove(target.processID)
         }

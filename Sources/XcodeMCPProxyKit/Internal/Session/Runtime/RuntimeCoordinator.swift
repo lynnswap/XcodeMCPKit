@@ -49,6 +49,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
             _ queuedRequestCount: Int
         ) -> Void)?
     var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
+    var processRouteActivationEvent:
+        (@Sendable (_ processID: pid_t, _ upstreamIndex: Int?, _ event: String) -> Void)?
 
     init(
         initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
@@ -63,7 +65,9 @@ struct RuntimeCoordinatorTestHooks: Sendable {
                 _ descriptor: SessionRequestPipeline.Descriptor,
                 _ queuedRequestCount: Int
             ) -> Void)? = nil,
-        primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil
+        primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil,
+        processRouteActivationEvent:
+            (@Sendable (_ processID: pid_t, _ upstreamIndex: Int?, _ event: String) -> Void)? = nil
     ) {
         self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
@@ -72,6 +76,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
+        self.processRouteActivationEvent = processRouteActivationEvent
     }
 }
 
@@ -417,6 +422,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
     let pendingProcessToolsCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
+    let xcodeProcessRouteActivationTracker = XcodeProcessRouteActivationTracker()
     let unavailableXcodeProcessRoutes =
         NIOLockedValueBox<[pid_t: UInt64]>([:])
     let prewarmDocumentationProviderOnStartup: Bool
@@ -819,6 +825,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
+        resetAllProcessRouteActivations(reason: "debug_reset")
         unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
         clearXcodeWindowOwners()
         invalidateControlPlane(
@@ -852,6 +859,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         documentationPrewarmTask?.cancel()
         upstreamReadinessCoordinator.shutdown()
+        resetAllProcessRouteActivations(reason: "shutdown")
         xcodeProcessEventMonitor.stop()
 
         let runtimeDrain = runtimeTasks.beginShutdown()
@@ -1147,8 +1155,17 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     ) -> EventLoopFuture<ByteBuffer> {
         _ = session(id: sessionID)
         let sessionGeneration = sessionRegistry.generation(of: sessionID) ?? 0
-        let primaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
-            ?? primaryInitializeUpstreamIndex()
+        let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
+        let candidatePrimaryUpstreamIndex = activePrimaryUpstreamIndex ?? primaryInitializeUpstreamIndex()
+        let primaryUpstreamIndex: Int?
+        if activePrimaryUpstreamIndex == nil,
+           let candidatePrimaryUpstreamIndex,
+           processRouteActivationOwnsPrimaryInitialize(upstreamIndex: candidatePrimaryUpstreamIndex)
+        {
+            primaryUpstreamIndex = nil
+        } else {
+            primaryUpstreamIndex = candidatePrimaryUpstreamIndex
+        }
         guard primaryUpstreamIndex != nil || initializeManager.isInitialized() || processRoutingEnabled else {
             return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
