@@ -164,10 +164,24 @@ extension RuntimeCoordinator {
                 requestTimeout: requestTimeout,
                 deadlineUptimeNs: deadlineUptimeNs,
                 startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs
+                exposedProcessIDs: exposedProcessIDs,
+                registerActivationCatalogRPCs: true
             )
         } catch is CancellationError {
-            throw CancellationError()
+            guard Task.isCancelled == false,
+                  let surface = try await waitForAvailableToolsCatalogSurface(
+                      exposedProcessIDs: exposedProcessIDs,
+                      deadlineUptimeNs: deadlineUptimeNs
+                  ),
+                  let sourceUpstream = surface.sourceUpstream else {
+                throw CancellationError()
+            }
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: surface.rawResult,
+                sourceUpstream: sourceUpstream,
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
+                cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+            )
         } catch {
             guard let surface = currentSurface,
                   let sourceUpstream = surface.sourceUpstream else {
@@ -179,6 +193,27 @@ extension RuntimeCoordinator {
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
                 cacheableAsCanonical: surface.processIDs == exposedProcessIDs
             )
+        }
+    }
+
+    private func waitForAvailableToolsCatalogSurface(
+        exposedProcessIDs: Set<pid_t>,
+        deadlineUptimeNs: UInt64?
+    ) async throws -> ProcessToolCatalogRegistry.AvailableToolCatalog? {
+        while true {
+            if let surface = processToolCatalogRegistry.availableToolCatalogSurface(
+                processIDs: exposedProcessIDs
+            ),
+                surface.processIDs == exposedProcessIDs
+            {
+                return surface
+            }
+            try Task.checkCancellation()
+            if let deadlineUptimeNs,
+               nowUptimeNanoseconds() >= deadlineUptimeNs {
+                return nil
+            }
+            try await Task.sleep(for: .milliseconds(25))
         }
     }
 

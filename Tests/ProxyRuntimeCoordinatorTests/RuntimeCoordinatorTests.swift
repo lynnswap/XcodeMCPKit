@@ -816,6 +816,119 @@ struct RuntimeCoordinatorTests {
         #expect(rpcHandle.isCancelled())
     }
 
+    @Test func processRouteActivationCatalogTimeoutLetsForegroundToolsListReturnRetryCatalog()
+        async throws
+    {
+        var config = makeConfig(requestTimeout: 20)
+        config.autoApproveXcodeDialog = true
+        let target = xcodeProcessTarget(processID: 27028, xcodeVersion: "27.0")
+        let initialUpstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [initialUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
+        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+            processID: target.processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 0
+        )
+        _ = manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.insert(target.processID)
+        }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let foregroundTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-foreground-timeout",
+                requestTimeoutOverride: .seconds(20)
+            )
+        }
+        let foregroundRequest = try await waitWithTimeout(
+            "waiting for foreground activation catalog tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await initialUpstream.nextSent(
+                startingAt: 0,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        #expect(methodName(from: foregroundRequest) == "tools/list")
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.fire(at: 0))
+        #expect(timeoutScheduler.scheduledCount() == 2)
+        #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
+
+        #expect(timeoutScheduler.fire(at: 1))
+        let retryUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let retryInitialize = try await waitWithTimeout(
+            "waiting for retry activation initialize",
+            timeout: .seconds(2)
+        ) {
+            try await retryUpstream.nextSent(at: 0)
+        }
+        await retryUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
+        )
+        _ = try await waitWithTimeout(
+            "waiting for retry activation initialized notification",
+            timeout: .seconds(2)
+        ) {
+            try await retryUpstream.nextSent(at: 1)
+        }
+        let retryToolsRequest = try await waitWithTimeout(
+            "waiting for retry activation tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await retryUpstream.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await retryUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: retryToolsRequest),
+                    tools: [
+                        toolDescriptor(name: "RetryForegroundTool"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout(
+            "waiting for foreground tools/list to return retry catalog",
+            timeout: .seconds(2)
+        ) {
+            try await foregroundTask.value
+        }
+        #expect(toolNames(in: result) == ["RetryForegroundTool"])
+    }
+
     @Test func processRouteActivationClearingPreCatalogInitializedUpstreamAllowsRetry()
         async throws
     {
@@ -4863,24 +4976,6 @@ struct RuntimeCoordinatorTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
-
-        let foregroundRequest = try await sentValue(
-            from: upstream,
-            startingAt: 1,
-            matching: { methodName(from: $0) == "tools/list" },
-            timeout: .seconds(2),
-            description: "waiting for overlapping foreground tools/list"
-        )
-        await upstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: foregroundRequest),
-                    tools: [
-                        toolDescriptor(name: "SharedOverlapTool"),
-                    ]
-                )
-            )
-        )
 
         let result = try await waitWithTimeout(
             "waiting for overlapping foreground process catalog result",

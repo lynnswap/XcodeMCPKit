@@ -327,7 +327,7 @@ extension RuntimeCoordinator {
         ) else {
             return
         }
-        timeout.rpcHandle?.cancel()
+        timeout.rpcHandles.forEach { $0.cancel() }
 
         logger.info(
             "route_activation_timeout",

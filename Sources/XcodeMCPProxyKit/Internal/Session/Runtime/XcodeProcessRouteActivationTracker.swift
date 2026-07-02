@@ -30,7 +30,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
 
     struct CatalogTimeout: Sendable {
         let retry: Retry
-        let rpcHandle: ControlPlane.RPCHandle?
+        let rpcHandles: [ControlPlane.RPCHandle]
     }
 
     private struct Record: Sendable {
@@ -38,26 +38,26 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         var attempt: Int
         var retryTimeout: RuntimeScheduledTimeout?
         var catalogTimeout: RuntimeScheduledTimeout?
-        var catalogRPCHandle: ControlPlane.RPCHandle?
+        var catalogRPCHandles: [ControlPlane.RPCHandle]
 
         init(
             phase: Phase,
             attempt: Int = 0,
             retryTimeout: RuntimeScheduledTimeout? = nil,
             catalogTimeout: RuntimeScheduledTimeout? = nil,
-            catalogRPCHandle: ControlPlane.RPCHandle? = nil
+            catalogRPCHandles: [ControlPlane.RPCHandle] = []
         ) {
             self.phase = phase
             self.attempt = attempt
             self.retryTimeout = retryTimeout
             self.catalogTimeout = catalogTimeout
-            self.catalogRPCHandle = catalogRPCHandle
+            self.catalogRPCHandles = catalogRPCHandles
         }
 
         func cancelTimeouts() {
             retryTimeout?.cancel()
             catalogTimeout?.cancel()
-            catalogRPCHandle?.cancel()
+            catalogRPCHandles.forEach { $0.cancel() }
         }
     }
 
@@ -103,8 +103,8 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.retryTimeout = nil
             record.catalogTimeout?.cancel()
             record.catalogTimeout = nil
-            record.catalogRPCHandle?.cancel()
-            record.catalogRPCHandle = nil
+            record.catalogRPCHandles.forEach { $0.cancel() }
+            record.catalogRPCHandles.removeAll()
             record.attempt += 1
             record.phase = .attaching(
                 upstreamIndex: upstreamIndex,
@@ -173,8 +173,8 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.retryTimeout = nil
             record.catalogTimeout?.cancel()
             record.catalogTimeout = nil
-            record.catalogRPCHandle?.cancel()
-            record.catalogRPCHandle = nil
+            record.catalogRPCHandles.forEach { $0.cancel() }
+            record.catalogRPCHandles.removeAll()
             record.phase = .cataloged(
                 upstreamIndex: catalogedUpstreamIndex ?? upstreamIndex,
                 attempt: catalogedAttempt
@@ -228,14 +228,14 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             else {
                 return nil
             }
-            let rpcHandle = record.catalogRPCHandle
-            record.catalogRPCHandle = nil
+            let rpcHandles = record.catalogRPCHandles
+            record.catalogRPCHandles.removeAll()
             record.catalogTimeout = nil
             record.phase = .pending
             records[processID] = record
             return CatalogTimeout(
                 retry: Self.retry(forAttempt: currentAttempt),
-                rpcHandle: rpcHandle
+                rpcHandles: rpcHandles
             )
         }
     }
@@ -305,8 +305,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             else {
                 return true
             }
-            record.catalogRPCHandle?.cancel()
-            record.catalogRPCHandle = rpcHandle
+            record.catalogRPCHandles.append(rpcHandle)
             records[processID] = record
             return false
         }
@@ -321,7 +320,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.cancelTimeouts()
             record.retryTimeout = nil
             record.catalogTimeout = nil
-            record.catalogRPCHandle = nil
+            record.catalogRPCHandles.removeAll()
             record.phase = .abandoned(reason: reason)
             records[processID] = record
         }
