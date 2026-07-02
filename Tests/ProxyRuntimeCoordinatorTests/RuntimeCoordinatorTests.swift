@@ -675,6 +675,14 @@ struct RuntimeCoordinatorTests {
         ) {
             try await secondary.nextSent(at: 1)
         }
+        _ = try await waitWithTimeout(
+            "waiting for secondary initialized state",
+            timeout: .seconds(2)
+        ) {
+            while manager.testStateSnapshot().upstreams[2].isInitialized == false {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
 
         await primary.yield(
             .message(try makeInitializeResponse(id: try extractUpstreamID(from: primaryInitialize)))
