@@ -777,7 +777,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let context = sessionRegistry.removeSession(id: id)
         context?.notificationHub.closeAll()
         let pendingInitializes = initializeManager.removePendingInitializes(sessionID: id)
-        for pending in pendingInitializes {
+        pendingInitializes.timeout?.cancel()
+        for pending in pendingInitializes.pending {
             pending.eventLoop.execute {
                 pending.promise.fail(CancellationError())
             }

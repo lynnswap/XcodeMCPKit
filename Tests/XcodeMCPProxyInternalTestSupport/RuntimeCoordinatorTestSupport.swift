@@ -2340,14 +2340,26 @@ func makeDeterministicRuntimeTimeoutScheduler(
 }
 
 final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
-    private let operations = NIOLockedValueBox<[@Sendable () -> Void]>([])
+    private struct Operation {
+        let operation: @Sendable () -> Void
+        var isCancelled = false
+    }
+
+    private let operations = NIOLockedValueBox<[Operation]>([])
 
     func scheduler() -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
         { _, operation in
-            self.operations.withLockedValue {
-                $0.append(operation)
+            let index = self.operations.withLockedValue { operations in
+                let index = operations.count
+                operations.append(Operation(operation: operation))
+                return index
             }
-            return RuntimeScheduledTimeout {}
+            return RuntimeScheduledTimeout {
+                self.operations.withLockedValue { operations in
+                    guard operations.indices.contains(index) else { return }
+                    operations[index].isCancelled = true
+                }
+            }
         }
     }
 
@@ -2355,11 +2367,26 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
         operations.withLockedValue(\.count)
     }
 
-    func fire(at index: Int) {
-        let operation = operations.withLockedValue { operations in
-            operations[index]
+    func isCancelled(at index: Int) -> Bool {
+        operations.withLockedValue { operations in
+            guard operations.indices.contains(index) else { return false }
+            return operations[index].isCancelled
+        }
+    }
+
+    @discardableResult
+    func fire(at index: Int) -> Bool {
+        let operation: (@Sendable () -> Void)? = operations.withLockedValue { operations in
+            guard operations.indices.contains(index), operations[index].isCancelled == false else {
+                return nil
+            }
+            return operations[index].operation
+        }
+        guard let operation else {
+            return false
         }
         operation()
+        return true
     }
 }
 

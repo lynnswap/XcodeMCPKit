@@ -82,6 +82,11 @@ final class InitializeManager: Sendable {
         let primaryInitUpstreamID: Int64?
     }
 
+    struct PendingRemovalResult: Sendable {
+        let pending: [PendingInitialize]
+        let timeout: RuntimeScheduledTimeout?
+    }
+
     struct Snapshot: Sendable {
         let hasInitResult: Bool
         let initInFlight: Bool
@@ -122,14 +127,21 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func removePendingInitializes(sessionID: String) -> [PendingInitialize] {
+    func removePendingInitializes(sessionID: String) -> PendingRemovalResult {
         state.withLockedValue { state in
             let removed = state.initPending.filter { $0.sessionID == sessionID }
             guard removed.isEmpty == false else {
-                return []
+                return PendingRemovalResult(pending: [], timeout: nil)
             }
             state.initPending.removeAll { $0.sessionID == sessionID }
-            return removed
+            let timeout: RuntimeScheduledTimeout?
+            if state.initPending.isEmpty, state.primaryInitializePhase.isInFlight == false {
+                timeout = state.initTimeout
+                state.initTimeout = nil
+            } else {
+                timeout = nil
+            }
+            return PendingRemovalResult(pending: removed, timeout: timeout)
         }
     }
 

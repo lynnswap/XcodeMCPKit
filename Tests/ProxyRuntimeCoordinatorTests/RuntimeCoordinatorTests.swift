@@ -373,6 +373,7 @@ struct RuntimeCoordinatorTests {
         await #expect(throws: CancellationError.self) {
             try await removedFuture.get()
         }
+        #expect(timeoutScheduler.isCancelled(at: 0))
 
         let nextFuture = fixture.registerInitialize(
             requestID: 2,
@@ -380,6 +381,7 @@ struct RuntimeCoordinatorTests {
         )
         #expect(timeoutScheduler.scheduledCount() == 2)
 
+        #expect(timeoutScheduler.fire(at: 0) == false)
         timeoutScheduler.fire(at: 1)
         await #expect(throws: TimeoutError.self) {
             try await nextFuture.get()
