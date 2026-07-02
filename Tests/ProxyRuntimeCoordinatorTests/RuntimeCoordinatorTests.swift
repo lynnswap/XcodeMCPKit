@@ -3298,6 +3298,7 @@ struct RuntimeCoordinatorTests {
         let latestUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 66341, xcodeVersion: "26.6")
         let latestTarget = xcodeProcessTarget(processID: 80428, xcodeVersion: "27.0")
+        let toolsListRefreshes = NIOLockedValueBox<[String]>([])
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
@@ -3306,6 +3307,13 @@ struct RuntimeCoordinatorTests {
                 XcodeProcessRoute(target: latestTarget, upstreamIndices: [1]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
             ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                toolsListRefreshCompleted: { upstreamIndex, succeeded in
+                    toolsListRefreshes.withLockedValue {
+                        $0.append("\(upstreamIndex):\(succeeded)")
+                    }
+                }
+            ),
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -3339,6 +3347,19 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
             olderTarget.processID,
         ])
+
+        await latestUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: latestRequest),
+                    tools: [
+                        toolDescriptor(name: "LatestRouteOnly"),
+                    ]
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+        #expect(toolsListRefreshes.withLockedValue { $0 } == ["1:true"])
     }
 
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
