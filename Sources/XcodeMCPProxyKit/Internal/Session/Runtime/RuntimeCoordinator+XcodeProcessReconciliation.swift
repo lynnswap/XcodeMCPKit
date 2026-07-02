@@ -385,10 +385,21 @@ extension RuntimeCoordinator {
     private func retryPendingProcessRouteReadiness(reason: String) {
         let activeRoutes = xcodeProcessRoutes
         let activeProcessIDs = Set(activeRoutes.map(\.target.processID))
+        let unavailableProcessIDs = unavailableXcodeProcessIDs()
+        let missingCatalogProcessIDs = Set(activeRoutes.compactMap { route -> pid_t? in
+            guard unavailableProcessIDs.contains(route.target.processID) == false,
+                  processToolCatalogRegistry.catalog(forProcessID: route.target.processID) == nil
+            else {
+                return nil
+            }
+            return route.target.processID
+        })
         let pendingProcessIDs = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             processIDs -> Set<pid_t> in
+            processIDs.formUnion(missingCatalogProcessIDs)
             processIDs = processIDs.filter { processID in
                 activeProcessIDs.contains(processID)
+                && unavailableProcessIDs.contains(processID) == false
                 && processToolCatalogRegistry.catalog(forProcessID: processID) == nil
             }
             return processIDs

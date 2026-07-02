@@ -723,6 +723,66 @@ struct RuntimeCoordinatorTests {
         #expect(response["result"] != nil)
     }
 
+    @Test func processRoutingRetriesUnchangedRouteAfterUnavailableCooldown()
+        async throws
+    {
+        let uptimeClock = TestUptimeClock()
+        let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
+        let target = xcodeProcessTarget(processID: 27013, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now,
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            ),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        _ = try await fixture.initializePrimary(on: upstream)
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "RecoveredProcessTool")]),
+            ]
+        )
+
+        let exitEventIndex = upstreamEvents.count()
+        await upstream.yield(.exit(1))
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: exitEventIndex,
+            description: "waiting for process route upstream exit"
+        )
+        let sentCountAfterExit = await upstream.sentCount()
+        #expect(manager.testStateSnapshot().hasInitResult == false)
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+
+        manager.reconcileXcodeProcessTargets([target], reason: "test_before_cooldown")
+        #expect(await upstream.sentCount() == sentCountAfterExit)
+
+        uptimeClock.advance(by: .seconds(3))
+        manager.reconcileXcodeProcessTargets([target], reason: "test_after_cooldown")
+        let restartedInitialize = try await upstream.nextSent(at: sentCountAfterExit)
+        #expect(methodName(from: restartedInitialize) == "initialize")
+
+        await upstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: restartedInitialize)))
+        )
+        let initializedNotification = try await upstream.nextSent(at: sentCountAfterExit + 1)
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.testStateSnapshot().hasInitResult)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 0)
+    }
+
     @Test func processRoutingRetiresCrashedPIDAndAddsRelaunchedPID() async throws {
         let oldUpstream = TestUpstreamClient()
         let oldTarget = xcodeProcessTarget(processID: 27020, xcodeVersion: "27.0")
