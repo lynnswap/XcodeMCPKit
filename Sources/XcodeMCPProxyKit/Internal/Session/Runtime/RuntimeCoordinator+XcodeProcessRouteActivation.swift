@@ -118,7 +118,7 @@ extension RuntimeCoordinator {
             return
         }
         let processID = route.target.processID
-        guard xcodeProcessRouteActivationTracker.markInitialized(
+        guard let initialized = xcodeProcessRouteActivationTracker.markInitialized(
             processID: processID,
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNanoseconds()
@@ -133,19 +133,37 @@ extension RuntimeCoordinator {
             ]
         )
         testHooks.processRouteActivationEvent?(processID, upstreamIndex, "initialized")
+        if let existingCatalog = processToolCatalogRegistry.catalog(forProcessID: processID),
+           markProcessRouteActivationCataloged(
+               target: route.target,
+               upstreamIndex: existingCatalog.upstreamIndex,
+               activationUpstreamIndex: upstreamIndex,
+               attempt: initialized.attempt
+           ) {
+            return
+        }
+        scheduleProcessRouteActivationCatalogTimeout(
+            processID: processID,
+            upstreamIndex: upstreamIndex,
+            attempt: initialized.attempt
+        )
     }
 
     func markProcessRouteActivationCataloged(
         target: XcodeProcessTarget,
-        upstreamIndex: Int
-    ) {
+        upstreamIndex: Int,
+        activationUpstreamIndex: Int? = nil,
+        attempt: Int? = nil
+    ) -> Bool {
         let now = nowUptimeNanoseconds()
         guard let cataloged = xcodeProcessRouteActivationTracker.markCataloged(
             processID: target.processID,
-            upstreamIndex: upstreamIndex,
+            upstreamIndex: activationUpstreamIndex ?? upstreamIndex,
+            catalogedUpstreamIndex: upstreamIndex,
+            attempt: attempt,
             nowUptimeNs: now
         ) else {
-            return
+            return false
         }
         logger.info(
             "route_activation_cataloged",
@@ -158,6 +176,17 @@ extension RuntimeCoordinator {
             ]
         )
         testHooks.processRouteActivationEvent?(target.processID, upstreamIndex, "cataloged")
+        return true
+    }
+
+    func processRouteActivationCatalogAttempt(
+        processID: pid_t,
+        upstreamIndex: Int
+    ) -> Int? {
+        xcodeProcessRouteActivationTracker.catalogAttempt(
+            processID: processID,
+            upstreamIndex: upstreamIndex
+        )
     }
 
     func abandonProcessRouteActivation(processID: pid_t, reason: String) {
@@ -259,6 +288,66 @@ extension RuntimeCoordinator {
         xcodeProcessRouteActivationTracker.storeRetry(
             processID: processID,
             timeout: timeout
+        )
+    }
+
+    private func scheduleProcessRouteActivationCatalogTimeout(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int
+    ) {
+        let mode = WarmInitializeMode.processRouteActivation(processID: processID)
+        guard let timeoutAmount = upstreamInitTimeoutAmount(for: mode) else {
+            return
+        }
+        let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
+            self?.handleProcessRouteActivationCatalogTimeout(
+                processID: processID,
+                upstreamIndex: upstreamIndex,
+                attempt: attempt
+            )
+        }
+        xcodeProcessRouteActivationTracker.storeCatalogTimeout(
+            processID: processID,
+            upstreamIndex: upstreamIndex,
+            attempt: attempt,
+            timeout: timeout
+        )
+    }
+
+    private func handleProcessRouteActivationCatalogTimeout(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int
+    ) {
+        guard let timeout = xcodeProcessRouteActivationTracker.handleCatalogTimeout(
+            processID: processID,
+            upstreamIndex: upstreamIndex,
+            attempt: attempt
+        ) else {
+            return
+        }
+        timeout.rpcHandle?.cancel()
+
+        logger.info(
+            "route_activation_timeout",
+            metadata: [
+                "pid": .string("\(processID)"),
+                "upstream": .string("\(upstreamIndex)"),
+                "attempt": .string("\(attempt)"),
+                "phase": .string("catalog"),
+            ]
+        )
+        testHooks.processRouteActivationEvent?(processID, upstreamIndex, "timeout")
+
+        clearUpstreamState(upstreamIndex: upstreamIndex)
+        guard replaceProcessBoundUpstreamSlot(processID: processID, upstreamIndex: upstreamIndex) else {
+            return
+        }
+        scheduleProcessRouteActivationRetry(
+            processID: processID,
+            retry: timeout.retry,
+            reason: "catalog_timeout"
         )
     }
 

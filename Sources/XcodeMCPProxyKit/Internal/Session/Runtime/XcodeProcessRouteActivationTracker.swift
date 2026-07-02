@@ -17,21 +17,47 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         let startedAtUptimeNs: UInt64
     }
 
+    struct Initialized: Sendable {
+        let attempt: Int
+        let startedAtUptimeNs: UInt64
+    }
+
     struct Retry: Sendable {
         let attempt: Int
         let delay: TimeAmount
         let delayMilliseconds: Int64
     }
 
+    struct CatalogTimeout: Sendable {
+        let retry: Retry
+        let rpcHandle: ControlPlane.RPCHandle?
+    }
+
     private struct Record: Sendable {
         var phase: Phase
         var attempt: Int
         var retryTimeout: RuntimeScheduledTimeout?
+        var catalogTimeout: RuntimeScheduledTimeout?
+        var catalogRPCHandle: ControlPlane.RPCHandle?
 
-        init(phase: Phase, attempt: Int = 0, retryTimeout: RuntimeScheduledTimeout? = nil) {
+        init(
+            phase: Phase,
+            attempt: Int = 0,
+            retryTimeout: RuntimeScheduledTimeout? = nil,
+            catalogTimeout: RuntimeScheduledTimeout? = nil,
+            catalogRPCHandle: ControlPlane.RPCHandle? = nil
+        ) {
             self.phase = phase
             self.attempt = attempt
             self.retryTimeout = retryTimeout
+            self.catalogTimeout = catalogTimeout
+            self.catalogRPCHandle = catalogRPCHandle
+        }
+
+        func cancelTimeouts() {
+            retryTimeout?.cancel()
+            catalogTimeout?.cancel()
+            catalogRPCHandle?.cancel()
         }
     }
 
@@ -75,6 +101,10 @@ final class XcodeProcessRouteActivationTracker: Sendable {
 
             record.retryTimeout?.cancel()
             record.retryTimeout = nil
+            record.catalogTimeout?.cancel()
+            record.catalogTimeout = nil
+            record.catalogRPCHandle?.cancel()
+            record.catalogRPCHandle = nil
             record.attempt += 1
             record.phase = .attaching(
                 upstreamIndex: upstreamIndex,
@@ -90,13 +120,13 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         processID: pid_t,
         upstreamIndex: Int,
         nowUptimeNs _: UInt64
-    ) -> Bool {
-        state.withLockedValue { records -> Bool in
-            guard var record = records[processID] else { return false }
+    ) -> Initialized? {
+        state.withLockedValue { records -> Initialized? in
+            guard var record = records[processID] else { return nil }
             guard case .attaching(let currentUpstreamIndex, let attempt, let startedAt) = record.phase,
                   currentUpstreamIndex == upstreamIndex
             else {
-                return false
+                return nil
             }
             record.phase = .initialized(
                 upstreamIndex: upstreamIndex,
@@ -104,24 +134,32 @@ final class XcodeProcessRouteActivationTracker: Sendable {
                 startedAtUptimeNs: startedAt
             )
             records[processID] = record
-            return true
+            return Initialized(attempt: attempt, startedAtUptimeNs: startedAt)
         }
     }
 
     func markCataloged(
         processID: pid_t,
         upstreamIndex: Int,
+        catalogedUpstreamIndex: Int? = nil,
+        attempt expectedAttempt: Int? = nil,
         nowUptimeNs: UInt64
     ) -> UInt64? {
         state.withLockedValue { records -> UInt64? in
             guard var record = records[processID] else { return nil }
             let duration: UInt64
             switch record.phase {
-            case .initialized(let currentUpstreamIndex, _, let startedAt)
+            case .initialized(let currentUpstreamIndex, let attempt, let startedAt)
                 where currentUpstreamIndex == upstreamIndex:
+                if let expectedAttempt, expectedAttempt != attempt {
+                    return nil
+                }
                 duration = nowUptimeNs &- startedAt
-            case .attaching(let currentUpstreamIndex, _, let startedAt)
+            case .attaching(let currentUpstreamIndex, let attempt, let startedAt)
                 where currentUpstreamIndex == upstreamIndex:
+                if let expectedAttempt, expectedAttempt != attempt {
+                    return nil
+                }
                 duration = nowUptimeNs &- startedAt
             case .cataloged(let currentUpstreamIndex) where currentUpstreamIndex == upstreamIndex:
                 return nil
@@ -130,7 +168,10 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             }
             record.retryTimeout?.cancel()
             record.retryTimeout = nil
-            record.phase = .cataloged(upstreamIndex: upstreamIndex)
+            record.catalogTimeout?.cancel()
+            record.catalogTimeout = nil
+            record.catalogRPCHandle = nil
+            record.phase = .cataloged(upstreamIndex: catalogedUpstreamIndex ?? upstreamIndex)
             records[processID] = record
             return duration
         }
@@ -152,6 +193,31 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.phase = .pending
             records[processID] = record
             return Self.retry(forAttempt: currentAttempt)
+        }
+    }
+
+    func handleCatalogTimeout(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int
+    ) -> CatalogTimeout? {
+        state.withLockedValue { records in
+            guard var record = records[processID] else { return nil }
+            guard case .initialized(let currentUpstreamIndex, let currentAttempt, _) = record.phase,
+                  currentUpstreamIndex == upstreamIndex,
+                  currentAttempt == attempt
+            else {
+                return nil
+            }
+            let rpcHandle = record.catalogRPCHandle
+            record.catalogRPCHandle = nil
+            record.catalogTimeout = nil
+            record.phase = .pending
+            records[processID] = record
+            return CatalogTimeout(
+                retry: Self.retry(forAttempt: currentAttempt),
+                rpcHandle: rpcHandle
+            )
         }
     }
 
@@ -182,11 +248,61 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         }
     }
 
+    func storeCatalogTimeout(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int,
+        timeout: RuntimeScheduledTimeout
+    ) {
+        let shouldCancelTimeout = state.withLockedValue { records -> Bool in
+            guard var record = records[processID],
+                  case .initialized(let currentUpstreamIndex, let currentAttempt, _) = record.phase,
+                  currentUpstreamIndex == upstreamIndex,
+                  currentAttempt == attempt
+            else {
+                return true
+            }
+            record.catalogTimeout?.cancel()
+            record.catalogTimeout = timeout
+            records[processID] = record
+            return false
+        }
+        if shouldCancelTimeout {
+            timeout.cancel()
+        }
+    }
+
+    func storeCatalogRPCHandle(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int,
+        rpcHandle: ControlPlane.RPCHandle
+    ) {
+        let shouldCancelHandle = state.withLockedValue { records -> Bool in
+            guard var record = records[processID],
+                  case .initialized(let currentUpstreamIndex, let currentAttempt, _) = record.phase,
+                  currentUpstreamIndex == upstreamIndex,
+                  currentAttempt == attempt
+            else {
+                return true
+            }
+            record.catalogRPCHandle?.cancel()
+            record.catalogRPCHandle = rpcHandle
+            records[processID] = record
+            return false
+        }
+        if shouldCancelHandle {
+            rpcHandle.cancel()
+        }
+    }
+
     func abandon(processID: pid_t, reason: String) {
         state.withLockedValue { records in
             var record = records[processID] ?? Record(phase: .pending)
-            record.retryTimeout?.cancel()
+            record.cancelTimeouts()
             record.retryTimeout = nil
+            record.catalogTimeout = nil
+            record.catalogRPCHandle = nil
             record.phase = .abandoned(reason: reason)
             records[processID] = record
         }
@@ -198,7 +314,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             guard let record = records.removeValue(forKey: processID) else {
                 return false
             }
-            record.retryTimeout?.cancel()
+            record.cancelTimeouts()
             return true
         }
     }
@@ -207,7 +323,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         state.withLockedValue { records in
             let processIDs = Array(records.keys)
             for record in records.values {
-                record.retryTimeout?.cancel()
+                record.cancelTimeouts()
             }
             records.removeAll()
             return processIDs
@@ -216,6 +332,21 @@ final class XcodeProcessRouteActivationTracker: Sendable {
 
     func phase(processID: pid_t) -> Phase? {
         state.withLockedValue { $0[processID]?.phase }
+    }
+
+    func catalogAttempt(processID: pid_t, upstreamIndex: Int) -> Int? {
+        state.withLockedValue { records in
+            guard let record = records[processID] else {
+                return nil
+            }
+            switch record.phase {
+            case .initialized(let currentUpstreamIndex, let attempt, _)
+                where currentUpstreamIndex == upstreamIndex:
+                return attempt
+            case .pending, .attaching, .initialized, .cataloged, .abandoned:
+                return nil
+            }
+        }
     }
 
     private static func retry(forAttempt attempt: Int) -> Retry {
