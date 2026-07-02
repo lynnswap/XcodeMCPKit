@@ -234,6 +234,90 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.processRoutes.map(\.state) == ["active"])
     }
 
+    @Test func processRoutingSerializesTriggeredReconciles() async throws {
+        let olderTarget = xcodeProcessTarget(processID: 27004, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27005, xcodeVersion: "27.0")
+        let discovery = BlockingSequencedXcodeTargetDiscovery(
+            firstTargets: [olderTarget],
+            secondTargets: [newerTarget]
+        )
+        let routeCreations = LockedRecordedValues<pid_t>()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            processRoutingEnabled: true,
+            xcodeTargetDiscovery: discovery,
+            dynamicUpstreamFactory: { target in
+                routeCreations.append(target.processID)
+                return [TestUpstreamClient()]
+            },
+            startImmediately: false
+        )
+        defer {
+            discovery.releaseFirst()
+            fixture.shutdownAndWait()
+        }
+        let manager = fixture.manager
+
+        manager.triggerXcodeProcessReconcile(reason: "first_snapshot")
+        try await discovery.firstStarted.waitUntilSignaled()
+        manager.triggerXcodeProcessReconcile(reason: "second_snapshot")
+
+        #expect(discovery.callCount() == 1)
+        discovery.releaseFirst()
+
+        try await discovery.secondStarted.waitUntilSignaled()
+        #expect(try await nextRecordedValue(routeCreations, at: 1) == newerTarget.processID)
+        #expect(discovery.callCount() == 2)
+        #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
+        let processRoutes = manager.debugSnapshot().processRoutes
+        #expect(processRoutes.map(\.processID) == [
+            olderTarget.processID,
+            newerTarget.processID,
+        ])
+        #expect(processRoutes.map(\.state) == ["retired", "active"])
+    }
+
+    @Test func processRoutingReschedulesQueuedReconcileAfterWorkerCancellation() async throws {
+        let canceledTarget = xcodeProcessTarget(processID: 27006, xcodeVersion: "26.6")
+        let recoveredTarget = xcodeProcessTarget(processID: 27007, xcodeVersion: "27.0")
+        let discovery = BlockingSequencedXcodeTargetDiscovery(
+            firstTargets: [canceledTarget],
+            secondTargets: [recoveredTarget]
+        )
+        let routeCreations = LockedRecordedValues<pid_t>()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            processRoutingEnabled: true,
+            xcodeTargetDiscovery: discovery,
+            dynamicUpstreamFactory: { target in
+                routeCreations.append(target.processID)
+                return [TestUpstreamClient()]
+            },
+            startImmediately: false
+        )
+        defer {
+            discovery.releaseFirst()
+            fixture.shutdownAndWait()
+        }
+        let manager = fixture.manager
+
+        manager.triggerXcodeProcessReconcile(reason: "cancelled_snapshot")
+        try await discovery.firstStarted.waitUntilSignaled()
+        manager.debugReset()
+        manager.triggerXcodeProcessReconcile(reason: "queued_after_cancel")
+
+        #expect(discovery.callCount() == 1)
+        discovery.releaseFirst()
+
+        try await discovery.secondStarted.waitUntilSignaled()
+        #expect(try await nextRecordedValue(routeCreations, at: 0) == recoveredTarget.processID)
+        #expect(discovery.callCount() == 2)
+        #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [recoveredTarget.processID])
+        let processRoutes = manager.debugSnapshot().processRoutes
+        #expect(processRoutes.map(\.processID) == [recoveredTarget.processID])
+        #expect(processRoutes.map(\.state) == ["active"])
+    }
+
     @Test func processRoutingNoXcodeInitializeWaitDoesNotRescheduleTimeoutForJoinedClient()
         async throws
     {
@@ -10021,5 +10105,65 @@ private actor AutoToolsListUpstreamClient: UpstreamSlotControlling {
 
     func sentCount() async -> Int {
         await sentMessages.count()
+    }
+}
+
+private final class BlockingSequencedXcodeTargetDiscovery:
+    XcodeTargetDiscovering,
+    @unchecked Sendable
+{
+    let firstStarted = TestSignal()
+    let secondStarted = TestSignal()
+
+    private let lock = NSLock()
+    private let firstTargets: [XcodeProcessTarget]
+    private let secondTargets: [XcodeProcessTarget]
+    private let releaseFirstSemaphore = DispatchSemaphore(value: 0)
+    private var callCountValue = 0
+    private var firstReleased = false
+
+    init(
+        firstTargets: [XcodeProcessTarget],
+        secondTargets: [XcodeProcessTarget]
+    ) {
+        self.firstTargets = firstTargets
+        self.secondTargets = secondTargets
+    }
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
+        let call = nextCallCount()
+        if call == 1 {
+            firstStarted.signal()
+            releaseFirstSemaphore.wait()
+            return firstTargets
+        }
+        if call == 2 {
+            secondStarted.signal()
+        }
+        return secondTargets
+    }
+
+    func releaseFirst() {
+        let shouldRelease = lock.withLock { () -> Bool in
+            guard firstReleased == false else {
+                return false
+            }
+            firstReleased = true
+            return true
+        }
+        if shouldRelease {
+            releaseFirstSemaphore.signal()
+        }
+    }
+
+    func callCount() -> Int {
+        lock.withLock { callCountValue }
+    }
+
+    private func nextCallCount() -> Int {
+        lock.withLock {
+            callCountValue += 1
+            return callCountValue
+        }
     }
 }

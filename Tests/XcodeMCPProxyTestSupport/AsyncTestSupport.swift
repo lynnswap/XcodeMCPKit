@@ -480,6 +480,30 @@ package final class TestSignal: @unchecked Sendable {
         }
     }
 
+    package func waitUntilSignaled() async throws {
+        if state.withLockedValue({ $0.signaled }) {
+            return
+        }
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                let shouldResume = self.state.withLockedValue { state in
+                    if state.signaled {
+                        return true
+                    }
+                    state.waiters.append(Waiter(id: waiterID, continuation: continuation))
+                    return false
+                }
+                if shouldResume {
+                    continuation.resume(returning: ())
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter(id: waiterID)
+        }
+    }
+
     package func signal() {
         let waiters = state.withLockedValue { state -> [Waiter] in
             guard state.signaled == false else {

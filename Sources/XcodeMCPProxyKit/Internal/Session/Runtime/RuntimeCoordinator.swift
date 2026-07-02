@@ -75,6 +75,11 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     }
 }
 
+struct XcodeProcessReconcileScheduleState: Sendable {
+    var workerRunning = false
+    var pendingReasons: [String] = []
+}
+
 typealias XcodeProcessUpstreamFactory =
     @Sendable (_ target: XcodeProcessTarget) -> [any UpstreamSlotControlling]
 
@@ -393,6 +398,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let documentationProviderManager: (any DocumentationProviderManaging)?
     let processRoutingEnabled: Bool
     let xcodeProcessRegistry: XcodeProcessRegistry
+    let xcodeProcessReconcileScheduleState =
+        NIOLockedValueBox(XcodeProcessReconcileScheduleState())
     let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
     let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
     let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?

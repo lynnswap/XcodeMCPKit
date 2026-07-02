@@ -7,20 +7,41 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled, let xcodeTargetDiscovery else {
             return
         }
-        addRuntimeTask { [weak self, xcodeTargetDiscovery] in
+        xcodeProcessReconcileScheduleState.withLockedValue { state in
+            state.pendingReasons.append(reason)
+        }
+        startScheduledXcodeProcessReconcileWorkerIfNeeded(discovery: xcodeTargetDiscovery)
+    }
+
+    private func startScheduledXcodeProcessReconcileWorkerIfNeeded(
+        discovery: any XcodeTargetDiscovering
+    ) {
+        let shouldStartWorker = xcodeProcessReconcileScheduleState.withLockedValue { state in
+            guard state.workerRunning == false, state.pendingReasons.isEmpty == false else {
+                return false
+            }
+            state.workerRunning = true
+            return true
+        }
+        guard shouldStartWorker else { return }
+        let accepted = addRuntimeTask { [weak self, discovery] in
             guard let self else { return }
-            self.reconcileXcodeProcessTargets(
-                xcodeTargetDiscovery.runningXcodeTargets(),
-                reason: reason
-            )
+            self.runScheduledXcodeProcessReconciles(discovery: discovery)
+        }
+        guard accepted == false else {
+            return
+        }
+        xcodeProcessReconcileScheduleState.withLockedValue { state in
+            state.workerRunning = false
+            state.pendingReasons.removeAll()
         }
     }
 
     func startXcodeProcessReconciliationLoop() {
-        guard processRoutingEnabled, let xcodeTargetDiscovery else {
+        guard processRoutingEnabled, xcodeTargetDiscovery != nil else {
             return
         }
-        addRuntimeTask { [weak self, xcodeTargetDiscovery] in
+        addRuntimeTask { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 let hasPendingProcessToolsCatalogRefresh =
@@ -37,12 +58,50 @@ extension RuntimeCoordinator {
                     : .seconds(30)
                 await self.clock.sleep(interval)
                 guard !Task.isCancelled else { return }
-                self.reconcileXcodeProcessTargets(
-                    xcodeTargetDiscovery.runningXcodeTargets(),
-                    reason: "periodic_scan"
-                )
+                self.triggerXcodeProcessReconcile(reason: "periodic_scan")
             }
         }
+    }
+
+    private func runScheduledXcodeProcessReconciles(
+        discovery: any XcodeTargetDiscovering
+    ) {
+        defer {
+            finishScheduledXcodeProcessReconcileWorker(discovery: discovery)
+        }
+        while !Task.isCancelled {
+            guard let reason = dequeueScheduledXcodeProcessReconcileReason() else {
+                return
+            }
+            let targets = discovery.runningXcodeTargets()
+            guard !Task.isCancelled else {
+                return
+            }
+            reconcileXcodeProcessTargets(
+                targets,
+                reason: reason
+            )
+        }
+    }
+
+    private func dequeueScheduledXcodeProcessReconcileReason() -> String? {
+        xcodeProcessReconcileScheduleState.withLockedValue { state in
+            guard state.pendingReasons.isEmpty == false else {
+                return nil
+            }
+            let reasons = state.pendingReasons
+            state.pendingReasons.removeAll()
+            return reasons.joined(separator: ",")
+        }
+    }
+
+    private func finishScheduledXcodeProcessReconcileWorker(
+        discovery: any XcodeTargetDiscovering
+    ) {
+        xcodeProcessReconcileScheduleState.withLockedValue { state in
+            state.workerRunning = false
+        }
+        startScheduledXcodeProcessReconcileWorkerIfNeeded(discovery: discovery)
     }
 
     func reconcileXcodeProcessTargets(
