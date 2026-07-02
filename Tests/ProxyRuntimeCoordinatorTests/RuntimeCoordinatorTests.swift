@@ -8465,15 +8465,7 @@ struct RuntimeCoordinatorTests {
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultClientVersion(for: "Claude"))
     }
 
-    @Test func xcodeChatClientVersionFallsBackToCodeAliasWhenExactStemMissing() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
-
+    @Test func xcodeChatClientVersionFallsBackToCodeAliasWhenExactStemMissing() {
         let version = InitializeHandshakeParams.xcodeChatClientVersion(
             for: "Claude",
             defaults: [
@@ -8484,15 +8476,7 @@ struct RuntimeCoordinatorTests {
         #expect(version == "9.9.9")
     }
 
-    @Test func xcodeChatClientVersionPrefersExactStemMatchOverGenericCodeAlias() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
-
+    @Test func xcodeChatClientVersionPrefersExactStemMatchOverGenericCodeAlias() {
         let version = InitializeHandshakeParams.xcodeChatClientVersion(
             for: "Claude",
             defaults: [
