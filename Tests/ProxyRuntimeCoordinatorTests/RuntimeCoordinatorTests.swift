@@ -3257,15 +3257,11 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream],
-            testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
-            )
+            upstreams: [upstream]
         )
         defer { manager.shutdownAndWait() }
 
@@ -3299,15 +3295,8 @@ struct RuntimeCoordinatorTests {
             ],
             options: []
         )
-        let notificationEventIndex = upstreamEvents.count()
-        await upstream.yield(.message(notification))
-
         _ = try await cachedFuture.get()
-        _ = try await waitForRecordedValue(
-            upstreamEvents,
-            at: notificationEventIndex,
-            description: "waiting for cached initialize session notification"
-        )
+        manager.routeUpstreamMessage(notification, upstreamIndex: 0)
         let received = session.router.drainBufferedNotifications()
         #expect(received.count == 1)
         #expect(received.first == notification)
