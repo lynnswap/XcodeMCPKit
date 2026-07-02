@@ -1,9 +1,11 @@
 #!/bin/bash
 # Runs a test command and watches its output for stalls. If the command
-# produces no output for STALL_SECONDS, the test process has hung (the
-# swift-testing runner emits events continuously); dump thread backtraces
-# of every test-related process with `sample` so the hang site is visible
-# in the CI log, then fail fast instead of waiting for the job timeout.
+# produces no output for STALL_SECONDS, the test process is likely hung.
+# Recheck before killing because Swift Testing can emit a completion line at
+# the same moment the watchdog crosses the threshold. If it is still silent,
+# dump thread backtraces of every test-related process with `sample` so the
+# hang site is visible in the CI log, then fail fast instead of waiting for
+# the job timeout.
 set -uo pipefail
 
 STALL_SECONDS="${STALL_SECONDS:-120}"
@@ -24,6 +26,10 @@ sample_process() {
     fi
 }
 
+log_size() {
+    stat -f%z "${log}" 2> /dev/null || echo 0
+}
+
 dump_hang_diagnostics() {
     echo "::error::test run produced no output for ${STALL_SECONDS}s; dumping thread backtraces"
     ps -ef | grep -E 'swift|xctest' | grep -v grep || true
@@ -39,7 +45,7 @@ last_size=-1
 stalled_for=0
 while kill -0 "${runner}" 2> /dev/null; do
     sleep "${POLL_SECONDS}"
-    size=$(stat -f%z "${log}" 2> /dev/null || echo 0)
+    size=$(log_size)
     if [ "${size}" -eq "${last_size}" ]; then
         stalled_for=$((stalled_for + POLL_SECONDS))
     else
@@ -47,7 +53,27 @@ while kill -0 "${runner}" 2> /dev/null; do
         last_size=${size}
     fi
     if [ "${stalled_for}" -ge "${STALL_SECONDS}" ]; then
+        stalled_size="${size}"
+        sleep 1
+        size=$(log_size)
+        if [ "${size}" -ne "${stalled_size}" ]; then
+            stalled_for=0
+            last_size="${size}"
+            continue
+        fi
+
         dump_hang_diagnostics
+        size=$(log_size)
+        if ! kill -0 "${runner}" 2> /dev/null; then
+            break
+        fi
+        if [ "${size}" -ne "${stalled_size}" ]; then
+            echo "::warning::test output resumed while dumping diagnostics; continuing instead of killing"
+            stalled_for=0
+            last_size="${size}"
+            continue
+        fi
+
         pkill -9 -f 'swiftpm-testing-helper|PackageTests|xctest' || true
         kill -9 "${runner}" 2> /dev/null || true
         exit 70
