@@ -101,7 +101,8 @@ final class XcodeProcessRegistry: Sendable {
         return state.withLockedValue { state in
             var addedRoutes: [XcodeProcessRoute] = []
             var retiredRoutes: [XcodeProcessRoute] = []
-            let liveKeys = Set(orderedTargets.map(InstanceKey.init(target:)))
+            let orderedKeys = orderedTargets.map(InstanceKey.init(target:))
+            let liveKeys = Set(orderedKeys)
 
             for target in orderedTargets {
                 let key = InstanceKey(target: target)
@@ -153,6 +154,7 @@ final class XcodeProcessRegistry: Sendable {
                 retiredRoutes.append(record.route)
             }
 
+            reorderActiveKeys(orderedKeys, in: &state)
             let activeRoutes: [XcodeProcessRoute] = state.order.compactMap { key in
                 guard let record = state.recordsByKey[key], record.state == .active else {
                     return nil
@@ -165,6 +167,21 @@ final class XcodeProcessRegistry: Sendable {
                 activeRoutes: activeRoutes
             )
         }
+    }
+
+    private func reorderActiveKeys(_ orderedKeys: [InstanceKey], in state: inout State) {
+        var activeKeys: [InstanceKey] = []
+        var activeKeySet = Set<InstanceKey>()
+        for key in orderedKeys {
+            guard let record = state.recordsByKey[key],
+                  record.state == .active,
+                  activeKeySet.insert(key).inserted else {
+                continue
+            }
+            activeKeys.append(key)
+        }
+        let historicalKeys = state.order.filter { activeKeySet.contains($0) == false }
+        state.order = activeKeys + historicalKeys
     }
 
     func debugSnapshots(

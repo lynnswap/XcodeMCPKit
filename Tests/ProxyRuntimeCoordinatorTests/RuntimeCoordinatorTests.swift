@@ -271,10 +271,10 @@ struct RuntimeCoordinatorTests {
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
         let processRoutes = manager.debugSnapshot().processRoutes
         #expect(processRoutes.map(\.processID) == [
-            olderTarget.processID,
             newerTarget.processID,
+            olderTarget.processID,
         ])
-        #expect(processRoutes.map(\.state) == ["retired", "active"])
+        #expect(processRoutes.map(\.state) == ["active", "retired"])
     }
 
     @Test func processRoutingReschedulesQueuedReconcileAfterWorkerCancellation() async throws {
@@ -467,6 +467,42 @@ struct RuntimeCoordinatorTests {
         #expect(snapshots.map(\.state) == ["active"])
     }
 
+    @Test func processRegistryKeepsActiveRoutesInSortedXcodeOrderAfterLateAdd() {
+        let olderTarget = xcodeProcessTarget(processID: 26640, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27040, xcodeVersion: "27.0")
+        let registry = XcodeProcessRegistry()
+        var nextUpstreamIndex = 0
+        let makeRoute: (XcodeProcessTarget) -> XcodeProcessRoute = { target in
+            defer { nextUpstreamIndex += 1 }
+            return XcodeProcessRoute(target: target, upstreamIndices: [nextUpstreamIndex])
+        }
+
+        _ = registry.reconcile(
+            targets: [olderTarget],
+            reason: "initial_older",
+            nowUptimeNs: 1,
+            makeRoute: makeRoute
+        )
+
+        let result = registry.reconcile(
+            targets: [olderTarget, newerTarget],
+            reason: "late_newer",
+            nowUptimeNs: 2,
+            makeRoute: makeRoute
+        )
+
+        #expect(result.addedRoutes.map(\.target.processID) == [newerTarget.processID])
+        #expect(result.activeRoutes.map(\.target.processID) == [
+            newerTarget.processID,
+            olderTarget.processID,
+        ])
+        #expect(registry.activeRoutes().map(\.target.processID) == [
+            newerTarget.processID,
+            olderTarget.processID,
+        ])
+        #expect(registry.activeRoutes().map(\.upstreamIndices) == [[1], [0]])
+    }
+
     @Test func processRoutingAddsLateXcodeProcessWithoutRestart() async throws {
         let olderUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 26610, xcodeVersion: "26.6")
@@ -533,8 +569,8 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.processRoutes.map(\.state) == ["active", "active"])
         #expect(snapshot.processRoutes.map(\.toolsCatalogState) == ["available", "available"])
         #expect(snapshot.processRoutes.map(\.processID) == [
-            olderTarget.processID,
             newerTarget.processID,
+            olderTarget.processID,
         ])
         #expect(manager.documentationCandidateProcessIDs() == Set([
             olderTarget.processID,
@@ -596,8 +632,8 @@ struct RuntimeCoordinatorTests {
         )
         let pendingSnapshot = manager.debugSnapshot()
         #expect(pendingSnapshot.processRoutes.map(\.toolsCatalogState) == [
-            "available",
             "pending",
+            "available",
         ])
 
         manager.reconcileXcodeProcessTargets(
@@ -694,10 +730,10 @@ struct RuntimeCoordinatorTests {
         _ = try await relaunchedUpstream.nextSent(at: 1)
 
         let snapshot = manager.debugSnapshot()
-        #expect(snapshot.processRoutes.map(\.state) == ["retired", "active"])
+        #expect(snapshot.processRoutes.map(\.state) == ["active", "retired"])
         #expect(snapshot.processRoutes.map(\.processID) == [
-            oldTarget.processID,
             relaunchedTarget.processID,
+            oldTarget.processID,
         ])
         #expect(snapshot.processToolCatalogs.isEmpty)
         #expect(await oldUpstream.stopCount() == 1)
@@ -741,7 +777,7 @@ struct RuntimeCoordinatorTests {
         let response = try decodeJSON(from: try await initializeFuture.get())
         #expect(response["result"] != nil)
         #expect(await oldUpstream.stopCount() == 1)
-        #expect(manager.debugSnapshot().processRoutes.map(\.state) == ["retired", "active"])
+        #expect(manager.debugSnapshot().processRoutes.map(\.state) == ["active", "retired"])
     }
 
     @Test func processRoutingRetiringNonPrimaryRouteDoesNotStealPrimaryInitialize()
