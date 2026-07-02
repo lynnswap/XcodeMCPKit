@@ -163,18 +163,22 @@ final class InitializeManager: Sendable {
             let cancelledPrimaryUpstreamID: Int64?
             let cancelledPrimaryReadinessToken: UpstreamReadinessWaiterToken?
             if state.initPending.isEmpty {
-                if state.primaryInitializeRequiresPendingWaiter,
-                   state.primaryInitializePhase.isInFlight {
-                    cancelledPrimaryUpstreamIndex = state.primaryInitializePhase.upstreamIndex
-                    cancelledPrimaryUpstreamID = state.primaryInitializePhase.upstreamID
-                    if let upstreamIndex = cancelledPrimaryUpstreamIndex,
-                       let upstreamID = cancelledPrimaryUpstreamID
-                    {
+                if state.primaryInitializeRequiresPendingWaiter {
+                    switch state.primaryInitializePhase {
+                    case .pendingSend(let upstreamIndex):
+                        cancelledPrimaryUpstreamIndex = upstreamIndex
+                        cancelledPrimaryUpstreamID = nil
+                    case .sent(let upstreamIndex, let upstreamID):
+                        cancelledPrimaryUpstreamIndex = upstreamIndex
+                        cancelledPrimaryUpstreamID = upstreamID
                         recordCancelledPrimaryInitializeAttemptLocked(
                             upstreamIndex: upstreamIndex,
                             upstreamID: upstreamID,
                             state: &state
                         )
+                    case .idle:
+                        cancelledPrimaryUpstreamIndex = nil
+                        cancelledPrimaryUpstreamID = nil
                     }
                     cancelledPrimaryReadinessToken = state.primaryInitializeReadinessToken
                     state.primaryInitializePhase = .idle

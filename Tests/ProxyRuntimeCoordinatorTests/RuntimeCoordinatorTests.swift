@@ -3606,9 +3606,10 @@ struct RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
-        if let readinessToken = pendingInitializes.cancelledPrimaryReadinessToken {
-            manager.cancelPrimaryInitializeReadinessWaiter(readinessToken)
-        }
+        #expect(pendingInitializes.cancelledPrimaryUpstreamIndex == 0)
+        #expect(pendingInitializes.cancelledPrimaryUpstreamID == nil)
+        let readinessToken = try #require(pendingInitializes.cancelledPrimaryReadinessToken)
+        manager.cancelPrimaryInitializeReadinessWaiter(readinessToken)
 
         await #expect(throws: CancellationError.self) {
             try await removedFuture.get()
