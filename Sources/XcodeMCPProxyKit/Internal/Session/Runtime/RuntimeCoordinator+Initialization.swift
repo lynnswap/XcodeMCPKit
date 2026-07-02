@@ -311,7 +311,6 @@ extension RuntimeCoordinator {
 
         let update = initializeManager.preparePrimaryInitializeSuccess()
         guard let update else { return }
-        update.timeout?.cancel()
 
         sendInitializedNotificationIfNeeded(
             upstreamIndex: upstreamIndex,
@@ -328,7 +327,8 @@ extension RuntimeCoordinator {
                 result,
                 sourceUpstream: upstreamIndex
             )
-            guard let pending = self.initializeManager.finishPrimaryInitializeSuccess() else { return }
+            guard let completion = self.initializeManager.finishPrimaryInitializeSuccess() else { return }
+            completion.timeout?.cancel()
             self.upstreamSlotScheduler.wake()
             if update.shouldWarmSecondary {
                 self.initializeManager.markSecondaryWarmupStarted()
@@ -336,7 +336,7 @@ extension RuntimeCoordinator {
             }
             self.refreshToolsListIfNeeded()
             self.completePendingInitializes(
-                pending,
+                completion.pending,
                 result: result,
                 negotiatedProtocolVersion: negotiatedProtocolVersion
             )
@@ -352,6 +352,7 @@ extension RuntimeCoordinator {
                 self.hasUsableInitializedSecondaryUpstreams(excluding: upstreamIndex),
                 let completion = self.initializeManager.finishPrimaryInitializeUsingCachedResult()
             {
+                completion.timeout?.cancel()
                 self.completePendingInitializes(
                     completion.pending,
                     result: completion.result,
@@ -618,6 +619,12 @@ extension RuntimeCoordinator {
             )
         }
         if handlesPrimaryInitialize {
+            // The retry attempt gets a fresh full timeout window. This must
+            // replace the still-armed previous timeout (never disarm first):
+            // pending initializes stay timeout-guarded at every instant, so a
+            // retry chain that stalls or aborts on a stale guard fails with
+            // TimeoutError instead of leaking the pending promises forever.
+            scheduleInitTimeout()
             if hasHealthySecondary {
                 initializeManager.setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)

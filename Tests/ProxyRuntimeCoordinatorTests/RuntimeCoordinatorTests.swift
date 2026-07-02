@@ -2959,6 +2959,52 @@ struct RuntimeCoordinatorTests {
         #expect(response["result"] != nil, "initializeResponse=\(response)")
     }
 
+    @Test func sessionManagerInitializeTimeoutStaysArmedWhileInitializedNotificationIsInFlight()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = BlockingInitializedNotificationUpstreamClient()
+        let timeoutClock = TestClock()
+        let config = makeConfig(requestTimeout: 0.3)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+        )
+        defer { manager.shutdownAndWait() }
+
+        let future = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let upstreamID = try extractUpstreamID(from: sent)
+
+        await upstream.blockNextInitializedNotification()
+        await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
+        try await upstream.waitForBlockedInitializedNotification()
+
+        try await timeoutClock.sleep(untilSuspendedBy: 1)
+        timeoutClock.advance(by: .milliseconds(300))
+
+        do {
+            _ = try await waitWithTimeout(
+                "initialize should fail at its deadline while the initialized notification is in flight",
+                timeout: .seconds(2)
+            ) {
+                try await future.get()
+            }
+            Issue.record("initialize must not remain pending past its deadline")
+        } catch is TimeoutError {
+        }
+
+        await upstream.releaseBlockedInitializedNotification()
+    }
+
     @Test func sessionManagerRunsSecondaryWarmupAfterRecoveredInitializedNotification()
         async throws
     {
