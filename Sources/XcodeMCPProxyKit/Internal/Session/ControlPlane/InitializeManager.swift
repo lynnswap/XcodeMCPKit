@@ -383,6 +383,30 @@ final class InitializeManager: Sendable {
         }
     }
 
+    /// Re-arms the init timeout for a retry attempt, but only while pending
+    /// initializes remain unresolved. A retry with no waiters (e.g. after
+    /// pending initializes were satisfied from the cached result) must not
+    /// leave a global timer armed: a stale timer would stop the next eager
+    /// attempt from arming its own fresh window and could fail it early.
+    /// Returns the timeout the caller must cancel.
+    func rearmInitTimeoutForRetry(
+        makeTimeout: () -> RuntimeScheduledTimeout?
+    ) -> RuntimeScheduledTimeout? {
+        state.withLockedValue { state in
+            guard state.initPending.isEmpty == false else {
+                let stale = state.initTimeout
+                state.initTimeout = nil
+                return stale
+            }
+            guard let timeout = makeTimeout() else {
+                return nil
+            }
+            let previous = state.initTimeout
+            state.initTimeout = timeout
+            return previous
+        }
+    }
+
     func handleUpstreamExit(upstreamIndex: Int) -> ExitResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }

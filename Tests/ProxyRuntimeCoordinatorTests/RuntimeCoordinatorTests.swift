@@ -3005,6 +3005,58 @@ struct RuntimeCoordinatorTests {
         await upstream.releaseBlockedInitializedNotification()
     }
 
+    @Test func initializeManagerRearmsRetryTimeoutOnlyWhilePendingInitializesRemain() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let manager = InitializeManager(brokerState: CanonicalBrokerState())
+        let factoryCalls = NIOLockedValueBox(0)
+
+        let staleCancelled = NIOLockedValueBox(false)
+        _ = manager.replaceInitTimeout(
+            RuntimeScheduledTimeout { staleCancelled.withLockedValue { $0 = true } }
+        )
+        manager.rearmInitTimeoutForRetry {
+            factoryCalls.withLockedValue { $0 += 1 }
+            return RuntimeScheduledTimeout {}
+        }?.cancel()
+        #expect(staleCancelled.withLockedValue { $0 })
+        #expect(factoryCalls.withLockedValue { $0 } == 0)
+
+        _ = manager.registerInitialize(
+            sessionID: "session-rearm-retry-timeout",
+            sessionGeneration: 0,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            primaryUpstreamIndex: 0,
+            on: eventLoop
+        )
+        let replacedCancelled = NIOLockedValueBox(false)
+        _ = manager.replaceInitTimeout(
+            RuntimeScheduledTimeout { replacedCancelled.withLockedValue { $0 = true } }
+        )
+        manager.rearmInitTimeoutForRetry {
+            factoryCalls.withLockedValue { $0 += 1 }
+            return RuntimeScheduledTimeout {}
+        }?.cancel()
+        #expect(replacedCancelled.withLockedValue { $0 })
+        #expect(factoryCalls.withLockedValue { $0 } == 1)
+
+        let keptCancelled = NIOLockedValueBox(false)
+        _ = manager.replaceInitTimeout(
+            RuntimeScheduledTimeout { keptCancelled.withLockedValue { $0 = true } }
+        )
+        #expect(manager.rearmInitTimeoutForRetry { nil } == nil)
+        #expect(keptCancelled.withLockedValue { $0 } == false)
+
+        let shutdownState = manager.beginShutdown()
+        shutdownState.timeout?.cancel()
+        for pending in shutdownState.pending {
+            pending.eventLoop.execute {
+                pending.promise.fail(CancellationError())
+            }
+        }
+    }
+
     @Test func sessionManagerRunsSecondaryWarmupAfterRecoveredInitializedNotification()
         async throws
     {
