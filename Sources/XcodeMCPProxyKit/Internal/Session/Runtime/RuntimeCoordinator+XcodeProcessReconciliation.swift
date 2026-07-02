@@ -397,6 +397,12 @@ extension RuntimeCoordinator {
             return
         }
 
+        guard isInitialized() else {
+            clearActiveWarmInitializesBeforePrimaryRestart()
+            startEagerInitializePrimary(applyBackoff: true)
+            return
+        }
+
         for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
             for upstreamIndex in route.upstreamIndices {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)

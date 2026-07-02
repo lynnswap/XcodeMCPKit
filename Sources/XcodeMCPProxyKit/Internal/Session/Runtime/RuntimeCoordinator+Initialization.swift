@@ -190,11 +190,19 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex,
             upstreamID: upstreamID
         )
+        let activePrimaryInitializeUpstreamIndex =
+            initializeManager.activePrimaryInitializeUpstreamIndex()
+        let canPromoteWarmInitializeToPrimary =
+            processRoutingEnabled
+            && isPrimaryInitialize == false
+            && activePrimaryInitializeUpstreamIndex == nil
+            && canonicalBrokerState.initializeResult() == nil
         let handlesPrimaryInitialize = isPrimaryInitialize
+            || canPromoteWarmInitializeToPrimary
             || (
                 !processRoutingEnabled
                     && isCurrentPrimaryInitializeUpstream(upstreamIndex)
-                    && initializeManager.activePrimaryInitializeUpstreamIndex() == nil
+                    && activePrimaryInitializeUpstreamIndex == nil
             )
 
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {

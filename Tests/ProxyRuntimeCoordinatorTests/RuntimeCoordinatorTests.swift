@@ -675,6 +675,54 @@ struct RuntimeCoordinatorTests {
         ]))
     }
 
+    @Test func processRoutingRetriesPendingRouteAsPrimaryUntilInitializeCompletes()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 27012, xcodeVersion: "27.0")
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let failedFuture = fixture.registerInitialize(requestID: 1)
+        manager.reconcileXcodeProcessTargets([target], reason: "test_initial_route")
+        let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        _ = try await upstream.nextSent(at: 0)
+
+        manager.failInitPending(error: TimeoutError())
+        await #expect(throws: TimeoutError.self) {
+            try await failedFuture.get()
+        }
+        #expect(manager.testStateSnapshot().hasInitResult == false)
+
+        manager.reconcileXcodeProcessTargets([target], reason: "test_retry_pending_route")
+        let retriedInitialize = try await upstream.nextSent(at: 1)
+        #expect(methodName(from: retriedInitialize) == "initialize")
+        #expect(manager.testStateSnapshot().initInFlight)
+
+        await upstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retriedInitialize)))
+        )
+        let initializedNotification = try await upstream.nextSent(at: 2)
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.testStateSnapshot().hasInitResult)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 0)
+        let cachedFuture = fixture.registerInitialize(requestID: 2)
+        let response = try decodeJSON(from: try await cachedFuture.get())
+        #expect(response["result"] != nil)
+    }
+
     @Test func processRoutingRetiresCrashedPIDAndAddsRelaunchedPID() async throws {
         let oldUpstream = TestUpstreamClient()
         let oldTarget = xcodeProcessTarget(processID: 27020, xcodeVersion: "27.0")
