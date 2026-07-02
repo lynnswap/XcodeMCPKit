@@ -8,7 +8,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         case pending
         case attaching(upstreamIndex: Int, attempt: Int, startedAtUptimeNs: UInt64)
         case initialized(upstreamIndex: Int, attempt: Int, startedAtUptimeNs: UInt64)
-        case cataloged(upstreamIndex: Int)
+        case cataloged(upstreamIndex: Int, attempt: Int)
         case abandoned(reason: String)
     }
 
@@ -148,6 +148,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         state.withLockedValue { records -> UInt64? in
             guard var record = records[processID] else { return nil }
             let duration: UInt64
+            let catalogedAttempt: Int
             switch record.phase {
             case .initialized(let currentUpstreamIndex, let attempt, let startedAt)
                 where currentUpstreamIndex == upstreamIndex:
@@ -155,13 +156,15 @@ final class XcodeProcessRouteActivationTracker: Sendable {
                     return nil
                 }
                 duration = nowUptimeNs &- startedAt
+                catalogedAttempt = attempt
             case .attaching(let currentUpstreamIndex, let attempt, let startedAt)
                 where currentUpstreamIndex == upstreamIndex:
                 if let expectedAttempt, expectedAttempt != attempt {
                     return nil
                 }
                 duration = nowUptimeNs &- startedAt
-            case .cataloged(let currentUpstreamIndex) where currentUpstreamIndex == upstreamIndex:
+                catalogedAttempt = attempt
+            case .cataloged(let currentUpstreamIndex, _) where currentUpstreamIndex == upstreamIndex:
                 return nil
             case .pending, .abandoned, .attaching, .initialized, .cataloged:
                 return nil
@@ -172,9 +175,24 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.catalogTimeout = nil
             record.catalogRPCHandle?.cancel()
             record.catalogRPCHandle = nil
-            record.phase = .cataloged(upstreamIndex: catalogedUpstreamIndex ?? upstreamIndex)
+            record.phase = .cataloged(
+                upstreamIndex: catalogedUpstreamIndex ?? upstreamIndex,
+                attempt: catalogedAttempt
+            )
             records[processID] = record
             return duration
+        }
+    }
+
+    func isCataloged(processID: pid_t, attempt expectedAttempt: Int? = nil) -> Bool {
+        state.withLockedValue { records in
+            guard case .cataloged(_, let attempt)? = records[processID]?.phase else {
+                return false
+            }
+            if let expectedAttempt {
+                return attempt == expectedAttempt
+            }
+            return true
         }
     }
 

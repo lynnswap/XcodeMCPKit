@@ -724,7 +724,7 @@ struct RuntimeCoordinatorTests {
         #expect(newerCatalog.upstreamIndex == 2)
         #expect(
             manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
-                == .cataloged(upstreamIndex: 2)
+                == .cataloged(upstreamIndex: 2, attempt: 1)
         )
     }
 
@@ -4776,6 +4776,122 @@ struct RuntimeCoordinatorTests {
         #expect(manager.cachedToolsListResult() == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+    }
+
+    @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80438, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let uptimeClock = TestUptimeClock()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now,
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
+        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+            processID: target.processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 0
+        )
+        _ = manager.xcodeProcessRouteActivationTracker.markInitialized(
+            processID: target.processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 1
+        )
+
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_overlap_background_refresh",
+            processIDs: [target.processID]
+        )
+        let backgroundRequest = try await sentValue(
+            from: upstream,
+            at: 0,
+            timeout: .seconds(2)
+        )
+        #expect(methodName(from: backgroundRequest) == "tools/list")
+
+        let foregroundTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-overlap",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        _ = try await waitWithTimeout(
+            "waiting for overlapping foreground tools/list waiter",
+            timeout: .seconds(2)
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
+
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: backgroundRequest),
+                    tools: [
+                        toolDescriptor(name: "SharedOverlapTool"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for overlapping background process catalog",
+            timeout: .seconds(2)
+        ) {
+            while manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
+        let foregroundRequest = try await sentValue(
+            from: upstream,
+            startingAt: 1,
+            matching: { methodName(from: $0) == "tools/list" },
+            timeout: .seconds(2),
+            description: "waiting for overlapping foreground tools/list"
+        )
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: foregroundRequest),
+                    tools: [
+                        toolDescriptor(name: "SharedOverlapTool"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout(
+            "waiting for overlapping foreground process catalog result",
+            timeout: .seconds(2)
+        ) {
+            try await foregroundTask.value
+        }
+        #expect(toolNames(in: result) == ["SharedOverlapTool"])
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
+            target.processID,
+        ])
     }
 
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()

@@ -395,17 +395,29 @@ extension RuntimeCoordinator {
                activationUpstreamIndex: resolvedActivation.upstreamIndex,
                attempt: resolvedActivation.attempt
            ) == false {
-            logger.debug(
-                "Dropping stale process tools/list catalog",
-                metadata: [
-                    "pid": .string("\(target.processID)"),
-                    "app_path": .string(target.appPath),
-                    "xcode_version": .string(target.xcodeVersion),
-                    "upstream": .string("\(sourceUpstream)"),
-                    "activation_attempt": .string("\(resolvedActivation.attempt)"),
-                ]
-            )
-            return nil
+            if hadProcessCatalog {
+                return availableToolsCatalogSurfaceResult(
+                    startedAt: startedAt,
+                    exposedProcessIDs: exposedProcessIDs,
+                    fallback: result
+                )
+            }
+            guard xcodeProcessRouteActivationTracker.isCataloged(
+                processID: target.processID,
+                attempt: resolvedActivation.attempt
+            ) else {
+                logger.debug(
+                    "Dropping stale process tools/list catalog",
+                    metadata: [
+                        "pid": .string("\(target.processID)"),
+                        "app_path": .string(target.appPath),
+                        "xcode_version": .string(target.xcodeVersion),
+                        "upstream": .string("\(sourceUpstream)"),
+                        "activation_attempt": .string("\(resolvedActivation.attempt)"),
+                    ]
+                )
+                return nil
+            }
         }
         processToolCatalogRegistry.record(
             target: target,
