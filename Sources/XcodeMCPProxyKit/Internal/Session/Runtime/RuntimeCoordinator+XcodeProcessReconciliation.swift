@@ -277,6 +277,9 @@ extension RuntimeCoordinator {
             clearInitialize: resetInitialize,
             clearToolsCatalog: true
         )
+        if resetInitialize {
+            restartPrimaryInitializeAfterRetiringCachedProcessRoute()
+        }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
         logger.info(
             "Retired Xcode process route",
@@ -332,6 +335,35 @@ extension RuntimeCoordinator {
                reason: "xcode_process_removed_\(reason)"
            ) {
             return
+        }
+    }
+
+    private func restartPrimaryInitializeAfterRetiringCachedProcessRoute() {
+        guard processRoutingEnabled, isInitialized() == false else {
+            return
+        }
+        guard initializeManager.snapshot().initInFlight == false else {
+            return
+        }
+
+        clearActiveWarmInitializesBeforePrimaryRestart()
+        startEagerInitializePrimary(applyBackoff: true)
+    }
+
+    private func clearActiveWarmInitializesBeforePrimaryRestart() {
+        let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
+        let states = upstreamHealthManager.statesSnapshot()
+        for upstreamIndex in activeProcessBoundUpstreamIndices().sorted() {
+            guard upstreamIndex != activePrimaryUpstreamIndex,
+                  upstreamIndex >= 0,
+                  upstreamIndex < states.count else {
+                continue
+            }
+            let state = states[upstreamIndex]
+            guard state.initInFlight, state.isInitialized == false else {
+                continue
+            }
+            clearUpstreamState(upstreamIndex: upstreamIndex)
         }
     }
 

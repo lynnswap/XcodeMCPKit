@@ -780,6 +780,127 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().processRoutes.map(\.state) == ["active", "retired"])
     }
 
+    @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOnIdleActiveRoute()
+        async throws
+    {
+        let cachedUpstream = TestUpstreamClient()
+        let activeUpstream = TestUpstreamClient()
+        let cachedTarget = xcodeProcessTarget(processID: 27025, xcodeVersion: "27.0")
+        let activeTarget = xcodeProcessTarget(processID: 26625, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [cachedUpstream, activeUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: cachedTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
+            ],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let cachedHandshake = try jsonValue([
+            "protocolVersion": MCP.ProtocolVersion.current,
+            "capabilities": [String: Any](),
+            "serverInfo": ["name": "cached-source"],
+        ])
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            cachedHandshake,
+            sourceUpstream: 0
+        )
+
+        manager.reconcileXcodeProcessTargets(
+            [activeTarget],
+            reason: "test_remove_cached_initialize_source"
+        )
+        _ = try await cachedUpstream.nextStopCount()
+
+        #expect(manager.testStateSnapshot().hasInitResult == false)
+        let restartedInitialize = try await activeUpstream.nextSent(at: 0)
+        #expect(methodName(from: restartedInitialize) == "initialize")
+        await activeUpstream.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: try extractUpstreamID(from: restartedInitialize),
+                    serverName: "active-primary"
+                )
+            )
+        )
+        let initializedNotification = try await activeUpstream.nextSent(at: 1)
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.testStateSnapshot().hasInitResult)
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
+    }
+
+    @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOverWarmRoute()
+        async throws
+    {
+        let cachedUpstream = TestUpstreamClient()
+        let activeUpstream = TestUpstreamClient()
+        let cachedTarget = xcodeProcessTarget(processID: 27026, xcodeVersion: "27.0")
+        let activeTarget = xcodeProcessTarget(processID: 26626, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [cachedUpstream, activeUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: cachedTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
+            ],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let cachedHandshake = try jsonValue([
+            "protocolVersion": MCP.ProtocolVersion.current,
+            "capabilities": [String: Any](),
+            "serverInfo": ["name": "cached-source"],
+        ])
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            cachedHandshake,
+            sourceUpstream: 0
+        )
+        manager.startUpstreamWarmInitialize(upstreamIndex: 1)
+        let warmInitialize = try await activeUpstream.nextSent(at: 0)
+        let warmUpstreamID = try extractUpstreamID(from: warmInitialize)
+        #expect(manager.testStateSnapshot().upstreams[1].initInFlight)
+
+        manager.reconcileXcodeProcessTargets(
+            [activeTarget],
+            reason: "test_remove_cached_initialize_source_during_warm_init"
+        )
+        _ = try await cachedUpstream.nextStopCount()
+
+        let restartedInitialize = try await activeUpstream.nextSent(at: 1)
+        let restartedUpstreamID = try extractUpstreamID(from: restartedInitialize)
+        #expect(methodName(from: restartedInitialize) == "initialize")
+        await activeUpstream.yield(
+            .message(try makeInitializeResponse(id: warmUpstreamID, serverName: "stale-warm"))
+        )
+        await manager.drainRuntimeTasksForTesting()
+        #expect(manager.testStateSnapshot().hasInitResult == false)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == nil)
+
+        await activeUpstream.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: restartedUpstreamID,
+                    serverName: "active-primary"
+                )
+            )
+        )
+        let initializedNotification = try await activeUpstream.nextSent(at: 2)
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.testStateSnapshot().hasInitResult)
+        #expect(manager.testStateSnapshot().upstreams[1].isInitialized)
+        #expect(manager.canonicalBrokerState.initializeSourceUpstream() == 1)
+    }
+
     @Test func processRoutingRetiringNonPrimaryRouteDoesNotStealPrimaryInitialize()
         async throws
     {
