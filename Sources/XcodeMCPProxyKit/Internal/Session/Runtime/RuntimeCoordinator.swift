@@ -80,6 +80,11 @@ struct XcodeProcessReconcileScheduleState: Sendable {
     var pendingReasons: [String] = []
 }
 
+struct XcodeProcessReconciliationLoopState: Sendable {
+    var generation: UInt64 = 0
+    var isRunning = false
+}
+
 typealias XcodeProcessUpstreamFactory =
     @Sendable (_ target: XcodeProcessTarget) -> [any UpstreamSlotControlling]
 
@@ -364,6 +369,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let initializeManager: InitializeManager
     let upstreamEventTasks = AsyncTaskSupervisor()
     let runtimeTasks = AsyncTaskSupervisor()
+    let xcodeProcessReconciliationLoopState =
+        NIOLockedValueBox(XcodeProcessReconciliationLoopState())
     let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
@@ -821,6 +828,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         canonicalBrokerState.reset()
         processToolCatalogRegistry.reset()
+        restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset()
     }
 
     func shutdown() async {

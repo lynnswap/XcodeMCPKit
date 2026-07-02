@@ -41,25 +41,78 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled, xcodeTargetDiscovery != nil else {
             return
         }
-        addRuntimeTask { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                let hasPendingProcessToolsCatalogRefresh =
-                    self.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                        $0.isEmpty == false
-                    }
-                let isRecovering =
-                    self.activeInitializedHealthyishCount() == 0
-                    || self.anyActiveRecoveryInFlight()
-                    || hasPendingProcessToolsCatalogRefresh
-                let interval: Duration = self.xcodeProcessRoutes.isEmpty
-                    || isRecovering
-                    ? .seconds(2)
-                    : .seconds(30)
-                await self.clock.sleep(interval)
-                guard !Task.isCancelled else { return }
-                self.triggerXcodeProcessReconcile(reason: "periodic_scan")
+        let generation = xcodeProcessReconciliationLoopState.withLockedValue { state -> UInt64? in
+            guard state.isRunning == false else {
+                return nil
             }
+            state.generation &+= 1
+            state.isRunning = true
+            return state.generation
+        }
+        guard let generation else { return }
+        let accepted = addRuntimeTask { [weak self, generation] in
+            guard let self else { return }
+            await self.runXcodeProcessReconciliationLoop(generation: generation)
+        }
+        if accepted == false {
+            finishXcodeProcessReconciliationLoop(generation: generation)
+        }
+    }
+
+    func restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset() {
+        guard processRoutingEnabled else {
+            return
+        }
+        invalidateXcodeProcessReconciliationLoop()
+        startXcodeProcessReconciliationLoop()
+    }
+
+    private func runXcodeProcessReconciliationLoop(generation: UInt64) async {
+        defer {
+            finishXcodeProcessReconciliationLoop(generation: generation)
+        }
+        while !Task.isCancelled, isCurrentXcodeProcessReconciliationLoop(generation: generation) {
+            let hasPendingProcessToolsCatalogRefresh =
+                pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                    $0.isEmpty == false
+                }
+            let isRecovering =
+                activeInitializedHealthyishCount() == 0
+                || anyActiveRecoveryInFlight()
+                || hasPendingProcessToolsCatalogRefresh
+            let interval: Duration = xcodeProcessRoutes.isEmpty
+                || isRecovering
+                ? .seconds(2)
+                : .seconds(30)
+            await clock.sleep(interval)
+            guard !Task.isCancelled,
+                  isCurrentXcodeProcessReconciliationLoop(generation: generation)
+            else {
+                return
+            }
+            triggerXcodeProcessReconcile(reason: "periodic_scan")
+        }
+    }
+
+    private func invalidateXcodeProcessReconciliationLoop() {
+        xcodeProcessReconciliationLoopState.withLockedValue { state in
+            state.generation &+= 1
+            state.isRunning = false
+        }
+    }
+
+    private func isCurrentXcodeProcessReconciliationLoop(generation: UInt64) -> Bool {
+        xcodeProcessReconciliationLoopState.withLockedValue { state in
+            state.isRunning && state.generation == generation
+        }
+    }
+
+    private func finishXcodeProcessReconciliationLoop(generation: UInt64) {
+        xcodeProcessReconciliationLoopState.withLockedValue { state in
+            guard state.generation == generation else {
+                return
+            }
+            state.isRunning = false
         }
     }
 

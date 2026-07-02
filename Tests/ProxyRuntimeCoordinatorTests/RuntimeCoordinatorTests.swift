@@ -388,6 +388,42 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+    @Test func processRoutingDebugResetRestartsPeriodicReconcileLoop() async throws {
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let discovery = RecordingXcodeTargetDiscovery(targets: [])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            clock: clocks.clock,
+            processRoutingEnabled: true,
+            xcodeTargetDiscovery: discovery,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        manager.start()
+        #expect(
+            try await waitForRecordedValue(
+                discovery.calls,
+                at: 0,
+                description: "waiting for startup process reconcile"
+            ) == 1
+        )
+        try await clocks.timeoutClock.sleep(untilSuspendedBy: 1)
+
+        manager.debugReset()
+        try await clocks.timeoutClock.sleep(untilSuspendedBy: 1)
+        clocks.timeoutClock.advance(by: .seconds(2))
+
+        #expect(
+            try await waitForRecordedValue(
+                discovery.calls,
+                at: 1,
+                description: "waiting for periodic process reconcile after debug reset"
+            ) == 2
+        )
+    }
+
     @Test func processRegistryReactivatesRetiredRouteWithoutDuplicatingOrder() {
         let target = xcodeProcessTarget(processID: 27003, xcodeVersion: "27.0")
         let registry = XcodeProcessRegistry()
@@ -10167,5 +10203,26 @@ private final class BlockingSequencedXcodeTargetDiscovery:
             callCountValue += 1
             return callCountValue
         }
+    }
+}
+
+private final class RecordingXcodeTargetDiscovery: XcodeTargetDiscovering, @unchecked Sendable {
+    let calls = LockedRecordedValues<Int>()
+
+    private let lock = NSLock()
+    private let targets: [XcodeProcessTarget]
+    private var callCountValue = 0
+
+    init(targets: [XcodeProcessTarget]) {
+        self.targets = targets
+    }
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
+        let call = lock.withLock {
+            callCountValue += 1
+            return callCountValue
+        }
+        calls.append(call)
+        return targets
     }
 }
