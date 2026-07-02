@@ -451,19 +451,25 @@ extension RuntimeCoordinator {
                 throw TimeoutError()
             }
             do {
-                return try await loadCanonicalToolsCatalogFromRoute(
-                    .pinnedUpstream(upstreamIndex),
-                    requestTimeout: routeTimeout,
-                    rpcHandle: rpcHandle,
-                    startedAt: startedAt,
-                    purpose: "tools-\(upstreamIndex)",
-                    failureRouteMetadata: [
-                        "pid": .string("\(route.target.processID)"),
-                        "app_path": .string(route.target.appPath),
-                        "xcode_version": .string(route.target.xcodeVersion),
-                        "upstream": .string("\(upstreamIndex)"),
-                    ]
-                )
+                // First-success catalog loads cancel sibling routes; the route-level
+                // handle must release queued or in-flight fallback RPCs.
+                return try await withTaskCancellationHandler {
+                    try await loadCanonicalToolsCatalogFromRoute(
+                        .pinnedUpstream(upstreamIndex),
+                        requestTimeout: routeTimeout,
+                        rpcHandle: rpcHandle,
+                        startedAt: startedAt,
+                        purpose: "tools-\(upstreamIndex)",
+                        failureRouteMetadata: [
+                            "pid": .string("\(route.target.processID)"),
+                            "app_path": .string(route.target.appPath),
+                            "xcode_version": .string(route.target.xcodeVersion),
+                            "upstream": .string("\(upstreamIndex)"),
+                        ]
+                    )
+                } onCancel: {
+                    rpcHandle.cancel()
+                }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
