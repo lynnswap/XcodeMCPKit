@@ -33,16 +33,24 @@ run_group() {
   return "$status"
 }
 
-run_group "swift test" swift test \
+run_with_ci_watchdog() {
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    "$repo_root/scripts/ci-test-watchdog.sh" "$@"
+  else
+    "$@"
+  fi
+}
+
+run_group "swift test" run_with_ci_watchdog swift test \
   --no-parallel \
   -Xswiftc -strict-concurrency=minimal
 
-run_group "XcodeMCPProcessRuntimeTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+run_group "XcodeMCPProcessRuntimeTests" run_with_ci_watchdog env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
   --no-parallel \
   --filter XcodeMCPProcessRuntimeTests \
   -Xswiftc -strict-concurrency=minimal
 
-run_group "ProxyStdioAdapterTests" env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+run_group "ProxyStdioAdapterTests" run_with_ci_watchdog env XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
   --no-parallel \
   --filter ProxyStdioAdapterTests \
   -Xswiftc -strict-concurrency=minimal
