@@ -1,4 +1,5 @@
 import Testing
+import XcodeMCPCoreTestSupport
 import XcodeMCPKit
 import XcodeMCPKitTesting
 
@@ -191,7 +192,7 @@ struct XcodeMCPKitTestingTests {
             Task { await client.close() }
         }
 
-        let progressValues = ProgressRecorder()
+        let progressValues = RecordedValues<MCPProgress>()
         let result = try await client.callTool(
             "DocumentationSearch",
             arguments: [
@@ -204,7 +205,10 @@ struct XcodeMCPKitTestingTests {
         #expect(result.structuredContent == [
             "progressTokenWasPresent": true,
         ])
-        let progress = await progressValues.values
+        _ = try await waitWithTimeout("runtime progress updates were not delivered") {
+            try await progressValues.nextValue(at: 1)
+        }
+        let progress = await progressValues.snapshot()
         #expect(progress.map(\.message) == ["Preparing", "Done"])
         #expect(progress.allSatisfy { $0.progressToken.isEmpty == false })
     }
@@ -291,13 +295,5 @@ struct XcodeMCPKitTestingTests {
         )) {
             _ = try await client.callTool("DocumentationSearch")
         }
-    }
-}
-
-private actor ProgressRecorder {
-    private(set) var values: [MCPProgress] = []
-
-    func append(_ value: MCPProgress) {
-        values.append(value)
     }
 }
