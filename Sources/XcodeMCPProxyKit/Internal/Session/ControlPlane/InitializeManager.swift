@@ -89,6 +89,8 @@ final class InitializeManager: Sendable {
     struct PendingRemovalResult: Sendable {
         let pending: [PendingInitialize]
         let timeout: RuntimeScheduledTimeout?
+        let cancelledPrimaryUpstreamIndex: Int?
+        let cancelledPrimaryUpstreamID: Int64?
     }
 
     struct Snapshot: Sendable {
@@ -103,6 +105,7 @@ final class InitializeManager: Sendable {
     private struct State: Sendable {
         var initPending: [PendingInitialize] = []
         var primaryInitializePhase: PrimaryInitializePhase = .idle
+        var primaryInitializeRequiresPendingWaiter = false
         var initTimeout: RuntimeScheduledTimeout?
         var isShuttingDown = false
         var didWarmSecondary = false
@@ -123,6 +126,7 @@ final class InitializeManager: Sendable {
         state.withLockedValue { state in
             state.isShuttingDown = true
             state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
@@ -135,17 +139,47 @@ final class InitializeManager: Sendable {
         state.withLockedValue { state in
             let removed = state.initPending.filter { $0.sessionID == sessionID }
             guard removed.isEmpty == false else {
-                return PendingRemovalResult(pending: [], timeout: nil)
+                return PendingRemovalResult(
+                    pending: [],
+                    timeout: nil,
+                    cancelledPrimaryUpstreamIndex: nil,
+                    cancelledPrimaryUpstreamID: nil
+                )
             }
             state.initPending.removeAll { $0.sessionID == sessionID }
             let timeout: RuntimeScheduledTimeout?
-            if state.initPending.isEmpty, state.primaryInitializePhase.isInFlight == false {
-                timeout = state.initTimeout
-                state.initTimeout = nil
+            let cancelledPrimaryUpstreamIndex: Int?
+            let cancelledPrimaryUpstreamID: Int64?
+            if state.initPending.isEmpty {
+                if state.primaryInitializeRequiresPendingWaiter,
+                   state.primaryInitializePhase.isInFlight {
+                    cancelledPrimaryUpstreamIndex = state.primaryInitializePhase.upstreamIndex
+                    cancelledPrimaryUpstreamID = state.primaryInitializePhase.upstreamID
+                    state.primaryInitializePhase = .idle
+                    state.primaryInitializeRequiresPendingWaiter = false
+                    timeout = state.initTimeout
+                    state.initTimeout = nil
+                } else if state.primaryInitializePhase.isInFlight == false {
+                    cancelledPrimaryUpstreamIndex = nil
+                    cancelledPrimaryUpstreamID = nil
+                    timeout = state.initTimeout
+                    state.initTimeout = nil
+                } else {
+                    cancelledPrimaryUpstreamIndex = nil
+                    cancelledPrimaryUpstreamID = nil
+                    timeout = nil
+                }
             } else {
+                cancelledPrimaryUpstreamIndex = nil
+                cancelledPrimaryUpstreamID = nil
                 timeout = nil
             }
-            return PendingRemovalResult(pending: removed, timeout: timeout)
+            return PendingRemovalResult(
+                pending: removed,
+                timeout: timeout,
+                cancelledPrimaryUpstreamIndex: cancelledPrimaryUpstreamIndex,
+                cancelledPrimaryUpstreamID: cancelledPrimaryUpstreamID
+            )
         }
     }
 
@@ -165,6 +199,7 @@ final class InitializeManager: Sendable {
                 return (false, false)
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
+            state.primaryInitializeRequiresPendingWaiter = false
             return (true, state.initTimeout == nil)
         }
     }
@@ -246,6 +281,7 @@ final class InitializeManager: Sendable {
             }
 
             state.primaryInitializePhase = .pendingSend(upstreamIndex: primaryUpstreamIndex)
+            state.primaryInitializeRequiresPendingWaiter = true
             return RegisterDecision(
                 promise: promise,
                 cachedResult: nil,
@@ -288,6 +324,7 @@ final class InitializeManager: Sendable {
                 return false
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
+            state.primaryInitializeRequiresPendingWaiter = true
             return true
         }
     }
@@ -314,6 +351,7 @@ final class InitializeManager: Sendable {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
             state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
             state.warmInitRecoveryIntent = .none
             let pending = state.initPending
             state.initPending.removeAll()
@@ -331,6 +369,7 @@ final class InitializeManager: Sendable {
         state.withLockedValue { state in
             guard !state.isShuttingDown, let result = brokerState.initializeResult() else { return nil }
             state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
@@ -342,6 +381,7 @@ final class InitializeManager: Sendable {
     func reopenPrimaryInitializeForRetry() {
         state.withLockedValue { state in
             state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
         }
     }
 
@@ -362,6 +402,7 @@ final class InitializeManager: Sendable {
             let upstreamIndex = state.primaryInitializePhase.upstreamIndex
             let timeout = state.initTimeout
             state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
@@ -423,6 +464,7 @@ final class InitializeManager: Sendable {
                state.primaryInitializePhase.isInFlight
             {
                 state.primaryInitializePhase = .idle
+                state.primaryInitializeRequiresPendingWaiter = false
             }
 
             return result
@@ -440,6 +482,7 @@ final class InitializeManager: Sendable {
             let result = (pending: state.initPending, timeout: state.initTimeout)
             state.initPending.removeAll()
             state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
             state.initTimeout = nil
             state.isShuttingDown = false
             state.didWarmSecondary = false
