@@ -73,6 +73,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
+                "XcodeMCPDocumentationSearchPrivate",
                 "XcodeMCPKit",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -83,8 +84,19 @@ let package = Package(
             ],
             exclude: ["README.md"],
             swiftSettings: strictSwiftSettings,
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ],
             plugins: [
                 .plugin(name: "ProxyBuildInfoPlugin"),
+            ]
+        ),
+        .target(
+            name: "XcodeMCPDocumentationSearchPrivate",
+            path: "Sources/XcodeMCPDocumentationSearchPrivate",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("Foundation"),
             ]
         ),
         .target(
@@ -119,7 +131,10 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "Tests/XcodeMCPProxyInternalTestSupport",
-            swiftSettings: strictSwiftSettings
+            swiftSettings: strictSwiftSettings,
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
         ),
         .executableTarget(
             name: "XcodeMCPProxyCLI",
