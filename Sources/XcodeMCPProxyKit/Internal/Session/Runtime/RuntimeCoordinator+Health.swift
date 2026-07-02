@@ -123,6 +123,10 @@ extension RuntimeCoordinator {
         )
         if success {
             upstreamSlotScheduler.wake()
+            refreshPendingProcessToolsCatalogForReadyUpstream(
+                upstreamIndex: upstreamIndex,
+                reason: "health_probe_\(upstreamIndex)"
+            )
         } else {
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
         }
@@ -172,7 +176,23 @@ extension RuntimeCoordinator {
         return false
     }
 
+    func recoveryAwareUsableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
+        let nowUptimeNs = nowUptimeNanoseconds()
+        var effects: [UpstreamHealthManager.Effect] = []
+        let upstreamIndices = route.upstreamIndices.filter { upstreamIndex in
+            let evaluation = upstreamHealthManager.evaluateUsableInitialized(
+                index: upstreamIndex,
+                nowUptimeNs: nowUptimeNs
+            )
+            effects.append(contentsOf: evaluation.effects)
+            return evaluation.isUsable
+        }
+        applyHealthEffects(effects)
+        return upstreamIndices
+    }
+
     func startUpstreamWarmInitialize(upstreamIndex: Int, applyBackoff: Bool = false) {
+        guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         runWhenUpstreamReady(
             reason: "warm_initialize_\(upstreamIndex)",
             applyBackoff: applyBackoff
@@ -182,6 +202,7 @@ extension RuntimeCoordinator {
     }
 
     private func startUpstreamWarmInitializeWhenReady(upstreamIndex: Int) {
+        guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         guard upstreamHealthManager.beginWarmInitialize(upstreamIndex: upstreamIndex) else { return }
 
         let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)

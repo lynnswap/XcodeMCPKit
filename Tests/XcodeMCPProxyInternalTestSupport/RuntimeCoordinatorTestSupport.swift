@@ -36,6 +36,10 @@ extension RuntimeCoordinator {
             description: "timed out waiting for RuntimeCoordinator runtime task drain"
         )
     }
+
+    func drainRuntimeTasksForTesting() async {
+        await runtimeTasks.drainCurrentTasks().wait()
+    }
 }
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
@@ -1493,8 +1497,16 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
 func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {
     var config = makeConfig(requestTimeout: 5)
     config.upstreamSessionID = sharedSessionID
+    let bridgeConfig = MCPBridgeRuntime.Configuration(
+        upstreamCommand: config.upstreamCommand,
+        upstreamArgs: config.upstreamArgs,
+        upstreamProcessCount: config.upstreamProcessCount,
+        sharedSessionID: config.upstreamSessionID,
+        maxBodyBytes: config.maxBodyBytes,
+        processBoundRoutingSupported: false
+    )
     let upstreams = MCPBridgeRuntime.makeUpstreamPlan(
-        config: makeBridgeRuntimeConfig(config),
+        config: bridgeConfig,
         xcodeTargets: []
     ).upstreams
     let upstream = try #require(upstreams.first)
@@ -2141,6 +2153,9 @@ struct RuntimeCoordinatorFixture {
                 RuntimeScheduledTimeout
         )? = nil,
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
+        processRoutingEnabled: Bool? = nil,
+        xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
+        dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
@@ -2160,6 +2175,9 @@ struct RuntimeCoordinatorFixture {
             nowUptimeNanoseconds: nowUptimeNanoseconds,
             scheduleRuntimeTimeout: scheduleRuntimeTimeout,
             xcodeProcessRoutes: xcodeProcessRoutes,
+            processRoutingEnabled: processRoutingEnabled,
+            xcodeTargetDiscovery: xcodeTargetDiscovery,
+            dynamicUpstreamFactory: dynamicUpstreamFactory,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: prewarmDocumentationProviderOnStartup,
             testHooks: testHooks,
@@ -2321,6 +2339,57 @@ func makeDeterministicRuntimeTimeoutScheduler(
     }
 }
 
+final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
+    private struct Operation {
+        let operation: @Sendable () -> Void
+        var isCancelled = false
+    }
+
+    private let operations = NIOLockedValueBox<[Operation]>([])
+
+    func scheduler() -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
+        { _, operation in
+            let index = self.operations.withLockedValue { operations in
+                let index = operations.count
+                operations.append(Operation(operation: operation))
+                return index
+            }
+            return RuntimeScheduledTimeout {
+                self.operations.withLockedValue { operations in
+                    guard operations.indices.contains(index) else { return }
+                    operations[index].isCancelled = true
+                }
+            }
+        }
+    }
+
+    func scheduledCount() -> Int {
+        operations.withLockedValue(\.count)
+    }
+
+    func isCancelled(at index: Int) -> Bool {
+        operations.withLockedValue { operations in
+            guard operations.indices.contains(index) else { return false }
+            return operations[index].isCancelled
+        }
+    }
+
+    @discardableResult
+    func fire(at index: Int) -> Bool {
+        let operation: (@Sendable () -> Void)? = operations.withLockedValue { operations in
+            guard operations.indices.contains(index), operations[index].isCancelled == false else {
+                return nil
+            }
+            return operations[index].operation
+        }
+        guard let operation else {
+            return false
+        }
+        operation()
+        return true
+    }
+}
+
 func makeDeterministicClockClient(
     timeoutClock: TestClock,
     uptimeClock: TestUptimeClock
@@ -2399,6 +2468,13 @@ func waitForRecordedValue<Value: Sendable>(
     try await waitWithTimeout(description, timeout: timeout) {
         try await values.nextValue(at: index)
     }
+}
+
+func nextRecordedValue<Value: Sendable>(
+    _ values: LockedRecordedValues<Value>,
+    at index: Int
+) async throws -> Value {
+    try await values.nextValue(at: index)
 }
 
 func methodName(from data: Data) -> String? {

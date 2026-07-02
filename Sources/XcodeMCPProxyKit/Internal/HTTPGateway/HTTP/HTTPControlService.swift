@@ -10,6 +10,7 @@ final class HTTPControlService: Sendable {
         let warmupInFlight: Bool
         let controlPlane: ControlPlane.DebugSnapshot?
         let upstreams: [ProxyDebug.UpstreamSnapshot]
+        let processRoutes: [ProxyDebug.ProcessRouteSnapshot]
         let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
         let recentTraffic: [ProxyDebug.TrafficEvent]
         let sessions: [SessionRequestPipeline.DebugSnapshot]
@@ -27,6 +28,7 @@ final class HTTPControlService: Sendable {
             self.warmupInFlight = base.warmupInFlight
             self.controlPlane = base.controlPlane
             self.upstreams = base.upstreams
+            self.processRoutes = base.processRoutes
             self.processToolCatalogs = base.processToolCatalogs
             self.recentTraffic = base.recentTraffic
             self.sessions = base.sessions

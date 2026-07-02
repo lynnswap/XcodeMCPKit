@@ -5,11 +5,11 @@ import XcodeMCPKit
 
 extension RuntimeCoordinator {
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
-        guard upstreamHealthManager.initializedHealthyishCount() == 0 else { return }
-        guard upstreamHealthManager.anyRecoveryInFlight() == false else { return }
+        guard activeInitializedHealthyishCount() == 0 else { return }
+        guard anyActiveRecoveryInFlight() == false else { return }
         if initializeManager.consumeWarmInitRecoveryIntent(policy: .regardlessOfCachedInitialize) {
             startPrimaryEagerRetry()
-            if upstreamHealthManager.anyRecoveryInFlight() {
+            if anyActiveRecoveryInFlight() {
                 return
             }
         }
@@ -255,7 +255,7 @@ extension RuntimeCoordinator {
     /// upstream can still vouch for an equivalent catalog.
     func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
         canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !upstreamHealthManager.anyInitialized()
+            && !anyActiveInitializedUpstream()
     }
 
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
@@ -305,7 +305,7 @@ extension RuntimeCoordinator {
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
-            shouldResetGlobalInit = !upstreamHealthManager.anyInitialized()
+            shouldResetGlobalInit = !anyActiveInitializedUpstream()
         } else {
             shouldResetGlobalInit = false
         }
@@ -543,21 +543,47 @@ extension RuntimeCoordinator {
             allSessionIDs: sessionRegistry.sessionIDs()
         )
         let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
+        let processToolCatalogs = processToolCatalogRegistry.debugSnapshots(
+            exposedCatalog: brokerSnapshot.toolsCatalogRaw,
+            canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
+            tabOwnerCountsByProcessID: ownerCountsByProcessID(
+                tabOwnerProcessIDs.withLockedValue { $0 }
+            ),
+            workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
+                workspaceOwnerProcessIDs.withLockedValue { $0 }
+            )
+        )
+        let processIDsWithToolCatalog = Set(processToolCatalogs.map(\.processID))
+        let pendingToolCatalogProcessIDs =
+            pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0 }
+        let unavailableProcessIDs = unavailableXcodeProcessIDs()
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
-            processToolCatalogs: processToolCatalogRegistry.debugSnapshots(
-                exposedCatalog: brokerSnapshot.toolsCatalogRaw,
-                canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-                tabOwnerCountsByProcessID: ownerCountsByProcessID(
-                    tabOwnerProcessIDs.withLockedValue { $0 }
-                ),
-                workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
-                    workspaceOwnerProcessIDs.withLockedValue { $0 }
-                )
+            processRoutes: xcodeProcessRegistry.debugSnapshots(
+                usableSlotCount: { [weak self] route in
+                    guard let self else { return 0 }
+                    return self.usableInitializedUpstreamIndices(in: route).count
+                },
+                toolsCatalogState: { route, routeState in
+                    guard routeState == "active" else {
+                        return "retired"
+                    }
+                    if processIDsWithToolCatalog.contains(route.target.processID) {
+                        return "available"
+                    }
+                    if unavailableProcessIDs.contains(route.target.processID) {
+                        return "unavailable"
+                    }
+                    if pendingToolCatalogProcessIDs.contains(route.target.processID) {
+                        return "pending"
+                    }
+                    return "missing"
+                }
             ),
+            processToolCatalogs: processToolCatalogs,
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,
@@ -1106,7 +1132,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
+    func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
         for action in actions {
             if let upstreamIndex = action.upstreamIndex {
                 upstreamSlotScheduler.releaseUpstreamSlot(

@@ -5,17 +5,46 @@ import XcodeMCPKit
 extension RuntimeCoordinator {
     func startEagerInitializePrimary(applyBackoff: Bool = false) {
         guard let upstreamIndex = primaryInitializeUpstreamIndex() else {
+            if startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
+                applyBackoff: applyBackoff
+            ) {
+                return
+            }
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
         }
         runWhenUpstreamReady(
             reason: "primary_initialize",
             applyBackoff: applyBackoff
-        ) { [weak self, upstreamIndex] in
+        ) { [weak self, upstreamIndex, applyBackoff] in
             guard let self else { return }
+            guard self.isActiveProcessBoundUpstream(upstreamIndex) else {
+                self.startEagerInitializePrimary(applyBackoff: applyBackoff)
+                return
+            }
             self.startUpstreamSlot(upstreamIndex)
             self.startEagerInitializePrimaryWhenReady(upstreamIndex: upstreamIndex)
         }
+    }
+
+    @discardableResult
+    private func startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
+        applyBackoff: Bool
+    ) -> Bool {
+        guard processRoutingEnabled,
+              xcodeTargetDiscovery != nil,
+              xcodeProcessRoutes.isEmpty,
+              upstreamReadinessGate.isEnabled
+        else {
+            return false
+        }
+        runWhenUpstreamReady(
+            reason: "primary_initialize_process_discovery",
+            applyBackoff: applyBackoff
+        ) { [weak self] in
+            self?.triggerXcodeProcessReconcile(reason: "primary_initialize_readiness")
+        }
+        return true
     }
 
     private func startEagerInitializePrimaryWhenReady(upstreamIndex: Int) {
@@ -77,7 +106,7 @@ extension RuntimeCoordinator {
     }
 
     func primaryInitializeUpstreamIndex(excluding excludedUpstreamIndices: Set<Int> = []) -> Int? {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return excludedUpstreamIndices.contains(0) ? nil : 0
         }
 
@@ -150,7 +179,7 @@ extension RuntimeCoordinator {
         failedUpstreamID: Int64?,
         reason: String
     ) -> Bool {
-        guard xcodeProcessRoutes.isEmpty == false else {
+        guard processRoutingEnabled else {
             return false
         }
         guard let retryUpstreamIndex = primaryInitializeRetryUpstreamIndex(
@@ -190,11 +219,19 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex,
             upstreamID: upstreamID
         )
+        let activePrimaryInitializeUpstreamIndex =
+            initializeManager.activePrimaryInitializeUpstreamIndex()
+        let canPromoteWarmInitializeToPrimary =
+            processRoutingEnabled
+            && isPrimaryInitialize == false
+            && activePrimaryInitializeUpstreamIndex == nil
+            && canonicalBrokerState.initializeResult() == nil
         let handlesPrimaryInitialize = isPrimaryInitialize
+            || canPromoteWarmInitializeToPrimary
             || (
-                xcodeProcessRoutes.isEmpty
+                !processRoutingEnabled
                     && isCurrentPrimaryInitializeUpstream(upstreamIndex)
-                    && initializeManager.activePrimaryInitializeUpstreamIndex() == nil
+                    && activePrimaryInitializeUpstreamIndex == nil
             )
 
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {
@@ -256,6 +293,9 @@ extension RuntimeCoordinator {
                     return
                 }
                 self.upstreamSlotScheduler.wake()
+                self.refreshPendingProcessToolsCatalogAfterWarmInitialize(
+                    upstreamIndex: upstreamIndex
+                )
             } onRejected: { [weak self] in
                 self?.handleInitializedNotificationSendOverload(
                     upstreamIndex: upstreamIndex,
@@ -404,7 +444,7 @@ extension RuntimeCoordinator {
         let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
         let handlesPrimaryInitialize = activePrimaryUpstreamIndex == upstreamIndex
             || (
-                xcodeProcessRoutes.isEmpty
+                !processRoutingEnabled
                     && isCurrentPrimaryInitializeUpstream(upstreamIndex)
                     && activePrimaryUpstreamIndex == nil
             )
@@ -697,17 +737,15 @@ extension RuntimeCoordinator {
     }
 
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
-        guard upstreams.count > 1 else { return }
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        for upstreamIndex in upstreams.indices where upstreamIndex != resolvedPrimaryUpstreamIndex {
+        for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
     }
 
     func resetSecondaryUpstreamsForPrimaryRetry(excluding primaryUpstreamIndex: Int? = nil) {
-        guard upstreams.count > 1 else { return }
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        for upstreamIndex in upstreams.indices where upstreamIndex != resolvedPrimaryUpstreamIndex {
+        for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
             clearUpstreamState(upstreamIndex: upstreamIndex)
         }
     }
@@ -727,8 +765,10 @@ extension RuntimeCoordinator {
 
     func hasUsableInitializedSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) -> Bool {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        return upstreamHealthManager.statesSnapshot().enumerated().contains { upstreamIndex, upstream in
-            guard upstreamIndex != resolvedPrimaryUpstreamIndex else { return false }
+        let states = upstreamHealthManager.statesSnapshot()
+        return secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex).contains { upstreamIndex in
+            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
+            let upstream = states[upstreamIndex]
             guard upstream.isInitialized else { return false }
             switch upstream.healthState {
             case .healthy, .degraded:

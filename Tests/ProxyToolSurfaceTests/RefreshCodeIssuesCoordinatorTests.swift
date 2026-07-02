@@ -406,6 +406,7 @@ struct RefreshCodeIssuesCoordinatorTests {
                         await acquisitions.append("first-cancelling")
                         activeCancellationObserved.signal()
                         await allowActiveExit.waitIgnoringCancellation()
+                        await acquisitions.append("first-exiting")
                         throw CancellationError()
                     }
                 }
@@ -446,12 +447,16 @@ struct RefreshCodeIssuesCoordinatorTests {
 
         _ = await secondTask.value
         _ = await activeTask.value
-        #expect(await acquisitions.snapshot() == [
+        let acquisitionEvents = await acquisitions.snapshot()
+        #expect(Array(acquisitionEvents.prefix(3)) == [
             "first",
             "first-cancelling",
-            "first-cancelled",
-            "second",
+            "first-exiting",
         ])
+        #expect(acquisitionEvents.contains("first-cancelled"))
+        let firstExitedIndex = try #require(acquisitionEvents.firstIndex(of: "first-exiting"))
+        let secondIndex = try #require(acquisitionEvents.firstIndex(of: "second"))
+        #expect(firstExitedIndex < secondIndex)
     }
 }
 

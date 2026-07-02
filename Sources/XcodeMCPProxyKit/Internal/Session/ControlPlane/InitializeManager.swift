@@ -82,6 +82,11 @@ final class InitializeManager: Sendable {
         let primaryInitUpstreamID: Int64?
     }
 
+    struct PendingRemovalResult: Sendable {
+        let pending: [PendingInitialize]
+        let timeout: RuntimeScheduledTimeout?
+    }
+
     struct Snapshot: Sendable {
         let hasInitResult: Bool
         let initInFlight: Bool
@@ -122,6 +127,24 @@ final class InitializeManager: Sendable {
         }
     }
 
+    func removePendingInitializes(sessionID: String) -> PendingRemovalResult {
+        state.withLockedValue { state in
+            let removed = state.initPending.filter { $0.sessionID == sessionID }
+            guard removed.isEmpty == false else {
+                return PendingRemovalResult(pending: [], timeout: nil)
+            }
+            state.initPending.removeAll { $0.sessionID == sessionID }
+            let timeout: RuntimeScheduledTimeout?
+            if state.initPending.isEmpty, state.primaryInitializePhase.isInFlight == false {
+                timeout = state.initTimeout
+                state.initTimeout = nil
+            } else {
+                timeout = nil
+            }
+            return PendingRemovalResult(pending: removed, timeout: timeout)
+        }
+    }
+
     func isInitialized() -> Bool {
         brokerState.initializeResult() != nil
     }
@@ -138,7 +161,7 @@ final class InitializeManager: Sendable {
                 return (false, false)
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
-            return (true, true)
+            return (true, state.initTimeout == nil)
         }
     }
 
@@ -162,7 +185,7 @@ final class InitializeManager: Sendable {
         sessionID: String,
         sessionGeneration: UInt64,
         originalID: JSONRPC.ID,
-        primaryUpstreamIndex: Int,
+        primaryUpstreamIndex: Int?,
         on eventLoop: EventLoop
     ) -> RegisterDecision {
         state.withLockedValue { state in
@@ -186,6 +209,7 @@ final class InitializeManager: Sendable {
                 )
             }
 
+            let hadPendingInitialize = state.initPending.isEmpty == false
             let promise = eventLoop.makePromise(of: ByteBuffer.self)
             state.initPending.append(
                 PendingInitialize(
@@ -207,12 +231,22 @@ final class InitializeManager: Sendable {
                 )
             }
 
+            guard let primaryUpstreamIndex else {
+                return RegisterDecision(
+                    promise: promise,
+                    cachedResult: nil,
+                    shouldSendRequest: false,
+                    shouldScheduleTimeout: !hadPendingInitialize,
+                    isShuttingDown: false
+                )
+            }
+
             state.primaryInitializePhase = .pendingSend(upstreamIndex: primaryUpstreamIndex)
             return RegisterDecision(
                 promise: promise,
                 cachedResult: nil,
                 shouldSendRequest: true,
-                shouldScheduleTimeout: true,
+                shouldScheduleTimeout: !hadPendingInitialize,
                 isShuttingDown: false
             )
         }

@@ -29,12 +29,13 @@ enum MCPBridgeRuntime {
 
     static func makeUpstreamPlan(
         config: Configuration,
-        xcodeTargets: [XcodeProcessTarget]
+        xcodeTargets: [XcodeProcessTarget],
+        processBoundRoutingEnabled: Bool? = nil
     ) -> MCPBridgeUpstreamPlan {
         let orderedXcodeTargets = orderedXcodeTargets(xcodeTargets)
         let canUseProcessBoundXcodeUpstreams =
-            orderedXcodeTargets.isEmpty == false
-            && supportsProcessBoundRouting(config: config)
+            processBoundRoutingEnabled
+            ?? (supportsProcessBoundRouting(config: config) && orderedXcodeTargets.isEmpty == false)
         var upstreams: [ManagedUpstreamSlot] = []
         var xcodeProcessBindings: [XcodeProcessBinding] = []
         let upstreamCount = config.upstreamProcessCount
@@ -84,6 +85,22 @@ enum MCPBridgeRuntime {
             xcodeProcessRoutes: topology.xcodeProcessRoutes(),
             topology: topology
         )
+    }
+
+    static func makeProcessBoundUpstreamSlots(
+        config: Configuration,
+        xcodeTarget: XcodeProcessTarget
+    ) -> [ManagedUpstreamSlot] {
+        (0..<config.upstreamProcessCount).map { _ in
+            ManagedUpstreamSlot(
+                factory: UpstreamProcess(
+                    configuration: makeDefaultUpstreamConfig(
+                        config: config,
+                        xcodeTarget: xcodeTarget
+                    )
+                )
+            )
+        }
     }
 
     static func supportsProcessBoundRouting(config: Configuration) -> Bool {
@@ -156,7 +173,7 @@ enum MCPBridgeRuntime {
         return max(minimum, multiplied.partialValue)
     }
 
-    private static func orderedXcodeTargets(
+    static func orderedXcodeTargets(
         _ targets: [XcodeProcessTarget]
     ) -> [XcodeProcessTarget] {
         targets.sorted { lhs, rhs in

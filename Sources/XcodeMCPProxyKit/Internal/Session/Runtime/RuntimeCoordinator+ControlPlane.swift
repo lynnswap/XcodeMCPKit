@@ -62,6 +62,7 @@ extension RuntimeCoordinator {
     private enum AvailableToolsCatalogOutcome: Sendable {
         case success(route: AvailableToolsCatalogRoute, result: CanonicalToolsCatalogLoadResult)
         case failure(route: AvailableToolsCatalogRoute, upstreamIndex: Int, error: any Error)
+        case stale
     }
 
     func loadCanonicalToolsCatalog(
@@ -75,7 +76,7 @@ extension RuntimeCoordinator {
                 defaultSeconds: config.requestTimeout
             )
         let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
-        if xcodeProcessRoutes.isEmpty == false {
+        if processRoutingEnabled {
             return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
                 requestTimeout: effectiveRequestTimeout,
                 deadlineUptimeNs: requestDeadlineUptimeNs,
@@ -102,7 +103,7 @@ extension RuntimeCoordinator {
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            let upstreamIndices = recoveryAwareUsableInitializedUpstreamIndices(in: route)
             guard upstreamIndices.isEmpty == false else {
                 return nil
             }
@@ -192,14 +193,21 @@ extension RuntimeCoordinator {
                             deadlineUptimeNs: deadlineUptimeNs,
                             startedAt: startedAt
                         )
+                        if let sourceUpstream = result.sourceUpstream,
+                           let hook = self.testHooks.processToolsCatalogLoadedBeforeRecord {
+                            await hook(route.target, sourceUpstream)
+                        }
+                        guard let recordedResult = self.recordAvailableToolsCatalog(
+                            target: route.target,
+                            result: result,
+                            startedAt: startedAt,
+                            exposedProcessIDs: exposedProcessIDs
+                        ) else {
+                            return .stale
+                        }
                         return .success(
                             route: route,
-                            result: self.recordAvailableToolsCatalog(
-                                target: route.target,
-                                result: result,
-                                startedAt: startedAt,
-                                exposedProcessIDs: exposedProcessIDs
-                            )
+                            result: recordedResult
                         )
                     } catch is CancellationError {
                         throw CancellationError()
@@ -232,6 +240,8 @@ extension RuntimeCoordinator {
                     }
                 case .failure(let route, let upstreamIndex, let error):
                     failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
+                case .stale:
+                    continue
                 }
             }
             if let firstSuccess {
@@ -250,6 +260,54 @@ extension RuntimeCoordinator {
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+    }
+
+    func refreshMissingProcessToolsCatalogsIfNeeded(
+        reason: String,
+        processIDs requestedProcessIDs: Set<pid_t>? = nil
+    ) {
+        guard processRoutingEnabled, isInitialized() else {
+            return
+        }
+        let unavailable = unavailableXcodeProcessIDs()
+        let routes = xcodeProcessRoutes.compactMap { route -> AvailableToolsCatalogRoute? in
+            guard unavailable.contains(route.target.processID) == false else {
+                return nil
+            }
+            let upstreamIndices = recoveryAwareUsableInitializedUpstreamIndices(in: route)
+            guard upstreamIndices.isEmpty == false else {
+                return nil
+            }
+            return AvailableToolsCatalogRoute(target: route.target, upstreamIndices: upstreamIndices)
+        }
+        let missingRoutes = routes.filter {
+            if let requestedProcessIDs,
+               requestedProcessIDs.contains($0.target.processID) == false {
+                return false
+            }
+            return processToolCatalogRegistry.catalog(forProcessID: $0.target.processID) == nil
+        }
+        guard missingRoutes.isEmpty == false else {
+            return
+        }
+        logger.debug(
+            "Refreshing missing process tools/list catalogs",
+            metadata: [
+                "reason": .string(reason),
+                "process_ids": .string(
+                    missingRoutes
+                        .map { "\($0.target.processID)" }
+                        .joined(separator: ",")
+                ),
+            ]
+        )
+        scheduleAvailableToolsCatalogCompletion(
+            missingRoutes,
+            requestTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
+                defaultSeconds: config.requestTimeout
+            ),
+            exposedProcessIDs: Set(routes.map { $0.target.processID })
+        )
     }
 
     private func availableToolsCatalogSurfaceResult(
@@ -275,18 +333,38 @@ extension RuntimeCoordinator {
         result: CanonicalToolsCatalogLoadResult,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>
-    ) -> CanonicalToolsCatalogLoadResult {
+    ) -> CanonicalToolsCatalogLoadResult? {
         guard let sourceUpstream = result.sourceUpstream else {
             return result
         }
+        guard let activeRoute = xcodeProcessRoutes.first(where: {
+            $0.target == target && $0.upstreamIndices.contains(sourceUpstream)
+        }) else {
+            logger.debug(
+                "Dropping stale process tools/list catalog",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                    "upstream": .string("\(sourceUpstream)"),
+                ]
+            )
+            return nil
+        }
+        let hadProcessCatalog =
+            processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil
         processToolCatalogRegistry.record(
             target: target,
             upstreamIndex: sourceUpstream,
-            associatedUpstreamIndices: xcodeProcessRoutes.first {
-                $0.target.processID == target.processID
-            }?.upstreamIndices ?? [],
+            associatedUpstreamIndices: activeRoute.upstreamIndices,
             rawResult: result.rawResult
         )
+        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.remove(target.processID)
+        }
+        if hadProcessCatalog == false {
+            publishToolsListChangedNotification()
+        }
         let surface = processToolCatalogRegistry.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
         )
@@ -373,19 +451,25 @@ extension RuntimeCoordinator {
                 throw TimeoutError()
             }
             do {
-                return try await loadCanonicalToolsCatalogFromRoute(
-                    .pinnedUpstream(upstreamIndex),
-                    requestTimeout: routeTimeout,
-                    rpcHandle: rpcHandle,
-                    startedAt: startedAt,
-                    purpose: "tools-\(upstreamIndex)",
-                    failureRouteMetadata: [
-                        "pid": .string("\(route.target.processID)"),
-                        "app_path": .string(route.target.appPath),
-                        "xcode_version": .string(route.target.xcodeVersion),
-                        "upstream": .string("\(upstreamIndex)"),
-                    ]
-                )
+                // First-success catalog loads cancel sibling routes; the route-level
+                // handle must release queued or in-flight fallback RPCs.
+                return try await withTaskCancellationHandler {
+                    try await loadCanonicalToolsCatalogFromRoute(
+                        .pinnedUpstream(upstreamIndex),
+                        requestTimeout: routeTimeout,
+                        rpcHandle: rpcHandle,
+                        startedAt: startedAt,
+                        purpose: "tools-\(upstreamIndex)",
+                        failureRouteMetadata: [
+                            "pid": .string("\(route.target.processID)"),
+                            "app_path": .string(route.target.appPath),
+                            "xcode_version": .string(route.target.xcodeVersion),
+                            "upstream": .string("\(upstreamIndex)"),
+                        ]
+                    )
+                } onCancel: {
+                    rpcHandle.cancel()
+                }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

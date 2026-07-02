@@ -25,6 +25,19 @@ final class UpstreamRouter: Sendable {
         }
     }
 
+    func appendUpstreams(count: Int) {
+        guard count > 0 else { return }
+        state.withLockedValue { state in
+            state.mappingsByUpstream.append(contentsOf: Array(repeating: [:], count: count))
+            state.upstreamIDByRequestKeyByUpstream.append(
+                contentsOf: Array(repeating: [:], count: count)
+            )
+            state.recentlyReleasedResponseIDsByUpstream.append(
+                contentsOf: Array(repeating: [], count: count)
+            )
+        }
+    }
+
     func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
         -> Int64
     {

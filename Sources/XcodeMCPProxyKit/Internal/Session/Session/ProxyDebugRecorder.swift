@@ -41,6 +41,13 @@ final class ProxyDebugRecorder: Sendable {
         }
     }
 
+    func appendUpstreams(count: Int) {
+        guard count > 0 else { return }
+        state.withLockedValue { state in
+            state.upstreams.append(contentsOf: Array(repeating: DebugUpstreamState(), count: count))
+        }
+    }
+
     func resetUpstream(_ upstreamIndex: Int) {
         state.withLockedValue { state in
             guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
@@ -138,6 +145,7 @@ final class ProxyDebugRecorder: Sendable {
         proxyInitialized: Bool,
         cachedToolsListAvailable: Bool,
         controlPlane: ControlPlane.DebugSnapshot?,
+        processRoutes: [ProxyDebug.ProcessRouteSnapshot],
         processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot],
         upstreamStates: [UpstreamHealthManager.UpstreamState],
         sessionSnapshots: [SessionRequestPipeline.DebugSnapshot],
@@ -206,6 +214,7 @@ final class ProxyDebugRecorder: Sendable {
             warmupInFlight: controlPlane?.phase == "loading_tools_catalog",
             controlPlane: controlPlane,
             upstreams: upstreamSnapshots,
+            processRoutes: processRoutes,
             processToolCatalogs: processToolCatalogs,
             recentTraffic: recordedState.recentTraffic.map {
                 ProxyDebug.TrafficEvent(
