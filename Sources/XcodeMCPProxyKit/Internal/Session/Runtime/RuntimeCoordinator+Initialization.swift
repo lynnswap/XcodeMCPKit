@@ -5,17 +5,46 @@ import XcodeMCPKit
 extension RuntimeCoordinator {
     func startEagerInitializePrimary(applyBackoff: Bool = false) {
         guard let upstreamIndex = primaryInitializeUpstreamIndex() else {
+            if startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
+                applyBackoff: applyBackoff
+            ) {
+                return
+            }
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
         }
         runWhenUpstreamReady(
             reason: "primary_initialize",
             applyBackoff: applyBackoff
-        ) { [weak self, upstreamIndex] in
+        ) { [weak self, upstreamIndex, applyBackoff] in
             guard let self else { return }
+            guard self.isActiveProcessBoundUpstream(upstreamIndex) else {
+                self.startEagerInitializePrimary(applyBackoff: applyBackoff)
+                return
+            }
             self.startUpstreamSlot(upstreamIndex)
             self.startEagerInitializePrimaryWhenReady(upstreamIndex: upstreamIndex)
         }
+    }
+
+    @discardableResult
+    private func startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
+        applyBackoff: Bool
+    ) -> Bool {
+        guard processRoutingEnabled,
+              xcodeTargetDiscovery != nil,
+              xcodeProcessRoutes.isEmpty,
+              upstreamReadinessGate.isEnabled
+        else {
+            return false
+        }
+        runWhenUpstreamReady(
+            reason: "primary_initialize_process_discovery",
+            applyBackoff: applyBackoff
+        ) { [weak self] in
+            self?.triggerXcodeProcessReconcile(reason: "primary_initialize_readiness")
+        }
+        return true
     }
 
     private func startEagerInitializePrimaryWhenReady(upstreamIndex: Int) {

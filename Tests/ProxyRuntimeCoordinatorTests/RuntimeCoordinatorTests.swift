@@ -37,6 +37,39 @@ struct RuntimeCoordinatorTests {
         #expect(plan.xcodeProcessRoutes.isEmpty)
     }
 
+    @Test func processRoutingWithoutInitialTargetsRunsReadinessAutoLaunch() async throws {
+        let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
+        let launchRecorder = XcodeLaunchRecorder()
+        let discovery = RecordingXcodeTargetDiscovery(targets: [])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true,
+                launchRecorder: launchRecorder
+            ),
+            processRoutingEnabled: true,
+            xcodeTargetDiscovery: discovery
+        )
+        defer { fixture.shutdownAndWait() }
+
+        _ = try await waitWithTimeout("waiting for no-target Xcode launch", timeout: .seconds(2)) {
+            try await launchRecorder.nextLaunch(at: 0)
+        }
+        let sleep = try await waitWithTimeout(
+            "waiting for no-target readiness poll",
+            timeout: .seconds(2)
+        ) {
+            try await sleepRecorder.nextSleep(at: 0)
+        }
+
+        #expect(sleep == 1_000_000)
+        #expect(fixture.manager.debugSnapshot().upstreams.isEmpty)
+        #expect(fixture.manager.debugSnapshot().processRoutes.isEmpty)
+    }
+
     @Test func defaultCoordinatorWithoutDiscoveryUsesStaticFallbackUpstream() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -348,6 +381,43 @@ struct RuntimeCoordinatorTests {
         }
         await #expect(throws: TimeoutError.self) {
             try await secondFuture.get()
+        }
+    }
+
+    @Test func processRoutingLateXcodeKeepsOriginalInitializeTimeout()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 27008, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let future = fixture.registerInitialize(
+            requestID: 1,
+            sessionID: "session-late-xcode-timeout"
+        )
+        #expect(timeoutScheduler.scheduledCount() == 1)
+
+        manager.reconcileXcodeProcessTargets([target], reason: "test_late_xcode_timeout")
+        let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        _ = try await upstream.nextSent(at: 0)
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        timeoutScheduler.fire(at: 0)
+        await #expect(throws: TimeoutError.self) {
+            try await future.get()
         }
     }
 
@@ -886,6 +956,49 @@ struct RuntimeCoordinatorTests {
         #expect(response["result"] != nil)
         #expect(await oldUpstream.stopCount() == 1)
         #expect(manager.debugSnapshot().processRoutes.map(\.state) == ["active", "retired"])
+    }
+
+    @Test func processRoutingReadinessGateSkipsRetiredPrimaryRoute()
+        async throws
+    {
+        let oldUpstream = TestUpstreamClient()
+        let oldTarget = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
+        let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [oldUpstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            ),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        _ = try await readiness.nextCheck(at: 0)
+        _ = try await waitWithTimeout(
+            "waiting for primary readiness poll",
+            timeout: .seconds(2)
+        ) {
+            try await sleepRecorder.nextSleep(at: 0)
+        }
+
+        manager.reconcileXcodeProcessTargets([], reason: "test_retire_waiting_primary")
+        _ = try await oldUpstream.nextStopCount()
+
+        await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
+        _ = try await readiness.nextCheck(at: 1)
+        await Task.yield()
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(await oldUpstream.startCount() == 0)
+        #expect(await oldUpstream.sentCount() == 0)
     }
 
     @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOnIdleActiveRoute()

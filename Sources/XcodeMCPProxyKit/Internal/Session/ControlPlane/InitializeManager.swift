@@ -161,7 +161,7 @@ final class InitializeManager: Sendable {
                 return (false, false)
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
-            return (true, true)
+            return (true, state.initTimeout == nil)
         }
     }
 
