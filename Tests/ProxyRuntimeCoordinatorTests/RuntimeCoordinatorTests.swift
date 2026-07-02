@@ -3409,6 +3409,102 @@ struct RuntimeCoordinatorTests {
         ])
     }
 
+    @Test func sessionManagerRetriesPendingProcessCatalogAfterQuarantinedRouteRecovers()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80429, xcodeVersion: "27.0")
+        let uptimeClock = TestUptimeClock()
+        let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now,
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                toolsListRefreshCompleted: { upstreamIndex, succeeded in
+                    toolsListRefreshes.append((upstreamIndex, succeeded))
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        _ = manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.insert(target.processID)
+        }
+
+        manager.markToolsListRefreshFailed(
+            upstreamIndex: 0,
+            nowUptimeNs: uptimeClock.now(),
+            reason: "test_catalog_failure"
+        )
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_before_quarantine_expired",
+            processIDs: [target.processID]
+        )
+        #expect(await upstream.sentCount() == 0)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_after_quarantine_expired",
+            processIDs: [target.processID]
+        )
+        let probeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: probeRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: probeRequest),
+                    tools: []
+                )
+            )
+        )
+
+        let catalogRequest = try await sentValue(
+            from: upstream,
+            startingAt: 1,
+            matching: { methodName(from: $0) == "tools/list" },
+            timeout: .seconds(2),
+            description: "waiting for pending process catalog refresh after health probe"
+        )
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: catalogRequest),
+                    tools: [
+                        toolDescriptor(name: "RecoveredRouteOnly"),
+                    ]
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+
+        let failedRefresh = try await nextRecordedValue(toolsListRefreshes, at: 0)
+        #expect(failedRefresh.0 == 0)
+        #expect(failedRefresh.1 == false)
+        let recoveredRefresh = try await nextRecordedValue(toolsListRefreshes, at: 1)
+        #expect(recoveredRefresh.0 == 0)
+        #expect(recoveredRefresh.1 == true)
+        #expect(manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0.isEmpty })
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [target.processID])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RecoveredRouteOnly"])
+    }
+
     @Test func sessionManagerToolsListReturnsCachedProcessCatalogWhileFreshRouteRefreshIsPending()
         async throws
     {

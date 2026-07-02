@@ -1034,7 +1034,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         return chosen
     }
 
-    private func applyHealthEffects(_ effects: [UpstreamHealthManager.Effect]) {
+    func applyHealthEffects(_ effects: [UpstreamHealthManager.Effect]) {
         for effect in effects {
             switch effect {
             case .cancelInitTimeout(let timeout):

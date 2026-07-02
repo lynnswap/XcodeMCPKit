@@ -103,7 +103,7 @@ extension RuntimeCoordinator {
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            let upstreamIndices = recoveryAwareUsableInitializedUpstreamIndices(in: route)
             guard upstreamIndices.isEmpty == false else {
                 return nil
             }
@@ -274,7 +274,7 @@ extension RuntimeCoordinator {
             guard unavailable.contains(route.target.processID) == false else {
                 return nil
             }
-            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+            let upstreamIndices = recoveryAwareUsableInitializedUpstreamIndices(in: route)
             guard upstreamIndices.isEmpty == false else {
                 return nil
             }

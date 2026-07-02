@@ -409,6 +409,13 @@ extension RuntimeCoordinator {
     }
 
     func refreshPendingProcessToolsCatalogAfterWarmInitialize(upstreamIndex: Int) {
+        refreshPendingProcessToolsCatalogForReadyUpstream(
+            upstreamIndex: upstreamIndex,
+            reason: "warm_initialize_\(upstreamIndex)"
+        )
+    }
+
+    func refreshPendingProcessToolsCatalogForReadyUpstream(upstreamIndex: Int, reason: String) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
@@ -419,7 +426,7 @@ extension RuntimeCoordinator {
             return
         }
         refreshMissingProcessToolsCatalogsIfNeeded(
-            reason: "warm_initialize_\(upstreamIndex)",
+            reason: reason,
             processIDs: [route.target.processID]
         )
     }
