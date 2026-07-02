@@ -170,6 +170,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.retryTimeout = nil
             record.catalogTimeout?.cancel()
             record.catalogTimeout = nil
+            record.catalogRPCHandle?.cancel()
             record.catalogRPCHandle = nil
             record.phase = .cataloged(upstreamIndex: catalogedUpstreamIndex ?? upstreamIndex)
             records[processID] = record

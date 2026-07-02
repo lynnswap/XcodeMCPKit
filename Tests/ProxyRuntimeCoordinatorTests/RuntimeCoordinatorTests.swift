@@ -762,6 +762,60 @@ struct RuntimeCoordinatorTests {
         #expect(retry?.delay.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
     }
 
+    @Test func processRouteActivationCatalogCompletionCancelsStoredRPCHandle() {
+        let tracker = XcodeProcessRouteActivationTracker()
+        let processID: pid_t = 27020
+        let rpcHandle = ControlPlane.RPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
+        let registrationToken = UUID()
+
+        rpcHandle.installCancel { snapshot in
+            cancellation.withLockedValue { $0 = snapshot }
+        }
+        tracker.prepare(processID: processID)
+        let start = tracker.beginAttaching(
+            processID: processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 10
+        )
+        #expect(start?.attempt == 1)
+        _ = tracker.markInitialized(
+            processID: processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 20
+        )
+        tracker.storeCatalogRPCHandle(
+            processID: processID,
+            upstreamIndex: 0,
+            attempt: 1,
+            rpcHandle: rpcHandle
+        )
+        #expect(rpcHandle.markRegistered(
+            registrationToken: registrationToken,
+            upstreamIndex: 0
+        ))
+        #expect(rpcHandle.markAssigned(
+            registrationToken: registrationToken,
+            upstreamIndex: 0,
+            requestIDKey: "tools/list"
+        ))
+
+        let duration = tracker.markCataloged(
+            processID: processID,
+            upstreamIndex: 0,
+            catalogedUpstreamIndex: 1,
+            attempt: 1,
+            nowUptimeNs: 30
+        )
+
+        #expect(duration == 20)
+        let snapshot = cancellation.withLockedValue { $0 }
+        #expect(snapshot?.registrationToken == registrationToken)
+        #expect(snapshot?.upstreamIndex == 0)
+        #expect(snapshot?.requestIDKey == "tools/list")
+        #expect(rpcHandle.isCancelled())
+    }
+
     @Test func processRouteActivationClearingPreCatalogInitializedUpstreamAllowsRetry()
         async throws
     {
