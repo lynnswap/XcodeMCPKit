@@ -164,8 +164,7 @@ extension RuntimeCoordinator {
                 requestTimeout: requestTimeout,
                 deadlineUptimeNs: deadlineUptimeNs,
                 startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs,
-                registerActivationCatalogRPCs: true
+                exposedProcessIDs: exposedProcessIDs
             )
         } catch is CancellationError {
             guard Task.isCancelled == false,
@@ -223,8 +222,7 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>,
-        returnAfterFirstSuccess: Bool = true,
-        registerActivationCatalogRPCs: Bool = false
+        returnAfterFirstSuccess: Bool = true
     ) async throws -> CanonicalToolsCatalogLoadResult {
         try await withThrowingTaskGroup(
             of: AvailableToolsCatalogOutcome.self,
@@ -238,8 +236,7 @@ extension RuntimeCoordinator {
                             route,
                             requestTimeout: requestTimeout,
                             deadlineUptimeNs: deadlineUptimeNs,
-                            startedAt: startedAt,
-                            registerActivationCatalogRPCs: registerActivationCatalogRPCs
+                            startedAt: startedAt
                         )
                         if let sourceUpstream = result.sourceUpstream,
                            let hook = self.testHooks.processToolsCatalogLoadedBeforeRecord {
@@ -529,8 +526,7 @@ extension RuntimeCoordinator {
                     deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
                     startedAt: startedAt,
                     exposedProcessIDs: exposedProcessIDs,
-                    returnAfterFirstSuccess: false,
-                    registerActivationCatalogRPCs: true
+                    returnAfterFirstSuccess: false
                 )
                 guard result.cacheableAsCanonical,
                       let sourceUpstream = result.sourceUpstream,
@@ -572,18 +568,19 @@ extension RuntimeCoordinator {
         _ route: AvailableToolsCatalogRoute,
         requestTimeout: TimeAmount?,
         deadlineUptimeNs: UInt64?,
-        startedAt: UInt64,
-        registerActivationCatalogRPCs: Bool
+        startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
         var lastFailure: (upstreamIndex: Int, error: any Error)?
         for upstreamIndex in route.upstreamIndices {
             let rpcHandle = ControlPlane.RPCHandle()
-            if registerActivationCatalogRPCs,
-               route.activationUpstreamIndex == upstreamIndex,
+            // Fallback-upstream RPCs are registered on the activation attempt
+            // too; otherwise they outlive the catalog-phase timeout and their
+            // late failure would drop a catalog recorded by a newer attempt.
+            if let activationUpstreamIndex = route.activationUpstreamIndex,
                let activationAttempt = route.activationAttempt {
                 xcodeProcessRouteActivationTracker.storeCatalogRPCHandle(
                     processID: route.target.processID,
-                    upstreamIndex: upstreamIndex,
+                    upstreamIndex: activationUpstreamIndex,
                     attempt: activationAttempt,
                     rpcHandle: rpcHandle
                 )

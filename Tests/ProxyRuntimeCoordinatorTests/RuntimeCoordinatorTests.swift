@@ -728,6 +728,207 @@ struct RuntimeCoordinatorTests {
         )
     }
 
+    @Test func processRouteActivationCatalogTimeoutCancelsSecondaryFallbackRPC()
+        async throws
+    {
+        var config = makeConfig(requestTimeout: 20)
+        config.autoApproveXcodeDialog = true
+        let olderUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 26628, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27127, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [olderUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let primary = TestUpstreamClient()
+                let secondary = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(contentsOf: [primary, secondary]) }
+                return [primary, secondary]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let olderInitializeFuture = fixture.registerInitialize(requestID: 1)
+        let olderInitialize = try await olderUpstream.nextSent(at: 0)
+        await olderUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: olderInitialize)))
+        )
+        _ = try await olderInitializeFuture.get()
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (olderTarget, 0, [toolDescriptor(name: "Only26")]),
+            ]
+        )
+
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_fallback_rpc_timeout"
+        )
+
+        let created = createdUpstreams.withLockedValue { $0 }
+        let primary = try #require(created.first)
+        let secondary = try #require(created.dropFirst().first)
+        let primaryInitialize = try await waitWithTimeout(
+            "waiting for primary activation initialize",
+            timeout: .seconds(2)
+        ) {
+            try await primary.nextSent(at: 0)
+        }
+        let secondaryInitialize = try await waitWithTimeout(
+            "waiting for secondary warm initialize",
+            timeout: .seconds(2)
+        ) {
+            try await secondary.nextSent(at: 0)
+        }
+
+        // The secondary initializes first; its pre-activation catalog load
+        // stays pending so the activation batch below owns the fallback RPC.
+        await secondary.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: secondaryInitialize)))
+        )
+        _ = try await waitWithTimeout(
+            "waiting for pre-activation secondary tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await secondary.nextSent(
+                startingAt: 1,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+
+        let scheduledBeforePrimaryInitialized = timeoutScheduler.scheduledCount()
+        await primary.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: primaryInitialize)))
+        )
+        let primaryToolsRequest = try await waitWithTimeout(
+            "waiting for activation catalog tools/list on primary",
+            timeout: .seconds(2)
+        ) {
+            try await primary.nextSent(
+                startingAt: 1,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+
+        await primary.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: primaryToolsRequest),
+                        "error": [
+                            "code": -32000,
+                            "message": "primary tools/list failed",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+        let fallbackToolsRequest = try await waitWithTimeout(
+            "waiting for fallback tools/list on secondary",
+            timeout: .seconds(2)
+        ) {
+            try await secondary.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+
+        let catalogTimeoutIndex = try #require(
+            (scheduledBeforePrimaryInitialized..<timeoutScheduler.scheduledCount()).first {
+                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds
+            }
+        )
+        let scheduledBeforeCatalogTimeoutFired = timeoutScheduler.scheduledCount()
+        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
+        let retryIndex = try #require(
+            (scheduledBeforeCatalogTimeoutFired..<timeoutScheduler.scheduledCount()).first {
+                timeoutScheduler.delay(at: $0)?.nanoseconds
+                    == TimeAmount.milliseconds(250).nanoseconds
+            }
+        )
+
+        #expect(timeoutScheduler.fire(at: retryIndex))
+        let retryPrimary = try #require(createdUpstreams.withLockedValue { $0.dropFirst(2).first })
+        let retryInitialize = try await waitWithTimeout(
+            "waiting for retry activation initialize",
+            timeout: .seconds(2)
+        ) {
+            try await retryPrimary.nextSent(at: 0)
+        }
+        await retryPrimary.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
+        )
+        let retryToolsRequest = try await waitWithTimeout(
+            "waiting for retry activation tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await retryPrimary.nextSent(
+                startingAt: 1,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await retryPrimary.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: retryToolsRequest),
+                    tools: [
+                        toolDescriptor(name: "Only27Retry"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for retry process catalog completion",
+            timeout: .seconds(2)
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
+
+        // The timed-out attempt's fallback RPC was cancelled with the attempt;
+        // its late failure must not drop the catalog recorded by the retry.
+        await secondary.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: fallbackToolsRequest),
+                        "error": [
+                            "code": -32000,
+                            "message": "stale fallback tools/list failed",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        #expect(
+            manager.processToolCatalogRegistry.catalog(forProcessID: newerTarget.processID) != nil
+        )
+        #expect(
+            manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
+                == .cataloged(upstreamIndex: 1, attempt: 2)
+        )
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "Only26",
+            "Only27Retry",
+        ]))
+    }
+
     @Test func processRouteActivationTrackerMatchesUpstreamAndAttemptExactly() {
         let tracker = XcodeProcessRouteActivationTracker()
         let processID: pid_t = 27018
