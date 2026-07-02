@@ -91,6 +91,7 @@ final class InitializeManager: Sendable {
         let timeout: RuntimeScheduledTimeout?
         let cancelledPrimaryUpstreamIndex: Int?
         let cancelledPrimaryUpstreamID: Int64?
+        let cancelledPrimaryReadinessToken: UpstreamReadinessWaiterToken?
     }
 
     struct Snapshot: Sendable {
@@ -106,10 +107,17 @@ final class InitializeManager: Sendable {
         var initPending: [PendingInitialize] = []
         var primaryInitializePhase: PrimaryInitializePhase = .idle
         var primaryInitializeRequiresPendingWaiter = false
+        var primaryInitializeReadinessToken: UpstreamReadinessWaiterToken?
+        var cancelledPrimaryInitializeAttempts: [CancelledPrimaryInitializeAttempt] = []
         var initTimeout: RuntimeScheduledTimeout?
         var isShuttingDown = false
         var didWarmSecondary = false
         var warmInitRecoveryIntent: WarmInitRecoveryIntent = .none
+    }
+
+    private struct CancelledPrimaryInitializeAttempt: Sendable, Equatable {
+        let upstreamIndex: Int
+        let upstreamID: Int64
     }
 
     private let state = NIOLockedValueBox(State())
@@ -127,6 +135,8 @@ final class InitializeManager: Sendable {
             state.isShuttingDown = true
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
+            state.cancelledPrimaryInitializeAttempts.removeAll()
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
@@ -143,42 +153,59 @@ final class InitializeManager: Sendable {
                     pending: [],
                     timeout: nil,
                     cancelledPrimaryUpstreamIndex: nil,
-                    cancelledPrimaryUpstreamID: nil
+                    cancelledPrimaryUpstreamID: nil,
+                    cancelledPrimaryReadinessToken: nil
                 )
             }
             state.initPending.removeAll { $0.sessionID == sessionID }
             let timeout: RuntimeScheduledTimeout?
             let cancelledPrimaryUpstreamIndex: Int?
             let cancelledPrimaryUpstreamID: Int64?
+            let cancelledPrimaryReadinessToken: UpstreamReadinessWaiterToken?
             if state.initPending.isEmpty {
                 if state.primaryInitializeRequiresPendingWaiter,
                    state.primaryInitializePhase.isInFlight {
                     cancelledPrimaryUpstreamIndex = state.primaryInitializePhase.upstreamIndex
                     cancelledPrimaryUpstreamID = state.primaryInitializePhase.upstreamID
+                    if let upstreamIndex = cancelledPrimaryUpstreamIndex,
+                       let upstreamID = cancelledPrimaryUpstreamID
+                    {
+                        recordCancelledPrimaryInitializeAttemptLocked(
+                            upstreamIndex: upstreamIndex,
+                            upstreamID: upstreamID,
+                            state: &state
+                        )
+                    }
+                    cancelledPrimaryReadinessToken = state.primaryInitializeReadinessToken
                     state.primaryInitializePhase = .idle
                     state.primaryInitializeRequiresPendingWaiter = false
+                    state.primaryInitializeReadinessToken = nil
                     timeout = state.initTimeout
                     state.initTimeout = nil
                 } else if state.primaryInitializePhase.isInFlight == false {
                     cancelledPrimaryUpstreamIndex = nil
                     cancelledPrimaryUpstreamID = nil
+                    cancelledPrimaryReadinessToken = nil
                     timeout = state.initTimeout
                     state.initTimeout = nil
                 } else {
                     cancelledPrimaryUpstreamIndex = nil
                     cancelledPrimaryUpstreamID = nil
+                    cancelledPrimaryReadinessToken = nil
                     timeout = nil
                 }
             } else {
                 cancelledPrimaryUpstreamIndex = nil
                 cancelledPrimaryUpstreamID = nil
+                cancelledPrimaryReadinessToken = nil
                 timeout = nil
             }
             return PendingRemovalResult(
                 pending: removed,
                 timeout: timeout,
                 cancelledPrimaryUpstreamIndex: cancelledPrimaryUpstreamIndex,
-                cancelledPrimaryUpstreamID: cancelledPrimaryUpstreamID
+                cancelledPrimaryUpstreamID: cancelledPrimaryUpstreamID,
+                cancelledPrimaryReadinessToken: cancelledPrimaryReadinessToken
             )
         }
     }
@@ -199,8 +226,29 @@ final class InitializeManager: Sendable {
                 return (false, false)
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
-            state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeRequiresPendingWaiter = state.initPending.isEmpty == false
+            state.primaryInitializeReadinessToken = nil
             return (true, state.initTimeout == nil)
+        }
+    }
+
+    func setPrimaryInitializeReadinessToken(_ token: UpstreamReadinessWaiterToken) -> Bool {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown,
+                  case .pendingSend = state.primaryInitializePhase
+            else {
+                return false
+            }
+            state.primaryInitializeReadinessToken = token
+            return true
+        }
+    }
+
+    func clearPrimaryInitializeReadinessToken(_ token: UpstreamReadinessWaiterToken) {
+        state.withLockedValue { state in
+            if state.primaryInitializeReadinessToken === token {
+                state.primaryInitializeReadinessToken = nil
+            }
         }
     }
 
@@ -216,6 +264,7 @@ final class InitializeManager: Sendable {
                 upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID
             )
+            state.primaryInitializeReadinessToken = nil
             return true
         }
     }
@@ -282,6 +331,7 @@ final class InitializeManager: Sendable {
 
             state.primaryInitializePhase = .pendingSend(upstreamIndex: primaryUpstreamIndex)
             state.primaryInitializeRequiresPendingWaiter = true
+            state.primaryInitializeReadinessToken = nil
             return RegisterDecision(
                 promise: promise,
                 cachedResult: nil,
@@ -325,6 +375,7 @@ final class InitializeManager: Sendable {
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
             state.primaryInitializeRequiresPendingWaiter = true
+            state.primaryInitializeReadinessToken = nil
             return true
         }
     }
@@ -352,6 +403,7 @@ final class InitializeManager: Sendable {
             guard !state.isShuttingDown else { return nil }
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
             state.warmInitRecoveryIntent = .none
             let pending = state.initPending
             state.initPending.removeAll()
@@ -370,6 +422,7 @@ final class InitializeManager: Sendable {
             guard !state.isShuttingDown, let result = brokerState.initializeResult() else { return nil }
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
@@ -382,6 +435,7 @@ final class InitializeManager: Sendable {
         state.withLockedValue { state in
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
         }
     }
 
@@ -403,6 +457,7 @@ final class InitializeManager: Sendable {
             let timeout = state.initTimeout
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
             state.initTimeout = nil
             let pending = state.initPending
             state.initPending.removeAll()
@@ -465,6 +520,7 @@ final class InitializeManager: Sendable {
             {
                 state.primaryInitializePhase = .idle
                 state.primaryInitializeRequiresPendingWaiter = false
+                state.primaryInitializeReadinessToken = nil
             }
 
             return result
@@ -483,6 +539,8 @@ final class InitializeManager: Sendable {
             state.initPending.removeAll()
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
+            state.cancelledPrimaryInitializeAttempts.removeAll()
             state.initTimeout = nil
             state.isShuttingDown = false
             state.didWarmSecondary = false
@@ -505,6 +563,21 @@ final class InitializeManager: Sendable {
         }
     }
 
+    func consumeCancelledPrimaryInitializeAttempt(upstreamIndex: Int, upstreamID: Int64) -> Bool {
+        state.withLockedValue { state in
+            guard let index = state.cancelledPrimaryInitializeAttempts.firstIndex(
+                of: CancelledPrimaryInitializeAttempt(
+                    upstreamIndex: upstreamIndex,
+                    upstreamID: upstreamID
+                )
+            ) else {
+                return false
+            }
+            state.cancelledPrimaryInitializeAttempts.remove(at: index)
+            return true
+        }
+    }
+
     private func consumeWarmInitRecoveryIntentLocked(
         state: inout State,
         policy: WarmInitRecoveryConsumptionPolicy
@@ -522,6 +595,24 @@ final class InitializeManager: Sendable {
         }
         state.warmInitRecoveryIntent = .none
         return true
+    }
+
+    private func recordCancelledPrimaryInitializeAttemptLocked(
+        upstreamIndex: Int,
+        upstreamID: Int64,
+        state: inout State
+    ) {
+        let attempt = CancelledPrimaryInitializeAttempt(
+            upstreamIndex: upstreamIndex,
+            upstreamID: upstreamID
+        )
+        state.cancelledPrimaryInitializeAttempts.removeAll { $0 == attempt }
+        state.cancelledPrimaryInitializeAttempts.append(attempt)
+        if state.cancelledPrimaryInitializeAttempts.count > 16 {
+            state.cancelledPrimaryInitializeAttempts.removeFirst(
+                state.cancelledPrimaryInitializeAttempts.count - 16
+            )
+        }
     }
 
     func snapshot() -> Snapshot {

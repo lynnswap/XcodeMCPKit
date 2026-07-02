@@ -795,7 +795,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             if let upstreamID = pendingInitializes.cancelledPrimaryUpstreamID {
                 clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
             }
-            cancelPrimaryInitializeReadinessWaiter()
+            if let readinessToken = pendingInitializes.cancelledPrimaryReadinessToken {
+                cancelPrimaryInitializeReadinessWaiter(readinessToken)
+            }
         }
         for pending in pendingInitializes.pending {
             pending.eventLoop.execute {

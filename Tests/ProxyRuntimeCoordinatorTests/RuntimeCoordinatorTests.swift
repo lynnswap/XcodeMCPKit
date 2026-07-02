@@ -3445,6 +3445,183 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.upstreams[0].isInitialized == false)
     }
 
+    @Test func sessionManagerIgnoresRemovedInitializeResponseBeforeUpstreamStateClears() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-removed-before-clear"
+        _ = manager.session(id: sessionID)
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        let sent = await upstream.sent()
+        let initID = try extractUpstreamID(from: sent[0])
+
+        let context = manager.sessionRegistry.removeSession(id: sessionID)
+        context?.notificationHub.closeAll()
+        let pendingInitializes = manager.initializeManager.removePendingInitializes(
+            sessionID: sessionID
+        )
+        pendingInitializes.timeout?.cancel()
+        for pending in pendingInitializes.pending {
+            pending.eventLoop.execute {
+                pending.promise.fail(CancellationError())
+            }
+        }
+
+        let responseEventIndex = upstreamEvents.count()
+        await upstream.yield(.message(try makeInitializeResponse(id: initID)))
+        _ = try await nextRecordedValue(upstreamEvents, at: responseEventIndex)
+
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
+        }
+        let snapshot = manager.testStateSnapshot()
+        #expect(snapshot.hasInitResult == false)
+        #expect(snapshot.initInFlight == false)
+        #expect(snapshot.upstreams[0].isInitialized == false)
+    }
+
+    @Test func sessionManagerCancelsWaiterOwnedPrimaryRetryWhenSessionIsRemoved()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let upstreamEvents = LockedRecordedValues<Int>()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamEventHandled: { upstreamEvents.append($0) }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let sessionID = "session-removed-primary-retry"
+        let future = manager.registerInitialize(
+            sessionID: sessionID,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+
+        try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
+        let initialSent = await upstream.sent()
+        let initialID = try extractUpstreamID(from: initialSent[0])
+
+        manager.initializeManager.reopenPrimaryInitializeForRetry()
+        manager.handleInitializedNotificationSendOverload(
+            upstreamIndex: 0,
+            expectedUpstreamID: initialID,
+            treatsAsPrimary: true
+        )
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        let retrySent = await upstream.sent()
+        let retryID = try extractUpstreamID(from: retrySent[1])
+
+        manager.removeSession(id: sessionID)
+        await #expect(throws: CancellationError.self) {
+            try await future.get()
+        }
+
+        let responseEventIndex = upstreamEvents.count()
+        await upstream.yield(.message(try makeInitializeResponse(id: retryID)))
+        _ = try await nextRecordedValue(upstreamEvents, at: responseEventIndex)
+
+        let snapshot = manager.testStateSnapshot()
+        #expect(snapshot.hasInitResult == false)
+        #expect(snapshot.initInFlight == false)
+        #expect(snapshot.upstreams[0].isInitialized == false)
+    }
+
+    @Test func sessionManagerCancelsOnlyRemovedInitializeReadinessWaiter() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let readiness = ReadinessFlag(isReady: false)
+        let sleepRecorder = ControlledReadinessSleep()
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: sleepRecorder,
+                recordPollSleeps: true
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let removedSessionID = "session-readiness-removed"
+        let removedFuture = manager.registerInitialize(
+            sessionID: removedSessionID,
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        _ = try await sleepRecorder.nextSleep(at: 0)
+
+        let context = manager.sessionRegistry.removeSession(id: removedSessionID)
+        context?.notificationHub.closeAll()
+        let pendingInitializes = manager.initializeManager.removePendingInitializes(
+            sessionID: removedSessionID
+        )
+        pendingInitializes.timeout?.cancel()
+        for pending in pendingInitializes.pending {
+            pending.eventLoop.execute {
+                pending.promise.fail(CancellationError())
+            }
+        }
+
+        let replacementFuture = manager.registerInitialize(
+            sessionID: "session-readiness-replacement",
+            originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
+            requestObject: makeInitializeRequest(id: 2),
+            on: eventLoop
+        )
+        if let readinessToken = pendingInitializes.cancelledPrimaryReadinessToken {
+            manager.cancelPrimaryInitializeReadinessWaiter(readinessToken)
+        }
+
+        await #expect(throws: CancellationError.self) {
+            try await removedFuture.get()
+        }
+
+        await readiness.setReady(true)
+        await sleepRecorder.resumeNext()
+        let replacementInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let replacementID = try extractUpstreamID(from: replacementInitialize)
+        await upstream.yield(.message(try makeInitializeResponse(id: replacementID)))
+        _ = try await replacementFuture.get()
+    }
+
     @Test func sessionManagerRoutesUnmappedNotificationsToCachedInitializeSessionsUntilClientConnects()
         async throws
     {

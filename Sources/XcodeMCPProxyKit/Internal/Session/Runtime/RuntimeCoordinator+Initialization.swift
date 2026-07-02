@@ -62,6 +62,7 @@ extension RuntimeCoordinator {
     func startPrimaryInitializeRequestWhenReady(applyBackoff: Bool = false) {
         let token = upstreamReadinessGate.isEnabled ? UpstreamReadinessWaiterToken() : nil
         if let token {
+            guard initializeManager.setPrimaryInitializeReadinessToken(token) else { return }
             replacePrimaryInitializeReadinessWaiter(with: token)
         }
         runWhenUpstreamReady(
@@ -213,6 +214,13 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex,
             expectedUpstreamID: upstreamID
         ) else {
+            return
+        }
+        if initializeManager.consumeCancelledPrimaryInitializeAttempt(
+            upstreamIndex: upstreamIndex,
+            upstreamID: upstreamID
+        ) {
+            clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
             return
         }
         let isPrimaryInitialize = initializeManager.primaryInitializeMatches(
