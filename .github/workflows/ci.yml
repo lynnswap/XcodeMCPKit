@@ -41,17 +41,17 @@ jobs:
 
       - name: Run package tests
         run: |
-          swift test \
+          ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \
             -Xswiftc -strict-concurrency=minimal
 
       - name: Run process tests
         run: |
-          XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+          XCODE_MCP_RUN_PROCESS_TESTS=1 ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \
             --filter XcodeMCPProcessRuntimeTests \
             -Xswiftc -strict-concurrency=minimal
-          XCODE_MCP_RUN_PROCESS_TESTS=1 swift test \
+          XCODE_MCP_RUN_PROCESS_TESTS=1 ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \
             --filter ProxyStdioAdapterTests \
             -Xswiftc -strict-concurrency=minimal

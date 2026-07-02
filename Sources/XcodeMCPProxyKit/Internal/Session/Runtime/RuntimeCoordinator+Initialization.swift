@@ -311,7 +311,6 @@ extension RuntimeCoordinator {
 
         let update = initializeManager.preparePrimaryInitializeSuccess()
         guard let update else { return }
-        update.timeout?.cancel()
 
         sendInitializedNotificationIfNeeded(
             upstreamIndex: upstreamIndex,
@@ -328,7 +327,8 @@ extension RuntimeCoordinator {
                 result,
                 sourceUpstream: upstreamIndex
             )
-            guard let pending = self.initializeManager.finishPrimaryInitializeSuccess() else { return }
+            guard let completion = self.initializeManager.finishPrimaryInitializeSuccess() else { return }
+            completion.timeout?.cancel()
             self.upstreamSlotScheduler.wake()
             if update.shouldWarmSecondary {
                 self.initializeManager.markSecondaryWarmupStarted()
@@ -336,7 +336,7 @@ extension RuntimeCoordinator {
             }
             self.refreshToolsListIfNeeded()
             self.completePendingInitializes(
-                pending,
+                completion.pending,
                 result: result,
                 negotiatedProtocolVersion: negotiatedProtocolVersion
             )
@@ -352,6 +352,7 @@ extension RuntimeCoordinator {
                 self.hasUsableInitializedSecondaryUpstreams(excluding: upstreamIndex),
                 let completion = self.initializeManager.finishPrimaryInitializeUsingCachedResult()
             {
+                completion.timeout?.cancel()
                 self.completePendingInitializes(
                     completion.pending,
                     result: completion.result,
@@ -618,6 +619,12 @@ extension RuntimeCoordinator {
             )
         }
         if handlesPrimaryInitialize {
+            // A retry that still owns unresolved pending initializes gets a
+            // fresh full timeout window, replacing the still-armed previous
+            // timeout (never disarm first) so the pending promises stay
+            // timeout-guarded at every instant. A retry with no waiters
+            // drops the armed timeout instead of re-arming it.
+            initializeManager.rearmInitTimeoutForRetry { makeInitTimeout() }?.cancel()
             if hasHealthySecondary {
                 initializeManager.setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
@@ -631,16 +638,22 @@ extension RuntimeCoordinator {
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
-    func scheduleInitTimeout() {
+    func makeInitTimeout() -> RuntimeScheduledTimeout? {
         guard
             let timeoutAmount = MCP.MethodDispatcher.timeoutForInitialize(
                 defaultSeconds: config.requestTimeout)
         else {
-            return
+            return nil
         }
-        let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
+        return scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
             guard let self else { return }
             self.failInitPending(error: TimeoutError())
+        }
+    }
+
+    func scheduleInitTimeout() {
+        guard let timeout = makeInitTimeout() else {
+            return
         }
         let previous = initializeManager.replaceInitTimeout(timeout)
         previous?.cancel()

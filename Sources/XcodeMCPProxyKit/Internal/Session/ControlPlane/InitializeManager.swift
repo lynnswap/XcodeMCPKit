@@ -60,9 +60,13 @@ final class InitializeManager: Sendable {
     }
 
     struct SuccessPreparation: Sendable {
-        let timeout: RuntimeScheduledTimeout?
         let shouldWarmSecondary: Bool
         let cachedResult: JSONValue?
+    }
+
+    struct SuccessCompletion: Sendable {
+        let pending: [PendingInitialize]
+        let timeout: RuntimeScheduledTimeout?
     }
 
     struct FailureResult: Sendable {
@@ -288,39 +292,50 @@ final class InitializeManager: Sendable {
         }
     }
 
+    /// Success preparation must not disarm the init timeout: pending
+    /// initializes are only resolved later by the asynchronous
+    /// initialized-notification chain, and the timeout is the guarantee
+    /// that a stalled or stale-aborted chain surfaces as TimeoutError
+    /// instead of leaking the pending promises forever. The timeout is
+    /// released only at the points that actually resolve `initPending`.
     func preparePrimaryInitializeSuccess() -> SuccessPreparation? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
-            let timeout = state.initTimeout
-            state.initTimeout = nil
             let shouldWarmSecondary = !state.didWarmSecondary
             let cachedResult = brokerState.initializeResult()
             return SuccessPreparation(
-                timeout: timeout,
                 shouldWarmSecondary: shouldWarmSecondary,
                 cachedResult: cachedResult
             )
         }
     }
 
-    func finishPrimaryInitializeSuccess() -> [PendingInitialize]? {
+    func finishPrimaryInitializeSuccess() -> SuccessCompletion? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
             state.primaryInitializePhase = .idle
             state.warmInitRecoveryIntent = .none
             let pending = state.initPending
             state.initPending.removeAll()
-            return pending
+            let timeout = state.initTimeout
+            state.initTimeout = nil
+            return SuccessCompletion(pending: pending, timeout: timeout)
         }
     }
 
-    func finishPrimaryInitializeUsingCachedResult() -> (pending: [PendingInitialize], result: JSONValue)? {
+    func finishPrimaryInitializeUsingCachedResult() -> (
+        pending: [PendingInitialize],
+        result: JSONValue,
+        timeout: RuntimeScheduledTimeout?
+    )? {
         state.withLockedValue { state in
             guard !state.isShuttingDown, let result = brokerState.initializeResult() else { return nil }
             state.primaryInitializePhase = .idle
             let pending = state.initPending
             state.initPending.removeAll()
-            return (pending, result)
+            let timeout = state.initTimeout
+            state.initTimeout = nil
+            return (pending, result, timeout)
         }
     }
 
@@ -365,6 +380,30 @@ final class InitializeManager: Sendable {
             let existing = state.initTimeout
             state.initTimeout = timeout
             return existing
+        }
+    }
+
+    /// Re-arms the init timeout for a retry attempt, but only while pending
+    /// initializes remain unresolved. A retry with no waiters (e.g. after
+    /// pending initializes were satisfied from the cached result) must not
+    /// leave a global timer armed: a stale timer would stop the next eager
+    /// attempt from arming its own fresh window and could fail it early.
+    /// Returns the timeout the caller must cancel.
+    func rearmInitTimeoutForRetry(
+        makeTimeout: () -> RuntimeScheduledTimeout?
+    ) -> RuntimeScheduledTimeout? {
+        state.withLockedValue { state in
+            guard state.initPending.isEmpty == false else {
+                let stale = state.initTimeout
+                state.initTimeout = nil
+                return stale
+            }
+            guard let timeout = makeTimeout() else {
+                return nil
+            }
+            let previous = state.initTimeout
+            state.initTimeout = timeout
+            return previous
         }
     }
 
