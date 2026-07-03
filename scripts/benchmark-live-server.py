@@ -18,7 +18,8 @@ ENDPOINT_ENV = "XCODE_MCP_PROXY_ENDPOINT"
 DISCOVERY_FILE_ENV = "XCODE_MCP_PROXY_DISCOVERY_FILE"
 CACHE_ROOT_ENV = "XCODE_MCP_PROXY_CACHE_ROOT"
 SESSION_HEADER = "Mcp-Session-Id"
-PROTOCOL_VERSION = "2025-03-26"
+PROTOCOL_HEADER = "MCP-Protocol-Version"
+PROTOCOL_VERSION = "2025-06-18"
 
 
 class BenchmarkError(RuntimeError):
@@ -140,12 +141,13 @@ class HTTPConnection:
             f"POST {self.endpoint.target} HTTP/1.1",
             f"Host: {self.endpoint.host_header}",
             "Content-Type: application/json",
-            "Accept: application/json",
+            "Accept: application/json, text/event-stream",
             f"Connection: {'close' if close else 'keep-alive'}",
             f"Content-Length: {len(body)}",
         ]
         if session_id is not None:
             headers.append(f"{SESSION_HEADER}: {session_id}")
+            headers.append(f"{PROTOCOL_HEADER}: {PROTOCOL_VERSION}")
         request = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + body
         self.writer.write(request)
 
@@ -155,6 +157,7 @@ class HTTPConnection:
             f"Host: {self.endpoint.host_header}",
             f"Connection: {'close' if close else 'keep-alive'}",
             f"{SESSION_HEADER}: {session_id}",
+            f"{PROTOCOL_HEADER}: {PROTOCOL_VERSION}",
             "Content-Length: 0",
         ]
         request = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii")
