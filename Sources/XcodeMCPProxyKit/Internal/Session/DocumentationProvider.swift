@@ -880,6 +880,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private static let helperProductName = "documentation-search-action-helper"
     private static let defaultMaxResults = 20
     private static let defaultScoreThreshold = 0.4
+    private static let helperPreparationTimeout: TimeAmount = .seconds(120)
 
     private let cacheRoot: URL
     private let processRunner: any ProcessRunning
@@ -1069,6 +1070,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             return try await awaitHelperPreparation(preparation.task, deadline: deadline)
         }
         let preparationID = UUID()
+        let preparationDeadline = Deadline.fromNow(Self.helperPreparationTimeout)
         let preparationTask = Task { [self] in
             do {
                 let helperURL = try await prepareHelperURL(
@@ -1076,7 +1078,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                     packageRoot: packageRoot,
                     hostTarget: hostTarget,
                     sdkPath: sdkPath,
-                    deadline: deadline
+                    deadline: preparationDeadline
                 )
                 finishHelperPreparation(packageRoot: packageRoot, id: preparationID, helperURL: helperURL)
                 return helperURL
@@ -1169,21 +1171,32 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         guard let timeoutNanoseconds = try subprocessTimeoutNanoseconds(until: deadline) else {
             return try await task.value
         }
-        return try await withThrowingTaskGroup(of: URL.self) { group in
-            group.addTask {
-                try await task.value
+        let waiter = DocumentationSearchActionPreparationWaiter()
+        Task {
+            do {
+                waiter.complete(.success(try await task.value))
+            } catch {
+                waiter.complete(.failure(error))
             }
-            group.addTask {
+        }
+        let timeoutTask = Task {
+            do {
                 try await Task.sleep(nanoseconds: UInt64(timeoutNanoseconds))
-                throw TimeoutError()
+                waiter.complete(.failure(TimeoutError()))
+            } catch {
+                return
             }
-            defer {
-                group.cancelAll()
+        }
+        defer {
+            timeoutTask.cancel()
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiter.install(continuation)
             }
-            guard let helperURL = try await group.next() else {
-                throw TimeoutError()
-            }
-            return helperURL
+        } onCancel: {
+            timeoutTask.cancel()
+            waiter.complete(.failure(CancellationError()))
         }
     }
 

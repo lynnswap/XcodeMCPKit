@@ -3722,18 +3722,17 @@ struct DocumentationProviderTests {
         #expect(object["maxResults"] as? Int == 20)
         #expect(object["scoreThreshold"] as? Double == 0.4)
 
-        let firstInvocationTimeouts = requests.prefix(4).map(\.timeoutNanoseconds)
-        #expect(firstInvocationTimeouts.allSatisfy { timeout in
-            guard let timeout else {
-                return false
-            }
-            return timeout > 0 && timeout <= 1_000_000_000
-        })
-        for (previous, next) in zip(firstInvocationTimeouts, firstInvocationTimeouts.dropFirst()) {
-            let previousTimeout = try #require(previous)
-            let nextTimeout = try #require(next)
-            #expect(nextTimeout <= previousTimeout)
-        }
+        let oneSecond = Int64(1_000_000_000)
+        let sdkRequest = try #require(requests.first { $0.label == "DocumentationSearchAction.sdk" })
+        let sdkTimeout = try #require(sdkRequest.timeoutNanoseconds)
+        #expect(sdkTimeout > 0 && sdkTimeout <= oneSecond)
+        let binPathTimeout = try #require(binPathRequest.timeoutNanoseconds)
+        let buildTimeout = try #require(buildRequest.timeoutNanoseconds)
+        #expect(binPathTimeout > oneSecond)
+        #expect(buildTimeout > oneSecond)
+        #expect(buildTimeout <= binPathTimeout)
+        let helperTimeout = try #require(helperRequest.timeoutNanoseconds)
+        #expect(helperTimeout > 0 && helperTimeout <= oneSecond)
     }
 
     @Test func documentationSearchActionInvokerCoalescesConcurrentHelperPreparation()
@@ -3803,6 +3802,81 @@ struct DocumentationProviderTests {
         #expect(requests.filter { $0.label == "DocumentationSearchAction.bin-path" }.count == 1)
         #expect(requests.filter { $0.label == "DocumentationSearchAction.build" }.count == 1)
         #expect(requests.filter { $0.label == "DocumentationSearchAction" }.count == 2)
+    }
+
+    @Test func documentationSearchActionInvokerKeepsSharedHelperPreparationAfterShortWaiterTimeout()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.2",
+            documentationRelease: 950001
+        )
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let buildStarted = TestSignal()
+        let releaseBuild = TestSignal()
+        let processRunner = BlockingDocumentationSearchActionProcessRunner(
+            buildStarted: buildStarted,
+            releaseBuild: releaseBuild
+        )
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: processRunner
+        )
+        let invocation = DocumentationSearchActionInvocation(
+            target: target,
+            asset: asset,
+            query: "NavigationSplitView",
+            frameworks: ["SwiftUI"],
+            limit: nil
+        )
+
+        let shortWaiter = Task {
+            try await invoker.invoke(invocation, timeout: .milliseconds(50))
+        }
+        defer {
+            releaseBuild.signal()
+            shortWaiter.cancel()
+        }
+        try await buildStarted.wait(description: "waiting for DocumentationSearchAction helper build")
+        await #expect(throws: TimeoutError.self) {
+            try await shortWaiter.value
+        }
+
+        let longWaiter = Task {
+            try await invoker.invoke(invocation, timeout: .seconds(5))
+        }
+        defer {
+            longWaiter.cancel()
+        }
+        try await waitWithTimeout("waiting for second DocumentationSearchAction sdk lookup") {
+            while await processRunner.recordedRequests().filter({ $0.label == "DocumentationSearchAction.sdk" }).count < 2 {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+
+        releaseBuild.signal()
+        _ = try await longWaiter.value
+
+        let requests = await processRunner.recordedRequests()
+        #expect(requests.filter { $0.label == "DocumentationSearchAction.bin-path" }.count == 1)
+        let buildRequests = requests.filter { $0.label == "DocumentationSearchAction.build" }
+        #expect(buildRequests.count == 1)
+        let buildRequest = try #require(buildRequests.first)
+        let buildTimeout = try #require(buildRequest.timeoutNanoseconds)
+        #expect(buildTimeout > 1_000_000_000)
+        #expect(requests.filter { $0.label == "DocumentationSearchAction" }.count == 1)
     }
 
     @Test func documentationSearchActionInvokerMapsProcessTimeoutToRequestTimeout()
