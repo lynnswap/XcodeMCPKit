@@ -978,6 +978,8 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         let task: Task<URL, Error>
     }
 
+    private static let helperMacOSDeploymentTarget = "15.4"
+
     private func xcodeRuntime(for target: XcodeProcessTarget) -> XcodeRuntime? {
         let appURL = URL(fileURLWithPath: target.appPath)
         let developerDir = appURL.appendingPathComponent("Contents/Developer").path
@@ -1357,7 +1359,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private func hostTarget() throws -> HostTarget {
         #if arch(arm64)
         return HostTarget(
-            triple: "arm64-apple-macos15.0",
+            triple: "arm64-apple-macos\(Self.helperMacOSDeploymentTarget)",
             swiftInterfaceName: "arm64-apple-macos.swiftinterface"
         )
         #else
@@ -1505,7 +1507,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         let package = Package(
             name: "DocumentationSearchActionHelperPackage",
             platforms: [
-                .macOS(.v15),
+                .macOS("\(helperMacOSDeploymentTarget)"),
             ],
             products: [
                 .executable(
