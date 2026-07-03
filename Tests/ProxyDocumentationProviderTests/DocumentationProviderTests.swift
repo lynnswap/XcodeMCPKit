@@ -116,6 +116,12 @@ private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
     }
 }
 
+private struct DocumentationSearchActionTimeoutProcessRunner: ProcessRunning {
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        throw ProcessTimeoutError(label: request.label)
+    }
+}
+
 private func processArgumentValue(after flag: String, in arguments: [String]) -> String? {
     guard let index = arguments.firstIndex(of: flag),
           arguments.indices.contains(arguments.index(after: index)) else {
@@ -474,6 +480,38 @@ struct DocumentationProviderTests {
         let timeout = try #require(await localProvider.requestedCallTimeouts().first)
         #expect((timeout?.nanoseconds ?? 0) > 4_000_000_000)
         #expect(await localProvider.requestedCallPIDs() == [xcode27.processID])
+    }
+
+    @Test func documentationProviderReturnsPrimaryInstalledAssetTimeoutFailure()
+        async throws
+    {
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 128,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 0
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            preferLocalSearchProvider: true
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 128, query: "Observation"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .failed(let error, let invalidatedProvider) = outcome else {
+            Issue.record("expected failed timeout outcome, got \(outcome)")
+            return
+        }
+        #expect(error is TimeoutError)
+        #expect(invalidatedProvider == false)
+        #expect(await localProvider.requestedCallPIDs() == [0])
     }
 
     @Test func documentationProviderDoesNotFallbackToMCPBridgeWhenPrimaryAssetSearchFails()
@@ -3638,6 +3676,45 @@ struct DocumentationProviderTests {
             let previousTimeout = try #require(previous)
             let nextTimeout = try #require(next)
             #expect(nextTimeout <= previousTimeout)
+        }
+    }
+
+    @Test func documentationSearchActionInvokerMapsProcessTimeoutToRequestTimeout()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.2",
+            documentationRelease: 950001
+        )
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: DocumentationSearchActionTimeoutProcessRunner()
+        )
+
+        await #expect(throws: TimeoutError.self) {
+            try await invoker.invoke(
+                DocumentationSearchActionInvocation(
+                    target: target,
+                    asset: asset,
+                    query: "NavigationSplitView",
+                    frameworks: ["SwiftUI"],
+                    limit: nil
+                ),
+                timeout: .seconds(1)
+            )
         }
     }
 

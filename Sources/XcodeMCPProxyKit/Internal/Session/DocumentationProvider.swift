@@ -922,7 +922,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         guard let input = String(data: requestData, encoding: .utf8) else {
             throw ControlPlane.Error.invalidResponse("invalid DocumentationSearch helper request")
         }
-        let output = try await processRunner.run(ProcessRequest(
+        let output = try await runHelperSubprocess(ProcessRequest(
             label: "DocumentationSearchAction",
             executablePath: "/usr/bin/env",
             arguments: helperRuntimeEnvironmentArguments(for: runtime) + [helper.path],
@@ -1011,7 +1011,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         for runtime: XcodeRuntime,
         deadline: Deadline?
     ) async throws -> String {
-        let output = try await processRunner.run(ProcessRequest(
+        let output = try await runHelperSubprocess(ProcessRequest(
             label: "DocumentationSearchAction.sdk",
             executablePath: "/usr/bin/env",
             arguments: [
@@ -1084,7 +1084,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             deadline: deadline
         )
         let helperURL = productsDirectoryURL.appendingPathComponent(Self.helperProductName)
-        let output = try await processRunner.run(ProcessRequest(
+        let output = try await runHelperSubprocess(ProcessRequest(
             label: "DocumentationSearchAction.build",
             executablePath: "/usr/bin/env",
             arguments: helperBuildArguments(
@@ -1118,7 +1118,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         hostTarget: HostTarget,
         deadline: Deadline?
     ) async throws -> URL {
-        let output = try await processRunner.run(ProcessRequest(
+        let output = try await runHelperSubprocess(ProcessRequest(
             label: "DocumentationSearchAction.bin-path",
             executablePath: "/usr/bin/env",
             arguments: helperBuildArguments(
@@ -1330,6 +1330,14 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             throw TimeoutError()
         }
         return remaining.nanoseconds
+    }
+
+    private func runHelperSubprocess(_ request: ProcessRequest) async throws -> ProcessOutput {
+        do {
+            return try await processRunner.run(request)
+        } catch is ProcessTimeoutError {
+            throw TimeoutError()
+        }
     }
 
     private func writeIfChanged(_ content: String, to url: URL) throws {
@@ -2601,6 +2609,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 case .candidateFailed(let error):
                     lastCandidateFailure = error
                 }
+                if let lastCandidateFailure {
+                    return .failed(lastCandidateFailure, invalidatedProvider: invalidatedProvider)
+                }
                 return .unavailable(.noAvailableProvider)
             }
             if let activeProvider,
@@ -2952,7 +2963,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     private func installedDocumentationAssetFailureScope(_ error: any Error)
         -> InstalledDocumentationAssetFailureScope
     {
-        if error is TimeoutError {
+        if error is TimeoutError || error is ProcessTimeoutError {
             return .candidate
         }
         if let controlPlaneError = error as? ControlPlane.Error {
