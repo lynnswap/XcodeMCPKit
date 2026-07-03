@@ -528,7 +528,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [defaultTarget, newerTarget]),
             sessionFactory: factory,
             localSearchProvider: localProvider,
-            documentationSearchActionPolicy: .preferWhenDefaultXcodeIsOlder,
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder,
             defaultXcodeTargetResolver: { defaultTarget }
         )
 
@@ -547,6 +547,54 @@ struct DocumentationProviderTests {
         #expect(await factory.startedPIDs().isEmpty)
         #expect(await factory.documentationQueries(for: defaultTarget.processID).isEmpty)
         #expect(await factory.documentationQueries(for: newerTarget.processID).isEmpty)
+    }
+
+    @Test func documentationProviderUsesMCPBridgeWhenOnlyRunningXcodeIsNewerThanDefault()
+        async throws
+    {
+        let defaultTarget = xcodeProcessTarget(processID: 127, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 128, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                newerTarget.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"mcpbridge\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 127,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [newerTarget]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder,
+            defaultXcodeTargetResolver: { defaultTarget }
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"mcpbridge\"}")
+        #expect(await factory.startedPIDs() == [newerTarget.processID])
+        #expect(await factory.documentationQueries(for: newerTarget.processID) == ["SwiftUI"])
+        #expect(await localProvider.requestedCallPIDs().isEmpty)
     }
 
     @Test func documentationProviderUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()

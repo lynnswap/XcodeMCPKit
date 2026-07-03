@@ -112,7 +112,7 @@ protocol DocumentationSearchProviding: Sendable {
 
 enum DocumentationSearchActionPolicy: Sendable, Equatable {
     case fallbackOnly
-    case preferWhenDefaultXcodeIsOlder
+    case preferWhenMultipleRunningAndDefaultXcodeIsOlder
     case preferAlways
 }
 
@@ -3594,7 +3594,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             return false
         case .preferAlways:
             return true
-        case .preferWhenDefaultXcodeIsOlder:
+        case .preferWhenMultipleRunningAndDefaultXcodeIsOlder:
             let runningTargets = orderedTargetsForInstalledDocumentationAssetFallback()
             guard runningTargets.count > 1,
                   let preferredTarget = runningTargets.first,
