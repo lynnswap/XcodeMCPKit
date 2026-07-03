@@ -518,7 +518,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
             ),
-            serviceRepairer: NoopDocumentationSearchServiceRepairer(),
+            serviceRepairer: LiveDocumentationSearchServiceRepairer(),
             localSearchProvider: DocumentationSearchActionProvider(),
             documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder
         )

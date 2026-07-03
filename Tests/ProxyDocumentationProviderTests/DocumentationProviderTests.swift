@@ -661,11 +661,39 @@ struct DocumentationProviderTests {
         ])
     }
 
-    @Test func documentationProviderCallUsesNextInstalledAssetRuntimeWhenPrimaryCallUnavailable()
+    @Test func documentationProviderToolListUsesDefaultActionRuntimeAfterRunningRuntimesUnavailable()
         async throws
     {
         let xcode26 = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
         let xcode27 = xcodeProcessTarget(processID: 123, xcodeVersion: "27.0")
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: Data(),
+            unavailableDescriptorProcessIDs: [xcode26.processID, xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
+        #expect(await localProvider.requestedDescriptorPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+            0,
+        ])
+    }
+
+    @Test func documentationProviderCallUsesNextInstalledAssetRuntimeWhenPrimaryCallUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 124, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 125, xcodeVersion: "27.0")
         let factory = ScriptedDocumentationSessionFactory(
             plansByPID: [
                 xcode26.processID: [
@@ -726,6 +754,45 @@ struct DocumentationProviderTests {
         #expect(await factory.documentationQueries(for: xcode26.processID).isEmpty)
     }
 
+    @Test func documentationProviderCallUsesDefaultActionRuntimeAfterRunningRuntimesUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 123, xcodeVersion: "27.0")
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 122,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            failingCallProcessIDs: [xcode26.processID, xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 122, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+            0,
+        ])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "SwiftUI", "SwiftUI"])
+    }
+
     @Test func documentationProviderBackgroundDiscoveryUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()
         async throws
     {
@@ -747,7 +814,7 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedDescriptorPIDs() == [0])
     }
 
-    @Test func documentationProviderGivesPrimaryInstalledAssetFullCallerTimeout()
+    @Test func documentationProviderReservesFallbackTimeForPreferredInstalledAsset()
         async throws
     {
         let xcode26 = xcodeProcessTarget(processID: 126, xcodeVersion: "26.6")
@@ -763,7 +830,8 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            documentationSearchActionPolicy: .preferAlways
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder,
+            defaultXcodeTargetResolver: { xcode26 }
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -777,7 +845,7 @@ struct DocumentationProviderTests {
         }
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
         let timeout = try #require(await localProvider.requestedCallTimeouts().first)
-        #expect((timeout?.nanoseconds ?? 0) > 4_000_000_000)
+        #expect((timeout?.nanoseconds ?? 0) <= 2_000_000_000)
         #expect(await localProvider.requestedCallPIDs() == [xcode27.processID])
     }
 
@@ -853,9 +921,9 @@ struct DocumentationProviderTests {
             Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
-        #expect(await localProvider.requestedDescriptorPIDs() == [target.processID])
-        #expect(await localProvider.requestedCallPIDs() == [target.processID])
-        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
+        #expect(await localProvider.requestedDescriptorPIDs() == [target.processID, 0])
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, 0])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "SwiftUI"])
         #expect(await factory.startedPIDs().isEmpty)
         #expect(await factory.documentationQueries(for: target.processID).isEmpty)
     }

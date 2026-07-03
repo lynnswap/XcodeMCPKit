@@ -126,6 +126,93 @@ struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairi
     }
 }
 
+struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+    private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
+    private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
+
+    private let assetRoot: URL
+    private let readConfigURLOverride: @Sendable () -> String?
+    private let writeConfigURLOverride: @Sendable (String) -> Bool
+
+    init(
+        assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
+        readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
+        writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
+    ) {
+        self.assetRoot = assetRoot
+        self.readConfigURLOverride = readConfigURLOverride
+        self.writeConfigURLOverride = writeConfigURLOverride
+    }
+
+    func repairDocumentationSearch(
+        for _: XcodeProcessTarget
+    ) async -> DocumentationSearchServiceRepairResult {
+        let scan: DocumentationSearchAssetScan
+        do {
+            scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        } catch {
+            return .failed("asset_scan_failed: \(error)")
+        }
+        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
+            return .skipped(scan.noAssetReason)
+        }
+
+        let configURLString = asset.configURL.path
+        let currentConfigURLString = readConfigURLOverride()
+        guard currentConfigURLString != configURLString else {
+            return .repaired(
+                Self.report(for: asset, configURLString: configURLString, changedDefault: false)
+            )
+        }
+
+        guard writeConfigURLOverride(configURLString) else {
+            return .failed("defaults_write_failed")
+        }
+        return .repaired(
+            Self.report(for: asset, configURLString: configURLString, changedDefault: true)
+        )
+    }
+
+    private static func report(
+        for asset: DocumentationSearchInstalledAsset,
+        configURLString: String,
+        changedDefault: Bool
+    ) -> DocumentationSearchServiceRepairReport {
+        DocumentationSearchServiceRepairReport(
+            configURL: configURLString,
+            xcodeVersion: asset.xcodeVersion,
+            osVersion: asset.osVersion,
+            documentationRelease: asset.documentationRelease,
+            changedDefault: changedDefault
+        )
+    }
+
+    private static func currentConfigURLOverride() -> String? {
+        guard let value = CFPreferencesCopyAppValue(
+            configURLDefaultsKey as CFString,
+            xcodeDefaultsDomain as CFString
+        ) else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let url = value as? URL {
+            return url.absoluteString
+        }
+        return nil
+    }
+
+    private static func writeConfigURLOverride(_ value: String) -> Bool {
+        CFPreferencesSetAppValue(
+            configURLDefaultsKey as CFString,
+            value as CFString,
+            xcodeDefaultsDomain as CFString
+        )
+        return CFPreferencesAppSynchronize(xcodeDefaultsDomain as CFString)
+    }
+}
+
 struct UnavailableDocumentationSearchProvider: DocumentationSearchProviding {
     init() {}
 
@@ -2706,7 +2793,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 attemptedPreferredInstalledAsset = true
                 switch try await preferredInstalledDocumentationAssetFallback(
                     requestData: requestData,
-                    deadline: deadline
+                    deadline: deadline,
+                    reserveFallbackTime: documentationSearchActionPolicy != .preferAlways
                 ) {
                 case .success(let fallback):
                     return .handled(
@@ -2816,7 +2904,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                     attemptedPreferredInstalledAsset = true
                     switch try await preferredInstalledDocumentationAssetFallback(
                         requestData: requestData,
-                        deadline: deadline
+                        deadline: deadline,
+                        reserveFallbackTime: false
                     ) {
                     case .success(let fallback):
                         return .handled(
@@ -3183,14 +3272,23 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private func preferredInstalledDocumentationAssetFallback(
         requestData: Data,
-        deadline: Deadline?
+        deadline: Deadline?,
+        reserveFallbackTime: Bool
     ) async throws -> InstalledDocumentationAssetFallbackAttempt {
         var lastCandidateFailure: (any Error)?
-        for (index, target) in orderedInstalledDocumentationAssetTargets().enumerated() {
+        let targets = orderedInstalledDocumentationAssetTargets()
+        for (index, target) in targets.enumerated() {
+            let remainingCandidateCount = targets.count - index + (reserveFallbackTime ? 1 : 0)
+            let candidateDeadline = makeDeadline(
+                fromTimeout: timeoutForCandidate(
+                    until: deadline,
+                    remainingCandidateCount: remainingCandidateCount
+                )
+            )
             switch try await attemptInstalledDocumentationAssetFallback(
                 requestData: requestData,
                 target: target,
-                deadline: deadline,
+                deadline: candidateDeadline,
                 isPrimaryAttempt: index == 0
             ) {
             case .success(let fallback):
@@ -3582,10 +3680,10 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
 
     private func orderedInstalledDocumentationAssetTargets() -> [XcodeProcessTarget] {
         let runningTargets = orderedTargetsForInstalledDocumentationAssetFallback()
-        guard runningTargets.isEmpty else {
-            return runningTargets
+        guard runningTargets.isEmpty == false else {
+            return [Self.installedDocumentationAssetStandaloneTarget]
         }
-        return [Self.installedDocumentationAssetStandaloneTarget]
+        return runningTargets + [Self.installedDocumentationAssetStandaloneTarget]
     }
 
     private func shouldPreferInstalledDocumentationAsset() -> Bool {
