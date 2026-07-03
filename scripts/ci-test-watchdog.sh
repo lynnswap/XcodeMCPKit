@@ -31,11 +31,14 @@ log_size() {
     stat -f%z "${log}" 2> /dev/null || echo 0
 }
 
-wait_for_output_resume() {
+wait_for_output_or_exit() {
     local stalled_size=$1
     local remaining=${RESUME_RECHECK_SECONDS}
     while [ "${remaining}" -gt 0 ]; do
         sleep 1
+        if ! kill -0 "${runner}" 2> /dev/null; then
+            return 0
+        fi
         size=$(log_size)
         if [ "${size}" -ne "${stalled_size}" ]; then
             stalled_for=0
@@ -71,7 +74,7 @@ while kill -0 "${runner}" 2> /dev/null; do
     fi
     if [ "${stalled_for}" -ge "${STALL_SECONDS}" ]; then
         stalled_size="${size}"
-        if wait_for_output_resume "${stalled_size}"; then
+        if wait_for_output_or_exit "${stalled_size}"; then
             continue
         fi
 
@@ -79,8 +82,8 @@ while kill -0 "${runner}" 2> /dev/null; do
         if ! kill -0 "${runner}" 2> /dev/null; then
             break
         fi
-        if wait_for_output_resume "${stalled_size}"; then
-            echo "::warning::test output resumed while dumping diagnostics; continuing instead of killing"
+        if wait_for_output_or_exit "${stalled_size}"; then
+            echo "::warning::test output resumed or runner exited while dumping diagnostics; continuing instead of killing"
             continue
         fi
 
