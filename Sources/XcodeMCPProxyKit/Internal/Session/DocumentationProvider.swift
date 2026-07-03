@@ -877,7 +877,7 @@ protocol DocumentationSearchActionInvoking: Sendable {
 }
 
 actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
-    private static let helperVersion = "2026-07-03.5"
+    private static let helperVersion = "2026-07-03.7"
     private static let defaultMaxResults = 20
     private static let defaultScoreThreshold = 0.4
 
@@ -949,7 +949,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         let frameworks: [String]?
         let configURL: String
         let maxResults: Int?
-        let scoreThreshold: Double?
+        let scoreThreshold: Double
     }
 
     private struct XcodeRuntime: Sendable {
@@ -1262,7 +1262,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             let frameworks: [String]?
             let configURL: String
             let maxResults: Int?
-            let scoreThreshold: Double?
+            let scoreThreshold: Double
         }
 
         @main
@@ -1273,12 +1273,10 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                     let request = try JSONDecoder().decode(HelperRequest.self, from: inputData)
                     var defaults: [String: Any] = [
                         "IDEChatDocumentationSearchConfigURL": request.configURL,
+                        "IDEChatDocumentationSearchScoreThreshold": request.scoreThreshold,
                     ]
                     if let maxResults = request.maxResults {
                         defaults["IDEChatDocumentationSearchMaxResults"] = maxResults
-                    }
-                    if let scoreThreshold = request.scoreThreshold {
-                        defaults["IDEChatDocumentationSearchScoreThreshold"] = scoreThreshold
                     }
                     UserDefaults.standard.setVolatileDomain(
                         defaults,

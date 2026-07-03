@@ -3473,7 +3473,7 @@ struct DocumentationProviderTests {
         #expect(invocation.limit == 2)
     }
 
-    @Test func documentationSearchActionInvokerPassesLatestAssetAndActionDefaultsToHelper()
+    @Test func documentationSearchActionInvokerPassesLatestAssetWithActionDefaults()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -3528,8 +3528,8 @@ struct DocumentationProviderTests {
         #expect(object["query"] as? String == "NavigationSplitView")
         #expect(object["frameworks"] as? [String] == ["SwiftUI"])
         #expect(object["configURL"] as? String == asset.configURL.path)
-        #expect((object["maxResults"] as? NSNumber)?.intValue == 20)
-        #expect((object["scoreThreshold"] as? NSNumber)?.doubleValue == 0.4)
+        #expect(object["maxResults"] as? Int == 20)
+        #expect(object["scoreThreshold"] as? Double == 0.4)
     }
 
     @Test func documentationSearchActionProviderUsesStandaloneResolverOnlyWithoutRunningXcode()
