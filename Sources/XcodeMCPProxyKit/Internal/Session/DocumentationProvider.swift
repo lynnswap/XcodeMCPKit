@@ -902,14 +902,15 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         _ invocation: DocumentationSearchActionInvocation,
         timeout: TimeAmount?
     ) async throws -> DocumentationSearchActionOutput {
-        guard timeout?.nanoseconds != 0 else {
+        guard timeout.map({ $0.nanoseconds > 0 }) ?? true else {
             throw TimeoutError()
         }
         guard let runtime = xcodeRuntime(for: invocation.target) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let sdkPath = try await macOSSdkPath(for: runtime, timeout: timeout)
-        let helper = try await helperURL(for: runtime, sdkPath: sdkPath, timeout: timeout)
+        let deadline = Deadline.fromNow(timeout)
+        let sdkPath = try await macOSSdkPath(for: runtime, deadline: deadline)
+        let helper = try await helperURL(for: runtime, sdkPath: sdkPath, deadline: deadline)
         let request = HelperRequest(
             query: invocation.query,
             frameworks: invocation.frameworks.isEmpty ? nil : invocation.frameworks,
@@ -926,7 +927,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             executablePath: "/usr/bin/env",
             arguments: helperRuntimeEnvironmentArguments(for: runtime) + [helper.path],
             input: input,
-            timeoutNanoseconds: timeout?.nanoseconds
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
         ))
         guard output.terminationStatus == 0 else {
             throw ControlPlane.Error.invalidResponse(
@@ -1008,7 +1009,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
 
     private func macOSSdkPath(
         for runtime: XcodeRuntime,
-        timeout: TimeAmount?
+        deadline: Deadline?
     ) async throws -> String {
         let output = try await processRunner.run(ProcessRequest(
             label: "DocumentationSearchAction.sdk",
@@ -1021,7 +1022,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 "--show-sdk-path",
             ],
             input: nil,
-            timeoutNanoseconds: timeout?.nanoseconds
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
         ))
         guard output.terminationStatus == 0 else {
             throw ControlPlane.Error.invalidResponse(
@@ -1038,11 +1039,17 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private func helperURL(
         for runtime: XcodeRuntime,
         sdkPath: String,
-        timeout: TimeAmount?
+        deadline: Deadline?
     ) async throws -> URL {
         let hostTarget = try hostTarget()
+        let sourceFingerprint = helperSourceFingerprint(hostTarget: hostTarget)
         let packageRoot = cacheRoot.appendingPathComponent(
-            runtimePackageDirectoryName(runtime: runtime, sdkPath: sdkPath, hostTarget: hostTarget),
+            runtimePackageDirectoryName(
+                runtime: runtime,
+                sdkPath: sdkPath,
+                hostTarget: hostTarget,
+                sourceFingerprint: sourceFingerprint
+            ),
             isDirectory: true
         )
         if let helperURL = preparedHelperURLsByPackageRoot[packageRoot],
@@ -1074,7 +1081,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             moduleRoot: moduleRoot,
             sdkPath: sdkPath,
             hostTarget: hostTarget,
-            timeout: timeout
+            deadline: deadline
         )
         let helperURL = productsDirectoryURL.appendingPathComponent(Self.helperProductName)
         let output = try await processRunner.run(ProcessRequest(
@@ -1089,7 +1096,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 mode: .build
             ),
             input: nil,
-            timeoutNanoseconds: timeout?.nanoseconds
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
         ))
         guard output.terminationStatus == 0 else {
             throw ControlPlane.Error.invalidResponse(
@@ -1109,7 +1116,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         moduleRoot: URL,
         sdkPath: String,
         hostTarget: HostTarget,
-        timeout: TimeAmount?
+        deadline: Deadline?
     ) async throws -> URL {
         let output = try await processRunner.run(ProcessRequest(
             label: "DocumentationSearchAction.bin-path",
@@ -1123,7 +1130,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 mode: .showBinPath
             ),
             input: nil,
-            timeoutNanoseconds: timeout?.nanoseconds
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
         ))
         guard output.terminationStatus == 0 else {
             throw ControlPlane.Error.invalidResponse(
@@ -1276,7 +1283,8 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private func runtimePackageDirectoryName(
         runtime: XcodeRuntime,
         sdkPath: String,
-        hostTarget: HostTarget
+        hostTarget: HostTarget,
+        sourceFingerprint: String
     ) -> String {
         // Separate SwiftPM build artifacts by selected Xcode runtime. SwiftPM owns rebuild decisions inside this directory.
         let input = [
@@ -1286,7 +1294,22 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             runtime.buildVersion,
             sdkPath,
             hostTarget.triple,
+            sourceFingerprint,
         ].joined(separator: "\n")
+        let runtimeFingerprint = shortSHA256Hex(for: input)
+        return "runtime-\(runtimeFingerprint)-sources-\(sourceFingerprint)"
+    }
+
+    private func helperSourceFingerprint(hostTarget: HostTarget) -> String {
+        shortSHA256Hex(for: [
+            Self.helperPackageManifest,
+            dvtInterface(target: hostTarget.triple),
+            chatInterface(target: hostTarget.triple),
+            Self.helperSource,
+        ].joined(separator: "\n"))
+    }
+
+    private func shortSHA256Hex(for input: String) -> String {
         let digest = SHA256.hash(data: Data(input.utf8))
         let hexDigits = Array("0123456789abcdef".utf8)
         let hexBytes = digest.flatMap { byte in
@@ -1295,7 +1318,18 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 hexDigits[Int(byte) & 0x0f],
             ]
         }
-        return "runtime-\(String(decoding: hexBytes.prefix(16), as: UTF8.self))"
+        return String(decoding: hexBytes.prefix(16), as: UTF8.self)
+    }
+
+    private func subprocessTimeoutNanoseconds(until deadline: Deadline?) throws -> Int64? {
+        guard let deadline else {
+            return nil
+        }
+        let remaining = deadline.remaining()
+        guard remaining.nanoseconds > 0 else {
+            throw TimeoutError()
+        }
+        return remaining.nanoseconds
     }
 
     private func writeIfChanged(_ content: String, to url: URL) throws {

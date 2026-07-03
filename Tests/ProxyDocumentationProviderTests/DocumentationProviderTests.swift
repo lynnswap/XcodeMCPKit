@@ -3596,6 +3596,7 @@ struct DocumentationProviderTests {
         let packageRoot = URL(fileURLWithPath: packagePath, isDirectory: true)
         #expect(packageRoot.deletingLastPathComponent().path == cacheRoot.path)
         #expect(packageRoot.lastPathComponent.hasPrefix("runtime-"))
+        #expect(packageRoot.lastPathComponent.contains("-sources-"))
         #expect(
             processArgumentValue(after: "--scratch-path", in: buildRequest.arguments)
                 == packageRoot.appendingPathComponent(".build", isDirectory: true).path
@@ -3625,6 +3626,19 @@ struct DocumentationProviderTests {
         #expect(object["configURL"] as? String == asset.configURL.path)
         #expect(object["maxResults"] as? Int == 20)
         #expect(object["scoreThreshold"] as? Double == 0.4)
+
+        let firstInvocationTimeouts = requests.prefix(4).map(\.timeoutNanoseconds)
+        #expect(firstInvocationTimeouts.allSatisfy { timeout in
+            guard let timeout else {
+                return false
+            }
+            return timeout > 0 && timeout <= 1_000_000_000
+        })
+        for (previous, next) in zip(firstInvocationTimeouts, firstInvocationTimeouts.dropFirst()) {
+            let previousTimeout = try #require(previous)
+            let nextTimeout = try #require(next)
+            #expect(nextTimeout <= previousTimeout)
+        }
     }
 
     @Test func documentationSearchActionProviderUsesStandaloneResolverOnlyWithoutRunningXcode()
