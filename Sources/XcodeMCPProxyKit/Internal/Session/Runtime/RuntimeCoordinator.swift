@@ -518,8 +518,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             initializeParams: InitializeHandshakeJSON.resolved(
                 initializeParamsOverride: config.initializeParamsOverride
             ),
-            serviceRepairer: LiveDocumentationSearchServiceRepairer(),
-            localSearchProvider: LiveDocumentationAssetSearchProvider(),
+            serviceRepairer: NoopDocumentationSearchServiceRepairer(),
+            localSearchProvider: DocumentationSearchActionProvider(),
             preferLocalSearchProvider: true
         )
     }
