@@ -77,6 +77,7 @@ extension RuntimeCoordinator {
                 current = nil
             }
         }
+        initializeManager.clearPrimaryInitializeReadinessToken(token)
     }
 
     func cancelPrimaryInitializeReadinessWaiter() {
@@ -86,8 +87,19 @@ extension RuntimeCoordinator {
             return token
         }
         if let token {
+            initializeManager.clearPrimaryInitializeReadinessToken(token)
             cancelUpstreamReadinessWaiter(token)
         }
+    }
+
+    func cancelPrimaryInitializeReadinessWaiter(_ token: UpstreamReadinessWaiterToken) {
+        primaryInitializeReadinessTokenBox.withLockedValue { current in
+            if current === token {
+                current = nil
+            }
+        }
+        initializeManager.clearPrimaryInitializeReadinessToken(token)
+        cancelUpstreamReadinessWaiter(token)
     }
 
 }

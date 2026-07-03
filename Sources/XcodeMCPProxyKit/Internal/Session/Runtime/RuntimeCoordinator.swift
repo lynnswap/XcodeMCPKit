@@ -791,6 +791,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         context?.notificationHub.closeAll()
         let pendingInitializes = initializeManager.removePendingInitializes(sessionID: id)
         pendingInitializes.timeout?.cancel()
+        if let upstreamIndex = pendingInitializes.cancelledPrimaryUpstreamIndex {
+            if let upstreamID = pendingInitializes.cancelledPrimaryUpstreamID {
+                clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
+            }
+            if let readinessToken = pendingInitializes.cancelledPrimaryReadinessToken {
+                cancelPrimaryInitializeReadinessWaiter(readinessToken)
+            }
+        }
         for pending in pendingInitializes.pending {
             pending.eventLoop.execute {
                 pending.promise.fail(CancellationError())

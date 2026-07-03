@@ -179,6 +179,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPKitTestingTests",
             dependencies: [
+                "XcodeMCPCoreTestSupport",
                 "XcodeMCPKit",
                 "XcodeMCPKitTesting",
             ],
