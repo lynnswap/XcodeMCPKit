@@ -2287,7 +2287,7 @@ func advanceRuntimeCoordinatorTimeout(
     by duration: Duration,
     suspendedSleepers: Int = 1
 ) async throws {
-    try await timeoutClock.sleep(untilSuspendedBy: suspendedSleepers)
+    try await waitForSuspendedSleepers(on: timeoutClock, count: suspendedSleepers)
     uptimeClock.advance(by: duration)
     timeoutClock.advance(by: duration)
 }

@@ -406,7 +406,7 @@ extension RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
-        try await clock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: clock)
         clock.advance(by: .milliseconds(60))
         await #expect(throws: TimeoutError.self) {
             _ = try await future.get()
@@ -418,7 +418,7 @@ extension RuntimeCoordinatorTests {
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
-        try await clock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: clock)
         clock.advance(by: .milliseconds(60))
         await #expect(throws: TimeoutError.self) {
             _ = try await retryFuture.get()

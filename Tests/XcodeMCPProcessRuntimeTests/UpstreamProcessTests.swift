@@ -154,7 +154,7 @@ struct UpstreamProcessTests {
         fakeDriver.emitStdout(Data(try makeJSONRPCResponse(id: 20, text: "parent").utf8))
         _ = try await events.nextMessage()
         fakeDriver.emitTermination(status: 0)
-        try await drainClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: drainClock)
 
         #expect(!events.snapshot().contains(where: isExitEvent))
         drainClock.advance(by: .seconds(10))

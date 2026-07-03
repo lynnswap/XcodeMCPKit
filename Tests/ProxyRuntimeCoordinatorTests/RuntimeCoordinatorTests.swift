@@ -1524,10 +1524,10 @@ struct RuntimeCoordinatorTests {
                 description: "waiting for startup process reconcile"
             ) == 1
         )
-        try await clocks.timeoutClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
 
         manager.debugReset()
-        try await clocks.timeoutClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
         clocks.timeoutClock.advance(by: .seconds(2))
 
         #expect(
@@ -2975,7 +2975,7 @@ struct RuntimeCoordinatorTests {
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
 
         await upstream.overloadNextInitializedNotificationSend()
-        try await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: timeoutClock)
         timeoutClock.advance(by: .milliseconds(150))
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
@@ -2984,7 +2984,7 @@ struct RuntimeCoordinatorTests {
         let retriedInitialize = try #require(await upstream.sentValue(at: 2))
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
-        try await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: timeoutClock)
         timeoutClock.advance(by: .milliseconds(180))
         await upstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
         try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
@@ -3022,7 +3022,7 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(try makeInitializeResponse(id: upstreamID)))
         try await upstream.waitForBlockedInitializedNotification()
 
-        try await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: timeoutClock)
         timeoutClock.advance(by: .milliseconds(300))
 
         do {
@@ -8781,7 +8781,7 @@ struct RuntimeCoordinatorTests {
             count: 1,
             description: "waiting for eager initialize request"
         )
-        try await timeoutClock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: timeoutClock)
         timeoutClock.advance(by: .milliseconds(100))
         try await initializeCleanupCompleted.wait(
             description: "waiting for eager initialize timeout cleanup"
