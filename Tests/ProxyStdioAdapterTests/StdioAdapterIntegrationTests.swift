@@ -180,9 +180,7 @@ private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownC
 private func waitUntilDrainSleepSuspended(
     _ clocks: ControlledStdioAdapterShutdownClocks
 ) async throws {
-    try await waitWithTimeout("waiting for adapter drain timeout sleep") {
-        try await clocks.timeoutClock.sleep(untilSuspendedBy: 1)
-    }
+    try await waitForSuspendedSleepers(on: clocks.timeoutClock)
 }
 
 private func advanceStdioAdapterShutdownClocks(

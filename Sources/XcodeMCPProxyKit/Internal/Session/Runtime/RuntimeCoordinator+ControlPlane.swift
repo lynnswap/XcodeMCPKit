@@ -258,6 +258,8 @@ extension RuntimeCoordinator {
                         )
                     } catch is CancellationError {
                         throw CancellationError()
+                    } catch is TimeoutError {
+                        throw TimeoutError()
                     } catch {
                         self.processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
                         return .failure(
@@ -611,6 +613,8 @@ extension RuntimeCoordinator {
                 }
             } catch is CancellationError {
                 throw CancellationError()
+            } catch is TimeoutError {
+                lastFailure = (upstreamIndex, TimeoutError())
             } catch {
                 lastFailure = (upstreamIndex, error)
             }

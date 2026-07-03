@@ -248,6 +248,7 @@ struct PublicProductContractTests {
             close(outputFD)
         }
 
+        let targetDescription = targets.joined(separator: ", ")
         let process = try SpawnedProcessGroup.spawn(
             executable: "/usr/bin/env",
             arguments: [
@@ -262,7 +263,16 @@ struct PublicProductContractTests {
             ],
             outputFD: outputFD
         )
-        let waitResult = process.wait(timeoutSeconds: timeoutSeconds)
+        let waitResult = process.wait(
+            timeoutSeconds: timeoutSeconds,
+            heartbeatInterval: 30
+        ) { elapsedSeconds in
+            print(
+                "PublicProductContractTests: swift build still running after \(Int(elapsedSeconds))s "
+                    + "for \(targetDescription); log: \(logURL.path)"
+            )
+            unsafe fflush(stdout)
+        }
 
         return CommandResult(
             exitCode: waitResult.exitCode,
@@ -468,12 +478,36 @@ private final class SpawnedProcessGroup: @unchecked Sendable {
         return pid
     }
 
-    func wait(timeoutSeconds: TimeInterval) -> (exitCode: Int32, timedOut: Bool) {
-        let timedOut = exitSemaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut
-        if timedOut {
-            terminateProcessGroup()
+    func wait(
+        timeoutSeconds: TimeInterval,
+        heartbeatInterval: TimeInterval,
+        onHeartbeat: (TimeInterval) -> Void
+    ) -> (exitCode: Int32, timedOut: Bool) {
+        let start = Date()
+        let deadline = start.addingTimeInterval(timeoutSeconds)
+        var nextHeartbeat = start.addingTimeInterval(heartbeatInterval)
+
+        while true {
+            let now = Date()
+            let nextWakeUp = min(deadline, nextHeartbeat)
+            let waitSeconds = max(0, nextWakeUp.timeIntervalSince(now))
+            if exitSemaphore.wait(timeout: .now() + waitSeconds) == .success {
+                return (Self.exitCode(from: currentWaitStatus()), false)
+            }
+
+            let elapsedSeconds = Date().timeIntervalSince(start)
+            if elapsedSeconds >= timeoutSeconds {
+                terminateProcessGroup()
+                return (Self.exitCode(from: currentWaitStatus()), true)
+            }
+
+            if Date() >= nextHeartbeat {
+                onHeartbeat(elapsedSeconds)
+                repeat {
+                    nextHeartbeat = nextHeartbeat.addingTimeInterval(heartbeatInterval)
+                } while Date() >= nextHeartbeat
+            }
         }
-        return (Self.exitCode(from: currentWaitStatus()), timedOut)
     }
 
     private func reap() {

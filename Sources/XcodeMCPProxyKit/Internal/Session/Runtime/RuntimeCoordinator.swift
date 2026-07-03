@@ -519,8 +519,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 initializeParamsOverride: config.initializeParamsOverride
             ),
             serviceRepairer: LiveDocumentationSearchServiceRepairer(),
-            localSearchProvider: LiveDocumentationAssetSearchProvider(),
-            preferLocalSearchProvider: true
+            localSearchProvider: DocumentationSearchActionProvider(),
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder
         )
     }
 

@@ -265,6 +265,19 @@ package func waitWithTimeout<T: Sendable>(
     }
 }
 
+package func waitForSuspendedSleepers(
+    on clock: TestClock,
+    count: Int = 1,
+    timeout: Duration = .seconds(5)
+) async throws {
+    try await waitWithTimeout(
+        "timed out waiting for \(count) suspended test clock sleeper(s)",
+        timeout: timeout
+    ) {
+        try await clock.sleep(untilSuspendedBy: count)
+    }
+}
+
 private final class TimeoutRace<T: Sendable>: @unchecked Sendable {
     private struct State {
         var continuation: CheckedContinuation<T, Error>?

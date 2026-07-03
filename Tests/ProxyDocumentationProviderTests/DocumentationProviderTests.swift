@@ -8,78 +8,183 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 
-private struct StubDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearching {
-    let available: Bool
-    let results: [DocumentationAssetSemanticSearchResult]
+private actor DocumentationSearchActionInvocationRecorder {
+    private var values: [DocumentationSearchActionInvocation] = []
 
-    init(
-        available: Bool = true,
-        results: [DocumentationAssetSemanticSearchResult]
-    ) {
-        self.available = available
-        self.results = results
-    }
-
-    func isAvailable() -> Bool {
-        available
-    }
-
-    func search(
-        asset _: DocumentationSearchInstalledAsset,
-        query _: String,
-        limit _: Int,
-        timeout _: TimeAmount?
-    ) async throws -> [DocumentationAssetSemanticSearchResult] {
-        results
-    }
-}
-
-private struct AssetAwareStubDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearching {
-    let results: @Sendable (DocumentationSearchInstalledAsset) -> [DocumentationAssetSemanticSearchResult]
-
-    func isAvailable() -> Bool {
-        true
-    }
-
-    func search(
-        asset: DocumentationSearchInstalledAsset,
-        query _: String,
-        limit _: Int,
-        timeout _: TimeAmount?
-    ) async throws -> [DocumentationAssetSemanticSearchResult] {
-        results(asset)
-    }
-}
-
-private actor SearchLimitRecorder {
-    private var values: [Int] = []
-
-    func record(_ value: Int) {
+    func record(_ value: DocumentationSearchActionInvocation) {
         values.append(value)
     }
 
-    func recordedValues() -> [Int] {
+    func recordedValues() -> [DocumentationSearchActionInvocation] {
         values
     }
 }
 
-private struct LimitAwareStubDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearching {
-    let recorder: SearchLimitRecorder
-    let results: @Sendable (Int) -> [DocumentationAssetSemanticSearchResult]
+private struct StubDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
+    let available: Bool
+    let output: DocumentationSearchActionOutput
+    let recorder: DocumentationSearchActionInvocationRecorder?
 
-    func isAvailable() -> Bool {
-        true
+    init(
+        available: Bool = true,
+        output: DocumentationSearchActionOutput,
+        recorder: DocumentationSearchActionInvocationRecorder? = nil
+    ) {
+        self.available = available
+        self.output = output
+        self.recorder = recorder
     }
 
-    func search(
-        asset _: DocumentationSearchInstalledAsset,
-        query _: String,
-        limit: Int,
+    func isAvailable(for _: XcodeProcessTarget) async -> Bool {
+        available
+    }
+
+    func invoke(
+        _ invocation: DocumentationSearchActionInvocation,
         timeout _: TimeAmount?
-    ) async throws -> [DocumentationAssetSemanticSearchResult] {
-        await recorder.record(limit)
-        return results(limit)
+    ) async throws -> DocumentationSearchActionOutput {
+        await recorder?.record(invocation)
+        return output
     }
+}
+
+private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
+    private var requests: [ProcessRequest] = []
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        requests.append(request)
+        switch request.label {
+        case "DocumentationSearchAction.sdk":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "/tmp/MacOSX.sdk\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.bin-path":
+            guard let scratchPath = processArgumentValue(after: "--scratch-path", in: request.arguments) else {
+                return ProcessOutput(
+                    terminationStatus: 1,
+                    stdout: "",
+                    stderr: "missing scratch path"
+                )
+            }
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "\(scratchPath)/out/Products/Release\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.build":
+            try createFakeDocumentationSearchActionHelperExecutable(for: request.arguments)
+            return ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
+        case "DocumentationSearchAction":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: #"{"documents":[]}"#,
+                stderr: ""
+            )
+        default:
+            return ProcessOutput(
+                terminationStatus: 1,
+                stdout: "",
+                stderr: "unexpected process request: \(request.label)"
+            )
+        }
+    }
+
+    func recordedRequests() -> [ProcessRequest] {
+        requests
+    }
+}
+
+private actor BlockingDocumentationSearchActionProcessRunner: ProcessRunning {
+    private var requests: [ProcessRequest] = []
+    private let buildStarted: TestSignal
+    private let releaseBuild: TestSignal
+
+    init(buildStarted: TestSignal, releaseBuild: TestSignal) {
+        self.buildStarted = buildStarted
+        self.releaseBuild = releaseBuild
+    }
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        requests.append(request)
+        switch request.label {
+        case "DocumentationSearchAction.sdk":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "/tmp/MacOSX.sdk\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.bin-path":
+            guard let scratchPath = processArgumentValue(after: "--scratch-path", in: request.arguments) else {
+                return ProcessOutput(
+                    terminationStatus: 1,
+                    stdout: "",
+                    stderr: "missing scratch path"
+                )
+            }
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "\(scratchPath)/out/Products/Release\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.build":
+            buildStarted.signal()
+            try await releaseBuild.wait(description: "waiting to release DocumentationSearchAction helper build")
+            try createFakeDocumentationSearchActionHelperExecutable(for: request.arguments)
+            return ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
+        case "DocumentationSearchAction":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: #"{"documents":[]}"#,
+                stderr: ""
+            )
+        default:
+            return ProcessOutput(
+                terminationStatus: 1,
+                stdout: "",
+                stderr: "unexpected process request: \(request.label)"
+            )
+        }
+    }
+
+    func recordedRequests() -> [ProcessRequest] {
+        requests
+    }
+}
+
+private struct DocumentationSearchActionTimeoutProcessRunner: ProcessRunning {
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        throw ProcessTimeoutError(label: request.label)
+    }
+}
+
+private func processArgumentValue(after flag: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: flag),
+          arguments.indices.contains(arguments.index(after: index)) else {
+        return nil
+    }
+    return arguments[arguments.index(after: index)]
+}
+
+private func createFakeDocumentationSearchActionHelperExecutable(for arguments: [String]) throws {
+    guard let scratchPath = processArgumentValue(after: "--scratch-path", in: arguments) else {
+        return
+    }
+    let helperURL = URL(fileURLWithPath: scratchPath, isDirectory: true)
+        .appendingPathComponent("out", isDirectory: true)
+        .appendingPathComponent("Products", isDirectory: true)
+        .appendingPathComponent("Release", isDirectory: true)
+        .appendingPathComponent("documentation-search-action-helper")
+    try FileManager.default.createDirectory(
+        at: helperURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data().write(to: helperURL)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: helperURL.path
+    )
 }
 
 private func makeDocumentationSearchRequestWithArguments(
@@ -108,6 +213,44 @@ private func makeDocumentationSearchRequestWithArguments(
             ],
         ],
         options: []
+    )
+}
+
+private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
+    let appURL = root.appendingPathComponent("Xcode.app", isDirectory: true)
+    let swiftURL = appURL
+        .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
+    let dvtFrameworkURL = appURL
+        .appendingPathComponent("Contents/SharedFrameworks/DVTFoundation.framework/DVTFoundation")
+    let chatFrameworkURL = appURL
+        .appendingPathComponent("Contents/PlugIns/IDEIntelligenceChat.framework/IDEIntelligenceChat")
+    let platformDeveloperLibraryURL = appURL
+        .appendingPathComponent("Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib", isDirectory: true)
+    for fileURL in [swiftURL, dvtFrameworkURL, chatFrameworkURL] {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: fileURL)
+    }
+    try FileManager.default.createDirectory(
+        at: appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+        at: platformDeveloperLibraryURL,
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: swiftURL.path
+    )
+    return XcodeProcessTarget(
+        processID: 123,
+        appPath: appURL.path,
+        developerDir: appURL.appendingPathComponent("Contents/Developer").path,
+        mcpbridgePath: appURL.appendingPathComponent("Contents/Developer/usr/bin/mcpbridge").path,
+        xcodeVersion: "27.0"
     )
 }
 
@@ -280,7 +423,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [target]),
             sessionFactory: factory,
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -295,13 +438,163 @@ struct DocumentationProviderTests {
         #expect(invalidatedProvider == false)
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
         #expect(await factory.startedPIDs().isEmpty)
-        #expect(await localProvider.requestedDescriptorPIDs() == [0])
-        #expect(await localProvider.requestedCallPIDs() == [0])
+        #expect(await localProvider.requestedDescriptorPIDs() == [target.processID])
+        #expect(await localProvider.requestedCallPIDs() == [target.processID])
         #expect(await localProvider.requestedQueries() == ["SwiftUI"])
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
         let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
         #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
+    }
+
+    @Test func documentationProviderUsesMCPBridgeBeforeInstalledAssetByDefault()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 124, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"xcode\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 124,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 124, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"xcode\"}")
+        #expect(await factory.startedPIDs() == [target.processID])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+        #expect(await localProvider.requestedCallPIDs().isEmpty)
+    }
+
+    @Test func documentationProviderPrefersInstalledAssetWhenRunningXcodeIsNewerThanDefault()
+        async throws
+    {
+        let defaultTarget = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 126, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                defaultTarget.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"default\"}")
+                    ),
+                ],
+                newerTarget.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"newer\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 126,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [defaultTarget, newerTarget]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder,
+            defaultXcodeTargetResolver: { defaultTarget }
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 126, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [newerTarget.processID])
+        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.documentationQueries(for: defaultTarget.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: newerTarget.processID).isEmpty)
+    }
+
+    @Test func documentationProviderUsesMCPBridgeWhenOnlyRunningXcodeIsNewerThanDefault()
+        async throws
+    {
+        let defaultTarget = xcodeProcessTarget(processID: 127, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 128, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                newerTarget.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"mcpbridge\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 127,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [newerTarget]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder,
+            defaultXcodeTargetResolver: { defaultTarget }
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"mcpbridge\"}")
+        #expect(await factory.startedPIDs() == [newerTarget.processID])
+        #expect(await factory.documentationQueries(for: newerTarget.processID) == ["SwiftUI"])
+        #expect(await localProvider.requestedCallPIDs().isEmpty)
     }
 
     @Test func documentationProviderUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()
@@ -318,7 +611,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: []),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
@@ -341,6 +634,165 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI"])
     }
 
+    @Test func documentationProviderToolListUsesNextInstalledAssetRuntimeWhenPrimaryDescriptorUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 120, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 121, xcodeVersion: "27.0")
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: Data(),
+            unavailableDescriptorProcessIDs: [xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
+        #expect(await localProvider.requestedDescriptorPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+        ])
+    }
+
+    @Test func documentationProviderToolListUsesDefaultActionRuntimeAfterRunningRuntimesUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 123, xcodeVersion: "27.0")
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: Data(),
+            unavailableDescriptorProcessIDs: [xcode26.processID, xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
+        #expect(await localProvider.requestedDescriptorPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+            0,
+        ])
+    }
+
+    @Test func documentationProviderCallUsesNextInstalledAssetRuntimeWhenPrimaryCallUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 124, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 125, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"xcode26\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"xcode27\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 123,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            failingCallProcessIDs: [xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedDescriptorPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+        ])
+        #expect(await localProvider.requestedCallPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+        ])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "SwiftUI"])
+        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.documentationQueries(for: xcode27.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: xcode26.processID).isEmpty)
+    }
+
+    @Test func documentationProviderCallUsesDefaultActionRuntimeAfterRunningRuntimesUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 123, xcodeVersion: "27.0")
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 122,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            failingCallProcessIDs: [xcode26.processID, xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 122, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+            0,
+        ])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "SwiftUI", "SwiftUI"])
+    }
+
     @Test func documentationProviderBackgroundDiscoveryUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()
         async throws
     {
@@ -352,7 +804,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: []),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let update = await manager.startBackgroundDiscovery(requestTimeout: TimeAmount.seconds(1))
@@ -362,7 +814,7 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedDescriptorPIDs() == [0])
     }
 
-    @Test func documentationProviderGivesPrimaryInstalledAssetFullCallerTimeout()
+    @Test func documentationProviderReservesFallbackTimeForPreferredInstalledAsset()
         async throws
     {
         let xcode26 = xcodeProcessTarget(processID: 126, xcodeVersion: "26.6")
@@ -378,7 +830,8 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder,
+            defaultXcodeTargetResolver: { xcode26 }
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -392,10 +845,43 @@ struct DocumentationProviderTests {
         }
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
         let timeout = try #require(await localProvider.requestedCallTimeouts().first)
-        #expect((timeout?.nanoseconds ?? 0) > 4_000_000_000)
+        #expect((timeout?.nanoseconds ?? 0) <= 2_000_000_000)
+        #expect(await localProvider.requestedCallPIDs() == [xcode27.processID])
     }
 
-    @Test func documentationProviderFallsBackToMCPBridgeWhenPrimaryAssetSearchFails()
+    @Test func documentationProviderReturnsPrimaryInstalledAssetTimeoutFailure()
+        async throws
+    {
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 128,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            timeoutOnceAfterSuccessfulCallCount: 0
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: []),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 128, query: "Observation"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .failed(let error, let invalidatedProvider) = outcome else {
+            Issue.record("expected failed timeout outcome, got \(outcome)")
+            return
+        }
+        #expect(error is TimeoutError)
+        #expect(invalidatedProvider == false)
+        #expect(await localProvider.requestedCallPIDs() == [0])
+    }
+
+    @Test func documentationProviderDoesNotFallbackToMCPBridgeWhenPrimaryAssetSearchFails()
         async throws
     {
         let target = xcodeProcessTarget(processID: 118, xcodeVersion: "27.0")
@@ -423,7 +909,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [target]),
             sessionFactory: factory,
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -431,17 +917,15 @@ struct DocumentationProviderTests {
             requestTimeoutOverride: .seconds(1)
         )
 
-        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
-            Issue.record("expected handled outcome, got \(outcome)")
+        guard case .unavailable = outcome else {
+            Issue.record("expected unavailable outcome, got \(outcome)")
             return
         }
-        #expect(invalidatedProvider == false)
-        #expect(try toolContentText(in: responseData) == "{\"answer\":\"xcode\"}")
-        #expect(await localProvider.requestedDescriptorPIDs() == [0])
-        #expect(await localProvider.requestedCallPIDs() == [0])
-        #expect(await localProvider.requestedQueries() == ["SwiftUI"])
-        #expect(await factory.startedPIDs() == [target.processID])
-        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+        #expect(await localProvider.requestedDescriptorPIDs() == [target.processID, 0])
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, 0])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "SwiftUI"])
+        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.documentationQueries(for: target.processID).isEmpty)
     }
 
     @Test func xcodeVersionKeyDistinguishesDeveloperDirAndMCPBridgePath() {
@@ -3281,61 +3765,6 @@ struct DocumentationProviderTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
-    @Test func liveDocumentationSearchServiceRepairerSelectsLatestInstalledAsset()
-        async throws
-    {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-27",
-            xcodeVersion: "27.0",
-            osVersion: "26.6",
-            documentationRelease: 950001
-        )
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
-            osVersion: "26.2",
-            documentationRelease: 900339
-        )
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-3",
-            xcodeVersion: "26.3",
-            osVersion: "26.2",
-            documentationRelease: 900124
-        )
-        let writtenValues = NIOLockedValueBox<[String]>([])
-        let repairer = LiveDocumentationSearchServiceRepairer(
-            assetRoot: root,
-            readConfigURLOverride: { nil },
-            writeConfigURLOverride: { value in
-                writtenValues.withLockedValue { $0.append(value) }
-                return true
-            }
-        )
-
-        let result = await repairer.repairDocumentationSearch(
-            for: xcodeProcessTarget(processID: 118, xcodeVersion: "26.6")
-        )
-
-        guard case .repaired(let report) = result else {
-            Issue.record("expected repaired result, got \(result)")
-            return
-        }
-        #expect(report.xcodeVersion == "27.0")
-        #expect(report.osVersion == "26.6")
-        #expect(report.documentationRelease == 950001)
-        #expect(report.changedDefault)
-        #expect(report.configURL.hasPrefix("/"))
-        #expect(report.configURL.contains("xcode-27.asset/AssetData/config.json"))
-        #expect(writtenValues.withLockedValue { $0 } == [report.configURL])
-    }
-
     @Test func documentationAssetLocatorTreatsTrailingZeroXcodeVersionsAsExactMatch()
         throws
     {
@@ -3408,7 +3837,7 @@ struct DocumentationProviderTests {
         #expect(asset.assetURL.path.contains("xcode-27-new-release.asset"))
     }
 
-    @Test func liveDocumentationAssetSearchProviderReturnsInstalledAssetResults()
+    @Test func documentationSearchActionProviderReturnsHelperOutput()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -3422,31 +3851,39 @@ struct DocumentationProviderTests {
             osVersion: "26.2",
             documentationRelease: 900339
         )
-        try addInstalledDocumentationAssetRows(
+        try makeInstalledDocumentationAsset(
             root: root,
-            name: "xcode-26-5",
-            rows: [
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/UIKit/UIView",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UIView",
-                    content: "UIView\nClass of UIKit"
-                ),
-            ]
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
         )
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: StubDocumentationAssetSemanticSearcher(results: [
-                .init(assetID: "/documentation/UIKit/UIView", score: 0.92),
-            ])
-        )
+        let recorder = DocumentationSearchActionInvocationRecorder()
         let target = xcodeProcessTarget(processID: 123, xcodeVersion: "26.6")
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: [
+                    .init(
+                        title: "UIView",
+                        contents: "UIView\nClass of UIKit",
+                        uri: "/documentation/UIKit/UIView",
+                        score: 0.92,
+                        kind: "symbol"
+                    ),
+                ]),
+                recorder: recorder
+            )
+        )
 
         #expect(await provider.descriptor(for: target) != nil)
         let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 123, query: "UIView"),
+            requestData: makeDocumentationSearchRequestWithArguments(
+                id: 123,
+                query: " UIView ",
+                frameworks: ["UIKit"],
+                limit: 2
+            ),
             for: target,
             timeout: .seconds(1)
         )
@@ -3473,377 +3910,400 @@ struct DocumentationProviderTests {
         #expect(firstDocument["contents"] as? String == "UIView\nClass of UIKit")
         #expect(firstDocument["uri"] as? String == "/documentation/UIKit/UIView")
         #expect(firstDocument["score"] as? Double == 0.92)
+
+        let invocation = try #require(await recorder.recordedValues().first)
+        #expect(invocation.target == target)
+        #expect(invocation.asset.xcodeVersion == "27.0")
+        #expect(invocation.asset.documentationRelease == 950001)
+        #expect(invocation.query == "UIView")
+        #expect(invocation.frameworks == ["UIKit"])
+        #expect(invocation.limit == 2)
     }
 
-    @Test func liveDocumentationAssetSearchProviderDeduplicatesSemanticAssetIDs()
+    @Test func documentationSearchActionInvokerPassesLatestAssetWithActionDefaults()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
         try makeInstalledDocumentationAsset(
-            root: root,
+            root: assetRoot,
             name: "xcode-26-5",
             xcodeVersion: "26.5",
             osVersion: "26.2",
             documentationRelease: 900339
         )
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-26-5",
-            rows: [
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/UIKit/UIView",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UIView",
-                    content: "UIView\nClass of UIKit"
-                ),
-                (
-                    vectorID: 2,
-                    assetID: "/documentation/UIKit/UILabel",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UILabel",
-                    content: "UILabel\nClass of UIKit"
-                ),
-            ]
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.2",
+            documentationRelease: 950001
         )
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: StubDocumentationAssetSemanticSearcher(results: [
-                .init(assetID: "/documentation/UIKit/UIView", score: 0.92),
-                .init(assetID: "/documentation/UIKit/UIView", score: 0.81),
-                .init(assetID: "/documentation/UIKit/UILabel", score: 0.72),
-            ])
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let processRunner = DocumentationSearchActionProcessRecorder()
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: processRunner
         )
-        let target = xcodeProcessTarget(processID: 124, xcodeVersion: "26.6")
 
-        let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequestWithArguments(
-                id: 124,
-                query: "UIKit views",
-                limit: 2
+        _ = try await invoker.invoke(
+            DocumentationSearchActionInvocation(
+                target: target,
+                asset: asset,
+                query: "NavigationSplitView",
+                frameworks: ["SwiftUI"],
+                limit: nil
             ),
-            for: target,
+            timeout: .seconds(1)
+        )
+        _ = try await invoker.invoke(
+            DocumentationSearchActionInvocation(
+                target: target,
+                asset: asset,
+                query: "NavigationSplitView",
+                frameworks: ["SwiftUI"],
+                limit: nil
+            ),
             timeout: .seconds(1)
         )
 
-        let text = try #require(try toolContentText(in: response))
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
+        let requests = await processRunner.recordedRequests()
+        let binPathRequests = requests.filter { $0.label == "DocumentationSearchAction.bin-path" }
+        #expect(binPathRequests.count == 1)
+        let binPathRequest = try #require(binPathRequests.first)
+        #expect(binPathRequest.arguments.contains("--show-bin-path"))
+        #expect(binPathRequest.arguments.contains("DEVELOPER_DIR=\(target.developerDir)"))
+        let buildRequests = requests.filter { $0.label == "DocumentationSearchAction.build" }
+        #expect(buildRequests.count == 1)
+        let buildRequest = try #require(buildRequests.first)
+        #expect(buildRequest.arguments.contains("DEVELOPER_DIR=\(target.developerDir)"))
+        #expect(buildRequest.arguments.contains(
+            URL(fileURLWithPath: target.appPath)
+                .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
+                .path
+        ))
+        #expect(buildRequest.arguments.contains("build"))
+        #expect(processArgumentValue(after: "--configuration", in: buildRequest.arguments) == "release")
+        #expect(
+            processArgumentValue(after: "--product", in: buildRequest.arguments)
+                == "documentation-search-action-helper"
         )
-        let documents = try #require(payload["documents"] as? [[String: Any]])
-        #expect(documents.map { $0["title"] as? String } == ["UIView", "UILabel"])
+        #expect(processArgumentValue(after: "--sdk", in: buildRequest.arguments) == "/tmp/MacOSX.sdk")
+        let packagePath = try #require(processArgumentValue(after: "--package-path", in: buildRequest.arguments))
+        #expect(processArgumentValue(after: "--package-path", in: binPathRequest.arguments) == packagePath)
+        let packageRoot = URL(fileURLWithPath: packagePath, isDirectory: true)
+        #expect(packageRoot.deletingLastPathComponent().path == cacheRoot.path)
+        #expect(packageRoot.lastPathComponent.hasPrefix("runtime-"))
+        #expect(packageRoot.lastPathComponent.contains("-sources-"))
+        #expect(
+            processArgumentValue(after: "--scratch-path", in: buildRequest.arguments)
+                == packageRoot.appendingPathComponent(".build", isDirectory: true).path
+        )
+        let manifest = try String(
+            contentsOf: packageRoot.appendingPathComponent("Package.swift"),
+            encoding: .utf8
+        )
+        #expect(manifest.contains("documentation-search-action-helper"))
+        #expect(FileManager.default.fileExists(
+            atPath: packageRoot
+                .appendingPathComponent("Sources", isDirectory: true)
+                .appendingPathComponent("DocumentationSearchActionHelper", isDirectory: true)
+                .appendingPathComponent("main.swift")
+                .path
+        ))
+
+        let helperRequest = try #require(
+            requests.last { $0.label == "DocumentationSearchAction" }
+        )
+        let input = try #require(helperRequest.input)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(input.utf8), options: []) as? [String: Any]
+        )
+        #expect(object["query"] as? String == "NavigationSplitView")
+        #expect(object["frameworks"] as? [String] == ["SwiftUI"])
+        #expect(object["configURL"] as? String == asset.configURL.path)
+        #expect(object["maxResults"] as? Int == 20)
+        #expect(object["scoreThreshold"] as? Double == 0.4)
+
+        let oneSecond = Int64(1_000_000_000)
+        let sdkRequest = try #require(requests.first { $0.label == "DocumentationSearchAction.sdk" })
+        let sdkTimeout = try #require(sdkRequest.timeoutNanoseconds)
+        #expect(sdkTimeout > 0 && sdkTimeout <= oneSecond)
+        let binPathTimeout = try #require(binPathRequest.timeoutNanoseconds)
+        let buildTimeout = try #require(buildRequest.timeoutNanoseconds)
+        #expect(binPathTimeout > oneSecond)
+        #expect(buildTimeout > oneSecond)
+        #expect(buildTimeout <= binPathTimeout)
+        let helperTimeout = try #require(helperRequest.timeoutNanoseconds)
+        #expect(helperTimeout > 0 && helperTimeout <= oneSecond)
     }
 
-    @Test func liveDocumentationAssetSearchProviderExpandsSemanticSearchForFrameworkFilters()
+    @Test func documentationSearchActionInvokerCoalescesConcurrentHelperPreparation()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
         try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
             osVersion: "26.2",
-            documentationRelease: 900339
+            documentationRelease: 950001
         )
-        let swiftRows: [(
-            vectorID: Int64,
-            assetID: String,
-            type: String,
-            framework: String?,
-            title: String,
-            content: String
-        )] = (0..<40).map { index in
-            (
-                vectorID: Int64(index + 1),
-                assetID: "/documentation/Swift/Only\(index)",
-                type: "symbol",
-                framework: "Swift",
-                title: "SwiftOnly\(index)",
-                content: "SwiftOnly\(index)"
-            )
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let buildStarted = TestSignal()
+        let releaseBuild = TestSignal()
+        let processRunner = BlockingDocumentationSearchActionProcessRunner(
+            buildStarted: buildStarted,
+            releaseBuild: releaseBuild
+        )
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: processRunner
+        )
+        let invocation = DocumentationSearchActionInvocation(
+            target: target,
+            asset: asset,
+            query: "NavigationSplitView",
+            frameworks: ["SwiftUI"],
+            limit: nil
+        )
+
+        let first = Task {
+            try await invoker.invoke(invocation, timeout: .seconds(5))
         }
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-26-5",
-            rows: swiftRows + [
-                (
-                    vectorID: 41,
-                    assetID: "/documentation/UIKit/UIView",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UIView",
-                    content: "UIView\nClass of UIKit"
-                ),
-            ]
-        )
-        let recorder = SearchLimitRecorder()
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: LimitAwareStubDocumentationAssetSemanticSearcher(
-                recorder: recorder,
-                results: { limit in
-                    var results = (0..<min(limit, 40)).map { index in
-                        DocumentationAssetSemanticSearchResult(
-                            assetID: "/documentation/Swift/Only\(index)",
-                            score: 1.0 - (Double(index) * 0.001)
-                        )
-                    }
-                    if limit > 40 {
-                        results.append(.init(
-                            assetID: "/documentation/UIKit/UIView",
-                            score: 0.5
-                        ))
-                    }
-                    return results
-                }
-            )
-        )
-        let target = xcodeProcessTarget(processID: 126, xcodeVersion: "26.6")
+        defer {
+            releaseBuild.signal()
+            first.cancel()
+        }
+        try await buildStarted.wait(description: "waiting for first DocumentationSearchAction helper build")
 
-        let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequestWithArguments(
-                id: 126,
-                query: "UIView",
-                frameworks: ["UIKit"],
-                limit: 1
-            ),
-            for: target,
-            timeout: .seconds(1)
-        )
+        let second = Task {
+            try await invoker.invoke(invocation, timeout: .seconds(5))
+        }
+        defer {
+            second.cancel()
+        }
+        try await waitWithTimeout("waiting for second DocumentationSearchAction sdk lookup") {
+            while await processRunner.recordedRequests().filter({ $0.label == "DocumentationSearchAction.sdk" }).count < 2 {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
 
-        let text = try #require(try toolContentText(in: response))
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
-        )
-        let documents = try #require(payload["documents"] as? [[String: Any]])
-        #expect(documents.first?["title"] as? String == "UIView")
-        #expect(await recorder.recordedValues() == [40, 80])
+        releaseBuild.signal()
+        _ = try await first.value
+        _ = try await second.value
+
+        let requests = await processRunner.recordedRequests()
+        #expect(requests.filter { $0.label == "DocumentationSearchAction.bin-path" }.count == 1)
+        #expect(requests.filter { $0.label == "DocumentationSearchAction.build" }.count == 1)
+        #expect(requests.filter { $0.label == "DocumentationSearchAction" }.count == 2)
     }
 
-    @Test func liveDocumentationAssetSearchProviderExpandsWhenDuplicatesShrinkUnfilteredResults()
+    @Test func documentationSearchActionInvokerKeepsSharedHelperPreparationAfterShortWaiterTimeout()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
         try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
             osVersion: "26.2",
-            documentationRelease: 900339
+            documentationRelease: 950001
         )
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-26-5",
-            rows: [
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/UIKit/UIView",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UIView",
-                    content: "UIView\nClass of UIKit"
-                ),
-                (
-                    vectorID: 41,
-                    assetID: "/documentation/UIKit/UILabel",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UILabel",
-                    content: "UILabel\nClass of UIKit"
-                ),
-            ]
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let buildStarted = TestSignal()
+        let releaseBuild = TestSignal()
+        let processRunner = BlockingDocumentationSearchActionProcessRunner(
+            buildStarted: buildStarted,
+            releaseBuild: releaseBuild
         )
-        let recorder = SearchLimitRecorder()
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: LimitAwareStubDocumentationAssetSemanticSearcher(
-                recorder: recorder,
-                results: { limit in
-                    var results = (0..<min(limit, 40)).map { index in
-                        DocumentationAssetSemanticSearchResult(
-                            assetID: "/documentation/UIKit/UIView",
-                            score: 1.0 - (Double(index) * 0.001)
-                        )
-                    }
-                    if limit > 40 {
-                        results.append(.init(
-                            assetID: "/documentation/UIKit/UILabel",
-                            score: 0.5
-                        ))
-                    }
-                    return results
-                }
-            )
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: processRunner
         )
-        let target = xcodeProcessTarget(processID: 129, xcodeVersion: "26.6")
-
-        let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequestWithArguments(
-                id: 129,
-                query: "UIKit views",
-                limit: 2
-            ),
-            for: target,
-            timeout: .seconds(1)
+        let invocation = DocumentationSearchActionInvocation(
+            target: target,
+            asset: asset,
+            query: "NavigationSplitView",
+            frameworks: ["SwiftUI"],
+            limit: nil
         )
 
-        let text = try #require(try toolContentText(in: response))
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
-        )
-        let documents = try #require(payload["documents"] as? [[String: Any]])
-        #expect(documents.map { $0["title"] as? String } == ["UIView", "UILabel"])
-        #expect(await recorder.recordedValues() == [40, 80])
-    }
-
-    @Test func liveDocumentationAssetSearchProviderPreservesSemanticRankOrder()
-        async throws
-    {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
-            osVersion: "26.2",
-            documentationRelease: 900339
-        )
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-26-5",
-            rows: [
-                (
-                    vectorID: 2,
-                    assetID: "/documentation/UIKit/ZZLabel",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "ZZLabel",
-                    content: "ZZLabel\nRelated UIKit label"
-                ),
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/UIKit/UIView",
-                    type: "symbol",
-                    framework: "UIKit",
-                    title: "UIView",
-                    content: "UIView\nClass of UIKit"
-                ),
-            ]
-        )
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: StubDocumentationAssetSemanticSearcher(results: [
-                .init(assetID: "/documentation/UIKit/ZZLabel", score: 0.51),
-                .init(assetID: "/documentation/UIKit/UIView", score: 0.99),
-            ])
-        )
-        let target = xcodeProcessTarget(processID: 127, xcodeVersion: "26.6")
-
-        let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequestWithArguments(
-                id: 127,
-                query: "UIView",
-                limit: 2
-            ),
-            for: target,
-            timeout: .seconds(1)
-        )
-
-        let text = try #require(try toolContentText(in: response))
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
-        )
-        let documents = try #require(payload["documents"] as? [[String: Any]])
-        #expect(documents.map { $0["title"] as? String } == ["ZZLabel", "UIView"])
-    }
-
-    @Test func liveDocumentationAssetSemanticSearcherEnforcesCallerTimeout()
-        async throws
-    {
-        let startedAt = Date()
+        let shortWaiter = Task {
+            try await invoker.invoke(invocation, timeout: .milliseconds(50))
+        }
+        defer {
+            releaseBuild.signal()
+            shortWaiter.cancel()
+        }
+        try await buildStarted.wait(description: "waiting for DocumentationSearchAction helper build")
         await #expect(throws: TimeoutError.self) {
-            try await LiveDocumentationAssetSemanticSearcher.runBlockingSearch(
-                timeout: .milliseconds(10)
-            ) {
-                Thread.sleep(forTimeInterval: 0.2)
-                return [DocumentationAssetSemanticSearchResult]()
+            try await shortWaiter.value
+        }
+
+        let longWaiter = Task {
+            try await invoker.invoke(invocation, timeout: .seconds(5))
+        }
+        defer {
+            longWaiter.cancel()
+        }
+        try await waitWithTimeout("waiting for second DocumentationSearchAction sdk lookup") {
+            while await processRunner.recordedRequests().filter({ $0.label == "DocumentationSearchAction.sdk" }).count < 2 {
+                try await Task.sleep(nanoseconds: 1_000_000)
             }
         }
-        #expect(Date().timeIntervalSince(startedAt) < 0.15)
+
+        releaseBuild.signal()
+        _ = try await longWaiter.value
+
+        let requests = await processRunner.recordedRequests()
+        #expect(requests.filter { $0.label == "DocumentationSearchAction.bin-path" }.count == 1)
+        let buildRequests = requests.filter { $0.label == "DocumentationSearchAction.build" }
+        #expect(buildRequests.count == 1)
+        let buildRequest = try #require(buildRequests.first)
+        let buildTimeout = try #require(buildRequest.timeoutNanoseconds)
+        #expect(buildTimeout > 1_000_000_000)
+        #expect(requests.filter { $0.label == "DocumentationSearchAction" }.count == 1)
     }
 
-    @Test func liveDocumentationAssetSearchProviderUsesLatestInstalledAsset()
+    @Test func documentationSearchActionInvokerMapsProcessTimeoutToRequestTimeout()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
         try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
-            osVersion: "26.2",
-            documentationRelease: 900339
-        )
-        try makeInstalledDocumentationAsset(
-            root: root,
+            root: assetRoot,
             name: "xcode-27",
             xcodeVersion: "27.0",
-            osVersion: "27.0",
+            osVersion: "26.2",
             documentationRelease: 950001
         )
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-27",
-            rows: [
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/Swift/TranscriptErrorHandlingPolicy",
-                    type: "symbol",
-                    framework: "Swift",
-                    title: "TranscriptErrorHandlingPolicy",
-                    content: "TranscriptErrorHandlingPolicy"
-                ),
-            ]
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: DocumentationSearchActionTimeoutProcessRunner()
         )
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: StubDocumentationAssetSemanticSearcher(results: [
-                .init(assetID: "/documentation/Swift/TranscriptErrorHandlingPolicy", score: 0.75),
-            ])
-        )
-        let target = xcodeProcessTarget(processID: 128, xcodeVersion: "26.6")
 
+        await #expect(throws: TimeoutError.self) {
+            try await invoker.invoke(
+                DocumentationSearchActionInvocation(
+                    target: target,
+                    asset: asset,
+                    query: "NavigationSplitView",
+                    frameworks: ["SwiftUI"],
+                    limit: nil
+                ),
+                timeout: .seconds(1)
+            )
+        }
+    }
+
+    @Test func documentationSearchActionProviderUsesStandaloneResolverOnlyWithoutRunningXcode()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let resolvedTarget = xcodeProcessTarget(processID: 777, xcodeVersion: "27.0")
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder
+            ),
+            defaultTargetResolver: { resolvedTarget }
+        )
+
+        #expect(await provider.descriptor(for: DocumentationSearchActionProvider.standaloneTarget) != nil)
         let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 128, query: "TranscriptErrorHandlingPolicy"),
-            for: target,
+            requestData: makeDocumentationSearchRequest(id: 126, query: "UIView"),
+            for: DocumentationSearchActionProvider.standaloneTarget,
             timeout: .seconds(1)
         )
 
-        let text = try #require(try toolContentText(in: response))
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
-        )
-        #expect(Set(payload.keys) == ["documents"])
-        let documents = try #require(payload["documents"] as? [[String: Any]])
-        #expect(documents.first?["title"] as? String == "TranscriptErrorHandlingPolicy")
+        #expect(try responseID(in: response) == 126)
+        let invocation = try #require(await recorder.recordedValues().first)
+        #expect(invocation.target == resolvedTarget)
     }
 
-    @Test func liveDocumentationAssetSearchProviderRefreshesLatestAssetWhenAssetRootChanges()
+    @Test func documentationSearchActionProviderIsUnavailableWithoutAssetOrInvoker()
+        async throws
+    {
+        let emptyRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: emptyRoot) }
+        try FileManager.default.createDirectory(at: emptyRoot, withIntermediateDirectories: true)
+        let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
+        let noAssetProvider = DocumentationSearchActionProvider(
+            assetRoot: emptyRoot,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: [])
+            )
+        )
+        #expect(await noAssetProvider.descriptor(for: target) == nil)
+
+        let assetRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: assetRoot) }
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        let unavailableInvokerProvider = DocumentationSearchActionProvider(
+            assetRoot: assetRoot,
+            invoker: StubDocumentationSearchActionInvoker(
+                available: false,
+                output: DocumentationSearchActionOutput(documents: [])
+            )
+        )
+
+        #expect(await unavailableInvokerProvider.descriptor(for: target) == nil)
+    }
+
+    @Test func documentationSearchActionProviderHonorsSearchTimeout()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -3857,139 +4317,19 @@ struct DocumentationProviderTests {
             osVersion: "26.2",
             documentationRelease: 900339
         )
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-26-5",
-            rows: [
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/Old/API",
-                    type: "symbol",
-                    framework: "OldFramework",
-                    title: "OldAPI",
-                    content: "OldAPI"
-                ),
-            ]
-        )
-        let provider = LiveDocumentationAssetSearchProvider(
+        let provider = DocumentationSearchActionProvider(
             assetRoot: root,
-            semanticSearcher: AssetAwareStubDocumentationAssetSemanticSearcher { asset in
-                if asset.xcodeVersion == "27.0" {
-                    return [.init(assetID: "/documentation/New/API", score: 0.91)]
-                }
-                return [.init(assetID: "/documentation/Old/API", score: 0.81)]
-            }
-        )
-        let target = xcodeProcessTarget(processID: 132, xcodeVersion: "26.6")
-
-        let firstResponse = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 132, query: "API"),
-            for: target,
-            timeout: .seconds(1)
-        )
-        let firstText = try #require(try toolContentText(in: firstResponse))
-        let firstPayload = try #require(
-            JSONSerialization.jsonObject(with: Data(firstText.utf8), options: []) as? [String: Any]
-        )
-        let firstDocuments = try #require(firstPayload["documents"] as? [[String: Any]])
-        #expect(firstDocuments.first?["title"] as? String == "OldAPI")
-
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-27",
-            xcodeVersion: "27.0",
-            osVersion: "27.0",
-            documentationRelease: 950001
-        )
-        try addInstalledDocumentationAssetRows(
-            root: root,
-            name: "xcode-27",
-            rows: [
-                (
-                    vectorID: 1,
-                    assetID: "/documentation/New/API",
-                    type: "symbol",
-                    framework: "NewFramework",
-                    title: "NewAPI",
-                    content: "NewAPI"
-                ),
-            ]
-        )
-        try FileManager.default.setAttributes(
-            [.modificationDate: Date().addingTimeInterval(10)],
-            ofItemAtPath: root.path
-        )
-
-        let secondResponse = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 133, query: "API"),
-            for: target,
-            timeout: .seconds(1)
-        )
-        let secondText = try #require(try toolContentText(in: secondResponse))
-        let secondPayload = try #require(
-            JSONSerialization.jsonObject(with: Data(secondText.utf8), options: []) as? [String: Any]
-        )
-        let documents = try #require(secondPayload["documents"] as? [[String: Any]])
-        #expect(documents.first?["title"] as? String == "NewAPI")
-    }
-
-    @Test func liveDocumentationAssetSearchProviderTreatsEmptySQLiteOutputAsNoResults()
-        async throws
-    {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
-            osVersion: "26.2",
-            documentationRelease: 900339
-        )
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: StubDocumentationAssetSemanticSearcher(results: [
-                .init(assetID: "/documentation/NoMatch", score: 0.1),
-            ])
-        )
-        let target = xcodeProcessTarget(processID: 127, xcodeVersion: "26.6")
-
-        let response = try await provider.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 127, query: "NoMatch"),
-            for: target,
-            timeout: .seconds(1)
-        )
-
-        let maybeText = try toolContentText(in: response)
-        let text = try #require(maybeText)
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: Data(text.utf8), options: []) as? [String: Any]
-        )
-        let documents = try #require(payload["documents"] as? [[String: Any]])
-        #expect(documents.isEmpty)
-        #expect(Set(payload.keys) == ["documents"])
-    }
-
-    @Test func liveDocumentationAssetSearchProviderHonorsSearchTimeout()
-        async throws
-    {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try makeInstalledDocumentationAsset(
-            root: root,
-            name: "xcode-26-5",
-            xcodeVersion: "26.5",
-            osVersion: "26.2",
-            documentationRelease: 900339
-        )
-        let provider = LiveDocumentationAssetSearchProvider(
-            assetRoot: root,
-            semanticSearcher: StubDocumentationAssetSemanticSearcher(results: [
-                .init(assetID: "/documentation/UIKit/UIView", score: 0.92),
-            ])
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: [
+                    .init(
+                        title: "UIView",
+                        contents: "UIView",
+                        uri: "/documentation/UIKit/UIView",
+                        score: 0.92,
+                        kind: "symbol"
+                    ),
+                ])
+            )
         )
         let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
 

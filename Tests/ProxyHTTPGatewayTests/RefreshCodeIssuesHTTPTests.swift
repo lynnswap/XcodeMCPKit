@@ -2240,7 +2240,7 @@ extension HTTPHandlerTests {
             )
         }
 
-        try await clock.sleep(untilSuspendedBy: 1)
+        try await waitForSuspendedSleepers(on: clock)
         clock.advance(by: .milliseconds(50))
 
         let result = await requestTask.value

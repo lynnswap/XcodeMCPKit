@@ -1,8 +1,7 @@
+import CryptoKit
 import Foundation
 import Logging
 import NIO
-import SQLite3
-import XcodeMCPDocumentationSearchPrivate
 import XcodeMCPKit
 
 enum DocumentationProvider {}
@@ -111,6 +110,12 @@ protocol DocumentationSearchProviding: Sendable {
     ) async throws -> Data
 }
 
+enum DocumentationSearchActionPolicy: Sendable, Equatable {
+    case fallbackOnly
+    case preferWhenMultipleRunningAndDefaultXcodeIsOlder
+    case preferAlways
+}
+
 struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
     init() {}
 
@@ -118,6 +123,93 @@ struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairi
         for _: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         .skipped("disabled")
+    }
+}
+
+struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
+    private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
+    private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
+
+    private let assetRoot: URL
+    private let readConfigURLOverride: @Sendable () -> String?
+    private let writeConfigURLOverride: @Sendable (String) -> Bool
+
+    init(
+        assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
+        readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
+        writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
+    ) {
+        self.assetRoot = assetRoot
+        self.readConfigURLOverride = readConfigURLOverride
+        self.writeConfigURLOverride = writeConfigURLOverride
+    }
+
+    func repairDocumentationSearch(
+        for _: XcodeProcessTarget
+    ) async -> DocumentationSearchServiceRepairResult {
+        let scan: DocumentationSearchAssetScan
+        do {
+            scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        } catch {
+            return .failed("asset_scan_failed: \(error)")
+        }
+        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
+            return .skipped(scan.noAssetReason)
+        }
+
+        let configURLString = asset.configURL.path
+        let currentConfigURLString = readConfigURLOverride()
+        guard currentConfigURLString != configURLString else {
+            return .repaired(
+                Self.report(for: asset, configURLString: configURLString, changedDefault: false)
+            )
+        }
+
+        guard writeConfigURLOverride(configURLString) else {
+            return .failed("defaults_write_failed")
+        }
+        return .repaired(
+            Self.report(for: asset, configURLString: configURLString, changedDefault: true)
+        )
+    }
+
+    private static func report(
+        for asset: DocumentationSearchInstalledAsset,
+        configURLString: String,
+        changedDefault: Bool
+    ) -> DocumentationSearchServiceRepairReport {
+        DocumentationSearchServiceRepairReport(
+            configURL: configURLString,
+            xcodeVersion: asset.xcodeVersion,
+            osVersion: asset.osVersion,
+            documentationRelease: asset.documentationRelease,
+            changedDefault: changedDefault
+        )
+    }
+
+    private static func currentConfigURLOverride() -> String? {
+        guard let value = CFPreferencesCopyAppValue(
+            configURLDefaultsKey as CFString,
+            xcodeDefaultsDomain as CFString
+        ) else {
+            return nil
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let url = value as? URL {
+            return url.absoluteString
+        }
+        return nil
+    }
+
+    private static func writeConfigURLOverride(_ value: String) -> Bool {
+        CFPreferencesSetAppValue(
+            configURLDefaultsKey as CFString,
+            value as CFString,
+            xcodeDefaultsDomain as CFString
+        )
+        return CFPreferencesAppSynchronize(xcodeDefaultsDomain as CFString)
     }
 }
 
@@ -769,93 +861,6 @@ enum DocumentationSearchAssetLocator {
     }
 }
 
-struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
-    private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
-    private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
-
-    private let assetRoot: URL
-    private let readConfigURLOverride: @Sendable () -> String?
-    private let writeConfigURLOverride: @Sendable (String) -> Bool
-
-    init(
-        assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
-        readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
-        writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
-    ) {
-        self.assetRoot = assetRoot
-        self.readConfigURLOverride = readConfigURLOverride
-        self.writeConfigURLOverride = writeConfigURLOverride
-    }
-
-    func repairDocumentationSearch(
-        for target: XcodeProcessTarget
-    ) async -> DocumentationSearchServiceRepairResult {
-        let scan: DocumentationSearchAssetScan
-        do {
-            scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
-        } catch {
-            return .failed("asset_scan_failed: \(error)")
-        }
-        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
-            return .skipped(scan.noAssetReason)
-        }
-
-        let configURLString = asset.configURL.path
-        let currentConfigURLString = readConfigURLOverride()
-        guard currentConfigURLString != configURLString else {
-            return .repaired(
-                Self.report(for: asset, configURLString: configURLString, changedDefault: false)
-            )
-        }
-
-        guard writeConfigURLOverride(configURLString) else {
-            return .failed("defaults_write_failed")
-        }
-        return .repaired(
-            Self.report(for: asset, configURLString: configURLString, changedDefault: true)
-        )
-    }
-
-    private static func report(
-        for asset: DocumentationSearchInstalledAsset,
-        configURLString: String,
-        changedDefault: Bool
-    ) -> DocumentationSearchServiceRepairReport {
-        DocumentationSearchServiceRepairReport(
-            configURL: configURLString,
-            xcodeVersion: asset.xcodeVersion,
-            osVersion: asset.osVersion,
-            documentationRelease: asset.documentationRelease,
-            changedDefault: changedDefault
-        )
-    }
-
-    private static func currentConfigURLOverride() -> String? {
-        guard let value = CFPreferencesCopyAppValue(
-            configURLDefaultsKey as CFString,
-            xcodeDefaultsDomain as CFString
-        ) else {
-            return nil
-        }
-        if let string = value as? String {
-            return string
-        }
-        if let url = value as? URL {
-            return url.absoluteString
-        }
-        return nil
-    }
-
-    private static func writeConfigURLOverride(_ value: String) -> Bool {
-        CFPreferencesSetAppValue(
-            configURLDefaultsKey as CFString,
-            value as CFString,
-            xcodeDefaultsDomain as CFString
-        )
-        return CFPreferencesAppSynchronize(xcodeDefaultsDomain as CFString)
-    }
-}
-
 private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable {
     struct Result: Sendable {
         let repairResult: DocumentationSearchServiceRepairResult?
@@ -936,186 +941,727 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
     }
 }
 
-struct DocumentationAssetSemanticSearchResult: Sendable, Decodable, Equatable {
-    let assetID: String
-    let score: Double
-
-    private enum CodingKeys: String, CodingKey {
-        case assetID = "asset_id"
-        case score
+struct DocumentationSearchActionOutput: Sendable, Codable, Equatable {
+    struct Document: Sendable, Codable, Equatable {
+        let title: String
+        let contents: String
+        let uri: String
+        let score: Double
+        let kind: String
     }
+
+    let documents: [Document]
 }
 
-private final class DocumentationSemanticSearchTimeoutWaiter<T: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<T, Error>?
-    private var result: Result<T, Error>?
-
-    func setContinuation(_ continuation: CheckedContinuation<T, Error>) {
-        let resultToResume: Result<T, Error>?
-        lock.lock()
-        if let result {
-            resultToResume = result
-        } else {
-            self.continuation = continuation
-            resultToResume = nil
-        }
-        lock.unlock()
-
-        if let resultToResume {
-            continuation.resume(with: resultToResume)
-        }
-    }
-
-    func resume(_ result: Result<T, Error>) {
-        let continuationToResume: CheckedContinuation<T, Error>?
-        lock.lock()
-        guard self.result == nil else {
-            lock.unlock()
-            return
-        }
-        self.result = result
-        continuationToResume = continuation
-        continuation = nil
-        lock.unlock()
-
-        continuationToResume?.resume(with: result)
-    }
+struct DocumentationSearchActionInvocation: Sendable, Equatable {
+    let target: XcodeProcessTarget
+    let asset: DocumentationSearchInstalledAsset
+    let query: String
+    let frameworks: [String]
+    let limit: Int?
 }
 
-protocol DocumentationAssetSemanticSearching: Sendable {
-    func isAvailable() -> Bool
-    func search(
-        asset: DocumentationSearchInstalledAsset,
-        query: String,
-        limit: Int,
+protocol DocumentationSearchActionInvoking: Sendable {
+    func isAvailable(for target: XcodeProcessTarget) async -> Bool
+    func invoke(
+        _ invocation: DocumentationSearchActionInvocation,
         timeout: TimeAmount?
-    ) async throws -> [DocumentationAssetSemanticSearchResult]
+    ) async throws -> DocumentationSearchActionOutput
 }
 
-struct LiveDocumentationAssetSemanticSearcher: DocumentationAssetSemanticSearching {
-    init() {}
+actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
+    private static let helperProductName = "documentation-search-action-helper"
+    private static let defaultMaxResults = 20
+    private static let defaultScoreThreshold = 0.4
+    private static let helperPreparationTimeout: TimeAmount = .seconds(120)
 
-    func isAvailable() -> Bool {
-        XCDocSemanticSearchRuntimeAvailable() != 0
+    private let cacheRoot: URL
+    private let processRunner: any ProcessRunning
+    private var preparedHelperURLsByPackageRoot: [URL: URL] = [:]
+    private var helperPreparationsByPackageRoot: [URL: HelperPreparation] = [:]
+
+    init(
+        cacheRoot: URL = URL.cachesDirectory
+            .appendingPathComponent("XcodeMCPKit/documentation-search-action", isDirectory: true),
+        processRunner: any ProcessRunning = ProcessRunner()
+    ) {
+        self.cacheRoot = cacheRoot
+        self.processRunner = processRunner
     }
 
-    func search(
-        asset: DocumentationSearchInstalledAsset,
-        query: String,
-        limit: Int,
+    func isAvailable(for target: XcodeProcessTarget) async -> Bool {
+        xcodeRuntime(for: target) != nil
+    }
+
+    func invoke(
+        _ invocation: DocumentationSearchActionInvocation,
         timeout: TimeAmount?
-    ) async throws -> [DocumentationAssetSemanticSearchResult] {
-        let timeoutSeconds: Double
-        if let timeout, timeout.nanoseconds > 0 {
-            timeoutSeconds = Double(timeout.nanoseconds) / 1_000_000_000.0
-        } else {
-            timeoutSeconds = 30
-        }
-        let databaseDirectoryPath = asset.databaseDirectoryURL.path
-        let embeddingModelName = asset.embeddingModelName
-        return try await Self.runBlockingSearch(timeout: timeout) {
-            let json = try unsafe Self.copyResultJSON(
-                databaseDirectoryPath: databaseDirectoryPath,
-                embeddingModelName: embeddingModelName,
-                query: query,
-                limit: limit,
-                timeoutSeconds: timeoutSeconds
-            )
-            guard let data = json.data(using: .utf8) else {
-                return []
-            }
-            return try JSONDecoder().decode(
-                [DocumentationAssetSemanticSearchResult].self,
-                from: data
-            )
-        }
-    }
-
-    static func runBlockingSearch<T: Sendable>(
-        timeout: TimeAmount?,
-        operation: @escaping @Sendable () throws -> T
-    ) async throws -> T {
-        guard timeout?.nanoseconds != 0 else {
+    ) async throws -> DocumentationSearchActionOutput {
+        guard timeout.map({ $0.nanoseconds > 0 }) ?? true else {
             throw TimeoutError()
         }
-        let waiter = DocumentationSemanticSearchTimeoutWaiter<T>()
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                waiter.resume(.success(try operation()))
-            } catch {
-                waiter.resume(.failure(error))
-            }
+        guard let runtime = xcodeRuntime(for: invocation.target) else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-
-        if let timeout, timeout.nanoseconds > 0 {
-            DispatchQueue.global().asyncAfter(
-                deadline: .now() + .nanoseconds(Int(clamping: timeout.nanoseconds))
-            ) {
-                waiter.resume(.failure(TimeoutError()))
-            }
+        let deadline = Deadline.fromNow(timeout)
+        let sdkPath = try await macOSSdkPath(for: runtime, deadline: deadline)
+        let helper = try await helperURL(for: runtime, sdkPath: sdkPath, deadline: deadline)
+        let request = HelperRequest(
+            query: invocation.query,
+            frameworks: invocation.frameworks.isEmpty ? nil : invocation.frameworks,
+            configURL: invocation.asset.configURL.path,
+            maxResults: invocation.limit ?? Self.defaultMaxResults,
+            scoreThreshold: Self.defaultScoreThreshold
+        )
+        let requestData = try JSONEncoder().encode(request)
+        guard let input = String(data: requestData, encoding: .utf8) else {
+            throw ControlPlane.Error.invalidResponse("invalid DocumentationSearch helper request")
         }
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                waiter.setContinuation(continuation)
-            }
-        } onCancel: {
-            waiter.resume(.failure(CancellationError()))
+        let output = try await runHelperSubprocess(ProcessRequest(
+            label: "DocumentationSearchAction",
+            executablePath: "/usr/bin/env",
+            arguments: helperRuntimeEnvironmentArguments(for: runtime) + [helper.path],
+            input: input,
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
+        ))
+        guard output.terminationStatus == 0 else {
+            throw ControlPlane.Error.invalidResponse(
+                "DocumentationSearchAction helper failed: \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        guard let data = output.stdout.data(using: .utf8) else {
+            throw ControlPlane.Error.invalidResponse("invalid DocumentationSearchAction helper output")
+        }
+        do {
+            return try JSONDecoder().decode(DocumentationSearchActionOutput.self, from: data)
+        } catch {
+            throw ControlPlane.Error.invalidResponse(
+                "DocumentationSearchAction helper returned invalid JSON: \(error)"
+            )
         }
     }
 
-    @unsafe private static func copyResultJSON(
-        databaseDirectoryPath: String,
-        embeddingModelName: String,
-        query: String,
-        limit: Int,
-        timeoutSeconds: Double
-    ) throws -> String {
-        var errorPointer: UnsafeMutablePointer<CChar>?
-        let resultPointer = unsafe databaseDirectoryPath.withCString { databasePathPointer in
-            unsafe embeddingModelName.withCString { embeddingModelNamePointer in
-                unsafe query.withCString { queryPointer in
-                    unsafe XCDocSemanticSearchCopyResultJSON(
-                        databasePathPointer,
-                        embeddingModelNamePointer,
-                        queryPointer,
-                        Int32(limit),
-                        timeoutSeconds,
-                        &errorPointer
-                    )
-                }
+    private struct HelperRequest: Sendable, Codable {
+        let query: String
+        let frameworks: [String]?
+        let configURL: String
+        let maxResults: Int?
+        let scoreThreshold: Double
+    }
+
+    private struct XcodeRuntime: Sendable {
+        let appURL: URL
+        let developerDir: String
+        let swiftURL: URL
+        let frameworksURL: URL
+        let sharedFrameworksURL: URL
+        let plugInsURL: URL
+        let platformDeveloperLibraryURL: URL
+        let version: String
+        let buildVersion: String
+    }
+
+    private struct HostTarget: Sendable {
+        let triple: String
+        let swiftInterfaceName: String
+    }
+
+    private struct HelperPreparation {
+        let id: UUID
+        let task: Task<URL, Error>
+    }
+
+    private static let helperMacOSDeploymentTarget = "15.4"
+
+    private func xcodeRuntime(for target: XcodeProcessTarget) -> XcodeRuntime? {
+        let appURL = URL(fileURLWithPath: target.appPath)
+        let developerDir = appURL.appendingPathComponent("Contents/Developer").path
+        let swiftURL = appURL
+            .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
+        let frameworksURL = appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        let sharedFrameworksURL = appURL.appendingPathComponent("Contents/SharedFrameworks", isDirectory: true)
+        let plugInsURL = appURL.appendingPathComponent("Contents/PlugIns", isDirectory: true)
+        let platformDeveloperLibraryURL = appURL
+            .appendingPathComponent("Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib", isDirectory: true)
+        let dvtFrameworkURL = sharedFrameworksURL
+            .appendingPathComponent("DVTFoundation.framework/DVTFoundation")
+        let chatFrameworkURL = plugInsURL
+            .appendingPathComponent("IDEIntelligenceChat.framework/IDEIntelligenceChat")
+        guard FileManager.default.isExecutableFile(atPath: swiftURL.path),
+              FileManager.default.isReadableFile(atPath: frameworksURL.path),
+              FileManager.default.isReadableFile(atPath: dvtFrameworkURL.path),
+              FileManager.default.isReadableFile(atPath: chatFrameworkURL.path),
+              FileManager.default.isReadableFile(atPath: platformDeveloperLibraryURL.path) else {
+            return nil
+        }
+        guard (try? hostTarget()) != nil else {
+            return nil
+        }
+        let bundle = Bundle(url: appURL)
+        return XcodeRuntime(
+            appURL: appURL,
+            developerDir: developerDir,
+            swiftURL: swiftURL,
+            frameworksURL: frameworksURL,
+            sharedFrameworksURL: sharedFrameworksURL,
+            plugInsURL: plugInsURL,
+            platformDeveloperLibraryURL: platformDeveloperLibraryURL,
+            version: bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+                ?? target.xcodeVersion,
+            buildVersion: bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        )
+    }
+
+    private func macOSSdkPath(
+        for runtime: XcodeRuntime,
+        deadline: Deadline?
+    ) async throws -> String {
+        let output = try await runHelperSubprocess(ProcessRequest(
+            label: "DocumentationSearchAction.sdk",
+            executablePath: "/usr/bin/env",
+            arguments: [
+                "DEVELOPER_DIR=\(runtime.developerDir)",
+                "/usr/bin/xcrun",
+                "--sdk",
+                "macosx",
+                "--show-sdk-path",
+            ],
+            input: nil,
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
+        ))
+        guard output.terminationStatus == 0 else {
+            throw ControlPlane.Error.invalidResponse(
+                "xcrun --show-sdk-path failed: \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        let sdkPath = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard sdkPath.isEmpty == false else {
+            throw ControlPlane.Error.invalidResponse("xcrun --show-sdk-path returned empty output")
+        }
+        return sdkPath
+    }
+
+    private func helperURL(
+        for runtime: XcodeRuntime,
+        sdkPath: String,
+        deadline: Deadline?
+    ) async throws -> URL {
+        let hostTarget = try hostTarget()
+        let sourceFingerprint = helperSourceFingerprint(hostTarget: hostTarget)
+        let packageRoot = cacheRoot.appendingPathComponent(
+            runtimePackageDirectoryName(
+                runtime: runtime,
+                sdkPath: sdkPath,
+                hostTarget: hostTarget,
+                sourceFingerprint: sourceFingerprint
+            ),
+            isDirectory: true
+        )
+        if let helperURL = preparedHelperURLsByPackageRoot[packageRoot],
+           FileManager.default.isExecutableFile(atPath: helperURL.path) {
+            return helperURL
+        }
+        if let preparation = helperPreparationsByPackageRoot[packageRoot] {
+            return try await awaitHelperPreparation(preparation.task, deadline: deadline)
+        }
+        let preparationID = UUID()
+        let preparationDeadline = Deadline.fromNow(Self.helperPreparationTimeout)
+        let preparationTask = Task { [self] in
+            do {
+                let helperURL = try await prepareHelperURL(
+                    runtime: runtime,
+                    packageRoot: packageRoot,
+                    hostTarget: hostTarget,
+                    sdkPath: sdkPath,
+                    deadline: preparationDeadline
+                )
+                finishHelperPreparation(packageRoot: packageRoot, id: preparationID, helperURL: helperURL)
+                return helperURL
+            } catch {
+                finishHelperPreparation(packageRoot: packageRoot, id: preparationID, helperURL: nil)
+                throw error
+            }
+        }
+        helperPreparationsByPackageRoot[packageRoot] = HelperPreparation(
+            id: preparationID,
+            task: preparationTask
+        )
+        return try await awaitHelperPreparation(preparationTask, deadline: deadline)
+    }
+
+    private func prepareHelperURL(
+        runtime: XcodeRuntime,
+        packageRoot: URL,
+        hostTarget: HostTarget,
+        sdkPath: String,
+        deadline: Deadline?
+    ) async throws -> URL {
+        let moduleRoot = packageRoot.appendingPathComponent("GeneratedModules", isDirectory: true)
+        let sourceURL = packageRoot
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("DocumentationSearchActionHelper", isDirectory: true)
+            .appendingPathComponent("main.swift")
+        try writeIfChanged(Self.helperPackageManifest, to: packageRoot.appendingPathComponent("Package.swift"))
+        try writeIfChanged(
+            dvtInterface(target: hostTarget.triple),
+            to: moduleRoot
+                .appendingPathComponent("DVTFoundation.swiftmodule", isDirectory: true)
+                .appendingPathComponent(hostTarget.swiftInterfaceName)
+        )
+        try writeIfChanged(
+            chatInterface(target: hostTarget.triple),
+            to: moduleRoot
+                .appendingPathComponent("IDEIntelligenceChat.swiftmodule", isDirectory: true)
+                .appendingPathComponent(hostTarget.swiftInterfaceName)
+        )
+        try writeIfChanged(Self.helperSource, to: sourceURL)
+        let productsDirectoryURL = try await helperProductsDirectoryURL(
+            runtime: runtime,
+            packageRoot: packageRoot,
+            moduleRoot: moduleRoot,
+            sdkPath: sdkPath,
+            hostTarget: hostTarget,
+            deadline: deadline
+        )
+        let helperURL = productsDirectoryURL.appendingPathComponent(Self.helperProductName)
+        let output = try await runHelperSubprocess(ProcessRequest(
+            label: "DocumentationSearchAction.build",
+            executablePath: "/usr/bin/env",
+            arguments: helperBuildArguments(
+                runtime: runtime,
+                packageRoot: packageRoot,
+                moduleRoot: moduleRoot,
+                sdkPath: sdkPath,
+                hostTarget: hostTarget,
+                mode: .build
+            ),
+            input: nil,
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
+        ))
+        guard output.terminationStatus == 0 else {
+            throw ControlPlane.Error.invalidResponse(
+                "DocumentationSearchAction helper build failed: \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            throw ControlPlane.Error.invalidResponse("DocumentationSearchAction helper build did not produce executable")
+        }
+        return helperURL
+    }
+
+    private func finishHelperPreparation(packageRoot: URL, id: UUID, helperURL: URL?) {
+        guard helperPreparationsByPackageRoot[packageRoot]?.id == id else {
+            return
+        }
+        helperPreparationsByPackageRoot[packageRoot] = nil
+        if let helperURL {
+            preparedHelperURLsByPackageRoot[packageRoot] = helperURL
+        }
+    }
+
+    private func awaitHelperPreparation(
+        _ task: Task<URL, Error>,
+        deadline: Deadline?
+    ) async throws -> URL {
+        guard let timeoutNanoseconds = try subprocessTimeoutNanoseconds(until: deadline) else {
+            return try await task.value
+        }
+        let waiter = DocumentationSearchActionPreparationWaiter()
+        Task {
+            do {
+                waiter.complete(.success(try await task.value))
+            } catch {
+                waiter.complete(.failure(error))
+            }
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(timeoutNanoseconds))
+                waiter.complete(.failure(TimeoutError()))
+            } catch {
+                return
             }
         }
         defer {
-            if let errorPointer = unsafe errorPointer {
-                unsafe XCDocSemanticSearchFree(errorPointer)
-            }
-            if let resultPointer = unsafe resultPointer {
-                unsafe XCDocSemanticSearchFree(resultPointer)
-            }
+            timeoutTask.cancel()
         }
-        guard let resultPointer = unsafe resultPointer else {
-            let message: String
-            if let errorPointer = unsafe errorPointer {
-                message = unsafe String(cString: errorPointer)
-            } else {
-                message = "private semantic DocumentationSearch failed"
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiter.install(continuation)
             }
-            throw ControlPlane.Error.invalidResponse(message)
+        } onCancel: {
+            timeoutTask.cancel()
+            waiter.complete(.failure(CancellationError()))
         }
-        return unsafe String(cString: resultPointer)
     }
-}
 
-private struct DocumentationAssetSearchRow: Sendable, Equatable {
-    let assetID: String?
-    let type: String?
-    let framework: String?
-    let title: String?
-    let content: String?
-    let score: Double?
+    private func helperProductsDirectoryURL(
+        runtime: XcodeRuntime,
+        packageRoot: URL,
+        moduleRoot: URL,
+        sdkPath: String,
+        hostTarget: HostTarget,
+        deadline: Deadline?
+    ) async throws -> URL {
+        let output = try await runHelperSubprocess(ProcessRequest(
+            label: "DocumentationSearchAction.bin-path",
+            executablePath: "/usr/bin/env",
+            arguments: helperBuildArguments(
+                runtime: runtime,
+                packageRoot: packageRoot,
+                moduleRoot: moduleRoot,
+                sdkPath: sdkPath,
+                hostTarget: hostTarget,
+                mode: .showBinPath
+            ),
+            input: nil,
+            timeoutNanoseconds: try subprocessTimeoutNanoseconds(until: deadline)
+        ))
+        guard output.terminationStatus == 0 else {
+            throw ControlPlane.Error.invalidResponse(
+                "DocumentationSearchAction helper bin path resolution failed: \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        let productsDirectoryPath = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard productsDirectoryPath.isEmpty == false else {
+            throw ControlPlane.Error.invalidResponse("DocumentationSearchAction helper bin path resolution returned empty output")
+        }
+        return URL(fileURLWithPath: productsDirectoryPath, isDirectory: true)
+    }
+
+    private enum HelperBuildMode {
+        case build
+        case showBinPath
+    }
+
+    private func helperBuildArguments(
+        runtime: XcodeRuntime,
+        packageRoot: URL,
+        moduleRoot: URL,
+        sdkPath: String,
+        hostTarget: HostTarget,
+        mode: HelperBuildMode
+    ) -> [String] {
+        var arguments = [
+            "DEVELOPER_DIR=\(runtime.developerDir)",
+            runtime.swiftURL.path,
+            "build",
+        ]
+        if mode == .showBinPath {
+            arguments.append("--show-bin-path")
+        }
+        arguments += [
+            "--package-path",
+            packageRoot.path,
+            "--scratch-path",
+            packageRoot.appendingPathComponent(".build", isDirectory: true).path,
+            "--configuration",
+            "release",
+        ]
+        if mode == .build {
+            arguments += [
+                "--product",
+                Self.helperProductName,
+            ]
+        }
+        arguments += [
+            "--triple",
+            hostTarget.triple,
+            "--sdk",
+            sdkPath,
+            "--disable-sandbox",
+            "-Xswiftc",
+            "-I",
+            "-Xswiftc",
+            moduleRoot.path,
+            "-Xswiftc",
+            "-F",
+            "-Xswiftc",
+            runtime.frameworksURL.path,
+            "-Xswiftc",
+            "-F",
+            "-Xswiftc",
+            runtime.sharedFrameworksURL.path,
+            "-Xswiftc",
+            "-F",
+            "-Xswiftc",
+            runtime.plugInsURL.path,
+            "-Xlinker",
+            "-F",
+            "-Xlinker",
+            runtime.frameworksURL.path,
+            "-Xlinker",
+            "-F",
+            "-Xlinker",
+            runtime.sharedFrameworksURL.path,
+            "-Xlinker",
+            "-F",
+            "-Xlinker",
+            runtime.plugInsURL.path,
+            "-Xlinker",
+            "-framework",
+            "-Xlinker",
+            "DVTFoundation",
+            "-Xlinker",
+            "-framework",
+            "-Xlinker",
+            "IDEIntelligenceChat",
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.appURL.appendingPathComponent("Contents").path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.frameworksURL.path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.sharedFrameworksURL.path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.plugInsURL.path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.platformDeveloperLibraryURL.path,
+        ]
+        return arguments
+    }
+
+    private func helperRuntimeEnvironmentArguments(for runtime: XcodeRuntime) -> [String] {
+        let frameworkPath = [
+            runtime.frameworksURL.path,
+            runtime.sharedFrameworksURL.path,
+            runtime.plugInsURL.path,
+        ].joined(separator: ":")
+        let libraryPath = [
+            runtime.sharedFrameworksURL.path,
+            runtime.platformDeveloperLibraryURL.path,
+        ].joined(separator: ":")
+        return [
+            "DEVELOPER_DIR=\(runtime.developerDir)",
+            "DYLD_FRAMEWORK_PATH=\(frameworkPath)",
+            "DYLD_LIBRARY_PATH=\(libraryPath)",
+            "DYLD_FALLBACK_LIBRARY_PATH=",
+            "DYLD_FALLBACK_FRAMEWORK_PATH=",
+        ]
+    }
+
+    private func hostTarget() throws -> HostTarget {
+        #if arch(arm64)
+        return HostTarget(
+            triple: "arm64-apple-macos\(Self.helperMacOSDeploymentTarget)",
+            swiftInterfaceName: "arm64-apple-macos.swiftinterface"
+        )
+        #else
+        throw ControlPlane.Error.invalidResponse("unsupported DocumentationSearchAction host architecture")
+        #endif
+    }
+
+    private func runtimePackageDirectoryName(
+        runtime: XcodeRuntime,
+        sdkPath: String,
+        hostTarget: HostTarget,
+        sourceFingerprint: String
+    ) -> String {
+        // Separate SwiftPM build artifacts by selected Xcode runtime. SwiftPM owns rebuild decisions inside this directory.
+        let input = [
+            runtime.appURL.path,
+            runtime.swiftURL.path,
+            runtime.version,
+            runtime.buildVersion,
+            sdkPath,
+            hostTarget.triple,
+            sourceFingerprint,
+        ].joined(separator: "\n")
+        let runtimeFingerprint = shortSHA256Hex(for: input)
+        return "runtime-\(runtimeFingerprint)-sources-\(sourceFingerprint)"
+    }
+
+    private func helperSourceFingerprint(hostTarget: HostTarget) -> String {
+        shortSHA256Hex(for: [
+            Self.helperPackageManifest,
+            dvtInterface(target: hostTarget.triple),
+            chatInterface(target: hostTarget.triple),
+            Self.helperSource,
+        ].joined(separator: "\n"))
+    }
+
+    private func shortSHA256Hex(for input: String) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        let hexDigits = Array("0123456789abcdef".utf8)
+        let hexBytes = digest.flatMap { byte in
+            [
+                hexDigits[Int(byte) >> 4],
+                hexDigits[Int(byte) & 0x0f],
+            ]
+        }
+        return String(decoding: hexBytes.prefix(16), as: UTF8.self)
+    }
+
+    private func subprocessTimeoutNanoseconds(until deadline: Deadline?) throws -> Int64? {
+        guard let deadline else {
+            return nil
+        }
+        let remaining = deadline.remaining()
+        guard remaining.nanoseconds > 0 else {
+            throw TimeoutError()
+        }
+        return remaining.nanoseconds
+    }
+
+    private func runHelperSubprocess(_ request: ProcessRequest) async throws -> ProcessOutput {
+        do {
+            return try await processRunner.run(request)
+        } catch is ProcessTimeoutError {
+            throw TimeoutError()
+        }
+    }
+
+    private func writeIfChanged(_ content: String, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if let existing = try? String(contentsOf: url, encoding: .utf8), existing == content {
+            return
+        }
+        try content.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func dvtInterface(target: String) -> String {
+        """
+        // swift-interface-format-version: 1.0
+        // swift-module-flags: -target \(target) -enable-library-evolution -module-name DVTFoundation
+        import Foundation
+
+        public struct DVTStatelessActionProperty {
+        }
+
+        public protocol DVTStatelessActionType : Swift.Codable {
+          static var schema: [DVTFoundation.DVTStatelessActionProperty] { get }
+        }
+
+        public protocol DVTStatelessAction {
+          associatedtype Input : DVTFoundation.DVTStatelessActionType
+          associatedtype Output : DVTFoundation.DVTStatelessActionType
+          static var name: Swift.String { get }
+          static var title: Swift.String { get }
+          static var description: Swift.String { get }
+          static func execute(input: Self.Input) async throws -> Self.Output
+        }
+        """
+    }
+
+    private func chatInterface(target: String) -> String {
+        """
+        // swift-interface-format-version: 1.0
+        // swift-module-flags: -target \(target) -enable-library-evolution -module-name IDEIntelligenceChat
+        import Foundation
+        import DVTFoundation
+
+        public final class DocumentationSearchAction : DVTFoundation.DVTStatelessAction {
+          public struct Input : DVTFoundation.DVTStatelessActionType, Swift.Codable {
+            public var query: Swift.String
+            public var frameworks: [Swift.String]?
+            public init(query: Swift.String, frameworks: [Swift.String]?)
+            public static var schema: [DVTFoundation.DVTStatelessActionProperty] { get }
+          }
+
+          public struct Output : DVTFoundation.DVTStatelessActionType, Swift.Codable {
+            public struct Document : DVTFoundation.DVTStatelessActionType, Swift.Codable {
+              public var title: Swift.String
+              public var contents: Swift.String
+              public var uri: Swift.String
+              public var score: Swift.Double
+              public var kind: Swift.String
+              public static var schema: [DVTFoundation.DVTStatelessActionProperty] { get }
+            }
+
+            public var documents: [IDEIntelligenceChat.DocumentationSearchAction.Output.Document]
+            public static var schema: [DVTFoundation.DVTStatelessActionProperty] { get }
+          }
+
+          public static var name: Swift.String { get }
+          public static var title: Swift.String { get }
+          public static var description: Swift.String { get }
+          public static func execute(input: IDEIntelligenceChat.DocumentationSearchAction.Input) async throws -> IDEIntelligenceChat.DocumentationSearchAction.Output
+          public init()
+        }
+        """
+    }
+
+    private static let helperPackageManifest = """
+        // swift-tools-version: 6.0
+        import PackageDescription
+
+        let package = Package(
+            name: "DocumentationSearchActionHelperPackage",
+            platforms: [
+                .macOS("\(helperMacOSDeploymentTarget)"),
+            ],
+            products: [
+                .executable(
+                    name: "\(helperProductName)",
+                    targets: ["DocumentationSearchActionHelper"]
+                ),
+            ],
+            targets: [
+                .executableTarget(
+                    name: "DocumentationSearchActionHelper"
+                ),
+            ]
+        )
+        """
+
+    private static let helperSource = """
+        import Foundation
+        import IDEIntelligenceChat
+
+        struct HelperRequest: Decodable {
+            let query: String
+            let frameworks: [String]?
+            let configURL: String
+            let maxResults: Int?
+            let scoreThreshold: Double
+        }
+
+        @main
+        struct DocumentationSearchActionHelper {
+            static func main() async {
+                do {
+                    let inputData = FileHandle.standardInput.readDataToEndOfFile()
+                    let request = try JSONDecoder().decode(HelperRequest.self, from: inputData)
+                    var defaults: [String: Any] = [
+                        "IDEChatDocumentationSearchConfigURL": request.configURL,
+                        "IDEChatDocumentationSearchScoreThreshold": request.scoreThreshold,
+                    ]
+                    if let maxResults = request.maxResults {
+                        defaults["IDEChatDocumentationSearchMaxResults"] = maxResults
+                    }
+                    UserDefaults.standard.setVolatileDomain(
+                        defaults,
+                        forName: UserDefaults.argumentDomain
+                    )
+                    let output = try await DocumentationSearchAction.execute(
+                        input: DocumentationSearchAction.Input(
+                            query: request.query,
+                            frameworks: request.frameworks
+                        )
+                    )
+                    let data = try JSONEncoder().encode(output)
+                    FileHandle.standardOutput.write(data)
+                    FileHandle.standardOutput.write(Data([0x0a]))
+                } catch {
+                    FileHandle.standardError.write(Data(String(describing: error).utf8))
+                    FileHandle.standardError.write(Data([0x0a]))
+                    exit(1)
+                }
+            }
+        }
+        """
 }
 
 private actor DocumentationAssetSelectionCache {
@@ -1152,264 +1698,35 @@ private actor DocumentationAssetSelectionCache {
     }
 }
 
-private actor DocumentationAssetSQLiteMaterializer {
-    @safe private final class Connection {
-        let path: String
-        private var database: OpaquePointer?
-
-        @unsafe init(path: String) throws {
-            self.path = path
-            var openedDatabase: OpaquePointer?
-            let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
-            guard unsafe sqlite3_open_v2(path, &openedDatabase, flags, nil) == SQLITE_OK else {
-                let message = unsafe Self.errorMessage(openedDatabase)
-                if let openedDatabase = unsafe openedDatabase {
-                    unsafe sqlite3_close_v2(openedDatabase)
-                }
-                throw ControlPlane.Error.invalidResponse(
-                    "local DocumentationSearch sqlite open failed: \(message)"
-                )
-            }
-            unsafe database = openedDatabase
-            try unsafe execute("PRAGMA temp_store = MEMORY")
-            try unsafe execute("""
-                CREATE TEMP TABLE IF NOT EXISTS xcode_mcp_ranked_doc_results (
-                    rank INTEGER PRIMARY KEY,
-                    asset_id TEXT NOT NULL,
-                    score REAL NOT NULL
-                )
-                """)
-        }
-
-        deinit {
-            if let database = unsafe database {
-                unsafe sqlite3_close_v2(database)
-            }
-        }
-
-        @unsafe func rows(
-            rankedResults: [DocumentationAssetSemanticSearchResult],
-            frameworks: [String],
-            limit: Int
-        ) throws -> [DocumentationAssetSearchRow] {
-            guard rankedResults.isEmpty == false else {
-                return []
-            }
-            let rankedResults = Self.deduplicatedRankedResults(rankedResults)
-            try unsafe execute("DELETE FROM temp.xcode_mcp_ranked_doc_results")
-            try unsafe insertRankedResults(rankedResults)
-
-            let frameworkFilter = Set(frameworks.filter { $0.isEmpty == false })
-            var rows: [DocumentationAssetSearchRow] = []
-            let statement = try unsafe prepare("""
-                SELECT a.asset_id AS asset_id,
-                       a.type AS type,
-                       a.framework AS framework,
-                       a.title AS title,
-                       substr(a.content, 1, 4000) AS content,
-                       r.score AS score
-                FROM temp.xcode_mcp_ranked_doc_results r
-                JOIN attributes a
-                  ON a.asset_id = r.asset_id
-                 AND a.vector_id = (
-                   SELECT MIN(a2.vector_id)
-                   FROM attributes a2
-                   WHERE a2.asset_id = r.asset_id
-                     AND a2.title IS NOT NULL
-                     AND a2.content IS NOT NULL
-                 )
-                WHERE a.title IS NOT NULL
-                  AND a.content IS NOT NULL
-                -- Preserve VectorSearch order to match mcpbridge DocumentationSearch ranking.
-                ORDER BY r.rank
-                """)
-            defer { unsafe sqlite3_finalize(statement) }
-
-            var stepResult = unsafe sqlite3_step(statement)
-            while stepResult == SQLITE_ROW {
-                let framework = unsafe Self.stringColumn(statement, 2)
-                if frameworkFilter.isEmpty == false,
-                   framework.map({ frameworkFilter.contains($0) }) != true
-                {
-                    stepResult = unsafe sqlite3_step(statement)
-                    continue
-                }
-                let score: Double?
-                if unsafe sqlite3_column_type(statement, 5) == SQLITE_NULL {
-                    score = nil
-                } else {
-                    score = unsafe sqlite3_column_double(statement, 5)
-                }
-                rows.append(DocumentationAssetSearchRow(
-                    assetID: unsafe Self.stringColumn(statement, 0),
-                    type: unsafe Self.stringColumn(statement, 1),
-                    framework: framework,
-                    title: unsafe Self.stringColumn(statement, 3),
-                    content: unsafe Self.stringColumn(statement, 4),
-                    score: score
-                ))
-                if rows.count >= limit {
-                    break
-                }
-                stepResult = unsafe sqlite3_step(statement)
-            }
-            guard stepResult == SQLITE_DONE || rows.count >= limit
-            else {
-                throw ControlPlane.Error.invalidResponse(
-                    "local DocumentationSearch sqlite query failed: \(unsafe Self.errorMessage(database))"
-                )
-            }
-            return rows
-        }
-
-        private static func deduplicatedRankedResults(
-            _ rankedResults: [DocumentationAssetSemanticSearchResult]
-        ) -> [DocumentationAssetSemanticSearchResult] {
-            var seenAssetIDs = Set<String>()
-            var deduplicated: [DocumentationAssetSemanticSearchResult] = []
-            deduplicated.reserveCapacity(rankedResults.count)
-            for result in rankedResults where seenAssetIDs.insert(result.assetID).inserted {
-                deduplicated.append(result)
-            }
-            return deduplicated
-        }
-
-        @unsafe private func insertRankedResults(
-            _ rankedResults: [DocumentationAssetSemanticSearchResult]
-        ) throws {
-            let statement = try unsafe prepare("""
-                INSERT INTO temp.xcode_mcp_ranked_doc_results(rank, asset_id, score)
-                VALUES (?1, ?2, ?3)
-                """)
-            defer { unsafe sqlite3_finalize(statement) }
-
-            for (index, result) in rankedResults.enumerated() {
-                unsafe sqlite3_reset(statement)
-                unsafe sqlite3_clear_bindings(statement)
-                unsafe sqlite3_bind_int64(statement, 1, Int64(index))
-                try unsafe bind(result.assetID, to: statement, index: 2)
-                unsafe sqlite3_bind_double(statement, 3, result.score.isFinite ? result.score : 0)
-                guard unsafe sqlite3_step(statement) == SQLITE_DONE else {
-                    throw ControlPlane.Error.invalidResponse(
-                        "local DocumentationSearch sqlite insert failed: \(unsafe Self.errorMessage(database))"
-                    )
-                }
-            }
-        }
-
-        @unsafe private func execute(_ sql: String) throws {
-            var errorMessage: UnsafeMutablePointer<CChar>?
-            defer {
-                if let errorMessage = unsafe errorMessage {
-                    unsafe sqlite3_free(errorMessage)
-                }
-            }
-            guard unsafe sqlite3_exec(database, sql, nil, nil, &errorMessage) == SQLITE_OK else {
-                let message: String
-                if let errorMessage = unsafe errorMessage {
-                    message = unsafe String(cString: errorMessage)
-                } else {
-                    message = unsafe Self.errorMessage(database)
-                }
-                throw ControlPlane.Error.invalidResponse(
-                    "local DocumentationSearch sqlite exec failed: \(message)"
-                )
-            }
-        }
-
-        @unsafe private func prepare(_ sql: String) throws -> OpaquePointer? {
-            var statement: OpaquePointer?
-            guard unsafe sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
-                throw ControlPlane.Error.invalidResponse(
-                    "local DocumentationSearch sqlite prepare failed: \(unsafe Self.errorMessage(database))"
-                )
-            }
-            return unsafe statement
-        }
-
-        @unsafe private func bind(_ value: String, to statement: OpaquePointer?, index: Int32) throws {
-            let transient = unsafe unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-            let result = unsafe value.withCString { valuePointer in
-                unsafe sqlite3_bind_text(statement, index, valuePointer, -1, transient)
-            }
-            guard result == SQLITE_OK else {
-                throw ControlPlane.Error.invalidResponse(
-                    "local DocumentationSearch sqlite bind failed: \(unsafe Self.errorMessage(database))"
-                )
-            }
-        }
-
-        @unsafe private static func stringColumn(
-            _ statement: OpaquePointer?,
-            _ index: Int32
-        ) -> String? {
-            guard let text = unsafe sqlite3_column_text(statement, index) else {
-                return nil
-            }
-            return unsafe String(cString: text)
-        }
-
-        @unsafe private static func errorMessage(_ database: OpaquePointer?) -> String {
-            guard let database = unsafe database,
-                  let message = unsafe sqlite3_errmsg(database)
-            else {
-                return "unknown sqlite error"
-            }
-            return unsafe String(cString: message)
-        }
-    }
-
-    private var connections: [String: Connection] = [:]
-
-    func rows(
-        asset: DocumentationSearchInstalledAsset,
-        rankedResults: [DocumentationAssetSemanticSearchResult],
-        frameworks: [String],
-        limit: Int
-    ) throws -> [DocumentationAssetSearchRow] {
-        let path = asset.indexURL.path
-        let connection: Connection
-        if let cached = connections[path] {
-            connection = cached
-        } else {
-            let opened = try unsafe Connection(path: path)
-            connections[path] = opened
-            connection = opened
-        }
-        return try unsafe connection.rows(
-            rankedResults: rankedResults,
-            frameworks: frameworks,
-            limit: limit
-        )
-    }
-}
-
-struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
+struct DocumentationSearchActionProvider: DocumentationSearchProviding {
     private struct SearchArguments {
         let requestID: JSONRPC.ID
         let query: String
         let frameworks: [String]
-        let limit: Int
+        let limit: Int?
     }
 
     private let assetRoot: URL
-    private let semanticSearcher: any DocumentationAssetSemanticSearching
     private let assetCache: DocumentationAssetSelectionCache
-    private let sqliteMaterializer: DocumentationAssetSQLiteMaterializer
+    private let invoker: any DocumentationSearchActionInvoking
+    private let defaultTargetResolver: @Sendable () -> XcodeProcessTarget?
 
     init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
-        semanticSearcher: any DocumentationAssetSemanticSearching =
-            LiveDocumentationAssetSemanticSearcher()
+        invoker: any DocumentationSearchActionInvoking = LiveDocumentationSearchActionInvoker(),
+        defaultTargetResolver: @escaping @Sendable () -> XcodeProcessTarget? =
+            Self.defaultXcodeProcessTarget
     ) {
         self.assetRoot = assetRoot
-        self.semanticSearcher = semanticSearcher
+        self.invoker = invoker
+        self.defaultTargetResolver = defaultTargetResolver
         assetCache = DocumentationAssetSelectionCache()
-        sqliteMaterializer = DocumentationAssetSQLiteMaterializer()
     }
 
-    func descriptor(for _: XcodeProcessTarget) async -> JSONValue? {
-        guard await latestInstalledAsset() != nil, semanticSearcher.isAvailable() else {
+    func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
+        guard await latestInstalledAsset() != nil,
+              let resolvedTarget = resolveTarget(target),
+              await invoker.isAvailable(for: resolvedTarget) else {
             return nil
         }
         return Self.descriptor
@@ -1424,21 +1741,23 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
             throw TimeoutError()
         }
         let arguments = try Self.searchArguments(from: requestData)
-        guard let asset = await latestInstalledAsset() else {
+        guard let asset = await latestInstalledAsset(),
+              let resolvedTarget = resolveTarget(target) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        guard semanticSearcher.isAvailable() else {
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-        let deadline = Self.deadline(for: timeout)
-        let rows = try await searchRows(
-            arguments: arguments,
-            asset: asset,
-            deadline: deadline
+        let output = try await invoker.invoke(
+            DocumentationSearchActionInvocation(
+                target: resolvedTarget,
+                asset: asset,
+                query: arguments.query,
+                frameworks: arguments.frameworks,
+                limit: arguments.limit
+            ),
+            timeout: timeout
         )
         return try Self.makeResponse(
             requestID: arguments.requestID,
-            rows: rows
+            output: output
         )
     }
 
@@ -1446,47 +1765,18 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         await assetCache.latestInstalledAsset(assetRoot: assetRoot)
     }
 
-    private func searchRows(
-        arguments: SearchArguments,
-        asset: DocumentationSearchInstalledAsset,
-        deadline: UInt64?
-    ) async throws -> [DocumentationAssetSearchRow] {
-        var semanticLimit = Self.initialSemanticSearchLimit(for: arguments)
-        let maxSemanticLimit = Self.maxSemanticSearchLimit(for: arguments)
-        while true {
-            let rankedResults = try await semanticSearcher.search(
-                asset: asset,
-                query: arguments.query,
-                limit: semanticLimit,
-                timeout: try Self.remainingTimeout(until: deadline)
-            )
-            guard rankedResults.isEmpty == false else {
-                return []
-            }
-            let rows = try await sqliteMaterializer.rows(
-                asset: asset,
-                rankedResults: rankedResults,
-                frameworks: arguments.frameworks,
-                limit: arguments.limit
-            )
-            guard Self.shouldExpandSemanticSearch(
-                arguments: arguments,
-                rows: rows,
-                rankedResultCount: rankedResults.count,
-                semanticLimit: semanticLimit,
-                maxSemanticLimit: maxSemanticLimit
-            ) else {
-                return rows
-            }
-            semanticLimit = min(semanticLimit * 2, maxSemanticLimit)
+    private func resolveTarget(_ target: XcodeProcessTarget) -> XcodeProcessTarget? {
+        guard target.appPath != Self.standaloneTarget.appPath else {
+            return defaultTargetResolver()
         }
+        return target
     }
 
     private static var descriptor: JSONValue {
         .object([
             "name": .string(DocumentationProvider.ToolCatalog.toolName),
             "description": .string(
-                "Searches installed Apple Developer Documentation."
+                "Performs a semantic search of up-to-date Apple Developer Documentation."
             ),
             "inputSchema": .object([
                 "type": .string("object"),
@@ -1510,46 +1800,6 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         ])
     }
 
-    private static func initialSemanticSearchLimit(for arguments: SearchArguments) -> Int {
-        min(max(arguments.limit * 8, 40), 200)
-    }
-
-    private static func maxSemanticSearchLimit(for arguments: SearchArguments) -> Int {
-        return min(max(arguments.limit * 128, 1_000), 2_000)
-    }
-
-    private static func shouldExpandSemanticSearch(
-        arguments: SearchArguments,
-        rows: [DocumentationAssetSearchRow],
-        rankedResultCount: Int,
-        semanticLimit: Int,
-        maxSemanticLimit: Int
-    ) -> Bool {
-        rows.count < arguments.limit
-            && rankedResultCount >= semanticLimit
-            && semanticLimit < maxSemanticLimit
-    }
-
-    private static func deadline(for timeout: TimeAmount?) -> UInt64? {
-        guard let timeout, timeout.nanoseconds > 0 else {
-            return nil
-        }
-        let now = DispatchTime.now().uptimeNanoseconds
-        let (deadline, overflow) = now.addingReportingOverflow(UInt64(timeout.nanoseconds))
-        return overflow ? UInt64.max : deadline
-    }
-
-    private static func remainingTimeout(until deadline: UInt64?) throws -> TimeAmount? {
-        guard let deadline else {
-            return nil
-        }
-        let now = DispatchTime.now().uptimeNanoseconds
-        guard deadline > now else {
-            throw TimeoutError()
-        }
-        return .nanoseconds(Int64(clamping: deadline - now))
-    }
-
     private static func searchArguments(from data: Data) throws -> SearchArguments {
         guard
             let object = try JSONSerialization.jsonObject(with: data, options: [])
@@ -1566,13 +1816,11 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         else {
             throw ControlPlane.Error.invalidResponse("missing DocumentationSearch query")
         }
-        let frameworks = Self.frameworks(from: arguments["frameworks"])
-        let limit = min(max((arguments["limit"] as? NSNumber)?.intValue ?? 8, 1), 20)
         return SearchArguments(
             requestID: requestID,
             query: query.trimmingCharacters(in: .whitespacesAndNewlines),
-            frameworks: frameworks,
-            limit: limit
+            frameworks: Self.frameworks(from: arguments["frameworks"]),
+            limit: Self.limit(from: arguments["limit"])
         )
     }
 
@@ -1586,25 +1834,25 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
         return array.compactMap { $0 as? String }.filter { $0.isEmpty == false }
     }
 
+    private static func limit(from value: Any?) -> Int? {
+        guard let number = value as? NSNumber else {
+            return nil
+        }
+        return min(max(number.intValue, 1), 20)
+    }
+
     private static func makeResponse(
         requestID: JSONRPC.ID,
-        rows: [DocumentationAssetSearchRow]
+        output: DocumentationSearchActionOutput
     ) throws -> Data {
-        let documents = rows.map { row -> JSONValue in
-            let type = row.type ?? ""
-            let content = row.content ?? ""
-            var document: [String: JSONValue] = [
-                "title": .string(row.title ?? ""),
-                "kind": .string(type),
-                "contents": .string(content),
-            ]
-            if let assetID = row.assetID {
-                document["uri"] = .string(assetID)
-            }
-            if let score = row.score {
-                document["score"] = .number(.double(score))
-            }
-            return .object(document)
+        let documents = output.documents.map { document -> JSONValue in
+            .object([
+                "title": .string(document.title),
+                "kind": .string(document.kind),
+                "contents": .string(document.contents),
+                "uri": .string(document.uri),
+                "score": .number(.double(document.score)),
+            ])
         }
         let structuredContent = JSONValue.object([
             "documents": .array(documents),
@@ -1626,6 +1874,64 @@ struct LiveDocumentationAssetSearchProvider: DocumentationSearchProviding {
                 "structuredContent": structuredContent,
                 "isError": .bool(false),
             ])
+        )
+    }
+
+    static let standaloneTarget = XcodeProcessTarget(
+        processID: 0,
+        appPath: "documentation-search-action",
+        developerDir: "documentation-search-action",
+        mcpbridgePath: "documentation-search-action",
+        xcodeVersion: "documentation-search-action"
+    )
+
+    fileprivate static func defaultXcodeProcessTarget() -> XcodeProcessTarget? {
+        if let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"],
+           let target = target(developerDir: developerDir) {
+            return target
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        process.arguments = ["-p"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard let developerDir = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return nil
+        }
+        return target(developerDir: developerDir)
+    }
+
+    private static func target(developerDir: String) -> XcodeProcessTarget? {
+        let developerURL = URL(fileURLWithPath: developerDir).standardizedFileURL
+        guard developerURL.lastPathComponent == "Developer" else {
+            return nil
+        }
+        let appURL = developerURL.deletingLastPathComponent().deletingLastPathComponent()
+        let mcpbridgePath = developerURL.appendingPathComponent("usr/bin/mcpbridge").path
+        guard FileManager.default.isExecutableFile(atPath: mcpbridgePath) else {
+            return nil
+        }
+        let bundle = Bundle(url: appURL)
+        return XcodeProcessTarget(
+            processID: 0,
+            appPath: appURL.path,
+            developerDir: developerURL.path,
+            mcpbridgePath: mcpbridgePath,
+            xcodeVersion: bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+                ?? bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+                ?? ""
         )
     }
 }
@@ -2086,19 +2392,13 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         let descriptor: JSONValue
     }
 
-    private static let installedDocumentationAssetStandaloneTarget = XcodeProcessTarget(
-        processID: 0,
-        appPath: "installed-documentation-asset",
-        developerDir: "installed-documentation-asset",
-        mcpbridgePath: "installed-documentation-asset",
-        xcodeVersion: "installed-documentation-asset"
-    )
+    private static let installedDocumentationAssetStandaloneTarget =
+        DocumentationSearchActionProvider.standaloneTarget
 
     private struct ProviderPreparationContext: Sendable {
         let transport: any DocumentationProviderRouting
         let initializeParams: [String: JSONValue]
         let localSearchProvider: any DocumentationSearchProviding
-        let preferLocalSearchProvider: Bool
         let clock: ClockClient
         let logger: Logger
         let lifecycle: DocumentationProviderManagerLifecycle
@@ -2256,7 +2556,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     private let initializeParams: [String: JSONValue]
     private let serviceRepairer: any DocumentationSearchServiceRepairing
     private let localSearchProvider: any DocumentationSearchProviding
-    private let preferLocalSearchProvider: Bool
+    private let documentationSearchActionPolicy: DocumentationSearchActionPolicy
+    private let defaultXcodeTargetResolver: @Sendable () -> XcodeProcessTarget?
     private let clock: ClockClient
     private let testHooks: DocumentationProviderManagerTestHooks
     private let logger: Logger
@@ -2277,7 +2578,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
-        preferLocalSearchProvider: Bool = false,
+        documentationSearchActionPolicy: DocumentationSearchActionPolicy = .fallbackOnly,
+        defaultXcodeTargetResolver: @escaping @Sendable () -> XcodeProcessTarget? =
+            DocumentationSearchActionProvider.defaultXcodeProcessTarget,
         clock: ClockClient = .liveValue,
         testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
@@ -2288,7 +2591,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         self.initializeParams = initializeParams
         self.serviceRepairer = serviceRepairer
         self.localSearchProvider = localSearchProvider
-        self.preferLocalSearchProvider = preferLocalSearchProvider
+        self.documentationSearchActionPolicy = documentationSearchActionPolicy
+        self.defaultXcodeTargetResolver = defaultXcodeTargetResolver
         self.clock = clock
         self.testHooks = testHooks
         self.logger = logger
@@ -2313,7 +2617,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
-        preferLocalSearchProvider: Bool = false,
+        documentationSearchActionPolicy: DocumentationSearchActionPolicy = .fallbackOnly,
+        defaultXcodeTargetResolver: @escaping @Sendable () -> XcodeProcessTarget? =
+            DocumentationSearchActionProvider.defaultXcodeProcessTarget,
         clock: ClockClient = .liveValue,
         testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
@@ -2328,7 +2634,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             initializeParams: initializeParams,
             serviceRepairer: serviceRepairer,
             localSearchProvider: localSearchProvider,
-            preferLocalSearchProvider: preferLocalSearchProvider,
+            documentationSearchActionPolicy: documentationSearchActionPolicy,
+            defaultXcodeTargetResolver: defaultXcodeTargetResolver,
             clock: clock,
             testHooks: testHooks,
             logger: logger
@@ -2343,15 +2650,18 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             return .unavailable
         }
         let deadline = Deadline.fromNow(requestTimeout, clock: clock)
-        if preferLocalSearchProvider {
+        if shouldPreferInstalledDocumentationAsset() {
             let localUpdate = await installedDocumentationAssetToolListUpdate()
             if case .available = localUpdate {
+                return localUpdate
+            }
+            if documentationSearchActionPolicy == .preferAlways {
                 return localUpdate
             }
         }
         let targets = orderedTargets(excluding: [])
         guard targets.isEmpty == false else {
-            return .unavailable
+            return await installedDocumentationAssetToolListUpdate()
         }
         for (index, target) in targets.enumerated() {
             guard !Task.isCancelled, !isShutdown else {
@@ -2416,9 +2726,12 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         guard !Task.isCancelled else {
             return .unavailable
         }
-        if preferLocalSearchProvider {
+        if shouldPreferInstalledDocumentationAsset() {
             let localUpdate = await installedDocumentationAssetToolListUpdate()
             if case .available = localUpdate {
+                return localUpdate
+            }
+            if documentationSearchActionPolicy == .preferAlways {
                 return localUpdate
             }
         }
@@ -2468,17 +2781,20 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         var rejectedProcessIDs: Set<pid_t> = []
         var invalidatedProvider = false
         var lastCandidateFailure: (any Error)?
-        var attemptedPrimaryInstalledAsset = false
+        var attemptedPreferredInstalledAsset = false
+        let hasRunningDocumentationTargets =
+            orderedTargetsForInstalledDocumentationAssetFallback().isEmpty == false
 
         while !Task.isCancelled {
             if let deadline, deadline.hasExpired {
                 return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
-            if preferLocalSearchProvider, attemptedPrimaryInstalledAsset == false {
-                attemptedPrimaryInstalledAsset = true
-                switch try await primaryInstalledDocumentationAssetFallback(
+            if shouldPreferInstalledDocumentationAsset(), attemptedPreferredInstalledAsset == false {
+                attemptedPreferredInstalledAsset = true
+                switch try await preferredInstalledDocumentationAssetFallback(
                     requestData: requestData,
-                    deadline: deadline
+                    deadline: deadline,
+                    reserveFallbackTime: documentationSearchActionPolicy != .preferAlways
                 ) {
                 case .success(let fallback):
                     return .handled(
@@ -2491,6 +2807,12 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                     return .failed(error, invalidatedProvider: invalidatedProvider)
                 case .candidateFailed(let error):
                     lastCandidateFailure = error
+                }
+                if documentationSearchActionPolicy == .preferAlways, let lastCandidateFailure {
+                    return .failed(lastCandidateFailure, invalidatedProvider: invalidatedProvider)
+                }
+                if documentationSearchActionPolicy == .preferAlways {
+                    return .unavailable(.noAvailableProvider)
                 }
             }
             if let activeProvider,
@@ -2575,6 +2897,28 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 try Task.checkCancellation()
                 if let deadline, deadline.hasExpired {
                     return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                if !hasRunningDocumentationTargets,
+                   attemptedPreferredInstalledAsset == false
+                {
+                    attemptedPreferredInstalledAsset = true
+                    switch try await preferredInstalledDocumentationAssetFallback(
+                        requestData: requestData,
+                        deadline: deadline,
+                        reserveFallbackTime: false
+                    ) {
+                    case .success(let fallback):
+                        return .handled(
+                            fallback.responseData,
+                            invalidatedProvider: invalidatedProvider
+                        )
+                    case .unavailable:
+                        break
+                    case .requestFailed(let error):
+                        return .failed(error, invalidatedProvider: invalidatedProvider)
+                    case .candidateFailed(let error):
+                        lastCandidateFailure = error
+                    }
                 }
                 if let lastCandidateFailure {
                     return .failed(lastCandidateFailure, invalidatedProvider: invalidatedProvider)
@@ -2842,7 +3186,7 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     private func installedDocumentationAssetFailureScope(_ error: any Error)
         -> InstalledDocumentationAssetFailureScope
     {
-        if error is TimeoutError {
+        if error is TimeoutError || error is ProcessTimeoutError {
             return .candidate
         }
         if let controlPlaneError = error as? ControlPlane.Error {
@@ -2926,27 +3270,48 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func primaryInstalledDocumentationAssetFallback(
+    private func preferredInstalledDocumentationAssetFallback(
         requestData: Data,
-        deadline: Deadline?
+        deadline: Deadline?,
+        reserveFallbackTime: Bool
     ) async throws -> InstalledDocumentationAssetFallbackAttempt {
-        try await attemptInstalledDocumentationAssetFallback(
-            requestData: requestData,
-            target: Self.installedDocumentationAssetStandaloneTarget,
-            deadline: deadline,
-            isPrimaryAttempt: true
-        )
+        var lastCandidateFailure: (any Error)?
+        let targets = orderedInstalledDocumentationAssetTargets()
+        for (index, target) in targets.enumerated() {
+            let remainingCandidateCount = targets.count - index + (reserveFallbackTime ? 1 : 0)
+            let candidateDeadline = makeDeadline(
+                fromTimeout: timeoutForCandidate(
+                    until: deadline,
+                    remainingCandidateCount: remainingCandidateCount
+                )
+            )
+            switch try await attemptInstalledDocumentationAssetFallback(
+                requestData: requestData,
+                target: target,
+                deadline: candidateDeadline,
+                isPrimaryAttempt: index == 0
+            ) {
+            case .success(let fallback):
+                return .success(fallback)
+            case .unavailable:
+                continue
+            case .requestFailed(let error):
+                return .requestFailed(error)
+            case .candidateFailed(let error):
+                lastCandidateFailure = error
+                continue
+            }
+        }
+        if let lastCandidateFailure {
+            return .candidateFailed(lastCandidateFailure)
+        }
+        return .unavailable
     }
 
     private func installedDocumentationAssetToolListUpdate() async
         -> DocumentationProvider.ToolListUpdate
     {
-        if let descriptor = await localSearchProvider.descriptor(
-            for: Self.installedDocumentationAssetStandaloneTarget
-        ) {
-            return .available(descriptor)
-        }
-        for target in orderedTargetsForInstalledDocumentationAssetFallback() {
+        for target in orderedInstalledDocumentationAssetTargets() {
             if let descriptor = await localSearchProvider.descriptor(for: target) {
                 return .available(descriptor)
             }
@@ -3120,7 +3485,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 transport: transport,
                 initializeParams: initializeParams,
                 localSearchProvider: localSearchProvider,
-                preferLocalSearchProvider: preferLocalSearchProvider,
                 clock: clock,
                 logger: logger,
                 lifecycle: lifecycle
@@ -3312,6 +3676,43 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         -> [XcodeProcessTarget]
     {
         sortedDocumentationTargets(discovery.runningXcodeTargets())
+    }
+
+    private func orderedInstalledDocumentationAssetTargets() -> [XcodeProcessTarget] {
+        let runningTargets = orderedTargetsForInstalledDocumentationAssetFallback()
+        guard runningTargets.isEmpty == false else {
+            return [Self.installedDocumentationAssetStandaloneTarget]
+        }
+        return runningTargets + [Self.installedDocumentationAssetStandaloneTarget]
+    }
+
+    private func shouldPreferInstalledDocumentationAsset() -> Bool {
+        switch documentationSearchActionPolicy {
+        case .fallbackOnly:
+            return false
+        case .preferAlways:
+            return true
+        case .preferWhenMultipleRunningAndDefaultXcodeIsOlder:
+            let runningTargets = orderedTargetsForInstalledDocumentationAssetFallback()
+            guard runningTargets.count > 1,
+                  let preferredTarget = runningTargets.first,
+                  let defaultTarget = defaultXcodeTargetResolver(),
+                  !targetsReferToSameXcode(preferredTarget, defaultTarget) else {
+                return false
+            }
+            return Self.compareVersion(
+                preferredTarget.xcodeVersion,
+                defaultTarget.xcodeVersion
+            ) == .orderedDescending
+        }
+    }
+
+    private func targetsReferToSameXcode(
+        _ lhs: XcodeProcessTarget,
+        _ rhs: XcodeProcessTarget
+    ) -> Bool {
+        URL(fileURLWithPath: lhs.appPath).standardizedFileURL.path
+            == URL(fileURLWithPath: rhs.appPath).standardizedFileURL.path
     }
 
     private func sortedDocumentationTargets(

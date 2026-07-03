@@ -264,6 +264,18 @@ package func waitWithTimeout<T: Sendable>(
     )
 }
 
+package func waitForSuspendedSleepers(
+    on clock: TestClock,
+    count: Int = 1,
+    timeout: Duration = .seconds(5)
+) async throws {
+    try await XcodeMCPCoreTestSupport.waitForSuspendedSleepers(
+        on: clock,
+        count: count,
+        timeout: timeout
+    )
+}
+
 package func shutdown(_ group: EventLoopGroup, timeout: Duration = .seconds(5)) async throws {
     try await waitWithTimeout(
         "timed out waiting for event loop group shutdown",
