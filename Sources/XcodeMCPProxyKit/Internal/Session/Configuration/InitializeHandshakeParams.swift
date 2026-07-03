@@ -59,14 +59,14 @@ enum InitializeHandshakeParams {
         }
 
         let orderedExactMatches = exactMatches.sorted { lhs, rhs in
-            lhs.stem.localizedStandardCompare(rhs.stem) == .orderedAscending
+            lhs.stem < rhs.stem
         }
         if let match = orderedExactMatches.first {
             return match.version
         }
 
         let orderedAliasMatches = aliasMatches.sorted { lhs, rhs in
-            lhs.stem.localizedStandardCompare(rhs.stem) == .orderedAscending
+            lhs.stem < rhs.stem
         }
         return orderedAliasMatches.first?.version
     }
