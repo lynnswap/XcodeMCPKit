@@ -60,7 +60,21 @@ private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
                 stdout: "/tmp/MacOSX.sdk\n",
                 stderr: ""
             )
+        case "DocumentationSearchAction.bin-path":
+            guard let scratchPath = processArgumentValue(after: "--scratch-path", in: request.arguments) else {
+                return ProcessOutput(
+                    terminationStatus: 1,
+                    stdout: "",
+                    stderr: "missing scratch path"
+                )
+            }
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "\(scratchPath)/out/Products/Release\n",
+                stderr: ""
+            )
         case "DocumentationSearchAction.build":
+            try createFakeHelperExecutable(for: request.arguments)
             return ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
         case "DocumentationSearchAction":
             return ProcessOutput(
@@ -80,6 +94,34 @@ private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
     func recordedRequests() -> [ProcessRequest] {
         requests
     }
+
+    private func createFakeHelperExecutable(for arguments: [String]) throws {
+        guard let scratchPath = processArgumentValue(after: "--scratch-path", in: arguments) else {
+            return
+        }
+        let helperURL = URL(fileURLWithPath: scratchPath, isDirectory: true)
+            .appendingPathComponent("out", isDirectory: true)
+            .appendingPathComponent("Products", isDirectory: true)
+            .appendingPathComponent("Release", isDirectory: true)
+            .appendingPathComponent("documentation-search-action-helper")
+        try FileManager.default.createDirectory(
+            at: helperURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: helperURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: helperURL.path
+        )
+    }
+}
+
+private func processArgumentValue(after flag: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: flag),
+          arguments.indices.contains(arguments.index(after: index)) else {
+        return nil
+    }
+    return arguments[arguments.index(after: index)]
 }
 
 private func makeDocumentationSearchRequestWithArguments(
@@ -113,15 +155,15 @@ private func makeDocumentationSearchRequestWithArguments(
 
 private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
     let appURL = root.appendingPathComponent("Xcode.app", isDirectory: true)
-    let swiftcURL = appURL
-        .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc")
+    let swiftURL = appURL
+        .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
     let dvtFrameworkURL = appURL
         .appendingPathComponent("Contents/SharedFrameworks/DVTFoundation.framework/DVTFoundation")
     let chatFrameworkURL = appURL
         .appendingPathComponent("Contents/PlugIns/IDEIntelligenceChat.framework/IDEIntelligenceChat")
     let platformDeveloperLibraryURL = appURL
         .appendingPathComponent("Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib", isDirectory: true)
-    for fileURL in [swiftcURL, dvtFrameworkURL, chatFrameworkURL] {
+    for fileURL in [swiftURL, dvtFrameworkURL, chatFrameworkURL] {
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -138,7 +180,7 @@ private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
     )
     try FileManager.default.setAttributes(
         [.posixPermissions: 0o755],
-        ofItemAtPath: swiftcURL.path
+        ofItemAtPath: swiftURL.path
     )
     return XcodeProcessTarget(
         processID: 123,
@@ -3516,10 +3558,63 @@ struct DocumentationProviderTests {
             ),
             timeout: .seconds(1)
         )
+        _ = try await invoker.invoke(
+            DocumentationSearchActionInvocation(
+                target: target,
+                asset: asset,
+                query: "NavigationSplitView",
+                frameworks: ["SwiftUI"],
+                limit: nil
+            ),
+            timeout: .seconds(1)
+        )
 
         let requests = await processRunner.recordedRequests()
+        let binPathRequests = requests.filter { $0.label == "DocumentationSearchAction.bin-path" }
+        #expect(binPathRequests.count == 1)
+        let binPathRequest = try #require(binPathRequests.first)
+        #expect(binPathRequest.arguments.contains("--show-bin-path"))
+        #expect(binPathRequest.arguments.contains("DEVELOPER_DIR=\(target.developerDir)"))
+        let buildRequests = requests.filter { $0.label == "DocumentationSearchAction.build" }
+        #expect(buildRequests.count == 1)
+        let buildRequest = try #require(buildRequests.first)
+        #expect(buildRequest.arguments.contains("DEVELOPER_DIR=\(target.developerDir)"))
+        #expect(buildRequest.arguments.contains(
+            URL(fileURLWithPath: target.appPath)
+                .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
+                .path
+        ))
+        #expect(buildRequest.arguments.contains("build"))
+        #expect(processArgumentValue(after: "--configuration", in: buildRequest.arguments) == "release")
+        #expect(
+            processArgumentValue(after: "--product", in: buildRequest.arguments)
+                == "documentation-search-action-helper"
+        )
+        #expect(processArgumentValue(after: "--sdk", in: buildRequest.arguments) == "/tmp/MacOSX.sdk")
+        let packagePath = try #require(processArgumentValue(after: "--package-path", in: buildRequest.arguments))
+        #expect(processArgumentValue(after: "--package-path", in: binPathRequest.arguments) == packagePath)
+        let packageRoot = URL(fileURLWithPath: packagePath, isDirectory: true)
+        #expect(packageRoot.deletingLastPathComponent().path == cacheRoot.path)
+        #expect(packageRoot.lastPathComponent.hasPrefix("runtime-"))
+        #expect(
+            processArgumentValue(after: "--scratch-path", in: buildRequest.arguments)
+                == packageRoot.appendingPathComponent(".build", isDirectory: true).path
+        )
+        let manifest = try String(
+            contentsOf: packageRoot.appendingPathComponent("Package.swift"),
+            encoding: .utf8
+        )
+        #expect(manifest.contains("documentation-search-action-helper"))
+        #expect(FileManager.default.fileExists(
+            atPath: packageRoot
+                .appendingPathComponent("Sources", isDirectory: true)
+                .appendingPathComponent("DocumentationSearchActionHelper", isDirectory: true)
+                .appendingPathComponent("main.swift")
+                .path
+        ))
+
         let helperRequest = try #require(
-            requests.first { $0.label == "DocumentationSearchAction" }
+            requests.last { $0.label == "DocumentationSearchAction" }
         )
         let input = try #require(helperRequest.input)
         let object = try #require(

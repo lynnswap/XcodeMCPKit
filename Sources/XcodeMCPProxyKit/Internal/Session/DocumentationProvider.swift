@@ -877,12 +877,13 @@ protocol DocumentationSearchActionInvoking: Sendable {
 }
 
 actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
-    private static let helperVersion = "2026-07-03.7"
+    private static let helperProductName = "documentation-search-action-helper"
     private static let defaultMaxResults = 20
     private static let defaultScoreThreshold = 0.4
 
     private let cacheRoot: URL
     private let processRunner: any ProcessRunning
+    private var preparedHelperURLsByPackageRoot: [URL: URL] = [:]
 
     init(
         cacheRoot: URL = URL.cachesDirectory
@@ -955,7 +956,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private struct XcodeRuntime: Sendable {
         let appURL: URL
         let developerDir: String
-        let swiftcURL: URL
+        let swiftURL: URL
         let frameworksURL: URL
         let sharedFrameworksURL: URL
         let plugInsURL: URL
@@ -972,8 +973,8 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private func xcodeRuntime(for target: XcodeProcessTarget) -> XcodeRuntime? {
         let appURL = URL(fileURLWithPath: target.appPath)
         let developerDir = appURL.appendingPathComponent("Contents/Developer").path
-        let swiftcURL = appURL
-            .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc")
+        let swiftURL = appURL
+            .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
         let frameworksURL = appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
         let sharedFrameworksURL = appURL.appendingPathComponent("Contents/SharedFrameworks", isDirectory: true)
         let plugInsURL = appURL.appendingPathComponent("Contents/PlugIns", isDirectory: true)
@@ -983,7 +984,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             .appendingPathComponent("DVTFoundation.framework/DVTFoundation")
         let chatFrameworkURL = plugInsURL
             .appendingPathComponent("IDEIntelligenceChat.framework/IDEIntelligenceChat")
-        guard FileManager.default.isExecutableFile(atPath: swiftcURL.path),
+        guard FileManager.default.isExecutableFile(atPath: swiftURL.path),
               FileManager.default.isReadableFile(atPath: frameworksURL.path),
               FileManager.default.isReadableFile(atPath: dvtFrameworkURL.path),
               FileManager.default.isReadableFile(atPath: chatFrameworkURL.path),
@@ -994,7 +995,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         return XcodeRuntime(
             appURL: appURL,
             developerDir: developerDir,
-            swiftcURL: swiftcURL,
+            swiftURL: swiftURL,
             frameworksURL: frameworksURL,
             sharedFrameworksURL: sharedFrameworksURL,
             plugInsURL: plugInsURL,
@@ -1040,13 +1041,20 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         timeout: TimeAmount?
     ) async throws -> URL {
         let hostTarget = try hostTarget()
-        let helperRoot = cacheRoot.appendingPathComponent(
-            cacheKey(runtime: runtime, sdkPath: sdkPath, hostTarget: hostTarget),
+        let packageRoot = cacheRoot.appendingPathComponent(
+            runtimePackageDirectoryName(runtime: runtime, sdkPath: sdkPath, hostTarget: hostTarget),
             isDirectory: true
         )
-        let helperURL = helperRoot.appendingPathComponent("documentation-search-action-helper")
-        let moduleRoot = helperRoot.appendingPathComponent("modules", isDirectory: true)
-        let sourceURL = helperRoot.appendingPathComponent("DocumentationSearchActionHelper.swift")
+        if let helperURL = preparedHelperURLsByPackageRoot[packageRoot],
+           FileManager.default.isExecutableFile(atPath: helperURL.path) {
+            return helperURL
+        }
+        let moduleRoot = packageRoot.appendingPathComponent("GeneratedModules", isDirectory: true)
+        let sourceURL = packageRoot
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("DocumentationSearchActionHelper", isDirectory: true)
+            .appendingPathComponent("main.swift")
+        try writeIfChanged(Self.helperPackageManifest, to: packageRoot.appendingPathComponent("Package.swift"))
         try writeIfChanged(
             dvtInterface(target: hostTarget.triple),
             to: moduleRoot
@@ -1060,56 +1068,26 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 .appendingPathComponent(hostTarget.swiftInterfaceName)
         )
         try writeIfChanged(Self.helperSource, to: sourceURL)
-        guard FileManager.default.isExecutableFile(atPath: helperURL.path) == false else {
-            return helperURL
-        }
+        let productsDirectoryURL = try await helperProductsDirectoryURL(
+            runtime: runtime,
+            packageRoot: packageRoot,
+            moduleRoot: moduleRoot,
+            sdkPath: sdkPath,
+            hostTarget: hostTarget,
+            timeout: timeout
+        )
+        let helperURL = productsDirectoryURL.appendingPathComponent(Self.helperProductName)
         let output = try await processRunner.run(ProcessRequest(
             label: "DocumentationSearchAction.build",
             executablePath: "/usr/bin/env",
-            arguments: [
-                "DEVELOPER_DIR=\(runtime.developerDir)",
-                runtime.swiftcURL.path,
-                sourceURL.path,
-                "-target",
-                hostTarget.triple,
-                "-sdk",
-                sdkPath,
-                "-I",
-                moduleRoot.path,
-                "-F",
-                runtime.frameworksURL.path,
-                "-F",
-                runtime.sharedFrameworksURL.path,
-                "-F",
-                runtime.plugInsURL.path,
-                "-framework",
-                "DVTFoundation",
-                "-framework",
-                "IDEIntelligenceChat",
-                "-parse-as-library",
-                "-Xlinker",
-                "-rpath",
-                "-Xlinker",
-                runtime.appURL.appendingPathComponent("Contents").path,
-                "-Xlinker",
-                "-rpath",
-                "-Xlinker",
-                runtime.frameworksURL.path,
-                "-Xlinker",
-                "-rpath",
-                "-Xlinker",
-                runtime.sharedFrameworksURL.path,
-                "-Xlinker",
-                "-rpath",
-                "-Xlinker",
-                runtime.plugInsURL.path,
-                "-Xlinker",
-                "-rpath",
-                "-Xlinker",
-                runtime.platformDeveloperLibraryURL.path,
-                "-o",
-                helperURL.path,
-            ],
+            arguments: helperBuildArguments(
+                runtime: runtime,
+                packageRoot: packageRoot,
+                moduleRoot: moduleRoot,
+                sdkPath: sdkPath,
+                hostTarget: hostTarget,
+                mode: .build
+            ),
             input: nil,
             timeoutNanoseconds: timeout?.nanoseconds
         ))
@@ -1118,7 +1096,146 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 "DocumentationSearchAction helper build failed: \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
             )
         }
+        guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            throw ControlPlane.Error.invalidResponse("DocumentationSearchAction helper build did not produce executable")
+        }
+        preparedHelperURLsByPackageRoot[packageRoot] = helperURL
         return helperURL
+    }
+
+    private func helperProductsDirectoryURL(
+        runtime: XcodeRuntime,
+        packageRoot: URL,
+        moduleRoot: URL,
+        sdkPath: String,
+        hostTarget: HostTarget,
+        timeout: TimeAmount?
+    ) async throws -> URL {
+        let output = try await processRunner.run(ProcessRequest(
+            label: "DocumentationSearchAction.bin-path",
+            executablePath: "/usr/bin/env",
+            arguments: helperBuildArguments(
+                runtime: runtime,
+                packageRoot: packageRoot,
+                moduleRoot: moduleRoot,
+                sdkPath: sdkPath,
+                hostTarget: hostTarget,
+                mode: .showBinPath
+            ),
+            input: nil,
+            timeoutNanoseconds: timeout?.nanoseconds
+        ))
+        guard output.terminationStatus == 0 else {
+            throw ControlPlane.Error.invalidResponse(
+                "DocumentationSearchAction helper bin path resolution failed: \(output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        let productsDirectoryPath = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard productsDirectoryPath.isEmpty == false else {
+            throw ControlPlane.Error.invalidResponse("DocumentationSearchAction helper bin path resolution returned empty output")
+        }
+        return URL(fileURLWithPath: productsDirectoryPath, isDirectory: true)
+    }
+
+    private enum HelperBuildMode {
+        case build
+        case showBinPath
+    }
+
+    private func helperBuildArguments(
+        runtime: XcodeRuntime,
+        packageRoot: URL,
+        moduleRoot: URL,
+        sdkPath: String,
+        hostTarget: HostTarget,
+        mode: HelperBuildMode
+    ) -> [String] {
+        var arguments = [
+            "DEVELOPER_DIR=\(runtime.developerDir)",
+            runtime.swiftURL.path,
+            "build",
+        ]
+        if mode == .showBinPath {
+            arguments.append("--show-bin-path")
+        }
+        arguments += [
+            "--package-path",
+            packageRoot.path,
+            "--scratch-path",
+            packageRoot.appendingPathComponent(".build", isDirectory: true).path,
+            "--configuration",
+            "release",
+        ]
+        if mode == .build {
+            arguments += [
+                "--product",
+                Self.helperProductName,
+            ]
+        }
+        arguments += [
+            "--triple",
+            hostTarget.triple,
+            "--sdk",
+            sdkPath,
+            "--disable-sandbox",
+            "-Xswiftc",
+            "-I",
+            "-Xswiftc",
+            moduleRoot.path,
+            "-Xswiftc",
+            "-F",
+            "-Xswiftc",
+            runtime.frameworksURL.path,
+            "-Xswiftc",
+            "-F",
+            "-Xswiftc",
+            runtime.sharedFrameworksURL.path,
+            "-Xswiftc",
+            "-F",
+            "-Xswiftc",
+            runtime.plugInsURL.path,
+            "-Xlinker",
+            "-F",
+            "-Xlinker",
+            runtime.frameworksURL.path,
+            "-Xlinker",
+            "-F",
+            "-Xlinker",
+            runtime.sharedFrameworksURL.path,
+            "-Xlinker",
+            "-F",
+            "-Xlinker",
+            runtime.plugInsURL.path,
+            "-Xlinker",
+            "-framework",
+            "-Xlinker",
+            "DVTFoundation",
+            "-Xlinker",
+            "-framework",
+            "-Xlinker",
+            "IDEIntelligenceChat",
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.appURL.appendingPathComponent("Contents").path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.frameworksURL.path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.sharedFrameworksURL.path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.plugInsURL.path,
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            runtime.platformDeveloperLibraryURL.path,
+        ]
+        return arguments
     }
 
     private func helperRuntimeEnvironmentArguments(for runtime: XcodeRuntime) -> [String] {
@@ -1156,14 +1273,15 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         #endif
     }
 
-    private func cacheKey(
+    private func runtimePackageDirectoryName(
         runtime: XcodeRuntime,
         sdkPath: String,
         hostTarget: HostTarget
     ) -> String {
+        // Separate SwiftPM build artifacts by selected Xcode runtime. SwiftPM owns rebuild decisions inside this directory.
         let input = [
-            Self.helperVersion,
             runtime.appURL.path,
+            runtime.swiftURL.path,
             runtime.version,
             runtime.buildVersion,
             sdkPath,
@@ -1177,7 +1295,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                 hexDigits[Int(byte) & 0x0f],
             ]
         }
-        return String(decoding: hexBytes.prefix(16), as: UTF8.self)
+        return "runtime-\(String(decoding: hexBytes.prefix(16), as: UTF8.self))"
     }
 
     private func writeIfChanged(_ content: String, to url: URL) throws {
@@ -1252,6 +1370,29 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         }
         """
     }
+
+    private static let helperPackageManifest = """
+        // swift-tools-version: 6.0
+        import PackageDescription
+
+        let package = Package(
+            name: "DocumentationSearchActionHelperPackage",
+            platforms: [
+                .macOS(.v15),
+            ],
+            products: [
+                .executable(
+                    name: "\(helperProductName)",
+                    targets: ["DocumentationSearchActionHelper"]
+                ),
+            ],
+            targets: [
+                .executableTarget(
+                    name: "DocumentationSearchActionHelper"
+                ),
+            ]
+        )
+        """
 
     private static let helperSource = """
         import Foundation
