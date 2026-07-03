@@ -48,6 +48,40 @@ private struct StubDocumentationSearchActionInvoker: DocumentationSearchActionIn
     }
 }
 
+private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
+    private var requests: [ProcessRequest] = []
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        requests.append(request)
+        switch request.label {
+        case "DocumentationSearchAction.sdk":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "/tmp/MacOSX.sdk\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.build":
+            return ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
+        case "DocumentationSearchAction":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: #"{"documents":[]}"#,
+                stderr: ""
+            )
+        default:
+            return ProcessOutput(
+                terminationStatus: 1,
+                stdout: "",
+                stderr: "unexpected process request: \(request.label)"
+            )
+        }
+    }
+
+    func recordedRequests() -> [ProcessRequest] {
+        requests
+    }
+}
+
 private func makeDocumentationSearchRequestWithArguments(
     id: Int64,
     query: String,
@@ -74,6 +108,44 @@ private func makeDocumentationSearchRequestWithArguments(
             ],
         ],
         options: []
+    )
+}
+
+private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
+    let appURL = root.appendingPathComponent("Xcode.app", isDirectory: true)
+    let swiftcURL = appURL
+        .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc")
+    let dvtFrameworkURL = appURL
+        .appendingPathComponent("Contents/SharedFrameworks/DVTFoundation.framework/DVTFoundation")
+    let chatFrameworkURL = appURL
+        .appendingPathComponent("Contents/PlugIns/IDEIntelligenceChat.framework/IDEIntelligenceChat")
+    let platformDeveloperLibraryURL = appURL
+        .appendingPathComponent("Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib", isDirectory: true)
+    for fileURL in [swiftcURL, dvtFrameworkURL, chatFrameworkURL] {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data().write(to: fileURL)
+    }
+    try FileManager.default.createDirectory(
+        at: appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+        at: platformDeveloperLibraryURL,
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: swiftcURL.path
+    )
+    return XcodeProcessTarget(
+        processID: 123,
+        appPath: appURL.path,
+        developerDir: appURL.appendingPathComponent("Contents/Developer").path,
+        mcpbridgePath: appURL.appendingPathComponent("Contents/Developer/usr/bin/mcpbridge").path,
+        xcodeVersion: "27.0"
     )
 }
 
@@ -3399,6 +3471,65 @@ struct DocumentationProviderTests {
         #expect(invocation.query == "UIView")
         #expect(invocation.frameworks == ["UIKit"])
         #expect(invocation.limit == 2)
+    }
+
+    @Test func documentationSearchActionInvokerPassesLatestAssetAndActionDefaultsToHelper()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.2",
+            documentationRelease: 950001
+        )
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let processRunner = DocumentationSearchActionProcessRecorder()
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: processRunner
+        )
+
+        _ = try await invoker.invoke(
+            DocumentationSearchActionInvocation(
+                target: target,
+                asset: asset,
+                query: "NavigationSplitView",
+                frameworks: ["SwiftUI"],
+                limit: nil
+            ),
+            timeout: .seconds(1)
+        )
+
+        let requests = await processRunner.recordedRequests()
+        let helperRequest = try #require(
+            requests.first { $0.label == "DocumentationSearchAction" }
+        )
+        let input = try #require(helperRequest.input)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(input.utf8), options: []) as? [String: Any]
+        )
+        #expect(object["query"] as? String == "NavigationSplitView")
+        #expect(object["frameworks"] as? [String] == ["SwiftUI"])
+        #expect(object["configURL"] as? String == asset.configURL.path)
+        #expect((object["maxResults"] as? NSNumber)?.intValue == 20)
+        #expect((object["scoreThreshold"] as? NSNumber)?.doubleValue == 0.4)
     }
 
     @Test func documentationSearchActionProviderUsesStandaloneResolverOnlyWithoutRunningXcode()

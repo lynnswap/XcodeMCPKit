@@ -877,7 +877,9 @@ protocol DocumentationSearchActionInvoking: Sendable {
 }
 
 actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
-    private static let helperVersion = "2026-07-03.3"
+    private static let helperVersion = "2026-07-03.5"
+    private static let defaultMaxResults = 20
+    private static let defaultScoreThreshold = 0.4
 
     private let cacheRoot: URL
     private let processRunner: any ProcessRunning
@@ -911,7 +913,8 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             query: invocation.query,
             frameworks: invocation.frameworks.isEmpty ? nil : invocation.frameworks,
             configURL: invocation.asset.configURL.path,
-            maxResults: invocation.limit
+            maxResults: invocation.limit ?? Self.defaultMaxResults,
+            scoreThreshold: Self.defaultScoreThreshold
         )
         let requestData = try JSONEncoder().encode(request)
         guard let input = String(data: requestData, encoding: .utf8) else {
@@ -946,6 +949,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         let frameworks: [String]?
         let configURL: String
         let maxResults: Int?
+        let scoreThreshold: Double?
     }
 
     private struct XcodeRuntime: Sendable {
@@ -1258,6 +1262,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
             let frameworks: [String]?
             let configURL: String
             let maxResults: Int?
+            let scoreThreshold: Double?
         }
 
         @main
@@ -1271,6 +1276,9 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
                     ]
                     if let maxResults = request.maxResults {
                         defaults["IDEChatDocumentationSearchMaxResults"] = maxResults
+                    }
+                    if let scoreThreshold = request.scoreThreshold {
+                        defaults["IDEChatDocumentationSearchScoreThreshold"] = scoreThreshold
                     }
                     UserDefaults.standard.setVolatileDomain(
                         defaults,
