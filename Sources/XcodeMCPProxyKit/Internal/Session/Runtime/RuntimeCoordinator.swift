@@ -520,7 +520,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ),
             serviceRepairer: NoopDocumentationSearchServiceRepairer(),
             localSearchProvider: DocumentationSearchActionProvider(),
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferWhenDefaultXcodeIsOlder
         )
     }
 

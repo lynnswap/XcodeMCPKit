@@ -110,6 +110,12 @@ protocol DocumentationSearchProviding: Sendable {
     ) async throws -> Data
 }
 
+enum DocumentationSearchActionPolicy: Sendable, Equatable {
+    case fallbackOnly
+    case preferWhenDefaultXcodeIsOlder
+    case preferAlways
+}
+
 struct NoopDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairing {
     init() {}
 
@@ -1792,7 +1798,7 @@ struct DocumentationSearchActionProvider: DocumentationSearchProviding {
         xcodeVersion: "documentation-search-action"
     )
 
-    private static func defaultXcodeProcessTarget() -> XcodeProcessTarget? {
+    fileprivate static func defaultXcodeProcessTarget() -> XcodeProcessTarget? {
         if let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"],
            let target = target(developerDir: developerDir) {
             return target
@@ -2306,7 +2312,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         let transport: any DocumentationProviderRouting
         let initializeParams: [String: JSONValue]
         let localSearchProvider: any DocumentationSearchProviding
-        let preferLocalSearchProvider: Bool
         let clock: ClockClient
         let logger: Logger
         let lifecycle: DocumentationProviderManagerLifecycle
@@ -2464,7 +2469,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     private let initializeParams: [String: JSONValue]
     private let serviceRepairer: any DocumentationSearchServiceRepairing
     private let localSearchProvider: any DocumentationSearchProviding
-    private let preferLocalSearchProvider: Bool
+    private let documentationSearchActionPolicy: DocumentationSearchActionPolicy
+    private let defaultXcodeTargetResolver: @Sendable () -> XcodeProcessTarget?
     private let clock: ClockClient
     private let testHooks: DocumentationProviderManagerTestHooks
     private let logger: Logger
@@ -2485,7 +2491,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
-        preferLocalSearchProvider: Bool = false,
+        documentationSearchActionPolicy: DocumentationSearchActionPolicy = .fallbackOnly,
+        defaultXcodeTargetResolver: @escaping @Sendable () -> XcodeProcessTarget? =
+            DocumentationSearchActionProvider.defaultXcodeProcessTarget,
         clock: ClockClient = .liveValue,
         testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
@@ -2496,7 +2504,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         self.initializeParams = initializeParams
         self.serviceRepairer = serviceRepairer
         self.localSearchProvider = localSearchProvider
-        self.preferLocalSearchProvider = preferLocalSearchProvider
+        self.documentationSearchActionPolicy = documentationSearchActionPolicy
+        self.defaultXcodeTargetResolver = defaultXcodeTargetResolver
         self.clock = clock
         self.testHooks = testHooks
         self.logger = logger
@@ -2521,7 +2530,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         initializeParams: [String: JSONValue] = InitializeHandshakeJSON.defaultParams(),
         serviceRepairer: any DocumentationSearchServiceRepairing = NoopDocumentationSearchServiceRepairer(),
         localSearchProvider: any DocumentationSearchProviding = UnavailableDocumentationSearchProvider(),
-        preferLocalSearchProvider: Bool = false,
+        documentationSearchActionPolicy: DocumentationSearchActionPolicy = .fallbackOnly,
+        defaultXcodeTargetResolver: @escaping @Sendable () -> XcodeProcessTarget? =
+            DocumentationSearchActionProvider.defaultXcodeProcessTarget,
         clock: ClockClient = .liveValue,
         testHooks: DocumentationProviderManagerTestHooks = .noop,
         logger: Logger = ProxyLogging.make("documentation.provider")
@@ -2536,7 +2547,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             initializeParams: initializeParams,
             serviceRepairer: serviceRepairer,
             localSearchProvider: localSearchProvider,
-            preferLocalSearchProvider: preferLocalSearchProvider,
+            documentationSearchActionPolicy: documentationSearchActionPolicy,
+            defaultXcodeTargetResolver: defaultXcodeTargetResolver,
             clock: clock,
             testHooks: testHooks,
             logger: logger
@@ -2551,13 +2563,18 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             return .unavailable
         }
         let deadline = Deadline.fromNow(requestTimeout, clock: clock)
-        if preferLocalSearchProvider {
+        if shouldPreferInstalledDocumentationAsset() {
             let localUpdate = await installedDocumentationAssetToolListUpdate()
-            return localUpdate
+            if case .available = localUpdate {
+                return localUpdate
+            }
+            if documentationSearchActionPolicy == .preferAlways {
+                return localUpdate
+            }
         }
         let targets = orderedTargets(excluding: [])
         guard targets.isEmpty == false else {
-            return .unavailable
+            return await installedDocumentationAssetToolListUpdate()
         }
         for (index, target) in targets.enumerated() {
             guard !Task.isCancelled, !isShutdown else {
@@ -2622,9 +2639,14 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         guard !Task.isCancelled else {
             return .unavailable
         }
-        if preferLocalSearchProvider {
+        if shouldPreferInstalledDocumentationAsset() {
             let localUpdate = await installedDocumentationAssetToolListUpdate()
-            return localUpdate
+            if case .available = localUpdate {
+                return localUpdate
+            }
+            if documentationSearchActionPolicy == .preferAlways {
+                return localUpdate
+            }
         }
         let cached = toolListUpdateFromCachedState(requestTimeout: requestTimeout)
         if case .unchanged = cached {
@@ -2672,15 +2694,17 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         var rejectedProcessIDs: Set<pid_t> = []
         var invalidatedProvider = false
         var lastCandidateFailure: (any Error)?
-        var attemptedPrimaryInstalledAsset = false
+        var attemptedPreferredInstalledAsset = false
+        let hasRunningDocumentationTargets =
+            orderedTargetsForInstalledDocumentationAssetFallback().isEmpty == false
 
         while !Task.isCancelled {
             if let deadline, deadline.hasExpired {
                 return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
             }
-            if preferLocalSearchProvider, attemptedPrimaryInstalledAsset == false {
-                attemptedPrimaryInstalledAsset = true
-                switch try await primaryInstalledDocumentationAssetFallback(
+            if shouldPreferInstalledDocumentationAsset(), attemptedPreferredInstalledAsset == false {
+                attemptedPreferredInstalledAsset = true
+                switch try await preferredInstalledDocumentationAssetFallback(
                     requestData: requestData,
                     deadline: deadline
                 ) {
@@ -2696,10 +2720,12 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 case .candidateFailed(let error):
                     lastCandidateFailure = error
                 }
-                if let lastCandidateFailure {
+                if documentationSearchActionPolicy == .preferAlways, let lastCandidateFailure {
                     return .failed(lastCandidateFailure, invalidatedProvider: invalidatedProvider)
                 }
-                return .unavailable(.noAvailableProvider)
+                if documentationSearchActionPolicy == .preferAlways {
+                    return .unavailable(.noAvailableProvider)
+                }
             }
             if let activeProvider,
                 rejectedProcessIDs.contains(activeProvider.profile.target.processID) == false,
@@ -2783,6 +2809,27 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 try Task.checkCancellation()
                 if let deadline, deadline.hasExpired {
                     return .failed(TimeoutError(), invalidatedProvider: invalidatedProvider)
+                }
+                if !hasRunningDocumentationTargets,
+                   attemptedPreferredInstalledAsset == false
+                {
+                    attemptedPreferredInstalledAsset = true
+                    switch try await preferredInstalledDocumentationAssetFallback(
+                        requestData: requestData,
+                        deadline: deadline
+                    ) {
+                    case .success(let fallback):
+                        return .handled(
+                            fallback.responseData,
+                            invalidatedProvider: invalidatedProvider
+                        )
+                    case .unavailable:
+                        break
+                    case .requestFailed(let error):
+                        return .failed(error, invalidatedProvider: invalidatedProvider)
+                    case .candidateFailed(let error):
+                        lastCandidateFailure = error
+                    }
                 }
                 if let lastCandidateFailure {
                     return .failed(lastCandidateFailure, invalidatedProvider: invalidatedProvider)
@@ -3134,25 +3181,42 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         }
     }
 
-    private func primaryInstalledDocumentationAssetFallback(
+    private func preferredInstalledDocumentationAssetFallback(
         requestData: Data,
         deadline: Deadline?
     ) async throws -> InstalledDocumentationAssetFallbackAttempt {
-        try await attemptInstalledDocumentationAssetFallback(
-            requestData: requestData,
-            target: primaryInstalledDocumentationAssetTarget(),
-            deadline: deadline,
-            isPrimaryAttempt: true
-        )
+        var lastCandidateFailure: (any Error)?
+        for (index, target) in orderedInstalledDocumentationAssetTargets().enumerated() {
+            switch try await attemptInstalledDocumentationAssetFallback(
+                requestData: requestData,
+                target: target,
+                deadline: deadline,
+                isPrimaryAttempt: index == 0
+            ) {
+            case .success(let fallback):
+                return .success(fallback)
+            case .unavailable:
+                continue
+            case .requestFailed(let error):
+                return .requestFailed(error)
+            case .candidateFailed(let error):
+                lastCandidateFailure = error
+                continue
+            }
+        }
+        if let lastCandidateFailure {
+            return .candidateFailed(lastCandidateFailure)
+        }
+        return .unavailable
     }
 
     private func installedDocumentationAssetToolListUpdate() async
         -> DocumentationProvider.ToolListUpdate
     {
-        if let descriptor = await localSearchProvider.descriptor(
-            for: primaryInstalledDocumentationAssetTarget()
-        ) {
-            return .available(descriptor)
+        for target in orderedInstalledDocumentationAssetTargets() {
+            if let descriptor = await localSearchProvider.descriptor(for: target) {
+                return .available(descriptor)
+            }
         }
         return .unavailable
     }
@@ -3323,7 +3387,6 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 transport: transport,
                 initializeParams: initializeParams,
                 localSearchProvider: localSearchProvider,
-                preferLocalSearchProvider: preferLocalSearchProvider,
                 clock: clock,
                 logger: logger,
                 lifecycle: lifecycle
@@ -3517,9 +3580,41 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         sortedDocumentationTargets(discovery.runningXcodeTargets())
     }
 
-    private func primaryInstalledDocumentationAssetTarget() -> XcodeProcessTarget {
-        orderedTargetsForInstalledDocumentationAssetFallback().first
-            ?? Self.installedDocumentationAssetStandaloneTarget
+    private func orderedInstalledDocumentationAssetTargets() -> [XcodeProcessTarget] {
+        let runningTargets = orderedTargetsForInstalledDocumentationAssetFallback()
+        guard runningTargets.isEmpty else {
+            return runningTargets
+        }
+        return [Self.installedDocumentationAssetStandaloneTarget]
+    }
+
+    private func shouldPreferInstalledDocumentationAsset() -> Bool {
+        switch documentationSearchActionPolicy {
+        case .fallbackOnly:
+            return false
+        case .preferAlways:
+            return true
+        case .preferWhenDefaultXcodeIsOlder:
+            let runningTargets = orderedTargetsForInstalledDocumentationAssetFallback()
+            guard runningTargets.count > 1,
+                  let preferredTarget = runningTargets.first,
+                  let defaultTarget = defaultXcodeTargetResolver(),
+                  !targetsReferToSameXcode(preferredTarget, defaultTarget) else {
+                return false
+            }
+            return Self.compareVersion(
+                preferredTarget.xcodeVersion,
+                defaultTarget.xcodeVersion
+            ) == .orderedDescending
+        }
+    }
+
+    private func targetsReferToSameXcode(
+        _ lhs: XcodeProcessTarget,
+        _ rhs: XcodeProcessTarget
+    ) -> Bool {
+        URL(fileURLWithPath: lhs.appPath).standardizedFileURL.path
+            == URL(fileURLWithPath: rhs.appPath).standardizedFileURL.path
     }
 
     private func sortedDocumentationTargets(

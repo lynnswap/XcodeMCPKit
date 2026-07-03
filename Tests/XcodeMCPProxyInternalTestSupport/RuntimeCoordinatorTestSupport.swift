@@ -550,6 +550,8 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
     private let descriptorValue: JSONValue?
     private let responseData: Data
     private let failsCalls: Bool
+    private let unavailableDescriptorProcessIDs: Set<pid_t>
+    private let failingCallProcessIDs: Set<pid_t>
     private let failAfterSuccessfulCallCount: Int?
     private let timeoutOnceAfterSuccessfulCallCount: Int?
     private var descriptorPIDs: [pid_t] = []
@@ -563,18 +565,25 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
         descriptor: JSONValue?,
         responseData: Data,
         failsCalls: Bool = false,
+        unavailableDescriptorProcessIDs: Set<pid_t> = [],
+        failingCallProcessIDs: Set<pid_t> = [],
         failAfterSuccessfulCallCount: Int? = nil,
         timeoutOnceAfterSuccessfulCallCount: Int? = nil
     ) {
         self.descriptorValue = descriptor
         self.responseData = responseData
         self.failsCalls = failsCalls
+        self.unavailableDescriptorProcessIDs = unavailableDescriptorProcessIDs
+        self.failingCallProcessIDs = failingCallProcessIDs
         self.failAfterSuccessfulCallCount = failAfterSuccessfulCallCount
         self.timeoutOnceAfterSuccessfulCallCount = timeoutOnceAfterSuccessfulCallCount
     }
 
     func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
         descriptorPIDs.append(target.processID)
+        if unavailableDescriptorProcessIDs.contains(target.processID) {
+            return nil
+        }
         return descriptorValue
     }
 
@@ -588,7 +597,7 @@ actor StubDocumentationSearchProvider: DocumentationSearchProviding {
         if let query = try documentationSearchQuery(in: requestData) {
             queries.append(query)
         }
-        if failsCalls {
+        if failsCalls || failingCallProcessIDs.contains(target.processID) {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         if let timeoutOnceAfterSuccessfulCallCount,

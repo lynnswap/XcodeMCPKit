@@ -423,7 +423,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [target]),
             sessionFactory: factory,
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -447,6 +447,108 @@ struct DocumentationProviderTests {
         #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
     }
 
+    @Test func documentationProviderUsesMCPBridgeBeforeInstalledAssetByDefault()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 124, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"xcode\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 124,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 124, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"xcode\"}")
+        #expect(await factory.startedPIDs() == [target.processID])
+        #expect(await factory.documentationQueries(for: target.processID) == ["SwiftUI"])
+        #expect(await localProvider.requestedCallPIDs().isEmpty)
+    }
+
+    @Test func documentationProviderPrefersInstalledAssetWhenRunningXcodeIsNewerThanDefault()
+        async throws
+    {
+        let defaultTarget = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 126, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                defaultTarget.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"default\"}")
+                    ),
+                ],
+                newerTarget.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"newer\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 126,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [defaultTarget, newerTarget]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferWhenDefaultXcodeIsOlder,
+            defaultXcodeTargetResolver: { defaultTarget }
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 126, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [newerTarget.processID])
+        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.documentationQueries(for: defaultTarget.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: newerTarget.processID).isEmpty)
+    }
+
     @Test func documentationProviderUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()
         async throws
     {
@@ -461,7 +563,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: []),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
@@ -484,6 +586,98 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI"])
     }
 
+    @Test func documentationProviderToolListUsesNextInstalledAssetRuntimeWhenPrimaryDescriptorUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 120, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 121, xcodeVersion: "27.0")
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: Data(),
+            unavailableDescriptorProcessIDs: [xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let update = await manager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(update, to: try jsonValue(["tools": []]))
+
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-primary")
+        #expect(await localProvider.requestedDescriptorPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+        ])
+    }
+
+    @Test func documentationProviderCallUsesNextInstalledAssetRuntimeWhenPrimaryCallUnavailable()
+        async throws
+    {
+        let xcode26 = xcodeProcessTarget(processID: 122, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 123, xcodeVersion: "27.0")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                xcode26.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"xcode26\"}")
+                    ),
+                ],
+                xcode27.processID: [
+                    .init(
+                        serverVersion: "27.0",
+                        toolCount: 47,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .successText("{\"answer\":\"xcode27\"}")
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-primary"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 123,
+                text: "{\"answer\":\"asset\"}"
+            ),
+            failingCallProcessIDs: [xcode27.processID]
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider,
+            documentationSearchActionPolicy: .preferAlways
+        )
+
+        let outcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 123, query: "SwiftUI"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let responseData, let invalidatedProvider) = outcome else {
+            Issue.record("expected handled outcome, got \(outcome)")
+            return
+        }
+        #expect(invalidatedProvider == false)
+        #expect(try toolContentText(in: responseData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedDescriptorPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+        ])
+        #expect(await localProvider.requestedCallPIDs() == [
+            xcode27.processID,
+            xcode26.processID,
+        ])
+        #expect(await localProvider.requestedQueries() == ["SwiftUI", "SwiftUI"])
+        #expect(await factory.startedPIDs().isEmpty)
+        #expect(await factory.documentationQueries(for: xcode27.processID).isEmpty)
+        #expect(await factory.documentationQueries(for: xcode26.processID).isEmpty)
+    }
+
     @Test func documentationProviderBackgroundDiscoveryUsesPrimaryInstalledAssetWithoutRunningXcodeWhenConfigured()
         async throws
     {
@@ -495,7 +689,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: []),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let update = await manager.startBackgroundDiscovery(requestTimeout: TimeAmount.seconds(1))
@@ -521,7 +715,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [xcode26, xcode27]),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -554,7 +748,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: []),
             sessionFactory: ScriptedDocumentationSessionFactory(plansByPID: [:]),
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let outcome = try await manager.callDocumentationSearch(
@@ -599,7 +793,7 @@ struct DocumentationProviderTests {
             discovery: StubXcodeTargetDiscovery(targets: [target]),
             sessionFactory: factory,
             localSearchProvider: localProvider,
-            preferLocalSearchProvider: true
+            documentationSearchActionPolicy: .preferAlways
         )
 
         let outcome = try await manager.callDocumentationSearch(
