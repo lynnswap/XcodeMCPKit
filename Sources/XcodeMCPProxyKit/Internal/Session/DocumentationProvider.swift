@@ -969,6 +969,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private struct HostTarget: Sendable {
         let triple: String
         let swiftInterfaceName: String
+        let cpuType: UInt32
     }
 
     private func xcodeRuntime(for target: XcodeProcessTarget) -> XcodeRuntime? {
@@ -990,6 +991,11 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
               FileManager.default.isReadableFile(atPath: dvtFrameworkURL.path),
               FileManager.default.isReadableFile(atPath: chatFrameworkURL.path),
               FileManager.default.isReadableFile(atPath: platformDeveloperLibraryURL.path) else {
+            return nil
+        }
+        guard let hostTarget = try? hostTarget(),
+              machoFile(at: dvtFrameworkURL, containsCPUType: hostTarget.cpuType),
+              machoFile(at: chatFrameworkURL, containsCPUType: hostTarget.cpuType) else {
             return nil
         }
         let bundle = Bundle(url: appURL)
@@ -1268,16 +1274,88 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         #if arch(arm64)
         return HostTarget(
             triple: "arm64-apple-macos15.0",
-            swiftInterfaceName: "arm64-apple-macos.swiftinterface"
+            swiftInterfaceName: "arm64-apple-macos.swiftinterface",
+            cpuType: 0x0100000c
         )
         #elseif arch(x86_64)
         return HostTarget(
             triple: "x86_64-apple-macos15.0",
-            swiftInterfaceName: "x86_64-apple-macos.swiftinterface"
+            swiftInterfaceName: "x86_64-apple-macos.swiftinterface",
+            cpuType: 0x01000007
         )
         #else
         throw ControlPlane.Error.invalidResponse("unsupported DocumentationSearchAction host architecture")
         #endif
+    }
+
+    private func machoFile(at url: URL, containsCPUType cpuType: UInt32) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return false
+        }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 4096), data.count >= 8 else {
+            return false
+        }
+        return machoData(data, containsCPUType: cpuType)
+    }
+
+    private func machoData(_ data: Data, containsCPUType cpuType: UInt32) -> Bool {
+        let magicBE = readUInt32(data, at: 0, endian: .big)
+        let magicLE = readUInt32(data, at: 0, endian: .little)
+        if magicBE == 0xcafebabe || magicBE == 0xcafebabf {
+            return fatMachOData(data, containsCPUType: cpuType, endian: .big)
+        }
+        if magicLE == 0xcafebabe || magicLE == 0xcafebabf {
+            return fatMachOData(data, containsCPUType: cpuType, endian: .little)
+        }
+        if magicLE == 0xfeedface || magicLE == 0xfeedfacf {
+            return readUInt32(data, at: 4, endian: .little) == cpuType
+        }
+        if magicBE == 0xfeedface || magicBE == 0xfeedfacf {
+            return readUInt32(data, at: 4, endian: .big) == cpuType
+        }
+        return false
+    }
+
+    private func fatMachOData(
+        _ data: Data,
+        containsCPUType cpuType: UInt32,
+        endian: IntegerEndian
+    ) -> Bool {
+        let magic = readUInt32(data, at: 0, endian: endian)
+        let entrySize = magic == 0xcafebabf ? 32 : 20
+        let count = Int(readUInt32(data, at: 4, endian: endian))
+        guard count > 0 else {
+            return false
+        }
+        for index in 0 ..< count {
+            let offset = 8 + index * entrySize
+            guard offset + 4 <= data.count else {
+                return false
+            }
+            if readUInt32(data, at: offset, endian: endian) == cpuType {
+                return true
+            }
+        }
+        return false
+    }
+
+    private enum IntegerEndian {
+        case big
+        case little
+    }
+
+    private func readUInt32(_ data: Data, at offset: Int, endian: IntegerEndian) -> UInt32 {
+        guard offset >= 0, offset + 4 <= data.count else {
+            return 0
+        }
+        let bytes = data[offset ..< offset + 4]
+        switch endian {
+        case .big:
+            return bytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        case .little:
+            return bytes.reversed().reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        }
     }
 
     private func runtimePackageDirectoryName(

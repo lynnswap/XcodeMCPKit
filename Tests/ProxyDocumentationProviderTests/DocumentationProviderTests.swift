@@ -159,7 +159,10 @@ private func makeDocumentationSearchRequestWithArguments(
     )
 }
 
-private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
+private func makeFakeXcodeApp(
+    root: URL,
+    frameworkCPUType: UInt32 = hostMachOCPUType()
+) throws -> XcodeProcessTarget {
     let appURL = root.appendingPathComponent("Xcode.app", isDirectory: true)
     let swiftURL = appURL
         .appendingPathComponent("Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift")
@@ -174,7 +177,8 @@ private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try Data().write(to: fileURL)
+        let contents = fileURL == swiftURL ? Data() : thinMachOHeaderData(cpuType: frameworkCPUType)
+        try contents.write(to: fileURL)
     }
     try FileManager.default.createDirectory(
         at: appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true),
@@ -195,6 +199,34 @@ private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
         mcpbridgePath: appURL.appendingPathComponent("Contents/Developer/usr/bin/mcpbridge").path,
         xcodeVersion: "27.0"
     )
+}
+
+private func hostMachOCPUType() -> UInt32 {
+    #if arch(arm64)
+    return 0x0100000c
+    #elseif arch(x86_64)
+    return 0x01000007
+    #else
+    return 0
+    #endif
+}
+
+private func otherMachOCPUType() -> UInt32 {
+    hostMachOCPUType() == 0x0100000c ? 0x01000007 : 0x0100000c
+}
+
+private func thinMachOHeaderData(cpuType: UInt32) -> Data {
+    var data = Data()
+    appendUInt32(0xfeedfacf, to: &data)
+    appendUInt32(cpuType, to: &data)
+    return data
+}
+
+private func appendUInt32(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8(value & 0x000000ff))
+    data.append(UInt8((value & 0x0000ff00) >> 8))
+    data.append(UInt8((value & 0x00ff0000) >> 16))
+    data.append(UInt8((value & 0xff000000) >> 24))
 }
 
 @Suite(.serialized)
@@ -3716,6 +3748,26 @@ struct DocumentationProviderTests {
                 timeout: .seconds(1)
             )
         }
+    }
+
+    @Test func documentationSearchActionInvokerRejectsIncompatibleFrameworkArchitecture()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        let target = try makeFakeXcodeApp(
+            root: xcodeRoot,
+            frameworkCPUType: otherMachOCPUType()
+        )
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: DocumentationSearchActionProcessRecorder()
+        )
+
+        #expect(await invoker.isAvailable(for: target) == false)
     }
 
     @Test func documentationSearchActionProviderUsesStandaloneResolverOnlyWithoutRunningXcode()
