@@ -614,7 +614,7 @@ extension RuntimeCoordinator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch is TimeoutError {
-                throw TimeoutError()
+                lastFailure = (upstreamIndex, TimeoutError())
             } catch {
                 lastFailure = (upstreamIndex, error)
             }
