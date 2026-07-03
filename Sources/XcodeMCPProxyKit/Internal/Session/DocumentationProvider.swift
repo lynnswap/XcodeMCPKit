@@ -884,6 +884,7 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private let cacheRoot: URL
     private let processRunner: any ProcessRunning
     private var preparedHelperURLsByPackageRoot: [URL: URL] = [:]
+    private var helperPreparationsByPackageRoot: [URL: HelperPreparation] = [:]
 
     init(
         cacheRoot: URL = URL.cachesDirectory
@@ -969,6 +970,11 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
     private struct HostTarget: Sendable {
         let triple: String
         let swiftInterfaceName: String
+    }
+
+    private struct HelperPreparation {
+        let id: UUID
+        let task: Task<URL, Error>
     }
 
     private func xcodeRuntime(for target: XcodeProcessTarget) -> XcodeRuntime? {
@@ -1059,6 +1065,40 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
            FileManager.default.isExecutableFile(atPath: helperURL.path) {
             return helperURL
         }
+        if let preparation = helperPreparationsByPackageRoot[packageRoot] {
+            return try await awaitHelperPreparation(preparation.task, deadline: deadline)
+        }
+        let preparationID = UUID()
+        let preparationTask = Task { [self] in
+            do {
+                let helperURL = try await prepareHelperURL(
+                    runtime: runtime,
+                    packageRoot: packageRoot,
+                    hostTarget: hostTarget,
+                    sdkPath: sdkPath,
+                    deadline: deadline
+                )
+                finishHelperPreparation(packageRoot: packageRoot, id: preparationID, helperURL: helperURL)
+                return helperURL
+            } catch {
+                finishHelperPreparation(packageRoot: packageRoot, id: preparationID, helperURL: nil)
+                throw error
+            }
+        }
+        helperPreparationsByPackageRoot[packageRoot] = HelperPreparation(
+            id: preparationID,
+            task: preparationTask
+        )
+        return try await awaitHelperPreparation(preparationTask, deadline: deadline)
+    }
+
+    private func prepareHelperURL(
+        runtime: XcodeRuntime,
+        packageRoot: URL,
+        hostTarget: HostTarget,
+        sdkPath: String,
+        deadline: Deadline?
+    ) async throws -> URL {
         let moduleRoot = packageRoot.appendingPathComponent("GeneratedModules", isDirectory: true)
         let sourceURL = packageRoot
             .appendingPathComponent("Sources", isDirectory: true)
@@ -1109,8 +1149,42 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
         guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
             throw ControlPlane.Error.invalidResponse("DocumentationSearchAction helper build did not produce executable")
         }
-        preparedHelperURLsByPackageRoot[packageRoot] = helperURL
         return helperURL
+    }
+
+    private func finishHelperPreparation(packageRoot: URL, id: UUID, helperURL: URL?) {
+        guard helperPreparationsByPackageRoot[packageRoot]?.id == id else {
+            return
+        }
+        helperPreparationsByPackageRoot[packageRoot] = nil
+        if let helperURL {
+            preparedHelperURLsByPackageRoot[packageRoot] = helperURL
+        }
+    }
+
+    private func awaitHelperPreparation(
+        _ task: Task<URL, Error>,
+        deadline: Deadline?
+    ) async throws -> URL {
+        guard let timeoutNanoseconds = try subprocessTimeoutNanoseconds(until: deadline) else {
+            return try await task.value
+        }
+        return try await withThrowingTaskGroup(of: URL.self) { group in
+            group.addTask {
+                try await task.value
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutNanoseconds))
+                throw TimeoutError()
+            }
+            defer {
+                group.cancelAll()
+            }
+            guard let helperURL = try await group.next() else {
+                throw TimeoutError()
+            }
+            return helperURL
+        }
     }
 
     private func helperProductsDirectoryURL(

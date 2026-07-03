@@ -74,7 +74,7 @@ private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
                 stderr: ""
             )
         case "DocumentationSearchAction.build":
-            try createFakeHelperExecutable(for: request.arguments)
+            try createFakeDocumentationSearchActionHelperExecutable(for: request.arguments)
             return ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
         case "DocumentationSearchAction":
             return ProcessOutput(
@@ -94,25 +94,62 @@ private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
     func recordedRequests() -> [ProcessRequest] {
         requests
     }
+}
 
-    private func createFakeHelperExecutable(for arguments: [String]) throws {
-        guard let scratchPath = processArgumentValue(after: "--scratch-path", in: arguments) else {
-            return
+private actor BlockingDocumentationSearchActionProcessRunner: ProcessRunning {
+    private var requests: [ProcessRequest] = []
+    private let buildStarted: TestSignal
+    private let releaseBuild: TestSignal
+
+    init(buildStarted: TestSignal, releaseBuild: TestSignal) {
+        self.buildStarted = buildStarted
+        self.releaseBuild = releaseBuild
+    }
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        requests.append(request)
+        switch request.label {
+        case "DocumentationSearchAction.sdk":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "/tmp/MacOSX.sdk\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.bin-path":
+            guard let scratchPath = processArgumentValue(after: "--scratch-path", in: request.arguments) else {
+                return ProcessOutput(
+                    terminationStatus: 1,
+                    stdout: "",
+                    stderr: "missing scratch path"
+                )
+            }
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: "\(scratchPath)/out/Products/Release\n",
+                stderr: ""
+            )
+        case "DocumentationSearchAction.build":
+            buildStarted.signal()
+            try await releaseBuild.wait(description: "waiting to release DocumentationSearchAction helper build")
+            try createFakeDocumentationSearchActionHelperExecutable(for: request.arguments)
+            return ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
+        case "DocumentationSearchAction":
+            return ProcessOutput(
+                terminationStatus: 0,
+                stdout: #"{"documents":[]}"#,
+                stderr: ""
+            )
+        default:
+            return ProcessOutput(
+                terminationStatus: 1,
+                stdout: "",
+                stderr: "unexpected process request: \(request.label)"
+            )
         }
-        let helperURL = URL(fileURLWithPath: scratchPath, isDirectory: true)
-            .appendingPathComponent("out", isDirectory: true)
-            .appendingPathComponent("Products", isDirectory: true)
-            .appendingPathComponent("Release", isDirectory: true)
-            .appendingPathComponent("documentation-search-action-helper")
-        try FileManager.default.createDirectory(
-            at: helperURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try Data().write(to: helperURL)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
-            ofItemAtPath: helperURL.path
-        )
+    }
+
+    func recordedRequests() -> [ProcessRequest] {
+        requests
     }
 }
 
@@ -128,6 +165,26 @@ private func processArgumentValue(after flag: String, in arguments: [String]) ->
         return nil
     }
     return arguments[arguments.index(after: index)]
+}
+
+private func createFakeDocumentationSearchActionHelperExecutable(for arguments: [String]) throws {
+    guard let scratchPath = processArgumentValue(after: "--scratch-path", in: arguments) else {
+        return
+    }
+    let helperURL = URL(fileURLWithPath: scratchPath, isDirectory: true)
+        .appendingPathComponent("out", isDirectory: true)
+        .appendingPathComponent("Products", isDirectory: true)
+        .appendingPathComponent("Release", isDirectory: true)
+        .appendingPathComponent("documentation-search-action-helper")
+    try FileManager.default.createDirectory(
+        at: helperURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data().write(to: helperURL)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: helperURL.path
+    )
 }
 
 private func makeDocumentationSearchRequestWithArguments(
@@ -3677,6 +3734,75 @@ struct DocumentationProviderTests {
             let nextTimeout = try #require(next)
             #expect(nextTimeout <= previousTimeout)
         }
+    }
+
+    @Test func documentationSearchActionInvokerCoalescesConcurrentHelperPreparation()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-action-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let assetRoot = root.appendingPathComponent("assets", isDirectory: true)
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let xcodeRoot = root.appendingPathComponent("xcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: assetRoot, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: assetRoot,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.2",
+            documentationRelease: 950001
+        )
+        let target = try makeFakeXcodeApp(root: xcodeRoot)
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+        let asset = try #require(DocumentationSearchAssetLocator.latestAsset(from: scan.assets))
+        let buildStarted = TestSignal()
+        let releaseBuild = TestSignal()
+        let processRunner = BlockingDocumentationSearchActionProcessRunner(
+            buildStarted: buildStarted,
+            releaseBuild: releaseBuild
+        )
+        let invoker = LiveDocumentationSearchActionInvoker(
+            cacheRoot: cacheRoot,
+            processRunner: processRunner
+        )
+        let invocation = DocumentationSearchActionInvocation(
+            target: target,
+            asset: asset,
+            query: "NavigationSplitView",
+            frameworks: ["SwiftUI"],
+            limit: nil
+        )
+
+        let first = Task {
+            try await invoker.invoke(invocation, timeout: .seconds(5))
+        }
+        defer {
+            releaseBuild.signal()
+            first.cancel()
+        }
+        try await buildStarted.wait(description: "waiting for first DocumentationSearchAction helper build")
+
+        let second = Task {
+            try await invoker.invoke(invocation, timeout: .seconds(5))
+        }
+        defer {
+            second.cancel()
+        }
+        try await waitWithTimeout("waiting for second DocumentationSearchAction sdk lookup") {
+            while await processRunner.recordedRequests().filter({ $0.label == "DocumentationSearchAction.sdk" }).count < 2 {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+
+        releaseBuild.signal()
+        _ = try await first.value
+        _ = try await second.value
+
+        let requests = await processRunner.recordedRequests()
+        #expect(requests.filter { $0.label == "DocumentationSearchAction.bin-path" }.count == 1)
+        #expect(requests.filter { $0.label == "DocumentationSearchAction.build" }.count == 1)
+        #expect(requests.filter { $0.label == "DocumentationSearchAction" }.count == 2)
     }
 
     @Test func documentationSearchActionInvokerMapsProcessTimeoutToRequestTimeout()
