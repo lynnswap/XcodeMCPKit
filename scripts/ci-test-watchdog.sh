@@ -10,6 +10,7 @@ set -uo pipefail
 
 STALL_SECONDS="${STALL_SECONDS:-120}"
 POLL_SECONDS=10
+RESUME_RECHECK_SECONDS=5
 
 log="$(mktemp -t ci-test-watchdog)"
 
@@ -28,6 +29,22 @@ sample_process() {
 
 log_size() {
     stat -f%z "${log}" 2> /dev/null || echo 0
+}
+
+wait_for_output_resume() {
+    local stalled_size=$1
+    local remaining=${RESUME_RECHECK_SECONDS}
+    while [ "${remaining}" -gt 0 ]; do
+        sleep 1
+        size=$(log_size)
+        if [ "${size}" -ne "${stalled_size}" ]; then
+            stalled_for=0
+            last_size="${size}"
+            return 0
+        fi
+        remaining=$((remaining - 1))
+    done
+    return 1
 }
 
 dump_hang_diagnostics() {
@@ -54,23 +71,16 @@ while kill -0 "${runner}" 2> /dev/null; do
     fi
     if [ "${stalled_for}" -ge "${STALL_SECONDS}" ]; then
         stalled_size="${size}"
-        sleep 1
-        size=$(log_size)
-        if [ "${size}" -ne "${stalled_size}" ]; then
-            stalled_for=0
-            last_size="${size}"
+        if wait_for_output_resume "${stalled_size}"; then
             continue
         fi
 
         dump_hang_diagnostics
-        size=$(log_size)
         if ! kill -0 "${runner}" 2> /dev/null; then
             break
         fi
-        if [ "${size}" -ne "${stalled_size}" ]; then
+        if wait_for_output_resume "${stalled_size}"; then
             echo "::warning::test output resumed while dumping diagnostics; continuing instead of killing"
-            stalled_for=0
-            last_size="${size}"
             continue
         fi
 
