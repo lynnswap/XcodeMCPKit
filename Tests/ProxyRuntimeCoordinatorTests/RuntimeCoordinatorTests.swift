@@ -486,6 +486,38 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
     }
 
+    @Test func processRouteActivationCatalogUsesControlPlaneTimeoutWhenAutoApproveEnabled()
+        async throws
+    {
+        var config = makeConfig(requestTimeout: 5)
+        config.autoApproveXcodeDialog = true
+        let target = xcodeProcessTarget(processID: 27010, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let route = XcodeProcessRoute(target: target, upstreamIndices: [0])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [route],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
+        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+            processID: target.processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 0
+        )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(5).nanoseconds)
+    }
+
     @Test func processRouteActivationCatalogTimeoutReplacesSlotAndDropsStaleCatalog()
         async throws
     {
@@ -560,7 +592,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(timeoutScheduler.scheduledCount() == 3)
         #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
+        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 2))
         #expect(try await firstAttempt.nextStopCount() == 1)
         #expect(timeoutScheduler.scheduledCount() == 4)
@@ -881,7 +913,7 @@ struct RuntimeCoordinatorTests {
 
         let catalogTimeoutIndex = try #require(
             (scheduledBeforePrimaryInitialized..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds
+                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds
             }
         )
         let scheduledBeforeCatalogTimeoutFired = timeoutScheduler.scheduledCount()
@@ -904,12 +936,18 @@ struct RuntimeCoordinatorTests {
         await retryPrimary.yield(
             .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
         )
+        _ = try await waitWithTimeout(
+            "waiting for retry activation initialized notification",
+            timeout: .seconds(2)
+        ) {
+            try await retryPrimary.nextSent(at: 1)
+        }
         let retryToolsRequest = try await waitWithTimeout(
             "waiting for retry activation tools/list",
             timeout: .seconds(2)
         ) {
             try await retryPrimary.nextSent(
-                startingAt: 1,
+                startingAt: 2,
                 matching: { methodName(from: $0) == "tools/list" }
             )
         }
@@ -1114,6 +1152,7 @@ struct RuntimeCoordinatorTests {
         #expect(methodName(from: foregroundRequest) == "tools/list")
 
         #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 0))
         #expect(timeoutScheduler.scheduledCount() == 2)
         #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
