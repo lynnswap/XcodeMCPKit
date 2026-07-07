@@ -238,10 +238,6 @@ extension RuntimeCoordinator {
                 processID: route.target.processID,
                 reason: "upstream_cleared_before_catalog"
             )
-            markXcodeProcessRouteUnavailableAfterCatalogFailure(
-                upstreamIndex: upstreamIndex,
-                reason: "upstream_cleared_before_catalog"
-            )
         case .pending, .cataloged, .abandoned, .attaching, .initialized, nil:
             return
         }
@@ -361,19 +357,20 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(upstreamIndex)"),
                 "attempt": .string("\(attempt)"),
                 "phase": .string("catalog"),
-                "cooldown_ms": .string("30000"),
+                "retry_delay_ms": .string("\(timeout.retry.delayMilliseconds)"),
             ]
         )
         testHooks.processRouteActivationEvent?(processID, upstreamIndex, "timeout")
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
-        markXcodeProcessRouteUnavailableAfterCatalogFailure(
-            upstreamIndex: upstreamIndex,
-            reason: "catalog_timeout"
-        )
         guard replaceProcessBoundUpstreamSlot(processID: processID, upstreamIndex: upstreamIndex) else {
             return
         }
+        scheduleProcessRouteActivationRetry(
+            processID: processID,
+            retry: timeout.retry,
+            reason: "catalog_timeout"
+        )
     }
 
     @discardableResult

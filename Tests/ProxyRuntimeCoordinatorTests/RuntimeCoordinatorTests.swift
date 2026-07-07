@@ -597,19 +597,11 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 2))
         #expect(try await firstAttempt.nextStopCount() == 1)
-        #expect(timeoutScheduler.scheduledCount() == 3)
-
-        manager.reconcileXcodeProcessTargets(
-            [olderTarget, newerTarget],
-            reason: "test_catalog_timeout_before_cooldown"
-        )
+        #expect(timeoutScheduler.scheduledCount() == 4)
+        #expect(timeoutScheduler.delay(at: 3)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
         #expect(createdUpstreams.withLockedValue(\.count) == 2)
 
-        uptimeClock.advance(by: .seconds(31))
-        manager.reconcileXcodeProcessTargets(
-            [olderTarget, newerTarget],
-            reason: "test_catalog_timeout_after_cooldown"
-        )
+        #expect(timeoutScheduler.fire(at: 3))
         let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -932,18 +924,14 @@ struct RuntimeCoordinatorTests {
         let scheduledBeforeCatalogTimeoutFired = timeoutScheduler.scheduledCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
 
-        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeCatalogTimeoutFired)
-        manager.reconcileXcodeProcessTargets(
-            [olderTarget, newerTarget],
-            reason: "test_catalog_fallback_timeout_before_cooldown"
+        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeCatalogTimeoutFired + 1)
+        #expect(
+            timeoutScheduler.delay(at: scheduledBeforeCatalogTimeoutFired)?.nanoseconds
+                == TimeAmount.milliseconds(250).nanoseconds
         )
         #expect(createdUpstreams.withLockedValue(\.count) == 4)
 
-        uptimeClock.advance(by: .seconds(31))
-        manager.reconcileXcodeProcessTargets(
-            [olderTarget, newerTarget],
-            reason: "test_catalog_fallback_timeout_after_cooldown"
-        )
+        #expect(timeoutScheduler.fire(at: scheduledBeforeCatalogTimeoutFired))
         let retryPrimary = try #require(createdUpstreams.withLockedValue { $0.dropFirst(2).first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -1174,19 +1162,11 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.scheduledCount() == 1)
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 0))
-        #expect(timeoutScheduler.scheduledCount() == 1)
-
-        manager.reconcileXcodeProcessTargets(
-            [target],
-            reason: "test_foreground_catalog_timeout_before_cooldown"
-        )
+        #expect(timeoutScheduler.scheduledCount() == 2)
+        #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
         #expect(createdUpstreams.withLockedValue(\.count) == 1)
 
-        uptimeClock.advance(by: .seconds(31))
-        manager.reconcileXcodeProcessTargets(
-            [target],
-            reason: "test_foreground_catalog_timeout_after_cooldown"
-        )
+        #expect(timeoutScheduler.fire(at: 1))
         let retryUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -1232,7 +1212,7 @@ struct RuntimeCoordinatorTests {
         #expect(toolNames(in: result) == ["RetryForegroundTool"])
     }
 
-    @Test func processRouteActivationClearingPreCatalogInitializedUpstreamWaitsForCooldownBeforeRetry()
+    @Test func processRouteActivationClearingPreCatalogInitializedUpstreamAllowsRetry()
         async throws
     {
         let target = xcodeProcessTarget(processID: 27019, xcodeVersion: "27.0")
@@ -1259,10 +1239,6 @@ struct RuntimeCoordinatorTests {
         manager.clearUpstreamState(upstreamIndex: 0)
 
         #expect(manager.xcodeProcessRouteActivationTracker.phase(processID: target.processID) == nil)
-        manager.startProcessRouteActivation(for: route)
-        #expect(await upstream.sentCount() == 0)
-
-        uptimeClock.advance(by: .seconds(31))
         manager.startProcessRouteActivation(for: route)
         let retryInitialize = try await upstream.nextSent(at: 0)
         #expect(methodName(from: retryInitialize) == "initialize")
@@ -2172,6 +2148,208 @@ struct RuntimeCoordinatorTests {
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
             "Only26",
             "Only27Relaunched",
+        ]))
+    }
+
+    @Test func processRoutingRetriesRelaunchedProcessCatalogAfterCatalogTimeout()
+        async throws
+    {
+        var config = makeConfig(requestTimeout: 20)
+        config.autoApproveXcodeDialog = true
+        let old26Upstream = TestUpstreamClient()
+        let xcode27Upstream = TestUpstreamClient()
+        let old26Target = XcodeProcessTarget(
+            processID: 26642,
+            appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
+            xcodeVersion: "26.6"
+        )
+        let relaunched26Target = XcodeProcessTarget(
+            processID: 26643,
+            appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
+            xcodeVersion: "26.6"
+        )
+        let xcode27Target = XcodeProcessTarget(
+            processID: 27043,
+            appPath: "/Applications/Xcode_27.app",
+            developerDir: "/Applications/Xcode_27.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode_27.app/Contents/Developer/usr/bin/mcpbridge",
+            xcodeVersion: "27.0"
+        )
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [old26Upstream, xcode27Upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: old26Target, upstreamIndices: [0]),
+                XcodeProcessRoute(target: xcode27Target, upstreamIndices: [1]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (old26Target, 0, [toolDescriptor(name: "OldOnly26")]),
+                (xcode27Target, 1, [toolDescriptor(name: "Only27")]),
+            ]
+        )
+
+        manager.reconcileXcodeProcessTargets(
+            [xcode27Target],
+            reason: "test_terminate_26_before_relaunch"
+        )
+        _ = try await waitWithTimeout(
+            "waiting for retired 26 upstream stop",
+            timeout: .seconds(2)
+        ) {
+            try await old26Upstream.nextStopCount()
+        }
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["Only27"])
+
+        manager.reconcileXcodeProcessTargets(
+            [xcode27Target, relaunched26Target],
+            reason: "test_relaunch_26_before_workspace_ready"
+        )
+        let firstAttempt = try #require(createdUpstreams.withLockedValue { $0.first })
+        let initialize = try await waitWithTimeout(
+            "waiting for relaunched 26 activation initialize",
+            timeout: .seconds(2)
+        ) {
+            try await firstAttempt.nextSent(at: 0)
+        }
+        await firstAttempt.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+        )
+        _ = try await waitWithTimeout(
+            "waiting for relaunched 26 initialized notification",
+            timeout: .seconds(2)
+        ) {
+            try await firstAttempt.nextSent(at: 1)
+        }
+        let staleCatalogRequest = try await waitWithTimeout(
+            "waiting for relaunched 26 first tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await firstAttempt.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+
+        let catalogTimeoutIndex = try #require((0..<timeoutScheduler.scheduledCount()).first {
+            timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds
+                && timeoutScheduler.isCancelled(at: $0) == false
+        })
+        let scheduledBeforeCatalogTimeout = timeoutScheduler.scheduledCount()
+        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
+        #expect(try await waitWithTimeout(
+            "waiting for timed-out 26 upstream stop",
+            timeout: .seconds(2)
+        ) {
+            try await firstAttempt.nextStopCount()
+        } == 1)
+        #expect(manager.unavailableXcodeProcessIDs().contains(
+            relaunched26Target.processID
+        ) == false)
+        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeCatalogTimeout + 1)
+        #expect(
+            timeoutScheduler.delay(at: scheduledBeforeCatalogTimeout)?.nanoseconds
+                == TimeAmount.milliseconds(250).nanoseconds
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 2)
+
+        await firstAttempt.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: staleCatalogRequest),
+                    tools: [
+                        toolDescriptor(name: "StaleOnly26"),
+                    ]
+                )
+            )
+        )
+        #expect(manager.processToolCatalogRegistry.catalog(
+            forProcessID: relaunched26Target.processID
+        ) == nil)
+
+        #expect(timeoutScheduler.fire(at: scheduledBeforeCatalogTimeout))
+        let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
+        let retryInitialize = try await waitWithTimeout(
+            "waiting for relaunched 26 retry initialize",
+            timeout: .seconds(2)
+        ) {
+            try await retryAttempt.nextSent(at: 0)
+        }
+        await retryAttempt.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
+        )
+        _ = try await waitWithTimeout(
+            "waiting for relaunched 26 retry initialized notification",
+            timeout: .seconds(2)
+        ) {
+            try await retryAttempt.nextSent(at: 1)
+        }
+        let readyCatalogRequest = try await waitWithTimeout(
+            "waiting for relaunched 26 retry tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await retryAttempt.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await retryAttempt.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: readyCatalogRequest),
+                    tools: [
+                        toolDescriptor(name: "Only26Relaunched"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for relaunched 26 catalog surface",
+            timeout: .seconds(2)
+        ) {
+            while manager.processToolCatalogRegistry.catalog(
+                forProcessID: relaunched26Target.processID
+            ) == nil {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
+        let snapshot = manager.debugSnapshot()
+        #expect(Set(snapshot.processToolCatalogs.map(\.processID)) == Set([
+            xcode27Target.processID,
+            relaunched26Target.processID,
+        ]))
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "Only27",
+            "Only26Relaunched",
         ]))
     }
 
