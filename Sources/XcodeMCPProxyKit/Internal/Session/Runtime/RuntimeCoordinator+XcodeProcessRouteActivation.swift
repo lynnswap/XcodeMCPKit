@@ -296,8 +296,7 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         attempt: Int
     ) {
-        let mode = WarmInitializeMode.processRouteActivation(processID: processID)
-        guard let timeoutAmount = upstreamInitTimeoutAmount(for: mode) else {
+        guard let timeoutAmount = processRouteActivationCatalogTimeoutAmount() else {
             return
         }
         let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
@@ -313,6 +312,10 @@ extension RuntimeCoordinator {
             attempt: attempt,
             timeout: timeout
         )
+    }
+
+    private func processRouteActivationCatalogTimeoutAmount() -> TimeAmount? {
+        MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
     }
 
     private func handleProcessRouteActivationCatalogTimeout(
