@@ -527,10 +527,12 @@ struct RuntimeCoordinatorTests {
         let olderTarget = xcodeProcessTarget(processID: 26626, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27026, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let uptimeClock = TestUptimeClock()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [olderUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
@@ -595,10 +597,19 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 2))
         #expect(try await firstAttempt.nextStopCount() == 1)
-        #expect(timeoutScheduler.scheduledCount() == 4)
-        #expect(timeoutScheduler.delay(at: 3)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
+        #expect(timeoutScheduler.scheduledCount() == 3)
 
-        #expect(timeoutScheduler.fire(at: 3))
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_timeout_before_cooldown"
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 2)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_timeout_after_cooldown"
+        )
         let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -803,10 +814,12 @@ struct RuntimeCoordinatorTests {
         let olderTarget = xcodeProcessTarget(processID: 26628, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27127, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let uptimeClock = TestUptimeClock()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [olderUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
@@ -918,14 +931,19 @@ struct RuntimeCoordinatorTests {
         )
         let scheduledBeforeCatalogTimeoutFired = timeoutScheduler.scheduledCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
-        let retryIndex = try #require(
-            (scheduledBeforeCatalogTimeoutFired..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds
-                    == TimeAmount.milliseconds(250).nanoseconds
-            }
-        )
 
-        #expect(timeoutScheduler.fire(at: retryIndex))
+        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeCatalogTimeoutFired)
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_fallback_timeout_before_cooldown"
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 4)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_fallback_timeout_after_cooldown"
+        )
         let retryPrimary = try #require(createdUpstreams.withLockedValue { $0.dropFirst(2).first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -1097,10 +1115,12 @@ struct RuntimeCoordinatorTests {
         let target = xcodeProcessTarget(processID: 27028, xcodeVersion: "27.0")
         let initialUpstream = TestUpstreamClient()
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let uptimeClock = TestUptimeClock()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [initialUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
@@ -1137,7 +1157,7 @@ struct RuntimeCoordinatorTests {
         let foregroundTask = Task {
             try await manager.sharedToolsList(
                 sessionID: "session-process-catalog-foreground-timeout",
-                requestTimeoutOverride: .seconds(20)
+                requestTimeoutOverride: .seconds(40)
             )
         }
         let foregroundRequest = try await waitWithTimeout(
@@ -1154,10 +1174,19 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.scheduledCount() == 1)
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 0))
-        #expect(timeoutScheduler.scheduledCount() == 2)
-        #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
+        #expect(timeoutScheduler.scheduledCount() == 1)
 
-        #expect(timeoutScheduler.fire(at: 1))
+        manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_foreground_catalog_timeout_before_cooldown"
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 1)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_foreground_catalog_timeout_after_cooldown"
+        )
         let retryUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -1203,14 +1232,16 @@ struct RuntimeCoordinatorTests {
         #expect(toolNames(in: result) == ["RetryForegroundTool"])
     }
 
-    @Test func processRouteActivationClearingPreCatalogInitializedUpstreamAllowsRetry()
+    @Test func processRouteActivationClearingPreCatalogInitializedUpstreamWaitsForCooldownBeforeRetry()
         async throws
     {
         let target = xcodeProcessTarget(processID: 27019, xcodeVersion: "27.0")
         let upstream = TestUpstreamClient()
         let route = XcodeProcessRoute(target: target, upstreamIndices: [0])
+        let uptimeClock = TestUptimeClock()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             xcodeProcessRoutes: [route],
             processRoutingEnabled: true,
             startImmediately: false
@@ -1228,6 +1259,10 @@ struct RuntimeCoordinatorTests {
         manager.clearUpstreamState(upstreamIndex: 0)
 
         #expect(manager.xcodeProcessRouteActivationTracker.phase(processID: target.processID) == nil)
+        manager.startProcessRouteActivation(for: route)
+        #expect(await upstream.sentCount() == 0)
+
+        uptimeClock.advance(by: .seconds(31))
         manager.startProcessRouteActivation(for: route)
         let retryInitialize = try await upstream.nextSent(at: 0)
         #expect(methodName(from: retryInitialize) == "initialize")
@@ -5237,6 +5272,32 @@ struct RuntimeCoordinatorTests {
         #expect(await badUpstream.sentCount() == 0)
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["XcodeRead"])
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+    }
+
+    @Test func processRouteCatalogCooldownSurvivesRouteAvailabilitySuccess() async throws {
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80423, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: 0,
+            reason: "catalog_timeout"
+        )
+        manager.markXcodeProcessRouteAvailable(upstreamIndex: 0)
+
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID))
+
+        manager.markXcodeProcessRouteCatalogAvailable(upstreamIndex: 0)
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID) == false)
     }
 
     @Test func sessionManagerToolsListRetriesSiblingBeforeDroppingProcessCatalog()

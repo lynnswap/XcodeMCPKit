@@ -424,7 +424,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let pendingProcessToolsCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
     let xcodeProcessRouteActivationTracker = XcodeProcessRouteActivationTracker()
     let unavailableXcodeProcessRoutes =
-        NIOLockedValueBox<[pid_t: UInt64]>([:])
+        NIOLockedValueBox<[pid_t: XcodeProcessRouteUnavailableRecord]>([:])
     let prewarmDocumentationProviderOnStartup: Bool
     let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)

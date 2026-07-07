@@ -3,9 +3,40 @@ import Logging
 import NIOCore
 import XcodeMCPKit
 
+struct XcodeProcessRouteUnavailableRecord: Sendable, Equatable {
+    var routeUnavailableUntilUptimeNs: UInt64?
+    var catalogUnavailableUntilUptimeNs: UInt64?
+
+    var unavailableUntilUptimeNs: UInt64 {
+        max(routeUnavailableUntilUptimeNs ?? 0, catalogUnavailableUntilUptimeNs ?? 0)
+    }
+
+    var isUnavailable: Bool {
+        unavailableUntilUptimeNs > 0
+    }
+
+    mutating func pruneExpired(nowUptimeNs: UInt64) {
+        if let routeUnavailableUntilUptimeNs,
+           routeUnavailableUntilUptimeNs <= nowUptimeNs {
+            self.routeUnavailableUntilUptimeNs = nil
+        }
+        if let catalogUnavailableUntilUptimeNs,
+           catalogUnavailableUntilUptimeNs <= nowUptimeNs {
+            self.catalogUnavailableUntilUptimeNs = nil
+        }
+    }
+}
+
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
         2_000_000_000
+    private static let xcodeProcessRouteCatalogUnavailableCooldownNanoseconds: UInt64 =
+        30_000_000_000
+
+    private enum XcodeProcessRouteUnavailableScope {
+        case route
+        case catalog
+    }
 
     private struct ToolRoutingRequest: Sendable {
         let id: JSONRPC.ID?
@@ -242,7 +273,11 @@ extension RuntimeCoordinator {
     func unavailableXcodeProcessIDs() -> Set<pid_t> {
         let now = nowUptimeNanoseconds()
         return unavailableXcodeProcessRoutes.withLockedValue { state in
-            state = state.filter { $0.value > now }
+            state = state.compactMapValues { record in
+                var pruned = record
+                pruned.pruneExpired(nowUptimeNs: now)
+                return pruned.isUnavailable ? pruned : nil
+            }
             return Set(state.keys)
         }
     }
@@ -251,13 +286,52 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         reason: String
     ) {
+        markXcodeProcessRouteUnavailable(
+            upstreamIndex: upstreamIndex,
+            reason: reason,
+            cooldownNanoseconds: Self.xcodeProcessRouteUnavailableCooldownNanoseconds,
+            scope: .route
+        )
+    }
+
+    func markXcodeProcessRouteUnavailableAfterCatalogFailure(
+        upstreamIndex: Int,
+        reason: String
+    ) {
+        markXcodeProcessRouteUnavailable(
+            upstreamIndex: upstreamIndex,
+            reason: reason,
+            cooldownNanoseconds: Self.xcodeProcessRouteCatalogUnavailableCooldownNanoseconds,
+            scope: .catalog
+        )
+    }
+
+    private func markXcodeProcessRouteUnavailable(
+        upstreamIndex: Int,
+        reason: String,
+        cooldownNanoseconds: UInt64,
+        scope: XcodeProcessRouteUnavailableScope
+    ) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
         let unavailableUntil = nowUptimeNanoseconds()
-            &+ Self.xcodeProcessRouteUnavailableCooldownNanoseconds
+            &+ cooldownNanoseconds
         unavailableXcodeProcessRoutes.withLockedValue { state in
-            state[route.target.processID] = unavailableUntil
+            var record = state[route.target.processID] ?? XcodeProcessRouteUnavailableRecord()
+            switch scope {
+            case .route:
+                record.routeUnavailableUntilUptimeNs = max(
+                    record.routeUnavailableUntilUptimeNs ?? 0,
+                    unavailableUntil
+                )
+            case .catalog:
+                record.catalogUnavailableUntilUptimeNs = max(
+                    record.catalogUnavailableUntilUptimeNs ?? 0,
+                    unavailableUntil
+                )
+            }
+            state[route.target.processID] = record
         }
         processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
         resyncProcessToolsCatalogSurfaceAfterRemoving(
@@ -273,6 +347,7 @@ extension RuntimeCoordinator {
                 "xcode_version": .string(route.target.xcodeVersion),
                 "upstream": .string("\(upstreamIndex)"),
                 "reason": .string(reason),
+                "cooldown_ms": .string("\(cooldownNanoseconds / 1_000_000)"),
                 "unavailable_until_uptime_ns": .string("\(unavailableUntil)"),
             ]
         )
@@ -282,7 +357,26 @@ extension RuntimeCoordinator {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
-        _ = unavailableXcodeProcessRoutes.withLockedValue { state in
+        let now = nowUptimeNanoseconds()
+        unavailableXcodeProcessRoutes.withLockedValue { state in
+            guard var record = state[route.target.processID] else {
+                return
+            }
+            record.routeUnavailableUntilUptimeNs = nil
+            record.pruneExpired(nowUptimeNs: now)
+            if record.isUnavailable {
+                state[route.target.processID] = record
+            } else {
+                state.removeValue(forKey: route.target.processID)
+            }
+        }
+    }
+
+    func markXcodeProcessRouteCatalogAvailable(upstreamIndex: Int) {
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+            return
+        }
+        unavailableXcodeProcessRoutes.withLockedValue { state in
             state.removeValue(forKey: route.target.processID)
         }
     }

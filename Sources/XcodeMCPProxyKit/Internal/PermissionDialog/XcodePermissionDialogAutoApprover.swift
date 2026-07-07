@@ -191,10 +191,8 @@ extension XcodePermissionDialog {
         }
 
         private func runMonitorLoop(dependencies: Dependencies) async {
-            let agentPathCandidates = dependencies.agentPathCandidates()
-            let assistantNameCandidates = dependencies.assistantNameCandidates()
-            let pathCandidateText = agentPathCandidates.sorted().joined(separator: " | ")
             var hasLoggedTrustedMonitoring = false
+            var loggedPathCandidateText: String?
 
             while Task.isCancelled == false {
                 if dependencies.axClient.authorizationStatus(promptIfNeeded: false) != .trusted {
@@ -202,6 +200,9 @@ extension XcodePermissionDialog {
                     continue
                 }
 
+                let agentPathCandidates = dependencies.agentPathCandidates()
+                let assistantNameCandidates = dependencies.assistantNameCandidates()
+                let pathCandidateText = agentPathCandidates.sorted().joined(separator: " | ")
                 if hasLoggedTrustedMonitoring == false {
                     dependencies.logger.info("\(Self.monitoringLogSummary())")
                     dependencies.logger.debug(
@@ -211,6 +212,15 @@ extension XcodePermissionDialog {
                         ]
                     )
                     hasLoggedTrustedMonitoring = true
+                    loggedPathCandidateText = pathCandidateText
+                } else if loggedPathCandidateText != pathCandidateText {
+                    dependencies.logger.debug(
+                        "Xcode permission dialog auto-approver candidate paths changed.",
+                        metadata: [
+                            "agent_paths": .string(pathCandidateText)
+                        ]
+                    )
+                    loggedPathCandidateText = pathCandidateText
                 }
 
                 let visibleFingerprints = scanAndApprove(
