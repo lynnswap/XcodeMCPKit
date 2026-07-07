@@ -271,8 +271,12 @@ extension RuntimeCoordinator {
     }
 
     func catalogExposedUsableProcessIDs() -> Set<pid_t> {
-        Set(xcodeProcessRoutes.compactMap { route in
-            firstUsableInitializedUpstreamIndex(in: route) == nil ? nil : route.target.processID
+        let unavailable = unavailableXcodeProcessIDs()
+        return Set(xcodeProcessRoutes.compactMap { route in
+            unavailable.contains(route.target.processID)
+                || firstUsableInitializedUpstreamIndex(in: route) == nil
+                ? nil
+                : route.target.processID
         })
     }
 

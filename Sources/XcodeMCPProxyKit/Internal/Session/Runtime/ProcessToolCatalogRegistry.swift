@@ -191,7 +191,12 @@ final class ProcessToolCatalogRegistry: Sendable {
             let hadProcessCatalog = state.catalogsByProcessID.removeValue(forKey: processID) != nil
             let hadUpstreamMapping = state.processIDByUpstreamIndex.values.contains(processID)
             guard hadProcessCatalog || hadUpstreamMapping else {
-                return .noChange
+                return Self.surfaceUpdate(
+                    in: state,
+                    exposedProcessIDs: exposedProcessIDs,
+                    clearWhenIncomplete: true,
+                    publishesToolsListChanged: exposedProcessIDs != nil
+                )
             }
             state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
                 $0.value != processID
@@ -200,7 +205,7 @@ final class ProcessToolCatalogRegistry: Sendable {
                 in: state,
                 exposedProcessIDs: exposedProcessIDs,
                 clearWhenIncomplete: true,
-                publishesToolsListChanged: hadProcessCatalog
+                publishesToolsListChanged: hadProcessCatalog || exposedProcessIDs != nil
             )
         }
     }

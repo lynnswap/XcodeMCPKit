@@ -6206,6 +6206,7 @@ struct RuntimeCoordinatorTests {
             reason: "test_process_route_unavailable"
         )
 
+        #expect(manager.processToolCatalogExposedProcessIDs() == Set([goodTarget.processID]))
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["GoodOnlyTool"])
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
@@ -6266,6 +6267,54 @@ struct RuntimeCoordinatorTests {
         )
         #expect(toolNames(in: result) == ["RemainingOnlyTool"])
         #expect(await remainingUpstream.sentCount() == 0)
+    }
+
+    @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUncatalogedProcessRouteRetires()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let uncatalogedUpstream = TestUpstreamClient()
+        let remainingUpstream = TestUpstreamClient()
+        let uncatalogedTarget = xcodeProcessTarget(processID: 80435, xcodeVersion: "27.0")
+        let remainingTarget = xcodeProcessTarget(processID: 66339, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [uncatalogedUpstream, remainingUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: uncatalogedTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: remainingTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (remainingTarget, 1, [toolDescriptor(name: "RemainingOnlyTool")]),
+            ]
+        )
+        manager.canonicalBrokerState.clearToolsCatalog()
+        #expect(manager.cachedToolsListResult() == nil)
+
+        manager.reconcileXcodeProcessTargets(
+            [remainingTarget],
+            reason: "test_uncataloged_process_route_retired"
+        )
+        _ = try await uncatalogedUpstream.nextStopCount()
+
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "RemainingOnlyTool",
+        ])
+        #expect(
+            manager.debugSnapshot().processToolCatalogs.map(\.processID)
+                == [remainingTarget.processID]
+        )
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
     }
 
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUpstreamStateClears()
