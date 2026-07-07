@@ -3,9 +3,40 @@ import Logging
 import NIOCore
 import XcodeMCPKit
 
+struct XcodeProcessRouteUnavailableRecord: Sendable, Equatable {
+    var routeUnavailableUntilUptimeNs: UInt64?
+    var catalogUnavailableUntilUptimeNs: UInt64?
+
+    var unavailableUntilUptimeNs: UInt64 {
+        max(routeUnavailableUntilUptimeNs ?? 0, catalogUnavailableUntilUptimeNs ?? 0)
+    }
+
+    var isUnavailable: Bool {
+        unavailableUntilUptimeNs > 0
+    }
+
+    mutating func pruneExpired(nowUptimeNs: UInt64) {
+        if let routeUnavailableUntilUptimeNs,
+           routeUnavailableUntilUptimeNs <= nowUptimeNs {
+            self.routeUnavailableUntilUptimeNs = nil
+        }
+        if let catalogUnavailableUntilUptimeNs,
+           catalogUnavailableUntilUptimeNs <= nowUptimeNs {
+            self.catalogUnavailableUntilUptimeNs = nil
+        }
+    }
+}
+
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
         2_000_000_000
+    private static let xcodeProcessRouteCatalogUnavailableCooldownNanoseconds: UInt64 =
+        30_000_000_000
+
+    private enum XcodeProcessRouteUnavailableScope {
+        case route
+        case catalog
+    }
 
     private struct ToolRoutingRequest: Sendable {
         let id: JSONRPC.ID?
@@ -242,7 +273,11 @@ extension RuntimeCoordinator {
     func unavailableXcodeProcessIDs() -> Set<pid_t> {
         let now = nowUptimeNanoseconds()
         return unavailableXcodeProcessRoutes.withLockedValue { state in
-            state = state.filter { $0.value > now }
+            state = state.compactMapValues { record in
+                var pruned = record
+                pruned.pruneExpired(nowUptimeNs: now)
+                return pruned.isUnavailable ? pruned : nil
+            }
             return Set(state.keys)
         }
     }
@@ -251,13 +286,52 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         reason: String
     ) {
+        markXcodeProcessRouteUnavailable(
+            upstreamIndex: upstreamIndex,
+            reason: reason,
+            cooldownNanoseconds: Self.xcodeProcessRouteUnavailableCooldownNanoseconds,
+            scope: .route
+        )
+    }
+
+    func markXcodeProcessRouteUnavailableAfterCatalogFailure(
+        upstreamIndex: Int,
+        reason: String
+    ) {
+        markXcodeProcessRouteUnavailable(
+            upstreamIndex: upstreamIndex,
+            reason: reason,
+            cooldownNanoseconds: Self.xcodeProcessRouteCatalogUnavailableCooldownNanoseconds,
+            scope: .catalog
+        )
+    }
+
+    private func markXcodeProcessRouteUnavailable(
+        upstreamIndex: Int,
+        reason: String,
+        cooldownNanoseconds: UInt64,
+        scope: XcodeProcessRouteUnavailableScope
+    ) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
         let unavailableUntil = nowUptimeNanoseconds()
-            &+ Self.xcodeProcessRouteUnavailableCooldownNanoseconds
+            &+ cooldownNanoseconds
         unavailableXcodeProcessRoutes.withLockedValue { state in
-            state[route.target.processID] = unavailableUntil
+            var record = state[route.target.processID] ?? XcodeProcessRouteUnavailableRecord()
+            switch scope {
+            case .route:
+                record.routeUnavailableUntilUptimeNs = max(
+                    record.routeUnavailableUntilUptimeNs ?? 0,
+                    unavailableUntil
+                )
+            case .catalog:
+                record.catalogUnavailableUntilUptimeNs = max(
+                    record.catalogUnavailableUntilUptimeNs ?? 0,
+                    unavailableUntil
+                )
+            }
+            state[route.target.processID] = record
         }
         processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
         resyncProcessToolsCatalogSurfaceAfterRemoving(
@@ -273,12 +347,32 @@ extension RuntimeCoordinator {
                 "xcode_version": .string(route.target.xcodeVersion),
                 "upstream": .string("\(upstreamIndex)"),
                 "reason": .string(reason),
+                "cooldown_ms": .string("\(cooldownNanoseconds / 1_000_000)"),
                 "unavailable_until_uptime_ns": .string("\(unavailableUntil)"),
             ]
         )
     }
 
     func markXcodeProcessRouteAvailable(upstreamIndex: Int) {
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+            return
+        }
+        let now = nowUptimeNanoseconds()
+        unavailableXcodeProcessRoutes.withLockedValue { state in
+            guard var record = state[route.target.processID] else {
+                return
+            }
+            record.routeUnavailableUntilUptimeNs = nil
+            record.pruneExpired(nowUptimeNs: now)
+            if record.isUnavailable {
+                state[route.target.processID] = record
+            } else {
+                state.removeValue(forKey: route.target.processID)
+            }
+        }
+    }
+
+    func markXcodeProcessRouteCatalogAvailable(upstreamIndex: Int) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
@@ -322,6 +416,9 @@ extension RuntimeCoordinator {
     }
 
     func usableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
+        guard unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
+            return []
+        }
         let states = upstreamHealthManager.statesSnapshot()
         return route.upstreamIndices.filter { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else {
@@ -792,9 +889,21 @@ extension RuntimeCoordinator {
         return Set(xcodeProcessRoutes.flatMap(\.upstreamIndices))
     }
 
+    func routableProcessBoundUpstreamIndices() -> Set<Int> {
+        guard processRoutingEnabled else {
+            return Set(upstreams.indices)
+        }
+        let unavailable = unavailableXcodeProcessIDs()
+        return Set(
+            xcodeProcessRoutes
+                .filter { unavailable.contains($0.target.processID) == false }
+                .flatMap(\.upstreamIndices)
+        )
+    }
+
     func inactiveProcessBoundUpstreamIndices() -> Set<Int> {
         guard processRoutingEnabled else { return [] }
-        return Set(upstreams.indices).subtracting(activeProcessBoundUpstreamIndices())
+        return Set(upstreams.indices).subtracting(routableProcessBoundUpstreamIndices())
     }
 
     func secondaryUpstreamIndices(excluding upstreamIndex: Int) -> [Int] {
@@ -809,7 +918,7 @@ extension RuntimeCoordinator {
             return upstreamHealthManager.initializedHealthyishCount()
         }
         let states = upstreamHealthManager.statesSnapshot()
-        return activeProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
+        return routableProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else { return }
             let upstream = states[upstreamIndex]
             guard upstream.isInitialized else { return }
@@ -827,7 +936,7 @@ extension RuntimeCoordinator {
             return upstreamHealthManager.anyInitialized()
         }
         let states = upstreamHealthManager.statesSnapshot()
-        return activeProcessBoundUpstreamIndices().contains { upstreamIndex in
+        return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
             return states[upstreamIndex].isInitialized
         }
@@ -838,7 +947,7 @@ extension RuntimeCoordinator {
             return upstreamHealthManager.anyRecoveryInFlight()
         }
         let states = upstreamHealthManager.statesSnapshot()
-        return activeProcessBoundUpstreamIndices().contains { upstreamIndex in
+        return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
             let upstream = states[upstreamIndex]
             return upstream.initInFlight || upstream.healthProbeInFlight

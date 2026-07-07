@@ -424,10 +424,11 @@ public final class XcodeMCPProxyServer {
 
         static func live(config: ProxyConfig) -> Self {
             let executableLookupClient = ExecutableLookupClient.liveValue
+            let xcodeTargetDiscovery = LiveXcodeTargetDiscovery()
             return Self(
                 executableLookupClient: executableLookupClient,
                 runningXcodeTargets: {
-                    LiveXcodeTargetDiscovery().runningXcodeTargets()
+                    xcodeTargetDiscovery.runningXcodeTargets()
                 },
                 makeAutoApprover: {
                     let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
@@ -437,8 +438,12 @@ public final class XcodeMCPProxyServer {
                     return XcodePermissionDialog.AutoApprover(
                         dependencies: .live(
                             agentPathCandidates: {
-                                XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
-                                    additionalExecutableCandidates: additionalCandidates
+                                let processBoundCandidates = xcodeTargetDiscovery
+                                    .runningXcodeTargets()
+                                    .map(\.mcpbridgePath)
+                                return XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
+                                    additionalExecutableCandidates:
+                                        additionalCandidates + processBoundCandidates
                                 )
                             },
                             assistantNameCandidates: {
@@ -452,7 +457,7 @@ public final class XcodeMCPProxyServer {
                         config: config,
                         eventLoop: eventLoop,
                         upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue),
-                        xcodeTargetDiscovery: LiveXcodeTargetDiscovery(),
+                        xcodeTargetDiscovery: xcodeTargetDiscovery,
                         startImmediately: false
                     )
                 }

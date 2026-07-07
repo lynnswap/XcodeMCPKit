@@ -261,6 +261,8 @@ extension RuntimeCoordinator {
     func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
+        let suppressProcessRouteWarmRestart =
+            clearsInitializedProcessRouteActivationBeforeCatalog(upstreamIndex: upstreamIndex)
 
         let exitedActivePrimaryInitialize =
             globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
@@ -327,7 +329,7 @@ extension RuntimeCoordinator {
         if upstreamIndex == primaryUpstreamIndex {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
                 startEagerInitializePrimary(applyBackoff: true)
-            } else {
+            } else if suppressProcessRouteWarmRestart == false {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             }
         } else if globalInit.hadGlobalInit {
@@ -342,7 +344,9 @@ extension RuntimeCoordinator {
                     startEagerInitializePrimary(applyBackoff: true)
                 }
             }
-            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
+            if suppressProcessRouteWarmRestart == false {
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
+            }
         }
     }
 

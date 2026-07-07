@@ -5,6 +5,9 @@ import XcodeMCPKit
 
 extension RuntimeCoordinator {
     func startProcessRouteActivation(for route: XcodeProcessRoute) {
+        guard unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
+            return
+        }
         guard let upstreamIndex = route.primaryUpstreamIndex else {
             abandonProcessRouteActivation(
                 processID: route.target.processID,
@@ -165,6 +168,7 @@ extension RuntimeCoordinator {
         ) else {
             return false
         }
+        markXcodeProcessRouteCatalogAvailable(upstreamIndex: upstreamIndex)
         logger.info(
             "route_activation_cataloged",
             metadata: [
@@ -234,9 +238,27 @@ extension RuntimeCoordinator {
                 processID: route.target.processID,
                 reason: "upstream_cleared_before_catalog"
             )
+            markXcodeProcessRouteUnavailableAfterCatalogFailure(
+                upstreamIndex: upstreamIndex,
+                reason: "upstream_cleared_before_catalog"
+            )
         case .pending, .cataloged, .abandoned, .attaching, .initialized, nil:
             return
         }
+    }
+
+    func clearsInitializedProcessRouteActivationBeforeCatalog(upstreamIndex: Int) -> Bool {
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+              processToolCatalogRegistry.catalog(forProcessID: route.target.processID) == nil
+        else {
+            return false
+        }
+        guard case .initialized(let activationUpstreamIndex, _, _) =
+            xcodeProcessRouteActivationTracker.phase(processID: route.target.processID)
+        else {
+            return false
+        }
+        return activationUpstreamIndex == upstreamIndex
     }
 
     func resetAllProcessRouteActivations(reason: String) {
@@ -339,19 +361,19 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(upstreamIndex)"),
                 "attempt": .string("\(attempt)"),
                 "phase": .string("catalog"),
+                "cooldown_ms": .string("30000"),
             ]
         )
         testHooks.processRouteActivationEvent?(processID, upstreamIndex, "timeout")
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
+        markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: upstreamIndex,
+            reason: "catalog_timeout"
+        )
         guard replaceProcessBoundUpstreamSlot(processID: processID, upstreamIndex: upstreamIndex) else {
             return
         }
-        scheduleProcessRouteActivationRetry(
-            processID: processID,
-            retry: timeout.retry,
-            reason: "catalog_timeout"
-        )
     }
 
     @discardableResult

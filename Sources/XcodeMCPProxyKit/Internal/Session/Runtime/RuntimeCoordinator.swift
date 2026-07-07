@@ -424,7 +424,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let pendingProcessToolsCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
     let xcodeProcessRouteActivationTracker = XcodeProcessRouteActivationTracker()
     let unavailableXcodeProcessRoutes =
-        NIOLockedValueBox<[pid_t: UInt64]>([:])
+        NIOLockedValueBox<[pid_t: XcodeProcessRouteUnavailableRecord]>([:])
     let prewarmDocumentationProviderOnStartup: Bool
     let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -613,13 +613,16 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             gate: resolvedReadinessGate,
             logger: ProxyLogging.make("upstream.readiness")
         )
-        let activeProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = {
+        let routableProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = { [runtimeBox] in
             guard resolvedProcessRoutingEnabled else { return [] }
-            return Set(xcodeProcessRegistry.activeRoutes().flatMap(\.upstreamIndices))
+            guard let runtime = runtimeBox.value else {
+                return Set(xcodeProcessRegistry.activeRoutes().flatMap(\.upstreamIndices))
+            }
+            return runtime.routableProcessBoundUpstreamIndices()
         }
         let inactiveProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = {
             guard resolvedProcessRoutingEnabled else { return [] }
-            let active = activeProcessBoundUpstreamIndices()
+            let active = routableProcessBoundUpstreamIndices()
             let upstreamCount = upstreamStore.withLockedValue { $0.count }
             return Set(0..<upstreamCount).subtracting(active)
         }
@@ -631,7 +634,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
                 }
                 if resolvedProcessRoutingEnabled,
-                   activeProcessBoundUpstreamIndices().contains(upstreamIndex) == false {
+                   routableProcessBoundUpstreamIndices().contains(upstreamIndex) == false {
                     return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
                 }
                 return upstreamHealthManager.evaluateUsableInitialized(

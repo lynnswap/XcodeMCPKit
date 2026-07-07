@@ -428,6 +428,55 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(snapshot.promptCalls == 1)
         #expect(snapshot.windowScanCalls == 0)
     }
+
+    @Test func autoApproverRefreshesAgentPathCandidatesWhileMonitoring() async throws {
+        let processID: pid_t = 4317
+        let bridgePath = "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [
+                processID: [
+                    XcodePermissionDialog.AXWindow(
+                        processID: processID,
+                        snapshot: makeSnapshot(
+                            processBundleIdentifier: "com.apple.dt.Xcode",
+                            title: "Access",
+                            textValues: [
+                                "The agent at \(bridgePath) wants to use Xcode's tools for XcodeMCPKit."
+                            ]
+                        ),
+                        defaultButton: AXUIElementCreateSystemWide()
+                    )
+                ]
+            ]
+        )
+        let candidateCounter = CandidateCounter()
+        let approver = XcodePermissionDialog.AutoApprover(
+            dependencies: .init(
+                axClient: axClient,
+                agentPathCandidates: {
+                    candidateCounter.nextCandidateSet(first: [], later: [bridgePath])
+                },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                serverProcessIDCandidates: { [] },
+                sleep: { _ in
+                    try? await Task.sleep(for: .milliseconds(1))
+                },
+                pollInterval: .milliseconds(1),
+                logger: ProxyLogging.make("tests.permission")
+            )
+        )
+        defer { approver.stop() }
+
+        approver.start()
+
+        let deadline = Date().addingTimeInterval(2)
+        while axClient.snapshot().pressCalls == 0, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(axClient.snapshot().pressCalls == 1)
+    }
 }
 
 private func makeSnapshot(
@@ -480,12 +529,18 @@ private func makeButton(
 
 private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialog.AXAccessing {
     private let status: XcodePermissionDialog.AccessibilityStatus
+    private let windowsByProcessID: [pid_t: [XcodePermissionDialog.AXWindow]]
     private let lock = NSLock()
     private var promptCalls = 0
     private var windowScanCalls = 0
+    private var pressCalls = 0
 
-    init(status: XcodePermissionDialog.AccessibilityStatus) {
+    init(
+        status: XcodePermissionDialog.AccessibilityStatus,
+        windowsByProcessID: [pid_t: [XcodePermissionDialog.AXWindow]] = [:]
+    ) {
         self.status = status
+        self.windowsByProcessID = windowsByProcessID
     }
 
     func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus {
@@ -500,19 +555,35 @@ private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialo
     func runningXcodeProcessIDs() -> [pid_t] {
         lock.withLock {
             windowScanCalls += 1
-            return []
+            return windowsByProcessID.keys.sorted()
         }
     }
 
     func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
-        []
+        windowsByProcessID[processID] ?? []
     }
 
-    func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws {}
-
-    func snapshot() -> (promptCalls: Int, windowScanCalls: Int) {
+    func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws {
         lock.withLock {
-            (promptCalls, windowScanCalls)
+            pressCalls += 1
+        }
+    }
+
+    func snapshot() -> (promptCalls: Int, windowScanCalls: Int, pressCalls: Int) {
+        lock.withLock {
+            (promptCalls, windowScanCalls, pressCalls)
+        }
+    }
+}
+
+private final class CandidateCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func nextCandidateSet(first: Set<String>, later: Set<String>) -> Set<String> {
+        lock.withLock {
+            count += 1
+            return count == 1 ? first : later
         }
     }
 }

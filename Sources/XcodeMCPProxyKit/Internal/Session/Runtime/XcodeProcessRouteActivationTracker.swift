@@ -29,7 +29,6 @@ final class XcodeProcessRouteActivationTracker: Sendable {
     }
 
     struct CatalogTimeout: Sendable {
-        let retry: Retry
         let rpcHandles: [ControlPlane.RPCHandle]
     }
 
@@ -233,10 +232,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.catalogTimeout = nil
             record.phase = .pending
             records[processID] = record
-            return CatalogTimeout(
-                retry: Self.retry(forAttempt: currentAttempt),
-                rpcHandles: rpcHandles
-            )
+            return CatalogTimeout(rpcHandles: rpcHandles)
         }
     }
 

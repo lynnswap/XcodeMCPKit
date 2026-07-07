@@ -527,10 +527,12 @@ struct RuntimeCoordinatorTests {
         let olderTarget = xcodeProcessTarget(processID: 26626, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27026, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let uptimeClock = TestUptimeClock()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [olderUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
@@ -595,10 +597,19 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 2))
         #expect(try await firstAttempt.nextStopCount() == 1)
-        #expect(timeoutScheduler.scheduledCount() == 4)
-        #expect(timeoutScheduler.delay(at: 3)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
+        #expect(timeoutScheduler.scheduledCount() == 3)
 
-        #expect(timeoutScheduler.fire(at: 3))
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_timeout_before_cooldown"
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 2)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_timeout_after_cooldown"
+        )
         let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -803,10 +814,12 @@ struct RuntimeCoordinatorTests {
         let olderTarget = xcodeProcessTarget(processID: 26628, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27127, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let uptimeClock = TestUptimeClock()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [olderUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
@@ -918,14 +931,19 @@ struct RuntimeCoordinatorTests {
         )
         let scheduledBeforeCatalogTimeoutFired = timeoutScheduler.scheduledCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
-        let retryIndex = try #require(
-            (scheduledBeforeCatalogTimeoutFired..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds
-                    == TimeAmount.milliseconds(250).nanoseconds
-            }
-        )
 
-        #expect(timeoutScheduler.fire(at: retryIndex))
+        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeCatalogTimeoutFired)
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_fallback_timeout_before_cooldown"
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 4)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_catalog_fallback_timeout_after_cooldown"
+        )
         let retryPrimary = try #require(createdUpstreams.withLockedValue { $0.dropFirst(2).first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -1097,10 +1115,12 @@ struct RuntimeCoordinatorTests {
         let target = xcodeProcessTarget(processID: 27028, xcodeVersion: "27.0")
         let initialUpstream = TestUpstreamClient()
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let uptimeClock = TestUptimeClock()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [initialUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
@@ -1137,7 +1157,7 @@ struct RuntimeCoordinatorTests {
         let foregroundTask = Task {
             try await manager.sharedToolsList(
                 sessionID: "session-process-catalog-foreground-timeout",
-                requestTimeoutOverride: .seconds(20)
+                requestTimeoutOverride: .seconds(40)
             )
         }
         let foregroundRequest = try await waitWithTimeout(
@@ -1154,10 +1174,19 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.scheduledCount() == 1)
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 0))
-        #expect(timeoutScheduler.scheduledCount() == 2)
-        #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
+        #expect(timeoutScheduler.scheduledCount() == 1)
 
-        #expect(timeoutScheduler.fire(at: 1))
+        manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_foreground_catalog_timeout_before_cooldown"
+        )
+        #expect(createdUpstreams.withLockedValue(\.count) == 1)
+
+        uptimeClock.advance(by: .seconds(31))
+        manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_foreground_catalog_timeout_after_cooldown"
+        )
         let retryUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
         let retryInitialize = try await waitWithTimeout(
             "waiting for retry activation initialize",
@@ -1203,14 +1232,16 @@ struct RuntimeCoordinatorTests {
         #expect(toolNames(in: result) == ["RetryForegroundTool"])
     }
 
-    @Test func processRouteActivationClearingPreCatalogInitializedUpstreamAllowsRetry()
+    @Test func processRouteActivationClearingPreCatalogInitializedUpstreamWaitsForCooldownBeforeRetry()
         async throws
     {
         let target = xcodeProcessTarget(processID: 27019, xcodeVersion: "27.0")
         let upstream = TestUpstreamClient()
         let route = XcodeProcessRoute(target: target, upstreamIndices: [0])
+        let uptimeClock = TestUptimeClock()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             xcodeProcessRoutes: [route],
             processRoutingEnabled: true,
             startImmediately: false
@@ -1228,6 +1259,10 @@ struct RuntimeCoordinatorTests {
         manager.clearUpstreamState(upstreamIndex: 0)
 
         #expect(manager.xcodeProcessRouteActivationTracker.phase(processID: target.processID) == nil)
+        manager.startProcessRouteActivation(for: route)
+        #expect(await upstream.sentCount() == 0)
+
+        uptimeClock.advance(by: .seconds(31))
         manager.startProcessRouteActivation(for: route)
         let retryInitialize = try await upstream.nextSent(at: 0)
         #expect(methodName(from: retryInitialize) == "initialize")
@@ -5237,6 +5272,114 @@ struct RuntimeCoordinatorTests {
         #expect(await badUpstream.sentCount() == 0)
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["XcodeRead"])
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+    }
+
+    @Test func processRouteCatalogCooldownSurvivesRouteAvailabilitySuccess() async throws {
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80423, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: 0,
+            reason: "catalog_timeout"
+        )
+        manager.markXcodeProcessRouteAvailable(upstreamIndex: 0)
+
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID))
+
+        manager.markXcodeProcessRouteCatalogAvailable(upstreamIndex: 0)
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID) == false)
+    }
+
+    @Test func processRouteCatalogCooldownExcludesSiblingSlotsFromScheduling()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let failedTarget = xcodeProcessTarget(processID: 80424, xcodeVersion: "27.0")
+        let healthyTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [
+                TestUpstreamClient(),
+                TestUpstreamClient(),
+                TestUpstreamClient(),
+            ],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: failedTarget, upstreamIndices: [0, 1]),
+                XcodeProcessRoute(target: healthyTarget, upstreamIndices: [2]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.markUpstreamInitialized(upstreamIndex: 2)
+
+        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: 0,
+            reason: "catalog_timeout"
+        )
+
+        #expect(manager.unavailableXcodeProcessIDs().contains(failedTarget.processID))
+        #expect(manager.chooseUpstreamIndex() == 2)
+
+        let preferredDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-catalog-cooldown-preferred",
+            label: "tools/call:BuildProject",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let preferredLeaseID = manager.createRequestLease(descriptor: preferredDescriptor)
+        let preferredStartedUpstream = NIOLockedValueBox<Int?>(nil)
+        let preferredFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: preferredLeaseID,
+            descriptor: preferredDescriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: [1]
+        ) { selectedUpstreamIndex in
+            preferredStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            try await preferredFuture.get()
+        }
+        #expect(preferredStartedUpstream.withLockedValue { $0 } == nil)
+
+        let genericDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-catalog-cooldown-generic",
+            label: "tools/call:XcodeRead",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let genericLeaseID = manager.createRequestLease(descriptor: genericDescriptor)
+        let genericStartedUpstream = NIOLockedValueBox<Int?>(nil)
+        let genericFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: genericLeaseID,
+            descriptor: genericDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        _ = try await genericFuture.get()
+        #expect(genericStartedUpstream.withLockedValue { $0 } == 2)
+        manager.completeRequestLease(genericLeaseID)
     }
 
     @Test func sessionManagerToolsListRetriesSiblingBeforeDroppingProcessCatalog()
