@@ -936,12 +936,18 @@ struct RuntimeCoordinatorTests {
         await retryPrimary.yield(
             .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
         )
+        _ = try await waitWithTimeout(
+            "waiting for retry activation initialized notification",
+            timeout: .seconds(2)
+        ) {
+            try await retryPrimary.nextSent(at: 1)
+        }
         let retryToolsRequest = try await waitWithTimeout(
             "waiting for retry activation tools/list",
             timeout: .seconds(2)
         ) {
             try await retryPrimary.nextSent(
-                startingAt: 1,
+                startingAt: 2,
                 matching: { methodName(from: $0) == "tools/list" }
             )
         }
