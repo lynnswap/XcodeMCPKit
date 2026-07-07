@@ -5300,6 +5300,88 @@ struct RuntimeCoordinatorTests {
         #expect(manager.unavailableXcodeProcessIDs().contains(target.processID) == false)
     }
 
+    @Test func processRouteCatalogCooldownExcludesSiblingSlotsFromScheduling()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let failedTarget = xcodeProcessTarget(processID: 80424, xcodeVersion: "27.0")
+        let healthyTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [
+                TestUpstreamClient(),
+                TestUpstreamClient(),
+                TestUpstreamClient(),
+            ],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: failedTarget, upstreamIndices: [0, 1]),
+                XcodeProcessRoute(target: healthyTarget, upstreamIndices: [2]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.markUpstreamInitialized(upstreamIndex: 2)
+
+        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: 0,
+            reason: "catalog_timeout"
+        )
+
+        #expect(manager.unavailableXcodeProcessIDs().contains(failedTarget.processID))
+        #expect(manager.chooseUpstreamIndex() == 2)
+
+        let preferredDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-catalog-cooldown-preferred",
+            label: "tools/call:BuildProject",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let preferredLeaseID = manager.createRequestLease(descriptor: preferredDescriptor)
+        let preferredStartedUpstream = NIOLockedValueBox<Int?>(nil)
+        let preferredFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: preferredLeaseID,
+            descriptor: preferredDescriptor,
+            on: eventLoop,
+            preferredUpstreamIndices: [1]
+        ) { selectedUpstreamIndex in
+            preferredStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            try await preferredFuture.get()
+        }
+        #expect(preferredStartedUpstream.withLockedValue { $0 } == nil)
+
+        let genericDescriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-catalog-cooldown-generic",
+            label: "tools/call:XcodeRead",
+            isBatch: false,
+            expectsResponse: true,
+            isTopLevelClientRequest: false
+        )
+        let genericLeaseID = manager.createRequestLease(descriptor: genericDescriptor)
+        let genericStartedUpstream = NIOLockedValueBox<Int?>(nil)
+        let genericFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: genericLeaseID,
+            descriptor: genericDescriptor,
+            on: eventLoop
+        ) { selectedUpstreamIndex in
+            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        _ = try await genericFuture.get()
+        #expect(genericStartedUpstream.withLockedValue { $0 } == 2)
+        manager.completeRequestLease(genericLeaseID)
+    }
+
     @Test func sessionManagerToolsListRetriesSiblingBeforeDroppingProcessCatalog()
         async throws
     {

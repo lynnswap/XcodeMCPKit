@@ -376,7 +376,7 @@ extension RuntimeCoordinator {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
-        unavailableXcodeProcessRoutes.withLockedValue { state in
+        _ = unavailableXcodeProcessRoutes.withLockedValue { state in
             state.removeValue(forKey: route.target.processID)
         }
     }
@@ -416,6 +416,9 @@ extension RuntimeCoordinator {
     }
 
     func usableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
+        guard unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
+            return []
+        }
         let states = upstreamHealthManager.statesSnapshot()
         return route.upstreamIndices.filter { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else {
@@ -886,9 +889,21 @@ extension RuntimeCoordinator {
         return Set(xcodeProcessRoutes.flatMap(\.upstreamIndices))
     }
 
+    func routableProcessBoundUpstreamIndices() -> Set<Int> {
+        guard processRoutingEnabled else {
+            return Set(upstreams.indices)
+        }
+        let unavailable = unavailableXcodeProcessIDs()
+        return Set(
+            xcodeProcessRoutes
+                .filter { unavailable.contains($0.target.processID) == false }
+                .flatMap(\.upstreamIndices)
+        )
+    }
+
     func inactiveProcessBoundUpstreamIndices() -> Set<Int> {
         guard processRoutingEnabled else { return [] }
-        return Set(upstreams.indices).subtracting(activeProcessBoundUpstreamIndices())
+        return Set(upstreams.indices).subtracting(routableProcessBoundUpstreamIndices())
     }
 
     func secondaryUpstreamIndices(excluding upstreamIndex: Int) -> [Int] {
@@ -903,7 +918,7 @@ extension RuntimeCoordinator {
             return upstreamHealthManager.initializedHealthyishCount()
         }
         let states = upstreamHealthManager.statesSnapshot()
-        return activeProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
+        return routableProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else { return }
             let upstream = states[upstreamIndex]
             guard upstream.isInitialized else { return }
@@ -921,7 +936,7 @@ extension RuntimeCoordinator {
             return upstreamHealthManager.anyInitialized()
         }
         let states = upstreamHealthManager.statesSnapshot()
-        return activeProcessBoundUpstreamIndices().contains { upstreamIndex in
+        return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
             return states[upstreamIndex].isInitialized
         }
@@ -932,7 +947,7 @@ extension RuntimeCoordinator {
             return upstreamHealthManager.anyRecoveryInFlight()
         }
         let states = upstreamHealthManager.statesSnapshot()
-        return activeProcessBoundUpstreamIndices().contains { upstreamIndex in
+        return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
             let upstream = states[upstreamIndex]
             return upstream.initInFlight || upstream.healthProbeInFlight
