@@ -486,6 +486,13 @@ extension RuntimeCoordinator {
                 reason: "empty_process_catalog"
             )
             if hadProcessCatalog {
+                applyToolCatalogSurfaceUpdate(
+                    processToolCatalogRegistry.removeProcess(
+                        processID: target.processID,
+                        exposedProcessIDs: processToolCatalogExposedProcessIDs()
+                    ),
+                    onlyIfGeneration: brokerGeneration
+                )
                 return availableToolsCatalogSurfaceResult(
                     startedAt: startedAt,
                     exposedProcessIDs: exposedProcessIDs,
