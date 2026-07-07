@@ -26,6 +26,22 @@ final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
+    struct SurfaceUpdate: Sendable {
+        enum CanonicalAction: Sendable {
+            case noChange
+            case syncCanonical(rawResult: JSONValue, sourceUpstream: Int)
+            case clearCanonical
+        }
+
+        let canonicalAction: CanonicalAction
+        let publishesToolsListChanged: Bool
+
+        static let noChange = SurfaceUpdate(
+            canonicalAction: .noChange,
+            publishesToolsListChanged: false
+        )
+    }
+
     struct DebugSnapshot: Codable, Sendable {
         let processID: Int32
         let appPath: String
@@ -57,6 +73,22 @@ final class ProcessToolCatalogRegistry: Sendable {
         associatedUpstreamIndices: [Int] = [],
         rawResult: JSONValue
     ) {
+        _ = recordCatalog(
+            target: target,
+            upstreamIndex: upstreamIndex,
+            associatedUpstreamIndices: associatedUpstreamIndices,
+            rawResult: rawResult,
+            exposedProcessIDs: nil
+        )
+    }
+
+    func recordCatalog(
+        target: XcodeProcessTarget,
+        upstreamIndex: Int,
+        associatedUpstreamIndices: [Int] = [],
+        rawResult: JSONValue,
+        exposedProcessIDs: Set<pid_t>?
+    ) -> SurfaceUpdate {
         let catalog = Catalog(
             target: target,
             upstreamIndex: upstreamIndex,
@@ -65,12 +97,19 @@ final class ProcessToolCatalogRegistry: Sendable {
             fingerprintsByName: Self.toolFingerprintsByName(in: rawResult),
             ownerBoundToolNames: Self.ownerBoundToolNames(in: rawResult)
         )
-        state.withLockedValue { state in
+        return state.withLockedValue { state in
+            let hadProcessCatalog = state.catalogsByProcessID[target.processID] != nil
             state.catalogsByProcessID[target.processID] = catalog
             state.processIDByUpstreamIndex[upstreamIndex] = target.processID
             for associatedUpstreamIndex in associatedUpstreamIndices {
                 state.processIDByUpstreamIndex[associatedUpstreamIndex] = target.processID
             }
+            return Self.surfaceUpdate(
+                in: state,
+                exposedProcessIDs: exposedProcessIDs,
+                clearWhenIncomplete: false,
+                publishesToolsListChanged: hadProcessCatalog == false
+            )
         }
     }
 
@@ -82,13 +121,50 @@ final class ProcessToolCatalogRegistry: Sendable {
     }
 
     func removeCatalog(forUpstreamIndex upstreamIndex: Int) {
+        _ = removeUpstream(
+            upstreamIndex: upstreamIndex,
+            replacementUpstreamIndex: nil,
+            exposedProcessIDs: nil
+        )
+    }
+
+    func removeUpstream(
+        upstreamIndex: Int,
+        replacementUpstreamIndex: Int?,
+        exposedProcessIDs: Set<pid_t>?
+    ) -> SurfaceUpdate {
         state.withLockedValue { state in
             guard let processID = state.processIDByUpstreamIndex[upstreamIndex]
-            else { return }
-            state.catalogsByProcessID.removeValue(forKey: processID)
-            state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
-                $0.value != processID
+            else { return .noChange }
+            if let replacementUpstreamIndex {
+                state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
+                state.processIDByUpstreamIndex[replacementUpstreamIndex] = processID
+                if let catalog = state.catalogsByProcessID[processID],
+                   catalog.upstreamIndex == upstreamIndex {
+                    state.catalogsByProcessID[processID] = Catalog(
+                        target: catalog.target,
+                        upstreamIndex: replacementUpstreamIndex,
+                        rawResult: catalog.rawResult,
+                        toolsByName: catalog.toolsByName,
+                        fingerprintsByName: catalog.fingerprintsByName,
+                        ownerBoundToolNames: catalog.ownerBoundToolNames
+                    )
+                }
+                return Self.surfaceUpdate(
+                    in: state,
+                    exposedProcessIDs: exposedProcessIDs,
+                    clearWhenIncomplete: true,
+                    publishesToolsListChanged: false
+                )
             }
+            state.catalogsByProcessID.removeValue(forKey: processID)
+            state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter { $0.value != processID }
+            return Self.surfaceUpdate(
+                in: state,
+                exposedProcessIDs: exposedProcessIDs,
+                clearWhenIncomplete: true,
+                publishesToolsListChanged: true
+            )
         }
     }
 
@@ -96,34 +172,36 @@ final class ProcessToolCatalogRegistry: Sendable {
         forUpstreamIndex upstreamIndex: Int,
         replacementUpstreamIndex: Int? = nil
     ) {
-        state.withLockedValue { state in
-            guard let processID = state.processIDByUpstreamIndex.removeValue(forKey: upstreamIndex)
-            else { return }
-            if let replacementUpstreamIndex {
-                state.processIDByUpstreamIndex[replacementUpstreamIndex] = processID
-            }
-            guard let replacementUpstreamIndex,
-                  let catalog = state.catalogsByProcessID[processID],
-                  catalog.upstreamIndex == upstreamIndex else {
-                return
-            }
-            state.catalogsByProcessID[processID] = Catalog(
-                target: catalog.target,
-                upstreamIndex: replacementUpstreamIndex,
-                rawResult: catalog.rawResult,
-                toolsByName: catalog.toolsByName,
-                fingerprintsByName: catalog.fingerprintsByName,
-                ownerBoundToolNames: catalog.ownerBoundToolNames
-            )
-        }
+        _ = removeUpstream(
+            upstreamIndex: upstreamIndex,
+            replacementUpstreamIndex: replacementUpstreamIndex,
+            exposedProcessIDs: nil
+        )
     }
 
     func removeCatalog(forProcessID processID: pid_t) {
+        _ = removeProcess(processID: processID, exposedProcessIDs: nil)
+    }
+
+    func removeProcess(
+        processID: pid_t,
+        exposedProcessIDs: Set<pid_t>?
+    ) -> SurfaceUpdate {
         state.withLockedValue { state in
-            state.catalogsByProcessID.removeValue(forKey: processID)
+            let hadProcessCatalog = state.catalogsByProcessID.removeValue(forKey: processID) != nil
+            let hadUpstreamMapping = state.processIDByUpstreamIndex.values.contains(processID)
+            guard hadProcessCatalog || hadUpstreamMapping else {
+                return .noChange
+            }
             state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
                 $0.value != processID
             }
+            return Self.surfaceUpdate(
+                in: state,
+                exposedProcessIDs: exposedProcessIDs,
+                clearWhenIncomplete: true,
+                publishesToolsListChanged: hadProcessCatalog
+            )
         }
     }
 
@@ -150,18 +228,12 @@ final class ProcessToolCatalogRegistry: Sendable {
 
     func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
         state.withLockedValue { state in
-            let catalogs = state.catalogsByProcessID.values.filter { catalog in
-                processIDs?.contains(catalog.target.processID) ?? true
-            }
-            guard let rawResult = Self.unionToolsListResult(from: catalogs) else {
-                return nil
-            }
-            return AvailableToolCatalog(
-                rawResult: rawResult,
-                sourceUpstream: catalogs.sorted(by: Self.catalogSort).first?.upstreamIndex,
-                processIDs: Set(catalogs.map { $0.target.processID })
-            )
+            Self.availableToolCatalogSurface(in: state, processIDs: processIDs)
         }
+    }
+
+    func surface(exposedProcessIDs: Set<pid_t>) -> AvailableToolCatalog? {
+        availableToolCatalogSurface(processIDs: exposedProcessIDs)
     }
 
     func representativeSourceUpstream() -> Int? {
@@ -258,6 +330,10 @@ final class ProcessToolCatalogRegistry: Sendable {
         return toolsByName
     }
 
+    static func hasUsableTools(in result: JSONValue) -> Bool {
+        toolsByName(in: result).isEmpty == false
+    }
+
     static func isOwnerBoundTool(_ tool: JSONValue) -> Bool {
         guard case .object(let toolObject) = tool,
               case .object(let inputSchema)? = toolObject["inputSchema"] else {
@@ -305,6 +381,58 @@ final class ProcessToolCatalogRegistry: Sendable {
             $0.localizedStandardCompare($1) == .orderedAscending
         }.compactMap { selectedTools[$0] }
         return .object(["tools": .array(tools)])
+    }
+
+    private static func availableToolCatalogSurface(
+        in state: State,
+        processIDs: Set<pid_t>?
+    ) -> AvailableToolCatalog? {
+        let catalogs = state.catalogsByProcessID.values.filter { catalog in
+            processIDs?.contains(catalog.target.processID) ?? true
+        }
+        guard let rawResult = unionToolsListResult(from: catalogs) else {
+            return nil
+        }
+        return AvailableToolCatalog(
+            rawResult: rawResult,
+            sourceUpstream: catalogs.sorted(by: catalogSort).first?.upstreamIndex,
+            processIDs: Set(catalogs.map { $0.target.processID })
+        )
+    }
+
+    private static func surfaceUpdate(
+        in state: State,
+        exposedProcessIDs: Set<pid_t>?,
+        clearWhenIncomplete: Bool,
+        publishesToolsListChanged: Bool
+    ) -> SurfaceUpdate {
+        guard let exposedProcessIDs else {
+            return SurfaceUpdate(
+                canonicalAction: .noChange,
+                publishesToolsListChanged: publishesToolsListChanged
+            )
+        }
+        guard exposedProcessIDs.isEmpty == false else {
+            return SurfaceUpdate(
+                canonicalAction: .clearCanonical,
+                publishesToolsListChanged: publishesToolsListChanged
+            )
+        }
+        guard let surface = availableToolCatalogSurface(in: state, processIDs: exposedProcessIDs),
+              let sourceUpstream = surface.sourceUpstream,
+              surface.processIDs == exposedProcessIDs else {
+            return SurfaceUpdate(
+                canonicalAction: clearWhenIncomplete ? .clearCanonical : .noChange,
+                publishesToolsListChanged: publishesToolsListChanged
+            )
+        }
+        return SurfaceUpdate(
+            canonicalAction: .syncCanonical(
+                rawResult: surface.rawResult,
+                sourceUpstream: sourceUpstream
+            ),
+            publishesToolsListChanged: publishesToolsListChanged
+        )
     }
 
     private static func schemaConflicts(in catalogs: [Catalog]) -> [String] {

@@ -421,6 +421,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
+    let scheduledProcessToolsCatalogRetryProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
     let pendingProcessToolsCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
     let xcodeProcessRouteActivationTracker = XcodeProcessRouteActivationTracker()
     let unavailableXcodeProcessRoutes =
@@ -838,6 +839,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamStderrLogLimiter.reset()
         resetAllProcessRouteActivations(reason: "debug_reset")
         unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
+        scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue { $0.removeAll() }
         clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
@@ -872,6 +874,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
         resetAllProcessRouteActivations(reason: "shutdown")
         xcodeProcessEventMonitor.stop()
+        scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue { $0.removeAll() }
 
         let runtimeDrain = runtimeTasks.beginShutdown()
         canonicalBrokerState.reset()
@@ -925,34 +928,27 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
-    func resyncProcessToolsCatalogSurfaceAfterRemoving(
-        upstreamIndex removedUpstreamIndex: Int,
-        processID removedProcessID: pid_t? = nil
+    func applyToolCatalogSurfaceUpdate(
+        _ update: ProcessToolCatalogRegistry.SurfaceUpdate
     ) {
-        guard processRoutingEnabled,
-              canonicalBrokerState.toolsCatalogRaw() != nil else {
-            return
-        }
-        if let surface = processToolCatalogRegistry.availableToolCatalogSurface(),
-           let sourceUpstream = surface.sourceUpstream {
+        switch update.canonicalAction {
+        case .noChange:
+            break
+        case .syncCanonical(let rawResult, let sourceUpstream):
             canonicalBrokerState.syncCanonicalToolsCatalog(
-                surface.rawResult,
+                rawResult,
                 sourceUpstream: sourceUpstream
             )
-            return
-        }
-        guard let sourceUpstream = canonicalBrokerState.toolsSourceUpstream() else {
-            return
-        }
-        if sourceUpstream == removedUpstreamIndex {
-            canonicalBrokerState.clearToolsCatalog()
-            return
-        }
-        if let removedProcessID,
-           xcodeProcessRoute(forUpstreamIndex: sourceUpstream)?.target.processID == removedProcessID
-        {
+        case .clearCanonical:
             canonicalBrokerState.clearToolsCatalog()
         }
+        if update.publishesToolsListChanged {
+            publishToolsListChangedNotification()
+        }
+    }
+
+    func processToolCatalogExposedProcessIDs() -> Set<pid_t> {
+        catalogExposedUsableProcessIDs()
     }
 
     func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {

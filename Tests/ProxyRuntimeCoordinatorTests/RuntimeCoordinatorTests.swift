@@ -2055,6 +2055,126 @@ struct RuntimeCoordinatorTests {
         #expect(await oldUpstream.sentCount() == oldSentCountAfterRetire)
     }
 
+    @Test func processRoutingRetriesRelaunchedProcessCatalogAfterWorkspaceBecomesReady()
+        async throws
+    {
+        let olderUpstream = TestUpstreamClient()
+        let oldNewerUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 26632, xcodeVersion: "26.6")
+        let oldNewerTarget = xcodeProcessTarget(processID: 27032, xcodeVersion: "27.0")
+        let relaunchedTarget = xcodeProcessTarget(processID: 27033, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [olderUpstream, oldNewerUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldNewerTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (olderTarget, 0, [toolDescriptor(name: "Only26")]),
+                (oldNewerTarget, 1, [toolDescriptor(name: "OldOnly27")]),
+            ]
+        )
+
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget],
+            reason: "test_terminate_newer_before_relaunch"
+        )
+        _ = try await oldNewerUpstream.nextStopCount()
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["Only26"])
+
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, relaunchedTarget],
+            reason: "test_relaunch_before_workspace_ready"
+        )
+        let relaunchedUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let initialize = try await relaunchedUpstream.nextSent(at: 0)
+        await relaunchedUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+        )
+        _ = try await relaunchedUpstream.nextSent(at: 1)
+        let emptyCatalogRequest = try await relaunchedUpstream.nextSent(
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
+        await relaunchedUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: emptyCatalogRequest),
+                    tools: []
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+
+        guard case .healthy = manager.testStateSnapshot().upstreams[2].healthState else {
+            Issue.record("empty process catalog should not quarantine a live relaunched route")
+            return
+        }
+        let retryIndex = try #require((0..<timeoutScheduler.scheduledCount()).first {
+            timeoutScheduler.delay(at: $0)?.nanoseconds
+                == TimeAmount.milliseconds(250).nanoseconds
+                && timeoutScheduler.isCancelled(at: $0) == false
+        })
+        #expect(timeoutScheduler.fire(at: retryIndex))
+        let readyCatalogRequest = try await relaunchedUpstream.nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
+        await relaunchedUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: readyCatalogRequest),
+                    tools: [
+                        toolDescriptor(name: "Only27Relaunched"),
+                    ]
+                )
+            )
+        )
+        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot {
+            $0.canonicalToolsSourceUpstream == 2
+        }
+
+        let snapshot = manager.debugSnapshot()
+        #expect(Set(snapshot.processRoutes.map(\.processID)) == Set([
+            olderTarget.processID,
+            relaunchedTarget.processID,
+            oldNewerTarget.processID,
+        ]))
+        #expect(Set(snapshot.processToolCatalogs.map(\.processID)) == Set([
+            olderTarget.processID,
+            relaunchedTarget.processID,
+        ]))
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "Only26",
+            "Only27Relaunched",
+        ]))
+    }
+
     @Test func processRoutingRetiresInFlightPrimaryStopsOldSlotAndRetriesActiveRoute()
         async throws
     {
@@ -5210,6 +5330,154 @@ struct RuntimeCoordinatorTests {
         #expect(toolsListRefreshes.withLockedValue { $0 } == ["1:true"])
     }
 
+    @Test func sessionManagerIgnoresEmptyProcessToolsCatalogWhenExistingSurfaceIsNonEmpty()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let existingUpstream = TestUpstreamClient()
+        let emptyUpstream = TestUpstreamClient()
+        let existingTarget = xcodeProcessTarget(processID: 66342, xcodeVersion: "26.6")
+        let emptyTarget = xcodeProcessTarget(processID: 80430, xcodeVersion: "27.0")
+        let toolsListRefreshes = NIOLockedValueBox<[String]>([])
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [existingUpstream, emptyUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: emptyTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: existingTarget, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                toolsListRefreshCompleted: { upstreamIndex, succeeded in
+                    toolsListRefreshes.withLockedValue {
+                        $0.append("\(upstreamIndex):\(succeeded)")
+                    }
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (existingTarget, 0, [toolDescriptor(name: "ExistingOnlyTool")]),
+            ]
+        )
+
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_empty_process_catalog",
+            processIDs: [emptyTarget.processID]
+        )
+        let emptyRequest = try await sentValue(from: emptyUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: emptyRequest) == "tools/list")
+        await emptyUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: emptyRequest),
+                    tools: []
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "ExistingOnlyTool",
+        ])
+        #expect(
+            manager.debugSnapshot().processToolCatalogs.map(\.processID)
+                == [existingTarget.processID]
+        )
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: emptyTarget.processID) == nil)
+        #expect(toolsListRefreshes.withLockedValue { $0 == ["1:true"] })
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.contains(emptyTarget.processID)
+            }
+        )
+        guard case .healthy = manager.testStateSnapshot().upstreams[1].healthState else {
+            Issue.record("empty process catalog should leave upstream health usable")
+            return
+        }
+        #expect(await existingUpstream.sentCount() == 0)
+    }
+
+    @Test func sessionManagerTreatsSingleProcessEmptyToolsCatalogAsMissingSurface()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80431, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_single_empty_process_catalog",
+            processIDs: [target.processID]
+        )
+        let emptyRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: emptyRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: emptyRequest),
+                    tools: []
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.contains(target.processID)
+            }
+        )
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(
+            timeoutScheduler.delay(at: 0)?.nanoseconds
+                == TimeAmount.milliseconds(250).nanoseconds
+        )
+        guard case .healthy = manager.testStateSnapshot().upstreams[0].healthState else {
+            Issue.record("empty process catalog should not quarantine the upstream")
+            return
+        }
+    }
+
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -5764,6 +6032,102 @@ struct RuntimeCoordinatorTests {
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
                 == [goodTarget.processID]
+        )
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
+    }
+
+    @Test func sessionManagerToolsListResyncsRemainingCatalogWhenProcessRouteRetires()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let retiredUpstream = TestUpstreamClient()
+        let remainingUpstream = TestUpstreamClient()
+        let retiredTarget = xcodeProcessTarget(processID: 80433, xcodeVersion: "27.0")
+        let remainingTarget = xcodeProcessTarget(processID: 66337, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [retiredUpstream, remainingUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: retiredTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: remainingTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (retiredTarget, 0, [toolDescriptor(name: "RetiredOnlyTool")]),
+                (remainingTarget, 1, [toolDescriptor(name: "RemainingOnlyTool")]),
+            ]
+        )
+        #expect(manager.cachedToolsListResult() != nil)
+
+        manager.reconcileXcodeProcessTargets(
+            [remainingTarget],
+            reason: "test_process_route_retired"
+        )
+        _ = try await retiredUpstream.nextStopCount()
+
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "RemainingOnlyTool",
+        ])
+        #expect(
+            manager.debugSnapshot().processToolCatalogs.map(\.processID)
+                == [remainingTarget.processID]
+        )
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-after-retire",
+            requestTimeoutOverride: .seconds(5)
+        )
+        #expect(toolNames(in: result) == ["RemainingOnlyTool"])
+        #expect(await remainingUpstream.sentCount() == 0)
+    }
+
+    @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUpstreamStateClears()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let clearedTarget = xcodeProcessTarget(processID: 80434, xcodeVersion: "27.0")
+        let remainingTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: clearedTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: remainingTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (clearedTarget, 0, [toolDescriptor(name: "ClearedOnlyTool")]),
+                (remainingTarget, 1, [toolDescriptor(name: "RemainingOnlyTool")]),
+            ]
+        )
+        #expect(manager.cachedToolsListResult() != nil)
+
+        #expect(manager.clearUpstreamState(upstreamIndex: 0))
+
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "RemainingOnlyTool",
+        ])
+        #expect(
+            manager.debugSnapshot().processToolCatalogs.map(\.processID)
+                == [remainingTarget.processID]
         )
         #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
     }

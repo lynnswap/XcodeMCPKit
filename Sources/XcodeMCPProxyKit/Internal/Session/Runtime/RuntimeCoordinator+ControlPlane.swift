@@ -261,7 +261,12 @@ extension RuntimeCoordinator {
                     } catch is TimeoutError {
                         throw TimeoutError()
                     } catch {
-                        self.processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
+                        self.applyToolCatalogSurfaceUpdate(
+                            self.processToolCatalogRegistry.removeProcess(
+                                processID: route.target.processID,
+                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
+                            )
+                        )
                         return .failure(
                             route: route,
                             upstreamIndex: route.upstreamIndices.last ?? -1,
@@ -368,6 +373,51 @@ extension RuntimeCoordinator {
         )
     }
 
+    func scheduleMissingProcessToolsCatalogRetry(
+        processID: pid_t,
+        reason: String
+    ) {
+        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.insert(processID)
+        }
+        let shouldSchedule = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
+            $0.insert(processID).inserted
+        }
+        guard shouldSchedule else {
+            return
+        }
+        let delay = TimeAmount.milliseconds(250)
+        logger.debug(
+            "Scheduling missing process tools/list catalog retry",
+            metadata: [
+                "pid": .string("\(processID)"),
+                "delay_ms": .string("250"),
+                "reason": .string(reason),
+            ]
+        )
+        _ = scheduleRuntimeTimeout(delay) { [weak self] in
+            guard let self else { return }
+            _ = self.scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
+                $0.remove(processID)
+            }
+            guard self.processRoutingEnabled,
+                  self.xcodeProcessRoutes.contains(where: {
+                      $0.target.processID == processID
+                  }),
+                  self.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue({
+                      $0.contains(processID)
+                  }),
+                  self.processToolCatalogRegistry.catalog(forProcessID: processID) == nil
+            else {
+                return
+            }
+            self.refreshMissingProcessToolsCatalogsIfNeeded(
+                reason: "scheduled_\(reason)",
+                processIDs: [processID]
+            )
+        }
+    }
+
     private func availableToolsCatalogSurfaceResult(
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>,
@@ -413,6 +463,31 @@ extension RuntimeCoordinator {
         }
         let hadProcessCatalog =
             processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil
+        // Empty tools arrays are valid MCP wire shape, but they are not a
+        // usable process-bound Xcode catalog surface.
+        guard ProcessToolCatalogRegistry.hasUsableTools(in: result.rawResult) else {
+            logger.debug(
+                "Dropping empty process tools/list catalog",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                    "upstream": .string("\(sourceUpstream)"),
+                ]
+            )
+            scheduleMissingProcessToolsCatalogRetry(
+                processID: target.processID,
+                reason: "empty_process_catalog"
+            )
+            if hadProcessCatalog {
+                return availableToolsCatalogSurfaceResult(
+                    startedAt: startedAt,
+                    exposedProcessIDs: exposedProcessIDs,
+                    fallback: result
+                )
+            }
+            return nil
+        }
         let resolvedActivation: (upstreamIndex: Int, attempt: Int)?
         if let activationUpstreamIndex, let activationAttempt {
             resolvedActivation = (activationUpstreamIndex, activationAttempt)
@@ -453,11 +528,14 @@ extension RuntimeCoordinator {
                 return nil
             }
         }
-        processToolCatalogRegistry.record(
-            target: target,
-            upstreamIndex: sourceUpstream,
-            associatedUpstreamIndices: activeRoute.upstreamIndices,
-            rawResult: result.rawResult
+        applyToolCatalogSurfaceUpdate(
+            processToolCatalogRegistry.recordCatalog(
+                target: target,
+                upstreamIndex: sourceUpstream,
+                associatedUpstreamIndices: activeRoute.upstreamIndices,
+                rawResult: result.rawResult,
+                exposedProcessIDs: processToolCatalogExposedProcessIDs()
+            )
         )
         if resolvedActivation == nil {
             _ = markProcessRouteActivationCataloged(
@@ -468,8 +546,8 @@ extension RuntimeCoordinator {
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.remove(target.processID)
         }
-        if hadProcessCatalog == false {
-            publishToolsListChangedNotification()
+        _ = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
+            $0.remove(target.processID)
         }
         let surface = processToolCatalogRegistry.availableToolCatalogSurface(
             processIDs: exposedProcessIDs

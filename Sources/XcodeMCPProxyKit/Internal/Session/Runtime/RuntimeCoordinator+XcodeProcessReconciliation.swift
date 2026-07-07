@@ -199,10 +199,10 @@ extension RuntimeCoordinator {
                 clearToolsCatalog: true
             )
             startInitializationForAddedProcessRoutes(result.addedRoutes)
+            publishToolsListChangedNotification()
         }
 
         retryPendingProcessRouteReadiness(reason: reason)
-        publishToolsListChangedNotification()
     }
 
     private func appendProcessBoundRoute(
@@ -256,7 +256,9 @@ extension RuntimeCoordinator {
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.remove(route.target.processID)
         }
-        processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
+        _ = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
+            $0.remove(route.target.processID)
+        }
         removeXcodeWindowOwners(forProcessID: route.target.processID)
         resetProcessRouteActivation(
             processID: route.target.processID,
@@ -272,14 +274,16 @@ extension RuntimeCoordinator {
             )
         }
 
-        resyncProcessToolsCatalogSurfaceAfterRemoving(
-            upstreamIndex: route.primaryUpstreamIndex ?? -1,
-            processID: route.target.processID
+        applyToolCatalogSurfaceUpdate(
+            processToolCatalogRegistry.removeProcess(
+                processID: route.target.processID,
+                exposedProcessIDs: processToolCatalogExposedProcessIDs()
+            )
         )
         invalidateControlPlane(
             reason: "xcode_process_removed",
             clearInitialize: resetInitialize,
-            clearToolsCatalog: true
+            clearToolsCatalog: false
         )
         if resetInitialize {
             restartPrimaryInitializeAfterRetiringCachedProcessRoute()

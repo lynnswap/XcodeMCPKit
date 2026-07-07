@@ -270,6 +270,12 @@ extension RuntimeCoordinator {
         })
     }
 
+    func catalogExposedUsableProcessIDs() -> Set<pid_t> {
+        Set(xcodeProcessRoutes.compactMap { route in
+            firstUsableInitializedUpstreamIndex(in: route) == nil ? nil : route.target.processID
+        })
+    }
+
     func unavailableXcodeProcessIDs() -> Set<pid_t> {
         let now = nowUptimeNanoseconds()
         return unavailableXcodeProcessRoutes.withLockedValue { state in
@@ -333,10 +339,17 @@ extension RuntimeCoordinator {
             }
             state[route.target.processID] = record
         }
-        processToolCatalogRegistry.removeCatalog(forProcessID: route.target.processID)
-        resyncProcessToolsCatalogSurfaceAfterRemoving(
-            upstreamIndex: upstreamIndex,
-            processID: route.target.processID
+        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+            $0.remove(route.target.processID)
+        }
+        _ = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
+            $0.remove(route.target.processID)
+        }
+        applyToolCatalogSurfaceUpdate(
+            processToolCatalogRegistry.removeProcess(
+                processID: route.target.processID,
+                exposedProcessIDs: processToolCatalogExposedProcessIDs()
+            )
         )
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(

@@ -216,6 +216,48 @@ struct ToolSurfaceTests {
         #expect((tools[0]["description"] as? String)?.contains("navigator issues") == true)
     }
 
+    @Test func toolSurfaceAllowsDisabledToolsFilterToExposeEmptyToolsList() throws {
+        var config = makeToolSurfaceConfig()
+        config.refreshCodeIssuesMode = .upstream
+        config.disabledToolNames = ["RunAllTests"]
+        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
+        let surface = ToolSurface(config: config, sessionManager: sessionManager)
+
+        let upstreamData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": [
+                    "tools": [
+                        [
+                            "name": "RunAllTests",
+                            "description": "hidden",
+                        ],
+                    ],
+                ],
+            ],
+            options: []
+        )
+        let rewritten = surface.rewriteForwardedResponse(
+            method: nil,
+            toolName: nil,
+            originalID: nil,
+            responseMethodsByIDKey: ["1": "tools/list"],
+            normalizationToolsListResponseIDKey: "1",
+            cacheableToolsListResponseIDKey: "1",
+            upstreamData: upstreamData
+        )
+
+        #expect(rewritten.cacheableToolsListResult != nil)
+
+        let payload = try #require(
+            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
+        )
+        let result = try #require(payload["result"] as? [String: Any])
+        let tools = try #require(result["tools"] as? [[String: Any]])
+        #expect(tools.isEmpty)
+    }
+
     @Test func toolSurfaceNormalizesMixedBatchUsingCatalogFromSamePayload() throws {
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         let surface = ToolSurface(
