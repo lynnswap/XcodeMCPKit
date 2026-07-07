@@ -100,6 +100,7 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
+        let brokerGeneration = canonicalBrokerState.generation()
         let unavailable = unavailableXcodeProcessIDs()
         let routes = xcodeProcessRoutes.compactMap { route -> AvailableToolsCatalogRoute? in
             guard unavailable.contains(route.target.processID) == false else {
@@ -164,7 +165,8 @@ extension RuntimeCoordinator {
                 requestTimeout: requestTimeout,
                 deadlineUptimeNs: deadlineUptimeNs,
                 startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs
+                exposedProcessIDs: exposedProcessIDs,
+                brokerGeneration: brokerGeneration
             )
         } catch is CancellationError {
             guard Task.isCancelled == false,
@@ -222,6 +224,7 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>,
+        brokerGeneration: UInt64? = nil,
         returnAfterFirstSuccess: Bool = true
     ) async throws -> CanonicalToolsCatalogLoadResult {
         try await withThrowingTaskGroup(
@@ -248,7 +251,8 @@ extension RuntimeCoordinator {
                             activationAttempt: route.activationAttempt,
                             result: result,
                             startedAt: startedAt,
-                            exposedProcessIDs: exposedProcessIDs
+                            exposedProcessIDs: exposedProcessIDs,
+                            brokerGeneration: brokerGeneration
                         ) else {
                             return .stale
                         }
@@ -265,7 +269,8 @@ extension RuntimeCoordinator {
                             self.processToolCatalogRegistry.removeProcess(
                                 processID: route.target.processID,
                                 exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
-                            )
+                            ),
+                            onlyIfGeneration: brokerGeneration
                         )
                         return .failure(
                             route: route,
@@ -442,7 +447,8 @@ extension RuntimeCoordinator {
         activationAttempt: Int?,
         result: CanonicalToolsCatalogLoadResult,
         startedAt: UInt64,
-        exposedProcessIDs: Set<pid_t>
+        exposedProcessIDs: Set<pid_t>,
+        brokerGeneration: UInt64?
     ) -> CanonicalToolsCatalogLoadResult? {
         guard let sourceUpstream = result.sourceUpstream else {
             return result
@@ -535,7 +541,8 @@ extension RuntimeCoordinator {
                 associatedUpstreamIndices: activeRoute.upstreamIndices,
                 rawResult: result.rawResult,
                 exposedProcessIDs: processToolCatalogExposedProcessIDs()
-            )
+            ),
+            onlyIfGeneration: brokerGeneration
         )
         if resolvedActivation == nil {
             _ = markProcessRouteActivationCataloged(
@@ -606,6 +613,7 @@ extension RuntimeCoordinator {
                     deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
                     startedAt: startedAt,
                     exposedProcessIDs: exposedProcessIDs,
+                    brokerGeneration: generation,
                     returnAfterFirstSuccess: false
                 )
                 guard result.cacheableAsCanonical,

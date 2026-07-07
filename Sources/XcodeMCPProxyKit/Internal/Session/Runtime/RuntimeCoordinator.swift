@@ -929,20 +929,30 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func applyToolCatalogSurfaceUpdate(
-        _ update: ProcessToolCatalogRegistry.SurfaceUpdate
+        _ update: ProcessToolCatalogRegistry.SurfaceUpdate,
+        onlyIfGeneration expectedGeneration: UInt64? = nil
     ) {
+        if let expectedGeneration,
+           canonicalBrokerState.generation() != expectedGeneration {
+            return
+        }
+        let applied: Bool
         switch update.canonicalAction {
         case .noChange:
+            applied = true
             break
         case .syncCanonical(let rawResult, let sourceUpstream):
-            canonicalBrokerState.syncCanonicalToolsCatalog(
+            applied = canonicalBrokerState.syncCanonicalToolsCatalog(
                 rawResult,
-                sourceUpstream: sourceUpstream
+                sourceUpstream: sourceUpstream,
+                onlyIfGeneration: expectedGeneration
             )
         case .clearCanonical:
-            canonicalBrokerState.clearToolsCatalog()
+            applied = canonicalBrokerState.clearToolsCatalog(
+                onlyIfGeneration: expectedGeneration
+            )
         }
-        if update.publishesToolsListChanged {
+        if applied, update.publishesToolsListChanged {
             publishToolsListChangedNotification()
         }
     }

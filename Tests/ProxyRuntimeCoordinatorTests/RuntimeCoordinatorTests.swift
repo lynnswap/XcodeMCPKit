@@ -6031,6 +6031,83 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
+    @Test func sessionManagerDoesNotReseedCanonicalCatalogFromStaleProcessSurfaceGeneration()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80440, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let staleLoadReachedRecord = TestSignal()
+        let releaseStaleRecord = AsyncGate()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0 else {
+                        return
+                    }
+                    staleLoadReachedRecord.signal()
+                    try? await releaseStaleRecord.wait()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-stale-generation",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let catalogRequest = try await waitWithTimeout(
+            "waiting for process tools/list request",
+            timeout: .seconds(2)
+        ) {
+            try await upstream.nextSent(
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: catalogRequest),
+                    tools: [
+                        toolDescriptor(name: "StaleGenerationTool"),
+                    ]
+                )
+            )
+        )
+        try await staleLoadReachedRecord.wait(
+            description: "waiting for process catalog load before record"
+        )
+
+        manager.canonicalBrokerState.clearToolsCatalog()
+        let invalidatedGeneration = manager.canonicalBrokerState.generation()
+        #expect(manager.cachedToolsListResult() == nil)
+
+        await releaseStaleRecord.signal()
+        await #expect(throws: CancellationError.self) {
+            _ = try await waitWithTimeout(
+                "waiting for stale-generation tools/list result",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+        }
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.canonicalBrokerState.generation() == invalidatedGeneration)
+    }
+
     @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()
         async throws
     {

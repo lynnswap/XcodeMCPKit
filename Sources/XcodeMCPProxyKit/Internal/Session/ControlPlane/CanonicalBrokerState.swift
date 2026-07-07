@@ -107,17 +107,19 @@ final class CanonicalBrokerState: Sendable {
         }
     }
 
+    @discardableResult
     func syncCanonicalToolsCatalog(
         _ rawResult: JSONValue,
         sourceUpstream: Int,
         onlyIfGeneration expectedGeneration: UInt64? = nil
-    ) {
+    ) -> Bool {
         state.withLockedValue { state in
             if let expectedGeneration, state.generation != expectedGeneration {
-                return
+                return false
             }
             state.toolsCatalogRaw = rawResult
             state.toolsSourceUpstream = sourceUpstream
+            return true
         }
     }
 
@@ -129,11 +131,16 @@ final class CanonicalBrokerState: Sendable {
         }
     }
 
-    func clearToolsCatalog() {
+    @discardableResult
+    func clearToolsCatalog(onlyIfGeneration expectedGeneration: UInt64? = nil) -> Bool {
         state.withLockedValue { state in
+            if let expectedGeneration, state.generation != expectedGeneration {
+                return false
+            }
             state.toolsCatalogRaw = nil
             state.toolsSourceUpstream = nil
             state.generation += 1
+            return true
         }
     }
 
