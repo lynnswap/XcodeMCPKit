@@ -532,6 +532,13 @@ extension RuntimeCoordinator {
                     "upstream": .string("\(sourceUpstream)"),
                 ]
             )
+            if let activationUpstreamIndex, let activationAttempt {
+                xcodeProcessRouteActivationTracker.finishCatalogWaitWithoutCatalog(
+                    processID: target.processID,
+                    upstreamIndex: activationUpstreamIndex,
+                    attempt: activationAttempt
+                )
+            }
             scheduleMissingProcessToolsCatalogRetry(
                 processID: target.processID,
                 reason: "empty_process_catalog"

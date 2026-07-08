@@ -669,6 +669,158 @@ struct RuntimeCoordinatorTests {
         ]))
     }
 
+    @Test func processRouteActivationEmptyCatalogRetryCancelsCatalogTimeout()
+        async throws
+    {
+        var config = makeConfig(requestTimeout: 20)
+        config.autoApproveXcodeDialog = true
+        let olderUpstream = TestUpstreamClient()
+        let olderTarget = xcodeProcessTarget(processID: 26629, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27029, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [olderUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let olderInitializeFuture = fixture.registerInitialize(requestID: 1)
+        let olderInitialize = try await olderUpstream.nextSent(at: 0)
+        await olderUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: olderInitialize)))
+        )
+        _ = try await olderInitializeFuture.get()
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (olderTarget, 0, [toolDescriptor(name: "Only26")]),
+            ]
+        )
+
+        manager.reconcileXcodeProcessTargets(
+            [olderTarget, newerTarget],
+            reason: "test_empty_catalog_retry_cancels_catalog_timeout"
+        )
+
+        let activationUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let initialize = try await waitWithTimeout(
+            "waiting for activation initialize",
+            timeout: .seconds(2)
+        ) {
+            try await activationUpstream.nextSent(at: 0)
+        }
+        await activationUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+        )
+        _ = try await waitWithTimeout(
+            "waiting for activation initialized notification",
+            timeout: .seconds(2)
+        ) {
+            try await activationUpstream.nextSent(at: 1)
+        }
+        try await waitForProcessRouteActivationInitialized(
+            manager,
+            processID: newerTarget.processID,
+            upstreamIndex: 1,
+            attempt: 1,
+            message: "waiting for activation initialized state"
+        )
+        let firstToolsRequest = try await waitWithTimeout(
+            "waiting for activation tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await activationUpstream.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        let catalogTimeoutIndex = try #require((0..<timeoutScheduler.scheduledCount()).first {
+            timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds
+                && timeoutScheduler.isCancelled(at: $0) == false
+        })
+
+        await activationUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: firstToolsRequest),
+                    tools: []
+                )
+            )
+        )
+
+        let retryIndex = try await waitWithTimeout(
+            "waiting for empty catalog retry timeout",
+            timeout: .seconds(2)
+        ) {
+            while true {
+                if let index = (0..<timeoutScheduler.scheduledCount()).first(where: {
+                    $0 != catalogTimeoutIndex
+                        && timeoutScheduler.delay(at: $0)?.nanoseconds
+                            == TimeAmount.milliseconds(250).nanoseconds
+                        && timeoutScheduler.isCancelled(at: $0) == false
+                }) {
+                    return index
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+
+        #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
+        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex) == false)
+        #expect(createdUpstreams.withLockedValue(\.count) == 1)
+        #expect(timeoutScheduler.fire(at: retryIndex))
+        let retryToolsRequest = try await waitWithTimeout(
+            "waiting for retry tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await activationUpstream.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await activationUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: retryToolsRequest),
+                    tools: [
+                        toolDescriptor(name: "Only27Recovered"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for retry process catalog completion",
+            timeout: .seconds(2)
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
+
+        #expect(createdUpstreams.withLockedValue(\.count) == 1)
+        #expect(
+            manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
+                == .cataloged(upstreamIndex: 1, attempt: 1)
+        )
+        #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+            "Only26",
+            "Only27Recovered",
+        ]))
+    }
+
     @Test func processRouteActivationCatalogAcceptsSecondaryFallbackForCurrentAttempt()
         async throws
     {

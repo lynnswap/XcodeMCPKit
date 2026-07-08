@@ -224,7 +224,8 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             guard var record = records[processID] else { return nil }
             guard case .initialized(let currentUpstreamIndex, let currentAttempt, _) = record.phase,
                   currentUpstreamIndex == upstreamIndex,
-                  currentAttempt == attempt
+                  currentAttempt == attempt,
+                  let catalogTimeout = record.catalogTimeout
             else {
                 return nil
             }
@@ -233,6 +234,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             record.catalogTimeout = nil
             record.phase = .pending
             records[processID] = record
+            catalogTimeout.cancel()
             return CatalogTimeout(
                 rpcHandles: rpcHandles,
                 retry: Self.retry(forAttempt: currentAttempt)
@@ -312,6 +314,34 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         if shouldCancelHandle {
             rpcHandle.cancel()
         }
+    }
+
+    func finishCatalogWaitWithoutCatalog(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int
+    ) {
+        let cleanup = state.withLockedValue {
+            records -> (
+                timeout: RuntimeScheduledTimeout?,
+                rpcHandles: [ControlPlane.RPCHandle]
+            )? in
+            guard var record = records[processID],
+                  case .initialized(let currentUpstreamIndex, let currentAttempt, _) = record.phase,
+                  currentUpstreamIndex == upstreamIndex,
+                  currentAttempt == attempt
+            else {
+                return nil
+            }
+            let timeout = record.catalogTimeout
+            let rpcHandles = record.catalogRPCHandles
+            record.catalogTimeout = nil
+            record.catalogRPCHandles.removeAll()
+            records[processID] = record
+            return (timeout, rpcHandles)
+        }
+        cleanup?.timeout?.cancel()
+        cleanup?.rpcHandles.forEach { $0.cancel() }
     }
 
     func abandon(processID: pid_t, reason: String) {
