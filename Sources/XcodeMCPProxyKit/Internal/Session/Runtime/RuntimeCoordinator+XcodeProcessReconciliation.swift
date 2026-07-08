@@ -73,9 +73,7 @@ extension RuntimeCoordinator {
         }
         while !Task.isCancelled, isCurrentXcodeProcessReconciliationLoop(generation: generation) {
             let hasPendingProcessToolsCatalogRefresh =
-                pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                    $0.isEmpty == false
-                }
+                processRouteReadinessStore.pendingCatalogRefreshIsEmpty() == false
             let isRecovering =
                 activeInitializedHealthyishCount() == 0
                 || anyActiveRecoveryInFlight()
@@ -162,7 +160,7 @@ extension RuntimeCoordinator {
         reason: String
     ) {
         guard processRoutingEnabled else { return }
-        let result = xcodeProcessRegistry.reconcile(
+        let result = processRouteStore.reconcile(
             targets: targets,
             reason: reason,
             nowUptimeNs: nowUptimeNanoseconds(),
@@ -180,15 +178,13 @@ extension RuntimeCoordinator {
         }
 
         if result.addedRoutes.isEmpty == false {
-            pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { processIDs in
-                for route in result.addedRoutes {
-                    processIDs.insert(route.target.processID)
-                }
+            for route in result.addedRoutes {
+                processRouteReadinessStore.insertPendingCatalogRefresh(
+                    processID: route.target.processID
+                )
             }
-            unavailableXcodeProcessRoutes.withLockedValue { unavailable in
-                for route in result.addedRoutes {
-                    unavailable.removeValue(forKey: route.target.processID)
-                }
+            for route in result.addedRoutes {
+                processRouteStore.removeUnavailableState(processID: route.target.processID)
             }
             for route in result.addedRoutes {
                 observeXcodeProcessExit(route.target.processID)
@@ -249,13 +245,9 @@ extension RuntimeCoordinator {
         _ route: XcodeProcessRoute,
         reason: String
     ) {
-        _ = unavailableXcodeProcessRoutes.withLockedValue { state in
-            state.removeValue(forKey: route.target.processID)
-        }
+        processRouteStore.removeUnavailableState(processID: route.target.processID)
         xcodeProcessEventMonitor.removeExitObserver(processID: route.target.processID)
-        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-            $0.remove(route.target.processID)
-        }
+        processRouteReadinessStore.removePendingCatalogRefresh(processID: route.target.processID)
         cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
         resetProcessRouteActivation(
@@ -263,18 +255,19 @@ extension RuntimeCoordinator {
             reason: "route_retired_\(reason)"
         )
 
-        let removalUpdate = processToolCatalogRegistry.removeProcess(
-            processID: route.target.processID,
-            exposedProcessIDs: processToolCatalogExposedProcessIDs()
-        )
-        applyToolCatalogSurfaceUpdate(removalUpdate)
-        if removalUpdate.isNoChange {
-            applyToolCatalogSurfaceUpdate(
-                processToolCatalogRegistry.recomputeSurface(
+        let removalUpdate = applyToolCatalogSurfaceMutation {
+            processToolSurfaceStore.removeProcess(
+                processID: route.target.processID,
+                exposedProcessIDs: processToolCatalogExposedProcessIDs()
+            )
+        }
+        if removalUpdate?.isNoChange == true {
+            applyToolCatalogSurfaceMutation {
+                processToolSurfaceStore.recomputeSurface(
                     exposedProcessIDs: processToolCatalogExposedProcessIDs(),
                     publishesToolsListChanged: true
                 )
-            )
+            }
         }
 
         var resetInitialize = false
@@ -401,22 +394,21 @@ extension RuntimeCoordinator {
         let unavailableProcessIDs = unavailableXcodeProcessIDs()
         let missingCatalogProcessIDs = Set(activeRoutes.compactMap { route -> pid_t? in
             guard unavailableProcessIDs.contains(route.target.processID) == false,
-                  processToolCatalogRegistry.catalog(forProcessID: route.target.processID) == nil
+                  processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil
             else {
                 return nil
             }
             return route.target.processID
         })
-        let pendingProcessIDs = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-            processIDs -> Set<pid_t> in
-            processIDs.formUnion(missingCatalogProcessIDs)
-            processIDs = processIDs.filter { processID in
+        let pendingProcessIDs = processRouteReadinessStore
+            .pendingCatalogRefreshProcessIDsSnapshot()
+            .union(missingCatalogProcessIDs)
+            .filter { processID in
                 activeProcessIDs.contains(processID)
-                && unavailableProcessIDs.contains(processID) == false
-                && processToolCatalogRegistry.catalog(forProcessID: processID) == nil
+                    && unavailableProcessIDs.contains(processID) == false
+                    && processToolSurfaceStore.catalog(forProcessID: processID) == nil
             }
-            return processIDs
-        }
+        processRouteReadinessStore.replacePendingCatalogRefreshes(pendingProcessIDs)
         guard pendingProcessIDs.isEmpty == false else {
             return
         }
@@ -453,9 +445,9 @@ extension RuntimeCoordinator {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
-        let shouldRefresh = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-            $0.contains(route.target.processID)
-        }
+        let shouldRefresh = processRouteReadinessStore.hasPendingCatalogRefresh(
+            processID: route.target.processID
+        )
         guard shouldRefresh else {
             return
         }

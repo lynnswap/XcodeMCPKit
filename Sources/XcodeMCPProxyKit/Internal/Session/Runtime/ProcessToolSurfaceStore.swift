@@ -2,8 +2,9 @@ import Foundation
 import NIOConcurrencyHelpers
 import XcodeMCPKit
 
-final class ProcessToolCatalogRegistry: Sendable {
+final class ProcessToolSurfaceStore: Sendable {
     struct Catalog: Sendable {
+        let routeID: ProcessRouteID
         let target: XcodeProcessTarget
         let upstreamIndex: Int
         let rawResult: JSONValue
@@ -84,6 +85,7 @@ final class ProcessToolCatalogRegistry: Sendable {
         rawResult: JSONValue
     ) {
         _ = recordCatalog(
+            routeID: ProcessRouteID(processID: target.processID, instanceGeneration: 0),
             target: target,
             upstreamIndex: upstreamIndex,
             associatedUpstreamIndices: associatedUpstreamIndices,
@@ -93,6 +95,7 @@ final class ProcessToolCatalogRegistry: Sendable {
     }
 
     func recordCatalog(
+        routeID: ProcessRouteID,
         target: XcodeProcessTarget,
         upstreamIndex: Int,
         associatedUpstreamIndices: [Int] = [],
@@ -100,6 +103,7 @@ final class ProcessToolCatalogRegistry: Sendable {
         exposedProcessIDs: Set<pid_t>?
     ) -> SurfaceUpdate {
         let catalog = Catalog(
+            routeID: routeID,
             target: target,
             upstreamIndex: upstreamIndex,
             rawResult: rawResult,
@@ -130,50 +134,6 @@ final class ProcessToolCatalogRegistry: Sendable {
         }
     }
 
-    func restoreCatalogIfMissing(
-        _ catalog: Catalog,
-        associatedUpstreamIndices: [Int] = []
-    ) {
-        state.withLockedValue { state in
-            guard state.catalogsByProcessID[catalog.target.processID] == nil else {
-                return
-            }
-            Self.recordCatalog(
-                catalog,
-                associatedUpstreamIndices: associatedUpstreamIndices,
-                in: &state
-            )
-        }
-    }
-
-    func rollbackRecordCatalogIfCurrent(
-        processID: pid_t,
-        attemptedUpstreamIndex: Int,
-        attemptedRawResult: JSONValue,
-        previousCatalog: Catalog?,
-        associatedUpstreamIndices: [Int] = []
-    ) {
-        state.withLockedValue { state in
-            guard let current = state.catalogsByProcessID[processID],
-                  current.upstreamIndex == attemptedUpstreamIndex,
-                  current.rawResult == attemptedRawResult else {
-                return
-            }
-            if let previousCatalog {
-                Self.recordCatalog(
-                    previousCatalog,
-                    associatedUpstreamIndices: associatedUpstreamIndices,
-                    in: &state
-                )
-            } else {
-                state.catalogsByProcessID.removeValue(forKey: processID)
-                state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
-                    $0.value != processID
-                }
-            }
-        }
-    }
-
     func removeCatalog(forUpstreamIndex upstreamIndex: Int) {
         _ = removeUpstream(
             upstreamIndex: upstreamIndex,
@@ -196,6 +156,7 @@ final class ProcessToolCatalogRegistry: Sendable {
                 if let catalog = state.catalogsByProcessID[processID],
                    catalog.upstreamIndex == upstreamIndex {
                     state.catalogsByProcessID[processID] = Catalog(
+                        routeID: catalog.routeID,
                         target: catalog.target,
                         upstreamIndex: replacementUpstreamIndex,
                         rawResult: catalog.rawResult,

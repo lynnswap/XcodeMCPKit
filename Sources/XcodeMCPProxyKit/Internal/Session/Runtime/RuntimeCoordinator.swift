@@ -100,11 +100,6 @@ struct XcodeProcessReconciliationLoopState: Sendable {
     var isRunning = false
 }
 
-struct ScheduledProcessToolsCatalogRetry: Sendable {
-    let generation: UInt64
-    let timeout: RuntimeScheduledTimeout
-}
-
 typealias XcodeProcessUpstreamFactory =
     @Sendable (_ target: XcodeProcessTarget) -> [any UpstreamSlotControlling]
 
@@ -410,7 +405,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
     let canonicalBrokerState: CanonicalBrokerState
     let controlPlaneDebugMirror = ControlPlane.DebugMirror()
-    let processToolCatalogRegistry = ProcessToolCatalogRegistry()
+    let processToolSurfaceStore = ProcessToolSurfaceStore()
+    private let processToolSurfaceMutationLock = NIOLockedValueBox(())
 
     let upstreamHealthManager: UpstreamHealthManager
     let upstreamSlotScheduler: UpstreamSlotScheduler
@@ -424,24 +420,19 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let controlPlaneCoordinator: ControlPlaneCoordinator
     let documentationProviderManager: (any DocumentationProviderManaging)?
     let processRoutingEnabled: Bool
-    let xcodeProcessRegistry: XcodeProcessRegistry
+    let processRouteStore: ProcessRouteStore
     let xcodeProcessReconcileScheduleState =
         NIOLockedValueBox(XcodeProcessReconcileScheduleState())
     let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
     let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
     let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?
     var xcodeProcessRoutes: [XcodeProcessRoute] {
-        xcodeProcessRegistry.activeRoutes()
+        processRouteStore.activeRoutes()
     }
     let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
-    let scheduledProcessToolsCatalogRetries =
-        NIOLockedValueBox<[pid_t: ScheduledProcessToolsCatalogRetry]>([:])
-    let pendingProcessToolsCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
-    let xcodeProcessRouteActivationTracker = XcodeProcessRouteActivationTracker()
-    let unavailableXcodeProcessRoutes =
-        NIOLockedValueBox<[pid_t: XcodeProcessRouteUnavailableRecord]>([:])
+    let processRouteReadinessStore = ProcessRouteReadinessStore()
     let prewarmDocumentationProviderOnStartup: Bool
     let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -612,12 +603,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
         self.processRoutingEnabled = resolvedProcessRoutingEnabled
-        let xcodeProcessRegistry = XcodeProcessRegistry(
+        let processRouteStore = ProcessRouteStore(
             initialRoutes: xcodeProcessRoutes,
             nowUptimeNs: uptimeProvider(),
             reason: "startup"
         )
-        self.xcodeProcessRegistry = xcodeProcessRegistry
+        self.processRouteStore = processRouteStore
         self.xcodeTargetDiscovery = xcodeTargetDiscovery
         self.dynamicUpstreamFactory = dynamicUpstreamFactory
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
@@ -633,7 +624,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let routableProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = { [runtimeBox] in
             guard resolvedProcessRoutingEnabled else { return [] }
             guard let runtime = runtimeBox.value else {
-                return Set(xcodeProcessRegistry.activeRoutes().flatMap(\.upstreamIndices))
+                return Set(processRouteStore.activeRoutes().flatMap(\.upstreamIndices))
             }
             return runtime.routableProcessBoundUpstreamIndices()
         }
@@ -853,18 +844,17 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
+        processRouteStore.resetExposureState()
         resetAllProcessRouteActivations(reason: "debug_reset")
-        unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
         cancelAllScheduledProcessToolsCatalogRetries()
-        pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0.removeAll() }
+        processRouteReadinessStore.removeAllPendingCatalogRefreshes()
         clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
             clearInitialize: true,
             clearToolsCatalog: true
         )
-        canonicalBrokerState.reset()
-        processToolCatalogRegistry.reset()
+        resetControlPlaneSurfaceState()
         restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset()
     }
 
@@ -892,11 +882,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         resetAllProcessRouteActivations(reason: "shutdown")
         xcodeProcessEventMonitor.stop()
         cancelAllScheduledProcessToolsCatalogRetries()
-        pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0.removeAll() }
+        processRouteReadinessStore.removeAllPendingCatalogRefreshes()
 
         let runtimeDrain = runtimeTasks.beginShutdown()
-        canonicalBrokerState.reset()
-        processToolCatalogRegistry.reset()
+        resetControlPlaneSurfaceState()
         let controlPlaneDrain = await controlPlaneCoordinator.beginShutdown(
             reason: "shutdown",
             clearInitialize: true,
@@ -934,7 +923,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
-        processToolCatalogRegistry.toolsListResult(forUpstreamIndex: upstreamIndex)
+        processToolSurfaceStore.toolsListResult(forUpstreamIndex: upstreamIndex)
             ?? canonicalBrokerState.toolsCatalogRaw()
     }
 
@@ -948,26 +937,90 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     @discardableResult
     func applyToolCatalogSurfaceUpdate(
-        _ update: ProcessToolCatalogRegistry.SurfaceUpdate,
+        _ update: ProcessToolSurfaceStore.SurfaceUpdate,
         onlyIfGeneration expectedGeneration: UInt64? = nil
     ) -> Bool {
-        func generationIsCurrent() -> Bool {
-            guard let expectedGeneration else {
-                return true
-            }
-            return canonicalBrokerState.generation() == expectedGeneration
+        processToolSurfaceMutationLock.withLockedValue { _ in
+            applyToolCatalogSurfaceUpdateLocked(
+                update,
+                onlyIfGeneration: expectedGeneration,
+                notifyInitialGenerationCheck: true
+            )
         }
+    }
 
-        guard generationIsCurrent() else {
+    @discardableResult
+    func applyToolCatalogSurfaceMutation(
+        onlyIfGeneration expectedGeneration: UInt64? = nil,
+        _ mutation: () -> ProcessToolSurfaceStore.SurfaceUpdate
+    ) -> ProcessToolSurfaceStore.SurfaceUpdate? {
+        processToolSurfaceMutationLock.withLockedValue { _ in
+            guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
+                return nil
+            }
+            testHooks.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck?()
+            guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
+                return nil
+            }
+            let update = mutation()
+            guard applyToolCatalogSurfaceUpdateLocked(
+                update,
+                onlyIfGeneration: expectedGeneration,
+                notifyInitialGenerationCheck: false
+            ) else {
+                return nil
+            }
+            return update
+        }
+    }
+
+    func invalidateControlPlaneGeneration(
+        clearInitialize: Bool,
+        clearToolsCatalog: Bool
+    ) -> UInt64 {
+        processToolSurfaceMutationLock.withLockedValue { _ in
+            if clearInitialize {
+                canonicalBrokerState.clearInitialize()
+            }
+            if clearToolsCatalog {
+                canonicalBrokerState.clearToolsCatalog()
+            }
+            return canonicalBrokerState.generation()
+        }
+    }
+
+    private func resetControlPlaneSurfaceState() {
+        processToolSurfaceMutationLock.withLockedValue { _ in
+            canonicalBrokerState.reset()
+            processToolSurfaceStore.reset()
+        }
+    }
+
+    private func toolCatalogBrokerGenerationIsCurrent(_ expectedGeneration: UInt64?) -> Bool {
+        guard let expectedGeneration else {
+            return true
+        }
+        return canonicalBrokerState.generation() == expectedGeneration
+    }
+
+    private func applyToolCatalogSurfaceUpdateLocked(
+        _ update: ProcessToolSurfaceStore.SurfaceUpdate,
+        onlyIfGeneration expectedGeneration: UInt64?,
+        notifyInitialGenerationCheck: Bool
+    ) -> Bool {
+        guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
             return false
         }
-        testHooks.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck?()
+        if notifyInitialGenerationCheck {
+            testHooks.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck?()
+            guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
+                return false
+            }
+        }
         let applied: Bool
         switch update.canonicalAction {
         case .noChange:
-            // Registry mutations happen before this method is called. A
-            // no-change canonical action still has to reject a stale mutation.
-            applied = generationIsCurrent()
+            applied = toolCatalogBrokerGenerationIsCurrent(expectedGeneration)
         case .syncCanonical(let rawResult, let sourceUpstream):
             applied = canonicalBrokerState.syncCanonicalToolsCatalog(
                 rawResult,
@@ -989,26 +1042,15 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         processID: pid_t,
         generation expectedGeneration: UInt64? = nil
     ) {
-        let retry: ScheduledProcessToolsCatalogRetry? =
-            scheduledProcessToolsCatalogRetries.withLockedValue { retries in
-                guard let retry = retries[processID] else {
-                    return nil
-                }
-                if let expectedGeneration, retry.generation != expectedGeneration {
-                    return nil
-                }
-                retries.removeValue(forKey: processID)
-                return retry
-            }
+        let retry = processRouteReadinessStore.takeScheduledCatalogRetry(
+            processID: processID,
+            expectedGeneration: expectedGeneration
+        )
         retry?.timeout.cancel()
     }
 
     func cancelAllScheduledProcessToolsCatalogRetries() {
-        let retries = scheduledProcessToolsCatalogRetries.withLockedValue { retries in
-            let retriesToCancel = Array(retries.values)
-            retries.removeAll()
-            return retriesToCancel
-        }
+        let retries = processRouteReadinessStore.takeAllScheduledCatalogRetries()
         for retry in retries {
             retry.timeout.cancel()
         }
@@ -1018,12 +1060,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         catalogExposedUsableProcessIDs()
     }
 
-    func processToolCatalogRegistryHasCompleteConfiguredCatalog() -> Bool {
+    func processToolSurfaceStoreHasCompleteConfiguredCatalog() -> Bool {
         let configuredProcessIDs = catalogEligibleConfiguredProcessIDs()
         guard configuredProcessIDs.isEmpty == false else {
             return false
         }
-        return processToolCatalogRegistry.processIDsWithCatalog() == configuredProcessIDs
+        return processToolSurfaceStore.processIDsWithCatalog() == configuredProcessIDs
     }
 
     func refreshToolsListIfNeeded() {
@@ -1592,13 +1634,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         // cache. The delayed actor cleanup must only cancel loads that
         // started before this generation, because fresh requests may already
         // have started by the time the actor receives the cleanup message.
-        if clearInitialize {
-            canonicalBrokerState.clearInitialize()
-        }
-        if clearToolsCatalog {
-            canonicalBrokerState.clearToolsCatalog()
-        }
-        let invalidatedGeneration = canonicalBrokerState.generation()
+        let invalidatedGeneration = invalidateControlPlaneGeneration(
+            clearInitialize: clearInitialize,
+            clearToolsCatalog: clearToolsCatalog
+        )
         let coordinator = controlPlaneCoordinator
         addRuntimeTask {
             await coordinator.cancelLoadsStartedBeforeGeneration(

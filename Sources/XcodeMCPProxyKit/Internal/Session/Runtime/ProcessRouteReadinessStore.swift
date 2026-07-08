@@ -3,7 +3,7 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPKit
 
-final class XcodeProcessRouteActivationTracker: Sendable {
+final class ProcessRouteReadinessStore: Sendable {
     enum Phase: Sendable, Equatable {
         case pending
         case attaching(upstreamIndex: Int, attempt: Int, startedAtUptimeNs: UInt64)
@@ -31,6 +31,11 @@ final class XcodeProcessRouteActivationTracker: Sendable {
     struct CatalogTimeout: Sendable {
         let rpcHandles: [ControlPlane.RPCHandle]
         let retry: Retry
+    }
+
+    struct ScheduledCatalogRetry: Sendable {
+        let generation: UInt64
+        let timeout: RuntimeScheduledTimeout
     }
 
     private struct Record: Sendable {
@@ -62,6 +67,110 @@ final class XcodeProcessRouteActivationTracker: Sendable {
     }
 
     private let state = NIOLockedValueBox<[pid_t: Record]>([:])
+    private let pendingCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
+    private let scheduledCatalogRetries =
+        NIOLockedValueBox<[pid_t: ScheduledCatalogRetry]>([:])
+
+    func insertPendingCatalogRefresh(processID: pid_t) {
+        _ = pendingCatalogRefreshProcessIDs.withLockedValue { $0.insert(processID) }
+    }
+
+    func removePendingCatalogRefresh(processID: pid_t) {
+        _ = pendingCatalogRefreshProcessIDs.withLockedValue { $0.remove(processID) }
+    }
+
+    func removeAllPendingCatalogRefreshes() {
+        pendingCatalogRefreshProcessIDs.withLockedValue { $0.removeAll() }
+    }
+
+    func replacePendingCatalogRefreshes(_ processIDs: Set<pid_t>) {
+        pendingCatalogRefreshProcessIDs.withLockedValue { $0 = processIDs }
+    }
+
+    func hasPendingCatalogRefresh(processID: pid_t) -> Bool {
+        pendingCatalogRefreshProcessIDs.withLockedValue { $0.contains(processID) }
+    }
+
+    func pendingCatalogRefreshProcessIDsSnapshot() -> Set<pid_t> {
+        pendingCatalogRefreshProcessIDs.withLockedValue { $0 }
+    }
+
+    func pendingCatalogRefreshIsEmpty() -> Bool {
+        pendingCatalogRefreshProcessIDs.withLockedValue(\.isEmpty)
+    }
+
+    func takeStaleScheduledCatalogRetry(
+        processID: pid_t,
+        currentGeneration: UInt64
+    ) -> ScheduledCatalogRetry? {
+        scheduledCatalogRetries.withLockedValue { retries in
+            guard let retry = retries[processID],
+                  retry.generation != currentGeneration else {
+                return nil
+            }
+            retries.removeValue(forKey: processID)
+            return retry
+        }
+    }
+
+    func hasScheduledCatalogRetry(processID: pid_t) -> Bool {
+        scheduledCatalogRetries.withLockedValue { $0[processID] != nil }
+    }
+
+    func takeScheduledCatalogRetryIfCurrent(
+        processID: pid_t,
+        generation: UInt64
+    ) -> Bool {
+        scheduledCatalogRetries.withLockedValue { retries in
+            guard let retry = retries[processID],
+                  retry.generation == generation else {
+                return false
+            }
+            retries.removeValue(forKey: processID)
+            return true
+        }
+    }
+
+    func storeScheduledCatalogRetry(
+        processID: pid_t,
+        generation: UInt64,
+        timeout: RuntimeScheduledTimeout
+    ) -> Bool {
+        scheduledCatalogRetries.withLockedValue { retries in
+            guard retries[processID] == nil else {
+                return false
+            }
+            retries[processID] = ScheduledCatalogRetry(
+                generation: generation,
+                timeout: timeout
+            )
+            return true
+        }
+    }
+
+    func takeScheduledCatalogRetry(
+        processID: pid_t,
+        expectedGeneration: UInt64?
+    ) -> ScheduledCatalogRetry? {
+        scheduledCatalogRetries.withLockedValue { retries in
+            guard let retry = retries[processID] else {
+                return nil
+            }
+            if let expectedGeneration, retry.generation != expectedGeneration {
+                return nil
+            }
+            retries.removeValue(forKey: processID)
+            return retry
+        }
+    }
+
+    func takeAllScheduledCatalogRetries() -> [ScheduledCatalogRetry] {
+        scheduledCatalogRetries.withLockedValue { retries in
+            let retriesToCancel = Array(retries.values)
+            retries.removeAll()
+            return retriesToCancel
+        }
+    }
 
     func prepare(processID: pid_t) {
         state.withLockedValue { records in

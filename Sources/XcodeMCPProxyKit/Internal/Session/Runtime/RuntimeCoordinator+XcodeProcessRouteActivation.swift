@@ -15,7 +15,7 @@ extension RuntimeCoordinator {
             )
             return
         }
-        xcodeProcessRouteActivationTracker.prepare(processID: route.target.processID)
+        processRouteReadinessStore.prepare(processID: route.target.processID)
         startUpstreamWarmInitialize(
             upstreamIndex: upstreamIndex,
             mode: .processRouteActivation(processID: route.target.processID)
@@ -34,7 +34,7 @@ extension RuntimeCoordinator {
         else {
             return false
         }
-        switch xcodeProcessRouteActivationTracker.phase(processID: route.target.processID) {
+        switch processRouteReadinessStore.phase(processID: route.target.processID) {
         case .pending, .attaching, .initialized:
             return true
         case .cataloged, .abandoned, nil:
@@ -45,12 +45,12 @@ extension RuntimeCoordinator {
     func beginProcessRouteActivationIfNeeded(
         mode: WarmInitializeMode,
         upstreamIndex: Int
-    ) -> XcodeProcessRouteActivationTracker.Start? {
+    ) -> ProcessRouteReadinessStore.Start? {
         guard case .processRouteActivation(let processID) = mode else {
             return nil
         }
         let now = nowUptimeNanoseconds()
-        guard let start = xcodeProcessRouteActivationTracker.beginAttaching(
+        guard let start = processRouteReadinessStore.beginAttaching(
             processID: processID,
             upstreamIndex: upstreamIndex,
             nowUptimeNs: now
@@ -80,7 +80,7 @@ extension RuntimeCoordinator {
         attempt: Int?
     ) {
         guard let attempt,
-              let retry = xcodeProcessRouteActivationTracker.handleTimeout(
+              let retry = processRouteReadinessStore.handleTimeout(
                   processID: processID,
                   upstreamIndex: upstreamIndex,
                   attempt: attempt
@@ -121,7 +121,7 @@ extension RuntimeCoordinator {
             return
         }
         let processID = route.target.processID
-        guard let initialized = xcodeProcessRouteActivationTracker.markInitialized(
+        guard let initialized = processRouteReadinessStore.markInitialized(
             processID: processID,
             upstreamIndex: upstreamIndex,
             nowUptimeNs: nowUptimeNanoseconds()
@@ -136,7 +136,7 @@ extension RuntimeCoordinator {
             ]
         )
         testHooks.processRouteActivationEvent?(processID, upstreamIndex, "initialized")
-        if let existingCatalog = processToolCatalogRegistry.catalog(forProcessID: processID),
+        if let existingCatalog = processToolSurfaceStore.catalog(forProcessID: processID),
            markProcessRouteActivationCataloged(
                target: route.target,
                upstreamIndex: existingCatalog.upstreamIndex,
@@ -159,7 +159,7 @@ extension RuntimeCoordinator {
         attempt: Int? = nil
     ) -> Bool {
         let now = nowUptimeNanoseconds()
-        guard let cataloged = xcodeProcessRouteActivationTracker.markCataloged(
+        guard let cataloged = processRouteReadinessStore.markCataloged(
             processID: target.processID,
             upstreamIndex: activationUpstreamIndex ?? upstreamIndex,
             catalogedUpstreamIndex: upstreamIndex,
@@ -187,7 +187,7 @@ extension RuntimeCoordinator {
         processID: pid_t,
         upstreamIndex: Int
     ) -> Int? {
-        xcodeProcessRouteActivationTracker.catalogAttempt(
+        processRouteReadinessStore.catalogAttempt(
             processID: processID,
             upstreamIndex: upstreamIndex
         )
@@ -198,7 +198,7 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         attempt: Int
     ) {
-        guard xcodeProcessRouteActivationTracker.finishCatalogRequestWithoutCatalog(
+        guard processRouteReadinessStore.finishCatalogRequestWithoutCatalog(
             processID: processID,
             upstreamIndex: upstreamIndex,
             attempt: attempt
@@ -208,7 +208,7 @@ extension RuntimeCoordinator {
     }
 
     func abandonProcessRouteActivation(processID: pid_t, reason: String) {
-        xcodeProcessRouteActivationTracker.abandon(processID: processID, reason: reason)
+        processRouteReadinessStore.abandon(processID: processID, reason: reason)
         logger.info(
             "route_activation_abandoned",
             metadata: [
@@ -220,7 +220,7 @@ extension RuntimeCoordinator {
     }
 
     func resetProcessRouteActivation(processID: pid_t, reason: String) {
-        guard xcodeProcessRouteActivationTracker.reset(processID: processID) else {
+        guard processRouteReadinessStore.reset(processID: processID) else {
             return
         }
         logger.info(
@@ -235,11 +235,11 @@ extension RuntimeCoordinator {
 
     func resetProcessRouteActivationIfClearingPreCatalogUpstream(upstreamIndex: Int) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              processToolCatalogRegistry.catalog(forProcessID: route.target.processID) == nil
+              processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil
         else {
             return
         }
-        switch xcodeProcessRouteActivationTracker.phase(processID: route.target.processID) {
+        switch processRouteReadinessStore.phase(processID: route.target.processID) {
         case .attaching(let activationUpstreamIndex, _, _)
             where activationUpstreamIndex == upstreamIndex:
             resetProcessRouteActivation(
@@ -259,12 +259,12 @@ extension RuntimeCoordinator {
 
     func clearsInitializedProcessRouteActivationBeforeCatalog(upstreamIndex: Int) -> Bool {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              processToolCatalogRegistry.catalog(forProcessID: route.target.processID) == nil
+              processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil
         else {
             return false
         }
         guard case .initialized(let activationUpstreamIndex, _, _) =
-            xcodeProcessRouteActivationTracker.phase(processID: route.target.processID)
+            processRouteReadinessStore.phase(processID: route.target.processID)
         else {
             return false
         }
@@ -272,7 +272,7 @@ extension RuntimeCoordinator {
     }
 
     func resetAllProcessRouteActivations(reason: String) {
-        for processID in xcodeProcessRouteActivationTracker.resetAll() {
+        for processID in processRouteReadinessStore.resetAll() {
             logger.info(
                 "route_activation_abandoned",
                 metadata: [
@@ -286,7 +286,7 @@ extension RuntimeCoordinator {
 
     private func scheduleProcessRouteActivationRetry(
         processID: pid_t,
-        retry: XcodeProcessRouteActivationTracker.Retry,
+        retry: ProcessRouteReadinessStore.Retry,
         reason: String
     ) {
         logger.info(
@@ -301,7 +301,7 @@ extension RuntimeCoordinator {
         testHooks.processRouteActivationEvent?(processID, nil, "retry_scheduled")
         let timeout = scheduleRuntimeTimeout(retry.delay) { [weak self] in
             guard let self else { return }
-            guard self.xcodeProcessRouteActivationTracker.handleRetryFired(
+            guard self.processRouteReadinessStore.handleRetryFired(
                 processID: processID
             ) else {
                 return
@@ -317,7 +317,7 @@ extension RuntimeCoordinator {
             }
             self.startProcessRouteActivation(for: route)
         }
-        xcodeProcessRouteActivationTracker.storeRetry(
+        processRouteReadinessStore.storeRetry(
             processID: processID,
             timeout: timeout
         )
@@ -338,7 +338,7 @@ extension RuntimeCoordinator {
                 attempt: attempt
             )
         }
-        xcodeProcessRouteActivationTracker.storeCatalogTimeout(
+        processRouteReadinessStore.storeCatalogTimeout(
             processID: processID,
             upstreamIndex: upstreamIndex,
             attempt: attempt,
@@ -355,7 +355,7 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         attempt: Int
     ) {
-        guard let timeout = xcodeProcessRouteActivationTracker.handleCatalogTimeout(
+        guard let timeout = processRouteReadinessStore.handleCatalogTimeout(
             processID: processID,
             upstreamIndex: upstreamIndex,
             attempt: attempt

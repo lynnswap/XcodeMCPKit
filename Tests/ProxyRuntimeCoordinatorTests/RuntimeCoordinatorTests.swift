@@ -506,8 +506,8 @@ struct RuntimeCoordinatorTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
-        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+        manager.processRouteReadinessStore.prepare(processID: target.processID)
+        _ = manager.processRouteReadinessStore.beginAttaching(
             processID: target.processID,
             upstreamIndex: 0,
             nowUptimeNs: 0
@@ -638,7 +638,7 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: newerTarget.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: newerTarget.processID) == nil)
 
         await retryAttempt.yield(
             .message(
@@ -811,7 +811,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(createdUpstreams.withLockedValue(\.count) == 1)
         #expect(
-            manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
+            manager.processRouteReadinessStore.phase(processID: newerTarget.processID)
                 == .cataloged(upstreamIndex: 1, attempt: 1)
         )
         #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
@@ -979,11 +979,11 @@ struct RuntimeCoordinatorTests {
             "Only27Fallback",
         ]))
         let newerCatalog = try #require(
-            manager.processToolCatalogRegistry.catalog(forProcessID: newerTarget.processID)
+            manager.processToolSurfaceStore.catalog(forProcessID: newerTarget.processID)
         )
         #expect(newerCatalog.upstreamIndex == 2)
         #expect(
-            manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
+            manager.processRouteReadinessStore.phase(processID: newerTarget.processID)
                 == .cataloged(upstreamIndex: 2, attempt: 1)
         )
     }
@@ -1193,10 +1193,10 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(
-            manager.processToolCatalogRegistry.catalog(forProcessID: newerTarget.processID) != nil
+            manager.processToolSurfaceStore.catalog(forProcessID: newerTarget.processID) != nil
         )
         #expect(
-            manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
+            manager.processRouteReadinessStore.phase(processID: newerTarget.processID)
                 == .cataloged(upstreamIndex: 1, attempt: 2)
         )
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
@@ -1205,33 +1205,33 @@ struct RuntimeCoordinatorTests {
         ]))
     }
 
-    @Test func processRouteActivationTrackerMatchesUpstreamAndAttemptExactly() {
-        let tracker = XcodeProcessRouteActivationTracker()
+    @Test func processRouteReadinessStoreMatchesUpstreamAndAttemptExactly() {
+        let readinessStore = ProcessRouteReadinessStore()
         let processID: pid_t = 27018
-        tracker.prepare(processID: processID)
-        _ = tracker.beginAttaching(
+        readinessStore.prepare(processID: processID)
+        _ = readinessStore.beginAttaching(
             processID: processID,
             upstreamIndex: 0,
             nowUptimeNs: 10
         )
 
-        #expect(tracker.markInitialized(
+        #expect(readinessStore.markInitialized(
             processID: processID,
             upstreamIndex: 1,
             nowUptimeNs: 20
         ) == nil)
-        #expect(tracker.handleTimeout(
+        #expect(readinessStore.handleTimeout(
             processID: processID,
             upstreamIndex: 1,
             attempt: 1
         ) == nil)
-        #expect(tracker.handleTimeout(
+        #expect(readinessStore.handleTimeout(
             processID: processID,
             upstreamIndex: 0,
             attempt: 2
         ) == nil)
 
-        let retry = tracker.handleTimeout(
+        let retry = readinessStore.handleTimeout(
             processID: processID,
             upstreamIndex: 0,
             attempt: 1
@@ -1240,7 +1240,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func processRouteActivationCatalogCompletionCancelsStoredRPCHandle() {
-        let tracker = XcodeProcessRouteActivationTracker()
+        let tracker = ProcessRouteReadinessStore()
         let processID: pid_t = 27020
         let rpcHandle = ControlPlane.RPCHandle()
         let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
@@ -1294,7 +1294,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func processRouteActivationEmptyCatalogFinishKeepsCatalogTimeout() {
-        let tracker = XcodeProcessRouteActivationTracker()
+        let tracker = ProcessRouteReadinessStore()
         let processID: pid_t = 27021
         let scheduler = RecordingRuntimeTimeoutScheduler()
         let catalogTimeout = scheduler.scheduler()(.seconds(10)) {}
@@ -1397,15 +1397,13 @@ struct RuntimeCoordinatorTests {
             ]),
             sourceUpstream: 0
         )
-        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
-        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+        manager.processRouteReadinessStore.prepare(processID: target.processID)
+        _ = manager.processRouteReadinessStore.beginAttaching(
             processID: target.processID,
             upstreamIndex: 0,
             nowUptimeNs: 0
         )
-        _ = manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-            $0.insert(target.processID)
-        }
+        manager.processRouteReadinessStore.insertPendingCatalogRefresh(processID: target.processID)
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let foregroundTask = Task {
@@ -1495,8 +1493,8 @@ struct RuntimeCoordinatorTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
-        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+        manager.processRouteReadinessStore.prepare(processID: target.processID)
+        _ = manager.processRouteReadinessStore.beginAttaching(
             processID: target.processID,
             upstreamIndex: 0,
             nowUptimeNs: 0
@@ -1504,7 +1502,7 @@ struct RuntimeCoordinatorTests {
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.clearUpstreamState(upstreamIndex: 0)
 
-        #expect(manager.xcodeProcessRouteActivationTracker.phase(processID: target.processID) == nil)
+        #expect(manager.processRouteReadinessStore.phase(processID: target.processID) == nil)
         manager.startProcessRouteActivation(for: route)
         let retryInitialize = try await upstream.nextSent(at: 0)
         #expect(methodName(from: retryInitialize) == "initialize")
@@ -1533,8 +1531,8 @@ struct RuntimeCoordinatorTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
-        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+        manager.processRouteReadinessStore.prepare(processID: target.processID)
+        _ = manager.processRouteReadinessStore.beginAttaching(
             processID: target.processID,
             upstreamIndex: 0,
             nowUptimeNs: 0
@@ -1549,7 +1547,7 @@ struct RuntimeCoordinatorTests {
 
         #expect(timeoutScheduler.scheduledCount() == 0)
         #expect(createdUpstreams.withLockedValue { $0.isEmpty })
-        #expect(manager.xcodeProcessRouteActivationTracker.phase(processID: target.processID) == nil)
+        #expect(manager.processRouteReadinessStore.phase(processID: target.processID) == nil)
     }
 
     @Test func processRouteActivationUnsupportedInitializeCompletesPendingClient()
@@ -1855,42 +1853,42 @@ struct RuntimeCoordinatorTests {
         )
     }
 
-    @Test func processRegistryReactivatesRetiredRouteWithoutDuplicatingOrder() {
+    @Test func processRouteStoreReactivatesRetiredRouteWithoutDuplicatingOrder() {
         let target = xcodeProcessTarget(processID: 27003, xcodeVersion: "27.0")
-        let registry = XcodeProcessRegistry()
+        let store = ProcessRouteStore()
         var nextUpstreamIndex = 0
         let makeRoute: (XcodeProcessTarget) -> XcodeProcessRoute = { target in
             defer { nextUpstreamIndex += 1 }
             return XcodeProcessRoute(target: target, upstreamIndices: [nextUpstreamIndex])
         }
 
-        var result = registry.reconcile(
+        var result = store.reconcile(
             targets: [target],
             reason: "initial_seen",
             nowUptimeNs: 1,
             makeRoute: makeRoute
         )
         #expect(result.addedRoutes.map(\.upstreamIndices) == [[0]])
-        #expect(registry.activeRoutes().map(\.upstreamIndices) == [[0]])
+        #expect(store.activeRoutes().map(\.upstreamIndices) == [[0]])
 
-        result = registry.reconcile(
+        result = store.reconcile(
             targets: [],
             reason: "transient_missing",
             nowUptimeNs: 2,
             makeRoute: makeRoute
         )
         #expect(result.retiredRoutes.map(\.upstreamIndices) == [[0]])
-        #expect(registry.activeRoutes().isEmpty)
+        #expect(store.activeRoutes().isEmpty)
 
-        result = registry.reconcile(
+        result = store.reconcile(
             targets: [target],
             reason: "seen_again",
             nowUptimeNs: 3,
             makeRoute: makeRoute
         )
         #expect(result.addedRoutes.map(\.upstreamIndices) == [[1]])
-        #expect(registry.activeRoutes().map(\.upstreamIndices) == [[1]])
-        let snapshots = registry.debugSnapshots(
+        #expect(store.activeRoutes().map(\.upstreamIndices) == [[1]])
+        let snapshots = store.debugSnapshots(
             usableSlotCount: { $0.upstreamIndices.count },
             toolsCatalogState: { _, state in state }
         )
@@ -1898,24 +1896,67 @@ struct RuntimeCoordinatorTests {
         #expect(snapshots.map(\.state) == ["active"])
     }
 
-    @Test func processRegistryKeepsActiveRoutesInSortedXcodeOrderAfterLateAdd() {
+    @Test func processRouteStoreBumpsExposureEpochWhenCooldownPruneChangesExposure() {
+        let target0 = xcodeProcessTarget(processID: 27004, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 27005, xcodeVersion: "26.6")
+        let store = ProcessRouteStore(
+            initialRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            nowUptimeNs: 0
+        )
+        let usability = ProcessRouteStore.UpstreamUsabilitySnapshot(
+            snapshotUsableUpstreamIndices: [0, 1],
+            recoveryAwareUsableUpstreamIndices: [0, 1]
+        )
+
+        _ = store.markUnavailable(
+            upstreamIndex: 1,
+            scope: .catalog,
+            unavailableUntilUptimeNs: 100
+        )
+        let cooledDownExposure = store.exposure(
+            policy: .toolsCatalog,
+            upstreamUsability: usability,
+            nowUptimeNs: 50
+        )
+        #expect(cooledDownExposure.processIDs == Set([target0.processID]))
+
+        let recoveredExposure = store.exposure(
+            policy: .toolsCatalog,
+            upstreamUsability: usability,
+            nowUptimeNs: 100
+        )
+        #expect(recoveredExposure.processIDs == Set([target0.processID, target1.processID]))
+        #expect(recoveredExposure.epoch == cooledDownExposure.epoch + 1)
+
+        let stableExposure = store.exposure(
+            policy: .toolsCatalog,
+            upstreamUsability: usability,
+            nowUptimeNs: 101
+        )
+        #expect(stableExposure.epoch == recoveredExposure.epoch)
+    }
+
+    @Test func processRouteStoreKeepsActiveRoutesInSortedXcodeOrderAfterLateAdd() {
         let olderTarget = xcodeProcessTarget(processID: 26640, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27040, xcodeVersion: "27.0")
-        let registry = XcodeProcessRegistry()
+        let store = ProcessRouteStore()
         var nextUpstreamIndex = 0
         let makeRoute: (XcodeProcessTarget) -> XcodeProcessRoute = { target in
             defer { nextUpstreamIndex += 1 }
             return XcodeProcessRoute(target: target, upstreamIndices: [nextUpstreamIndex])
         }
 
-        _ = registry.reconcile(
+        _ = store.reconcile(
             targets: [olderTarget],
             reason: "initial_older",
             nowUptimeNs: 1,
             makeRoute: makeRoute
         )
 
-        let result = registry.reconcile(
+        let result = store.reconcile(
             targets: [olderTarget, newerTarget],
             reason: "late_newer",
             nowUptimeNs: 2,
@@ -1927,11 +1968,11 @@ struct RuntimeCoordinatorTests {
             newerTarget.processID,
             olderTarget.processID,
         ])
-        #expect(registry.activeRoutes().map(\.target.processID) == [
+        #expect(store.activeRoutes().map(\.target.processID) == [
             newerTarget.processID,
             olderTarget.processID,
         ])
-        #expect(registry.activeRoutes().map(\.upstreamIndices) == [[1], [0]])
+        #expect(store.activeRoutes().map(\.upstreamIndices) == [[1], [0]])
     }
 
     @Test func processRoutingAddsLateXcodeProcessWithoutRestart() async throws {
@@ -2557,7 +2598,7 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        #expect(manager.processToolCatalogRegistry.catalog(
+        #expect(manager.processToolSurfaceStore.catalog(
             forProcessID: relaunched26Target.processID
         ) == nil)
 
@@ -2601,7 +2642,7 @@ struct RuntimeCoordinatorTests {
             "waiting for relaunched 26 catalog surface",
             timeout: .seconds(2)
         ) {
-            while manager.processToolCatalogRegistry.catalog(
+            while manager.processToolSurfaceStore.catalog(
                 forProcessID: relaunched26Target.processID
             ) == nil {
                 try await Task.sleep(for: .milliseconds(10))
@@ -5480,7 +5521,7 @@ struct RuntimeCoordinatorTests {
                 toolDescriptor(name: "GoodOnlyTool"),
             ],
         ])
-        manager.processToolCatalogRegistry.record(
+        manager.processToolSurfaceStore.record(
             target: goodTarget,
             upstreamIndex: 1,
             rawResult: goodCatalog
@@ -5510,7 +5551,7 @@ struct RuntimeCoordinatorTests {
         )
         await manager.drainRuntimeTasksForTesting()
 
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: badTarget.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: badTarget.processID) == nil)
         #expect(manager.unavailableXcodeProcessIDs().contains(badTarget.processID))
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
             goodTarget.processID,
@@ -5551,7 +5592,7 @@ struct RuntimeCoordinatorTests {
                 toolDescriptor(name: "OlderRouteOnly"),
             ],
         ])
-        manager.processToolCatalogRegistry.record(
+        manager.processToolSurfaceStore.record(
             target: olderTarget,
             upstreamIndex: 0,
             associatedUpstreamIndices: [0],
@@ -5646,7 +5687,11 @@ struct RuntimeCoordinatorTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")]),
             ]
         )
-        manager.canonicalBrokerState.clearToolsCatalog()
+        manager.invalidateControlPlane(
+            reason: "test_cached_process_catalog_fresh_route_fails",
+            clearInitialize: false,
+            clearToolsCatalog: true
+        )
 
         let task = Task {
             try await manager.sharedToolsList(
@@ -5722,9 +5767,7 @@ struct RuntimeCoordinatorTests {
             ]),
             sourceUpstream: 0
         )
-        _ = manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-            $0.insert(target.processID)
-        }
+        manager.processRouteReadinessStore.insertPendingCatalogRefresh(processID: target.processID)
 
         manager.markToolsListRefreshFailed(
             upstreamIndex: 0,
@@ -5778,7 +5821,7 @@ struct RuntimeCoordinatorTests {
         let recoveredRefresh = try await nextRecordedValue(toolsListRefreshes, at: 1)
         #expect(recoveredRefresh.0 == 0)
         #expect(recoveredRefresh.1 == true)
-        #expect(manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0.isEmpty })
+        #expect(manager.processRouteReadinessStore.pendingCatalogRefreshIsEmpty())
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [target.processID])
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RecoveredRouteOnly"])
     }
@@ -5820,7 +5863,11 @@ struct RuntimeCoordinatorTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")]),
             ]
         )
-        manager.canonicalBrokerState.clearToolsCatalog()
+        manager.invalidateControlPlane(
+            reason: "test_cached_process_catalog_fresh_route_cancelled",
+            clearInitialize: false,
+            clearToolsCatalog: true
+        )
 
         let task = Task {
             try await manager.sharedToolsList(
@@ -5926,12 +5973,12 @@ struct RuntimeCoordinatorTests {
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
                 == [existingTarget.processID]
         )
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: emptyTarget.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: emptyTarget.processID) == nil)
         #expect(toolsListRefreshes.withLockedValue { $0 == ["1:true"] })
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(emptyTarget.processID)
-            }
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: emptyTarget.processID
+            )
         )
         guard case .healthy = manager.testStateSnapshot().upstreams[1].healthState else {
             Issue.record("empty process catalog should leave upstream health usable")
@@ -5993,11 +6040,11 @@ struct RuntimeCoordinatorTests {
 
         #expect(toolNames(in: rawResult) == ["HiddenOnlyTool"])
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["HiddenOnlyTool"])
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) != nil)
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(target.processID)
-            } == false
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: target.processID
+            ) == false
         )
 
         let clientVisibleResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
@@ -6093,12 +6140,12 @@ struct RuntimeCoordinatorTests {
         await manager.drainRuntimeTasksForTesting()
 
         #expect(
-            manager.processToolCatalogRegistry.catalog(
+            manager.processToolSurfaceStore.catalog(
                 forProcessID: refreshedTarget.processID
             ) == nil
         )
         #expect(
-            manager.processToolCatalogRegistry.catalog(
+            manager.processToolSurfaceStore.catalog(
                 forProcessID: remainingTarget.processID
             ) != nil
         )
@@ -6108,9 +6155,9 @@ struct RuntimeCoordinatorTests {
         ])
         #expect(manager.cachedToolsListResult() == nil)
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(refreshedTarget.processID)
-            }
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: refreshedTarget.processID
+            )
         )
         _ = try await waitWithTimeout(
             "waiting for empty process catalog refresh task to finish",
@@ -6173,14 +6220,106 @@ struct RuntimeCoordinatorTests {
             }
         }
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(refreshedTarget.processID)
-            } == false
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: refreshedTarget.processID
+            ) == false
         )
         guard case .healthy = manager.testStateSnapshot().upstreams[1].healthState else {
             Issue.record("empty process catalog should leave upstream health usable")
             return
         }
+    }
+
+    @Test func sessionManagerStaleEmptyCatalogDoesNotRemoveCatalogAfterGenerationInvalidation()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80454, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let seededCatalogBeforeEmptyRecord = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    do {
+                        try seedProcessToolCatalogs(
+                            on: runtime,
+                            entries: [
+                                (target, 0, [toolDescriptor(name: "LiveAfterInvalidationTool")]),
+                            ]
+                        )
+                    } catch {
+                        Issue.record("failed to seed live process catalog: \(error)")
+                    }
+                    runtime.invalidateControlPlane(
+                        reason: "test_stale_empty_catalog_generation_invalidation",
+                        clearInitialize: false,
+                        clearToolsCatalog: true
+                    )
+                    seededCatalogBeforeEmptyRecord.signal()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-stale-empty-generation",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let emptyRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: emptyRequest) == "tools/list")
+
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: emptyRequest),
+                    tools: []
+                )
+            )
+        )
+        try await seededCatalogBeforeEmptyRecord.wait(
+            description: "waiting for live catalog seed before stale empty record"
+        )
+
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for stale empty catalog result",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+            Issue.record("stale empty catalog result should not complete")
+        } catch is CancellationError {
+        } catch is UpstreamSlotScheduler.AcquisitionError {
+        }
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null).isEmpty)
+        #expect(toolNames(in: manager.processToolSurfaceStore.catalog(
+            forProcessID: target.processID
+        )?.rawResult ?? .null) == ["LiveAfterInvalidationTool"])
+        #expect(
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: target.processID
+            ) == false
+        )
     }
 
     @Test func sessionManagerDoesNotReturnEmptyToolsListWhenEmptyRefreshDropsOnlyProcessCatalog()
@@ -6258,12 +6397,12 @@ struct RuntimeCoordinatorTests {
         await manager.drainRuntimeTasksForTesting()
 
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(target.processID)
-            }
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: target.processID
+            )
         )
     }
 
@@ -6314,12 +6453,12 @@ struct RuntimeCoordinatorTests {
         await manager.drainRuntimeTasksForTesting()
 
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(target.processID)
-            }
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: target.processID
+            )
         )
         #expect(timeoutScheduler.scheduledCount() == 1)
         #expect(
@@ -6381,9 +6520,9 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.scheduledCount() == 1)
         #expect(timeoutScheduler.isCancelled(at: 0) == false)
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.contains(target.processID)
-            }
+            manager.processRouteReadinessStore.hasPendingCatalogRefresh(
+                processID: target.processID
+            )
         )
 
         manager.debugReset()
@@ -6391,11 +6530,9 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.isCancelled(at: 0))
         #expect(timeoutScheduler.fire(at: 0) == false)
         #expect(
-            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-                $0.isEmpty
-            }
+            manager.processRouteReadinessStore.pendingCatalogRefreshIsEmpty()
         )
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
     }
 
     @Test func sessionManagerReplacesStaleMissingProcessCatalogRetryAfterGenerationChange()
@@ -6813,7 +6950,7 @@ struct RuntimeCoordinatorTests {
                     guard loadedTarget == target, sourceUpstream == 0 else {
                         return
                     }
-                    _ = runtimeBox.value?.xcodeProcessRegistry.reconcile(
+                    _ = runtimeBox.value?.processRouteStore.reconcile(
                         targets: [],
                         reason: "test_route_retired_before_catalog_record",
                         nowUptimeNs: 0,
@@ -6844,7 +6981,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
-    @Test func sessionManagerDoesNotRecordCatalogFromStaleProcessSurfaceGeneration()
+    @Test func sessionManagerDoesNotRecordCatalogFromStaleRouteExposureEpoch()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -6877,7 +7014,7 @@ struct RuntimeCoordinatorTests {
 
         let task = Task {
             try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-stale-generation",
+                sessionID: "session-process-catalog-stale-route-epoch",
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -6903,96 +7040,279 @@ struct RuntimeCoordinatorTests {
             description: "waiting for process catalog load before record"
         )
 
-        manager.canonicalBrokerState.clearToolsCatalog()
-        let invalidatedGeneration = manager.canonicalBrokerState.generation()
+        manager.processRouteStore.invalidateExposure()
+        let invalidatedEpoch = manager.processRouteStore.currentEpoch()
         #expect(manager.cachedToolsListResult() == nil)
 
         await releaseStaleRecord.signal()
         await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             _ = try await waitWithTimeout(
-                "waiting for stale-generation tools/list result",
+                "waiting for stale-route-epoch tools/list result",
                 timeout: .seconds(2)
             ) {
                 try await task.value
             }
         }
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.canonicalBrokerState.generation() == invalidatedGeneration)
+        #expect(manager.processRouteStore.currentEpoch() == invalidatedEpoch)
     }
 
-    @Test func sessionManagerRollsBackNoChangeProcessCatalogWhenGenerationChangesAfterRecord()
+    @Test func sessionManagerDoesNotRecordCatalogAfterCooldownPruneChangesExposure()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let recordedTarget = xcodeProcessTarget(processID: 80451, xcodeVersion: "26.6")
-        let missingTarget = xcodeProcessTarget(processID: 80452, xcodeVersion: "27.0")
-        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let uptimeClock = TestUptimeClock(nowUptimeNanoseconds: 0)
+        let activeTarget = xcodeProcessTarget(processID: 80455, xcodeVersion: "27.0")
+        let cooledDownTarget = xcodeProcessTarget(processID: 80456, xcodeVersion: "26.6")
+        let activeUpstream = TestUpstreamClient()
+        let cooledDownUpstream = TestUpstreamClient()
+        let staleLoadReachedRecord = TestSignal()
+        let releaseStaleRecord = AsyncGate()
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            upstreams: [activeUpstream, cooledDownUpstream],
+            nowUptimeNanoseconds: uptimeClock.now,
             xcodeProcessRoutes: [
-                XcodeProcessRoute(target: recordedTarget, upstreamIndices: [0]),
-                XcodeProcessRoute(target: missingTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: activeTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: cooledDownTarget, upstreamIndices: [1]),
             ],
             testHooks: RuntimeCoordinatorTestHooks(
-                processToolCatalogSurfaceUpdatePassedInitialGenerationCheck: {
-                    runtimeBox.value?.canonicalBrokerState.clearToolsCatalog()
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == activeTarget, sourceUpstream == 0 else {
+                        return
+                    }
+                    staleLoadReachedRecord.signal()
+                    try? await releaseStaleRecord.wait()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.processRouteStore.markUnavailable(
+            upstreamIndex: 1,
+            scope: ProcessRouteStore.CooldownScope.catalog,
+            unavailableUntilUptimeNs: 100
+        )
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-stale-cooldown-prune",
+                requestTimeoutOverride: TimeAmount.seconds(5)
+            )
+        }
+        let catalogRequest = try await waitWithTimeout(
+            "waiting for process tools/list request during cooldown",
+            timeout: .seconds(2)
+        ) {
+            try await activeUpstream.nextSent(
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await activeUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: catalogRequest),
+                    tools: [
+                        toolDescriptor(name: "PartialCooldownSurfaceTool"),
+                    ]
+                )
+            )
+        )
+        try await staleLoadReachedRecord.wait(
+            description: "waiting for process catalog load before cooldown prune"
+        )
+
+        uptimeClock.advance(by: .nanoseconds(100))
+        await releaseStaleRecord.signal()
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            _ = try await waitWithTimeout(
+                "waiting for stale cooldown-prune tools/list result",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+        }
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: activeTarget.processID) == nil)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(await cooledDownUpstream.sentCount() == 0)
+    }
+
+    @Test func sessionManagerKeepsCatalogCompletionCurrentAcrossNoOpProcessReconcile()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80452, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let noOpReconcileReached = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    runtime.reconcileXcodeProcessTargets(
+                        [target],
+                        reason: "test_noop_reconcile_during_catalog_record"
+                    )
+                    noOpReconcileReached.signal()
                 }
             ),
             startImmediately: false,
             runtimeBox: runtimeBox
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let routeEpoch = manager.processRouteStore.currentEpoch()
 
-        let generation = manager.canonicalBrokerState.generation()
-        let rawResult = try jsonValue([
-            "tools": [
-                toolDescriptor(name: "IncompleteSurfaceTool"),
-            ],
-        ])
-        let previousCatalog = manager.processToolCatalogRegistry.catalog(
-            forProcessID: recordedTarget.processID
-        )
-        let update = manager.processToolCatalogRegistry.recordCatalog(
-            target: recordedTarget,
-            upstreamIndex: 0,
-            associatedUpstreamIndices: [0],
-            rawResult: rawResult,
-            exposedProcessIDs: [
-                recordedTarget.processID,
-                missingTarget.processID,
-            ]
-        )
-        guard case .noChange = update.canonicalAction else {
-            Issue.record("partial process catalog should produce a no-change canonical update")
-            return
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-noop-reconcile",
+                requestTimeoutOverride: .seconds(5)
+            )
         }
-
-        let applied = manager.applyToolCatalogSurfaceUpdate(
-            update,
-            onlyIfGeneration: generation
+        let catalogRequest = try await waitWithTimeout(
+            "waiting for process tools/list request",
+            timeout: .seconds(2)
+        ) {
+            try await upstream.nextSent(
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: catalogRequest),
+                    tools: [
+                        toolDescriptor(name: "NoOpReconcileTool"),
+                    ]
+                )
+            )
         )
-        #expect(applied == false)
-        manager.processToolCatalogRegistry.rollbackRecordCatalogIfCurrent(
-            processID: recordedTarget.processID,
-            attemptedUpstreamIndex: 0,
-            attemptedRawResult: rawResult,
-            previousCatalog: previousCatalog,
-            associatedUpstreamIndices: [0]
-        )
 
-        #expect(manager.processToolCatalogRegistry.catalog(
-            forProcessID: recordedTarget.processID
-        ) == nil)
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.canonicalBrokerState.generation() == generation + 1)
+        try await noOpReconcileReached.wait(
+            description: "waiting for no-op process reconcile"
+        )
+        let result = try await waitWithTimeout(
+            "waiting for process catalog after no-op reconcile",
+            timeout: .seconds(2)
+        ) {
+            try await task.value
+        }
+        #expect(manager.processRouteStore.currentEpoch() == routeEpoch)
+        #expect(toolNames(in: result) == ["NoOpReconcileTool"])
+        #expect(toolNames(in: manager.processToolSurfaceStore.catalog(
+            forProcessID: target.processID
+        )?.rawResult ?? .null) == ["NoOpReconcileTool"])
     }
 
-    @Test func sessionManagerRestoresProcessCatalogWhenStaleFailureCleanupLosesGenerationRace()
+    @Test func sessionManagerDoesNotRecordCatalogAfterBrokerGenerationInvalidation()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80453, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let staleLoadReachedRecord = TestSignal()
+        let releaseStaleRecord = AsyncGate()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0 else {
+                        return
+                    }
+                    staleLoadReachedRecord.signal()
+                    try? await releaseStaleRecord.wait()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-stale-broker-generation",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let catalogRequest = try await waitWithTimeout(
+            "waiting for process tools/list request",
+            timeout: .seconds(2)
+        ) {
+            try await upstream.nextSent(
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: catalogRequest),
+                    tools: [
+                        toolDescriptor(name: "StaleBrokerGenerationTool"),
+                    ]
+                )
+            )
+        )
+        try await staleLoadReachedRecord.wait(
+            description: "waiting for process catalog load before record"
+        )
+
+        manager.canonicalBrokerState.syncCanonicalToolsCatalog(
+            try jsonValue([
+                "tools": [
+                    toolDescriptor(name: "TemporaryCanonicalTool"),
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+        manager.invalidateControlPlane(
+            reason: "test_stale_broker_generation",
+            clearInitialize: false,
+            clearToolsCatalog: true
+        )
+        let invalidatedGeneration = manager.canonicalBrokerState.generation()
+
+        await releaseStaleRecord.signal()
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for stale broker generation tools/list result",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+            Issue.record("stale broker generation tools/list result should not complete")
+        } catch is CancellationError {
+        } catch is UpstreamSlotScheduler.AcquisitionError {
+        }
+        #expect(manager.canonicalBrokerState.generation() == invalidatedGeneration)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.cachedToolsListResult() == nil)
+    }
+
+    @Test func sessionManagerSkipsFailureCleanupWhenRouteLeaseIsStale()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -7000,7 +7320,6 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 80449, xcodeVersion: "27.0")
         let upstream = TestUpstreamClient()
-        let runtimeBox = WeakRuntimeCoordinatorBox()
         let failureCleanupReached = TestSignal()
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -7011,33 +7330,20 @@ struct RuntimeCoordinatorTests {
             ],
             testHooks: RuntimeCoordinatorTestHooks(
                 processToolsCatalogFailureCleanupBeforeApply: { loadedTarget, sourceUpstream in
-                    guard loadedTarget == target, sourceUpstream == 0,
-                          let runtime = runtimeBox.value else {
+                    guard loadedTarget == target, sourceUpstream == 0 else {
                         return
                     }
-                    do {
-                        try seedProcessToolCatalogs(
-                            on: runtime,
-                            entries: [
-                                (target, 0, [toolDescriptor(name: "RecoveredBeforeStaleFailure")]),
-                            ]
-                        )
-                    } catch {
-                        Issue.record("failed to seed process catalog before stale cleanup: \(error)")
-                    }
-                    runtime.canonicalBrokerState.clearToolsCatalog()
                     failureCleanupReached.signal()
                 }
             ),
-            startImmediately: false,
-            runtimeBox: runtimeBox
+            startImmediately: false
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
 
         let task = Task {
             try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-stale-failure-cleanup",
+                sessionID: "session-process-catalog-stale-route-failure",
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -7059,75 +7365,83 @@ struct RuntimeCoordinatorTests {
             )
         )
 
-        try await failureCleanupReached.wait(
-            description: "waiting for failure cleanup generation race"
-        )
         await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             _ = try await waitWithTimeout(
-                "waiting for stale failure cleanup result",
+                "waiting for stale route failure result",
                 timeout: .seconds(2)
             ) {
                 try await task.value
             }
         }
-
-        #expect(toolNames(in: manager.processToolCatalogRegistry.catalog(
-            forProcessID: target.processID
-        )?.rawResult ?? .null) == ["RecoveredBeforeStaleFailure"])
+        #expect(failureCleanupReached.isSignaled() == false)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
         #expect(manager.cachedToolsListResult() == nil)
     }
 
-    @Test func sessionManagerDoesNotClearOverlappingCatalogOnSameGenerationFailureCleanup()
+    @Test func sessionManagerStaleMissingRouteFailureDoesNotClearExistingProcessSurface()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 80450, xcodeVersion: "27.0")
-        let upstream = TestUpstreamClient()
-        let runtimeBox = WeakRuntimeCoordinatorBox()
-        let overlappingCatalogRecorded = TestSignal()
+        let existingTarget = xcodeProcessTarget(processID: 80450, xcodeVersion: "26.6")
+        let missingTarget = xcodeProcessTarget(processID: 80451, xcodeVersion: "27.0")
+        let existingUpstream = TestUpstreamClient()
+        let missingUpstream = TestUpstreamClient()
+        let failureCleanupReached = TestSignal()
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [upstream],
+            upstreams: [existingUpstream, missingUpstream],
             xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+                XcodeProcessRoute(target: existingTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: missingTarget, upstreamIndices: [1]),
             ],
             testHooks: RuntimeCoordinatorTestHooks(
                 processToolsCatalogFailureCleanupBeforeApply: { loadedTarget, sourceUpstream in
-                    guard loadedTarget == target, sourceUpstream == 0,
-                          let runtime = runtimeBox.value else {
+                    guard loadedTarget == missingTarget, sourceUpstream == 1 else {
                         return
                     }
-                    do {
-                        try seedProcessToolCatalogs(
-                            on: runtime,
-                            entries: [
-                                (target, 0, [toolDescriptor(name: "OverlappingSuccessTool")]),
-                            ]
-                        )
-                    } catch {
-                        Issue.record("failed to seed overlapping process catalog: \(error)")
-                    }
-                    overlappingCatalogRecorded.signal()
+                    failureCleanupReached.signal()
                 }
             ),
-            startImmediately: false,
-            runtimeBox: runtimeBox
+            startImmediately: false
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let existingRoute = try #require(manager.processRouteStore.route(forUpstreamIndex: 0))
+        _ = manager.processToolSurfaceStore.recordCatalog(
+            routeID: existingRoute.id,
+            target: existingTarget,
+            upstreamIndex: 0,
+            associatedUpstreamIndices: existingRoute.upstreamIndices,
+            rawResult: try jsonValue([
+                "tools": [
+                    toolDescriptor(name: "ExistingSurfaceTool"),
+                ],
+            ]),
+            exposedProcessIDs: nil
+        )
+        #expect(manager.cachedToolsListResult() == nil)
 
         let task = Task {
             try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-overlapping-failure-cleanup",
+                sessionID: "session-process-catalog-stale-missing-route-failure",
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        let catalogRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let result = try await waitWithTimeout(
+            "waiting for partial process catalog surface",
+            timeout: .seconds(2)
+        ) {
+            try await task.value
+        }
+        #expect(toolNames(in: result) == ["ExistingSurfaceTool"])
+
+        let catalogRequest = try await sentValue(from: missingUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: catalogRequest) == "tools/list")
-        await upstream.yield(
+        await missingUpstream.yield(
             .message(
                 try JSONSerialization.data(
                     withJSONObject: [
@@ -7143,21 +7457,24 @@ struct RuntimeCoordinatorTests {
             )
         )
 
-        try await overlappingCatalogRecorded.wait(
-            description: "waiting for overlapping catalog before failure cleanup"
-        )
-        let result = try await waitWithTimeout(
-            "waiting for overlapping catalog result",
+        _ = try await waitWithTimeout(
+            "waiting for missing process catalog refresh task to finish",
             timeout: .seconds(2)
         ) {
-            try await task.value
+            while true {
+                if manager.availableToolsCatalogRefreshKeys.withLockedValue(\.isEmpty) {
+                    return true
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
         }
 
-        #expect(toolNames(in: result) == ["OverlappingSuccessTool"])
-        #expect(toolNames(in: manager.processToolCatalogRegistry.catalog(
-            forProcessID: target.processID
-        )?.rawResult ?? .null) == ["OverlappingSuccessTool"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["OverlappingSuccessTool"])
+        #expect(toolNames(in: manager.processToolSurfaceStore.catalog(
+            forProcessID: existingTarget.processID
+        )?.rawResult ?? .null) == ["ExistingSurfaceTool"])
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: missingTarget.processID) == nil)
+        #expect(failureCleanupReached.isSignaled() == false)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["ExistingSurfaceTool"])
     }
 
     @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()
@@ -7189,13 +7506,13 @@ struct RuntimeCoordinatorTests {
             ]),
             sourceUpstream: 0
         )
-        manager.xcodeProcessRouteActivationTracker.prepare(processID: target.processID)
-        _ = manager.xcodeProcessRouteActivationTracker.beginAttaching(
+        manager.processRouteReadinessStore.prepare(processID: target.processID)
+        _ = manager.processRouteReadinessStore.beginAttaching(
             processID: target.processID,
             upstreamIndex: 0,
             nowUptimeNs: 0
         )
-        _ = manager.xcodeProcessRouteActivationTracker.markInitialized(
+        _ = manager.processRouteReadinessStore.markInitialized(
             processID: target.processID,
             upstreamIndex: 0,
             nowUptimeNs: 1
@@ -7241,7 +7558,7 @@ struct RuntimeCoordinatorTests {
             "waiting for overlapping background process catalog",
             timeout: .seconds(2)
         ) {
-            while manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil {
+            while manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
@@ -7282,7 +7599,7 @@ struct RuntimeCoordinatorTests {
                 toolDescriptor(name: "StaleSiblingOnlyTool"),
             ],
         ])
-        manager.processToolCatalogRegistry.record(
+        manager.processToolSurfaceStore.record(
             target: target,
             upstreamIndex: 1,
             associatedUpstreamIndices: [0, 1],
@@ -7630,12 +7947,12 @@ struct RuntimeCoordinatorTests {
                         return
                     }
                     let generation = runtime.canonicalBrokerState.generation()
-                    runtime.applyToolCatalogSurfaceUpdate(
-                        runtime.processToolCatalogRegistry.removeProcess(
+                    runtime.applyToolCatalogSurfaceMutation {
+                        runtime.processToolSurfaceStore.removeProcess(
                             processID: 998_448,
                             exposedProcessIDs: runtime.processToolCatalogExposedProcessIDs()
                         )
-                    )
+                    }
                     #expect(runtime.canonicalBrokerState.generation() == generation)
                     noOpRemovalChecked.signal()
                 }
@@ -9067,6 +9384,62 @@ struct RuntimeCoordinatorTests {
             return
         }
         #expect(preferredUpstreamIndices == [0])
+    }
+
+    @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target0 = xcodeProcessTarget(processID: 628, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 629, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.setCachedToolsListResult(
+            try jsonValue([
+                "tools": [
+                    ownerBoundToolDescriptor(name: "BuildProject"),
+                ],
+            ]),
+            sourceUpstream: 0
+        )
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-before-catalog, "
+                            + "workspacePath: /Work/BeforeCatalog.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 102,
+                name: "BuildProject",
+                arguments: ["tabIdentifier": "tab-before-catalog"]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected owner-hinted request to route before catalog is available")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
     }
 
     @Test func ownerBoundToolRoutesToUsableSlotInOwningProcess() async throws {
@@ -13703,6 +14076,34 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot.leases.isEmpty)
     }
 
+    @Test func sessionManagerDebugResetClearsProcessRouteCooldowns() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 523, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: 0,
+            reason: "test_debug_reset"
+        )
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID))
+
+        manager.debugReset()
+
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID) == false)
+    }
+
     @Test func sessionManagerDebugResetClearsXcodeWindowOwners() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -14160,7 +14561,7 @@ struct RuntimeCoordinatorTests {
         _ = try await waitWithTimeout(message, timeout: .seconds(2)) {
             while true {
                 if case .initialized(let upstreamIndex, let attempt, _) =
-                    manager.xcodeProcessRouteActivationTracker.phase(processID: processID),
+                    manager.processRouteReadinessStore.phase(processID: processID),
                     upstreamIndex == expectedUpstreamIndex,
                     attempt == expectedAttempt
                 {

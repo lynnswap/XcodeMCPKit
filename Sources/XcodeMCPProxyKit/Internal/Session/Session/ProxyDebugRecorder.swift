@@ -146,7 +146,7 @@ final class ProxyDebugRecorder: Sendable {
         cachedToolsListAvailable: Bool,
         controlPlane: ControlPlane.DebugSnapshot?,
         processRoutes: [ProxyDebug.ProcessRouteSnapshot],
-        processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot],
+        processToolCatalogs: [ProcessToolSurfaceStore.DebugSnapshot],
         upstreamStates: [UpstreamHealthManager.UpstreamState],
         sessionSnapshots: [SessionRequestPipeline.DebugSnapshot],
         leaseSnapshots: [LeaseManager.DebugSnapshot],

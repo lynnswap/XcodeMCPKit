@@ -182,18 +182,10 @@ extension RuntimeCoordinator {
     }
 
     func recoveryAwareUsableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
-        let nowUptimeNs = nowUptimeNanoseconds()
-        var effects: [UpstreamHealthManager.Effect] = []
-        let upstreamIndices = route.upstreamIndices.filter { upstreamIndex in
-            let evaluation = upstreamHealthManager.evaluateUsableInitialized(
-                index: upstreamIndex,
-                nowUptimeNs: nowUptimeNs
-            )
-            effects.append(contentsOf: evaluation.effects)
-            return evaluation.isUsable
-        }
-        applyHealthEffects(effects)
-        return upstreamIndices
+        processRouteExposure(policy: .toolsCatalog)
+            .routes
+            .first { $0.route.id == route.id }?
+            .usableUpstreamIndices ?? []
     }
 
     func startUpstreamWarmInitialize(

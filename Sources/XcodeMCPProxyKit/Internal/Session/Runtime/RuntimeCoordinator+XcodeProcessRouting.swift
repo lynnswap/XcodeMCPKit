@@ -3,40 +3,11 @@ import Logging
 import NIOCore
 import XcodeMCPKit
 
-struct XcodeProcessRouteUnavailableRecord: Sendable, Equatable {
-    var routeUnavailableUntilUptimeNs: UInt64?
-    var catalogUnavailableUntilUptimeNs: UInt64?
-
-    var unavailableUntilUptimeNs: UInt64 {
-        max(routeUnavailableUntilUptimeNs ?? 0, catalogUnavailableUntilUptimeNs ?? 0)
-    }
-
-    var isUnavailable: Bool {
-        unavailableUntilUptimeNs > 0
-    }
-
-    mutating func pruneExpired(nowUptimeNs: UInt64) {
-        if let routeUnavailableUntilUptimeNs,
-           routeUnavailableUntilUptimeNs <= nowUptimeNs {
-            self.routeUnavailableUntilUptimeNs = nil
-        }
-        if let catalogUnavailableUntilUptimeNs,
-           catalogUnavailableUntilUptimeNs <= nowUptimeNs {
-            self.catalogUnavailableUntilUptimeNs = nil
-        }
-    }
-}
-
 extension RuntimeCoordinator {
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
         2_000_000_000
     private static let xcodeProcessRouteCatalogUnavailableCooldownNanoseconds: UInt64 =
         30_000_000_000
-
-    private enum XcodeProcessRouteUnavailableScope {
-        case route
-        case catalog
-    }
 
     private struct ToolRoutingRequest: Sendable {
         let id: JSONRPC.ID?
@@ -71,27 +42,20 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         routeScope: XcodeListWindowsRouteScope
     ) async throws -> JSONValue {
-        let unavailable = unavailableXcodeProcessIDs()
-        let usableRoutes = xcodeProcessRoutes.enumerated().compactMap { ordinal, route -> XcodeListWindowsRoute? in
-            guard unavailable.contains(route.target.processID) == false else {
-                return nil
-            }
-            let upstreamIndices = usableInitializedUpstreamIndices(in: route)
-            guard upstreamIndices.isEmpty == false else {
-                return nil
-            }
+        let exposure = processRouteExposure(policy: .windowDiscovery)
+        let usableRoutes = exposure.routes.map { routeExposure in
             return XcodeListWindowsRoute(
-                ordinal: ordinal,
-                target: route.target,
-                upstreamIndices: upstreamIndices
+                ordinal: routeExposure.ordinal,
+                target: routeExposure.route.target,
+                upstreamIndices: routeExposure.usableUpstreamIndices
             )
         }
         let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
         let catalogedProcessIDs =
-            processToolCatalogRegistry.processIDsWithCatalog()
+            processToolSurfaceStore.processIDsWithCatalog()
             .intersection(usableProcessIDs)
         let catalogProcessIDs =
-            processToolCatalogRegistry.processIDsHavingTool("XcodeListWindows")
+            processToolSurfaceStore.processIDsHavingTool("XcodeListWindows")
             .intersection(usableProcessIDs)
         let routes = usableRoutes.filter {
             includesXcodeListWindowsRoute(
@@ -271,25 +235,11 @@ extension RuntimeCoordinator {
     }
 
     func catalogExposedUsableProcessIDs() -> Set<pid_t> {
-        let unavailable = unavailableXcodeProcessIDs()
-        return Set(xcodeProcessRoutes.compactMap { route in
-            unavailable.contains(route.target.processID)
-                || firstUsableInitializedUpstreamIndex(in: route) == nil
-                ? nil
-                : route.target.processID
-        })
+        processRouteExposure(policy: .toolsCatalog).processIDs
     }
 
     func unavailableXcodeProcessIDs() -> Set<pid_t> {
-        let now = nowUptimeNanoseconds()
-        return unavailableXcodeProcessRoutes.withLockedValue { state in
-            state = state.compactMapValues { record in
-                var pruned = record
-                pruned.pruneExpired(nowUptimeNs: now)
-                return pruned.isUnavailable ? pruned : nil
-            }
-            return Set(state.keys)
-        }
+        processRouteStore.unavailableProcessIDs(nowUptimeNs: nowUptimeNanoseconds())
     }
 
     func markXcodeProcessRouteUnavailable(
@@ -320,39 +270,25 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         reason: String,
         cooldownNanoseconds: UInt64,
-        scope: XcodeProcessRouteUnavailableScope
+        scope: ProcessRouteStore.CooldownScope
     ) {
-        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
-            return
-        }
         let unavailableUntil = nowUptimeNanoseconds()
             &+ cooldownNanoseconds
-        unavailableXcodeProcessRoutes.withLockedValue { state in
-            var record = state[route.target.processID] ?? XcodeProcessRouteUnavailableRecord()
-            switch scope {
-            case .route:
-                record.routeUnavailableUntilUptimeNs = max(
-                    record.routeUnavailableUntilUptimeNs ?? 0,
-                    unavailableUntil
-                )
-            case .catalog:
-                record.catalogUnavailableUntilUptimeNs = max(
-                    record.catalogUnavailableUntilUptimeNs ?? 0,
-                    unavailableUntil
-                )
-            }
-            state[route.target.processID] = record
+        guard let route = processRouteStore.markUnavailable(
+            upstreamIndex: upstreamIndex,
+            scope: scope,
+            unavailableUntilUptimeNs: unavailableUntil
+        ) else {
+            return
         }
-        _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
-            $0.remove(route.target.processID)
-        }
+        processRouteReadinessStore.removePendingCatalogRefresh(processID: route.target.processID)
         cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
-        applyToolCatalogSurfaceUpdate(
-            processToolCatalogRegistry.removeProcess(
+        applyToolCatalogSurfaceMutation {
+            processToolSurfaceStore.removeProcess(
                 processID: route.target.processID,
                 exposedProcessIDs: processToolCatalogExposedProcessIDs()
             )
-        )
+        }
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(
             "Temporarily ignoring Xcode process route",
@@ -369,31 +305,14 @@ extension RuntimeCoordinator {
     }
 
     func markXcodeProcessRouteAvailable(upstreamIndex: Int) {
-        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
-            return
-        }
-        let now = nowUptimeNanoseconds()
-        unavailableXcodeProcessRoutes.withLockedValue { state in
-            guard var record = state[route.target.processID] else {
-                return
-            }
-            record.routeUnavailableUntilUptimeNs = nil
-            record.pruneExpired(nowUptimeNs: now)
-            if record.isUnavailable {
-                state[route.target.processID] = record
-            } else {
-                state.removeValue(forKey: route.target.processID)
-            }
-        }
+        _ = processRouteStore.markRouteAvailable(
+            upstreamIndex: upstreamIndex,
+            nowUptimeNs: nowUptimeNanoseconds()
+        )
     }
 
     func markXcodeProcessRouteCatalogAvailable(upstreamIndex: Int) {
-        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
-            return
-        }
-        _ = unavailableXcodeProcessRoutes.withLockedValue { state in
-            state.removeValue(forKey: route.target.processID)
-        }
+        _ = processRouteStore.markCatalogAvailable(upstreamIndex: upstreamIndex)
     }
 
     func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {
@@ -431,14 +350,33 @@ extension RuntimeCoordinator {
     }
 
     func usableInitializedUpstreamIndices(in route: XcodeProcessRoute) -> [Int] {
-        guard unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
-            return []
-        }
+        processRouteExposure(policy: .ownerRouting)
+            .routes
+            .first { $0.route.id == route.id }?
+            .usableUpstreamIndices ?? []
+    }
+
+    func processRouteExposure(
+        policy: ProcessRouteStore.ExposureSnapshot.Policy
+    ) -> ProcessRouteStore.ExposureSnapshot {
+        let nowUptimeNs = nowUptimeNanoseconds()
+        let upstreamUsability = processRouteUpstreamUsabilitySnapshot(
+            policy: policy,
+            nowUptimeNs: nowUptimeNs
+        )
+        return processRouteStore.exposure(
+            policy: policy,
+            upstreamUsability: upstreamUsability,
+            nowUptimeNs: nowUptimeNs
+        )
+    }
+
+    private func processRouteUpstreamUsabilitySnapshot(
+        policy: ProcessRouteStore.ExposureSnapshot.Policy,
+        nowUptimeNs: UInt64
+    ) -> ProcessRouteStore.UpstreamUsabilitySnapshot {
         let states = upstreamHealthManager.statesSnapshot()
-        return route.upstreamIndices.filter { upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else {
-                return false
-            }
+        let snapshotUsable = Set(states.indices.filter { upstreamIndex in
             guard states[upstreamIndex].isInitialized else {
                 return false
             }
@@ -448,7 +386,29 @@ extension RuntimeCoordinator {
             case .quarantined:
                 return false
             }
+        })
+
+        var recoveryAwareUsable = snapshotUsable
+        switch policy {
+        case .toolsCatalog:
+            var effects: [UpstreamHealthManager.Effect] = []
+            recoveryAwareUsable = Set(states.indices.filter { upstreamIndex in
+                let evaluation = upstreamHealthManager.evaluateUsableInitialized(
+                    index: upstreamIndex,
+                    nowUptimeNs: nowUptimeNs
+                )
+                effects.append(contentsOf: evaluation.effects)
+                return evaluation.isUsable
+            })
+            applyHealthEffects(effects)
+        case .ownerRouting, .windowDiscovery, .initialization:
+            break
         }
+
+        return ProcessRouteStore.UpstreamUsabilitySnapshot(
+            snapshotUsableUpstreamIndices: snapshotUsable,
+            recoveryAwareUsableUpstreamIndices: recoveryAwareUsable
+        )
     }
 
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
@@ -500,8 +460,7 @@ extension RuntimeCoordinator {
             }
         }
         let ownerBoundRequests = requests.filter {
-            processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
-                || cachedOwnerBoundToolNames().contains($0.toolName)
+            isOwnerBoundRoutingRequest($0)
         }
         guard ownerBoundRequests.isEmpty == false else {
             if let catalogDecision = catalogToolRoutingDecision(
@@ -522,8 +481,7 @@ extension RuntimeCoordinator {
     ) async -> ToolRoutingDecision {
         let requests = toolRoutingRequests(in: requestJSON)
         let ownerBoundRequests = requests.filter {
-            processToolCatalogRegistry.isOwnerBoundTool($0.toolName)
-                || cachedOwnerBoundToolNames().contains($0.toolName)
+            isOwnerBoundRoutingRequest($0)
         }
 
         var ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
@@ -590,8 +548,8 @@ extension RuntimeCoordinator {
         let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
 
         let hasMissingTools = requests.contains { request in
-            guard processToolCatalogRegistry.catalog(forProcessID: ownerProcessID) != nil,
-                  processToolCatalogRegistry.hasTool(
+            guard processToolSurfaceStore.catalog(forProcessID: ownerProcessID) != nil,
+                  processToolSurfaceStore.hasTool(
                       request.toolName,
                       processID: ownerProcessID
                   ) == false else {
@@ -655,7 +613,7 @@ extension RuntimeCoordinator {
         }
 
         let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
-            let processIDs = processToolCatalogRegistry.processIDsHavingTool(toolName)
+            let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
             return processIDs.isEmpty ? nil : processIDs
         }
         guard processIDSets.isEmpty == false else {
@@ -673,9 +631,18 @@ extension RuntimeCoordinator {
     }
 
     private func hasNoOwnerHint(_ request: ToolRoutingRequest) -> Bool {
-        let hasTabIdentifier = request.tabIdentifier?.isEmpty == false
-        let hasWorkspacePath = request.workspacePath?.isEmpty == false
-        return !hasTabIdentifier && !hasWorkspacePath
+        !hasOwnerHint(request)
+    }
+
+    private func hasOwnerHint(_ request: ToolRoutingRequest) -> Bool {
+        hasOwnerHint(
+            tabIdentifier: request.tabIdentifier,
+            workspacePath: request.workspacePath
+        )
+    }
+
+    private func hasOwnerHint(tabIdentifier: String?, workspacePath: String?) -> Bool {
+        tabIdentifier?.isEmpty == false || workspacePath?.isEmpty == false
     }
 
     private func toolRoutingErrors(
@@ -694,7 +661,7 @@ extension RuntimeCoordinator {
         forceBatchArray: Bool
     ) -> ToolRoutingDecision? {
         let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
-            let processIDs = processToolCatalogRegistry.processIDsHavingTool(toolName)
+            let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
             return processIDs.isEmpty ? nil : processIDs
         }
         guard processIDSets.isEmpty == false else {
@@ -889,7 +856,7 @@ extension RuntimeCoordinator {
     }
 
     func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
-        xcodeProcessRoutes.first { $0.upstreamIndices.contains(upstreamIndex) }
+        processRouteStore.route(forUpstreamIndex: upstreamIndex)
     }
 
     func isActiveProcessBoundUpstream(_ upstreamIndex: Int) -> Bool {
@@ -980,8 +947,7 @@ extension RuntimeCoordinator {
               let arguments = params["arguments"] as? [String: Any] else {
             return nil
         }
-        guard processToolCatalogRegistry.isOwnerBoundTool(toolName)
-            || cachedOwnerBoundToolNames().contains(toolName) else {
+        guard isKnownOwnerBoundTool(toolName) else {
             return nil
         }
         if let tabIdentifier = arguments["tabIdentifier"] as? String,
@@ -1113,12 +1079,26 @@ extension RuntimeCoordinator {
     }
 
     private func cachedOwnerBoundToolNames() -> Set<String> {
-        let toolsByName = ProcessToolCatalogRegistry.toolsByName(in: cachedToolsListResult())
+        let toolsByName = ProcessToolSurfaceStore.toolsByName(in: cachedToolsListResult())
         return Set(
             toolsByName.compactMap { name, tool in
-                ProcessToolCatalogRegistry.isOwnerBoundTool(tool) ? name : nil
+                ProcessToolSurfaceStore.isOwnerBoundTool(tool) ? name : nil
             }
         )
+    }
+
+    private func isKnownOwnerBoundTool(_ toolName: String) -> Bool {
+        if processToolSurfaceStore.isOwnerBoundTool(toolName) {
+            return true
+        }
+        guard processRoutingEnabled == false else {
+            return false
+        }
+        return cachedOwnerBoundToolNames().contains(toolName)
+    }
+
+    private func isOwnerBoundRoutingRequest(_ request: ToolRoutingRequest) -> Bool {
+        isKnownOwnerBoundTool(request.toolName) || hasOwnerHint(request)
     }
 
     private static func windowEntries(in result: JSONValue) -> [XcodeListWindowsEntry] {
