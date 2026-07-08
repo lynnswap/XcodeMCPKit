@@ -265,6 +265,8 @@ extension RuntimeCoordinator {
             reason: "route_retired_\(reason)"
         )
 
+        let hadProcessCatalog =
+            processToolCatalogRegistry.catalog(forProcessID: route.target.processID) != nil
         var resetInitialize = false
         for upstreamIndex in route.upstreamIndices {
             retireProcessBoundUpstream(
@@ -274,12 +276,16 @@ extension RuntimeCoordinator {
             )
         }
 
-        applyToolCatalogSurfaceUpdate(
-            processToolCatalogRegistry.removeProcess(
-                processID: route.target.processID,
-                exposedProcessIDs: processToolCatalogExposedProcessIDs()
+        let processCatalogStillPresent =
+            processToolCatalogRegistry.catalog(forProcessID: route.target.processID) != nil
+        if hadProcessCatalog == false || processCatalogStillPresent {
+            applyToolCatalogSurfaceUpdate(
+                processToolCatalogRegistry.removeProcess(
+                    processID: route.target.processID,
+                    exposedProcessIDs: processToolCatalogExposedProcessIDs()
+                )
             )
-        )
+        }
         invalidateControlPlane(
             reason: "xcode_process_removed",
             clearInitialize: resetInitialize,

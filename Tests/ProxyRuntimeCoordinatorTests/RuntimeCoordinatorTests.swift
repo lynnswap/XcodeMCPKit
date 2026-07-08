@@ -6446,6 +6446,56 @@ struct RuntimeCoordinatorTests {
         #expect(await remainingUpstream.sentCount() == 0)
     }
 
+    @Test func sessionManagerRetiringCatalogedProcessRoutePublishesToolsListChangedOnce()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80445, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let sessionID = "session-process-catalog-retire-notification-count"
+        let session = manager.session(id: sessionID)
+        manager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current,
+            buffersUnmappedNotificationsUntilClientConnects: true
+        )
+        _ = session.router.drainBufferedNotifications()
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "RetiredOnlyTool")]),
+            ]
+        )
+        let generationBeforeRetire = manager.canonicalBrokerState.generation()
+
+        manager.reconcileXcodeProcessTargets(
+            [],
+            reason: "test_cataloged_process_route_retired_once"
+        )
+        _ = try await upstream.nextStopCount()
+
+        let notificationMethods = session.router.drainBufferedNotifications().compactMap {
+            methodName(from: $0)
+        }
+        #expect(notificationMethods == ["notifications/tools/list_changed"])
+        #expect(manager.canonicalBrokerState.generation() == generationBeforeRetire + 1)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+    }
+
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUncatalogedProcessRouteRetires()
         async throws
     {
