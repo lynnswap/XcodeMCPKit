@@ -5436,6 +5436,89 @@ struct RuntimeCoordinatorTests {
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
     }
 
+    @Test func sessionManagerDropsBackgroundCatalogForProcessUnavailableBeforeRecord()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let badUpstream = TestUpstreamClient()
+        let goodUpstream = TestUpstreamClient()
+        let badTarget = xcodeProcessTarget(processID: 80427, xcodeVersion: "27.0")
+        let goodTarget = xcodeProcessTarget(processID: 66340, xcodeVersion: "26.6")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let markedUnavailable = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [badUpstream, goodUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: badTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: goodTarget, upstreamIndices: [1]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == badTarget, sourceUpstream == 0,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    runtime.markXcodeProcessRouteUnavailable(
+                        upstreamIndex: 0,
+                        reason: "test_background_catalog_unavailable"
+                    )
+                    markedUnavailable.signal()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let goodCatalog = try jsonValue([
+            "tools": [
+                toolDescriptor(name: "GoodOnlyTool"),
+            ],
+        ])
+        manager.processToolCatalogRegistry.record(
+            target: goodTarget,
+            upstreamIndex: 1,
+            rawResult: goodCatalog
+        )
+        #expect(manager.cachedToolsListResult() == nil)
+
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-background-catalog-unavailable-before-record",
+            requestTimeoutOverride: .seconds(5)
+        )
+        #expect(toolNames(in: result) == ["GoodOnlyTool"])
+
+        let badRequest = try await sentValue(from: badUpstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: badRequest) == "tools/list")
+        await badUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: badRequest),
+                    tools: [
+                        toolDescriptor(name: "BadUnavailableTool"),
+                    ]
+                )
+            )
+        )
+        try await markedUnavailable.wait(
+            description: "waiting for process route to become unavailable before record"
+        )
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: badTarget.processID) == nil)
+        #expect(manager.unavailableXcodeProcessIDs().contains(badTarget.processID))
+        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
+            goodTarget.processID,
+        ])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["GoodOnlyTool"])
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
+    }
+
     @Test func sessionManagerToolsListCompletesCachedProcessCatalogWithFreshRoutes()
         async throws
     {

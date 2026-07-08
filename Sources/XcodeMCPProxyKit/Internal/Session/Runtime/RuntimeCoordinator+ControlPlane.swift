@@ -148,8 +148,7 @@ extension RuntimeCoordinator {
            let sourceUpstream = surface.sourceUpstream {
             scheduleAvailableToolsCatalogCompletion(
                 uncachedRoutes,
-                requestTimeout: requestTimeout,
-                exposedProcessIDs: exposedProcessIDs
+                requestTimeout: requestTimeout
             )
             return CanonicalToolsCatalogLoadResult(
                 rawResult: surface.rawResult,
@@ -422,8 +421,7 @@ extension RuntimeCoordinator {
             missingRoutes,
             requestTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
                 defaultSeconds: config.requestTimeout
-            ),
-            exposedProcessIDs: Set(routes.map { $0.target.processID })
+            )
         )
     }
 
@@ -546,6 +544,19 @@ extension RuntimeCoordinator {
                     "app_path": .string(target.appPath),
                     "xcode_version": .string(target.xcodeVersion),
                     "upstream": .string("\(sourceUpstream)"),
+                ]
+            )
+            return nil
+        }
+        guard processToolCatalogExposedProcessIDs().contains(target.processID) else {
+            logger.debug(
+                "Dropping stale process tools/list catalog",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                    "upstream": .string("\(sourceUpstream)"),
+                    "reason": .string("process_not_exposed"),
                 ]
             )
             return nil
@@ -750,8 +761,7 @@ extension RuntimeCoordinator {
 
     private func scheduleAvailableToolsCatalogCompletion(
         _ routes: [AvailableToolsCatalogRoute],
-        requestTimeout: TimeAmount?,
-        exposedProcessIDs: Set<pid_t>
+        requestTimeout: TimeAmount?
     ) {
         let key = availableToolsCatalogRefreshKey(for: routes)
         let shouldStart = availableToolsCatalogRefreshKeys.withLockedValue { keys in
@@ -769,9 +779,14 @@ extension RuntimeCoordinator {
             }
             let startedAt = self.nowUptimeNanoseconds()
             let generation = self.canonicalBrokerState.generation()
+            let exposedProcessIDs = self.processToolCatalogExposedProcessIDs()
+            let currentRoutes = routes.filter { exposedProcessIDs.contains($0.target.processID) }
+            guard currentRoutes.isEmpty == false else {
+                return
+            }
             do {
-                let result = try await self.loadAvailableToolsCatalogsInBatch(
-                    routes,
+                _ = try await self.loadAvailableToolsCatalogsInBatch(
+                    currentRoutes,
                     requestTimeout: requestTimeout,
                     deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
                     startedAt: startedAt,
@@ -779,19 +794,14 @@ extension RuntimeCoordinator {
                     brokerGeneration: generation,
                     returnAfterFirstSuccess: false
                 )
-                guard result.cacheableAsCanonical,
-                      let sourceUpstream = result.sourceUpstream,
-                      self.canonicalBrokerState.generation() == generation else {
-                    return
+                if self.syncCurrentProcessToolsCatalogSurfaceIfComplete(generation: generation) {
+                    await self.controlPlaneCoordinator.syncDebug()
                 }
-                self.canonicalBrokerState.syncCanonicalToolsCatalog(
-                    result.rawResult,
-                    sourceUpstream: sourceUpstream,
-                    onlyIfGeneration: generation
-                )
-                await self.controlPlaneCoordinator.syncDebug()
             } catch is CancellationError {
             } catch {
+                if self.syncCurrentProcessToolsCatalogSurfaceIfComplete(generation: generation) {
+                    await self.controlPlaneCoordinator.syncDebug()
+                }
             }
         }
         if accepted == false {
@@ -813,6 +823,25 @@ extension RuntimeCoordinator {
             }
             .sorted()
             .joined(separator: ",")
+    }
+
+    private func syncCurrentProcessToolsCatalogSurfaceIfComplete(generation: UInt64) -> Bool {
+        let currentExposedProcessIDs = processToolCatalogExposedProcessIDs()
+        guard currentExposedProcessIDs.isEmpty == false,
+              let surface = processToolCatalogRegistry.availableToolCatalogSurface(
+                  processIDs: currentExposedProcessIDs
+              ),
+              surface.processIDs == currentExposedProcessIDs,
+              let sourceUpstream = surface.sourceUpstream,
+              canonicalBrokerState.generation() == generation
+        else {
+            return false
+        }
+        return canonicalBrokerState.syncCanonicalToolsCatalog(
+            surface.rawResult,
+            sourceUpstream: sourceUpstream,
+            onlyIfGeneration: generation
+        )
     }
 
     private func loadToolsCatalogFromAvailableProcessRoute(
