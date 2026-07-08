@@ -5705,6 +5705,90 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+    @Test func sessionManagerDoesNotReturnEmptyToolsListWhenEmptyRefreshDropsOnlyProcessCatalog()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80433, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let seededStaleCatalog = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    do {
+                        try seedProcessToolCatalogs(
+                            on: runtime,
+                            entries: [
+                                (target, 0, [toolDescriptor(name: "StaleOnlyTool")]),
+                            ]
+                        )
+                    } catch {
+                        Issue.record("failed to seed stale process catalog: \(error)")
+                    }
+                    seededStaleCatalog.signal()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.clearToolsCatalog()
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-empty-refresh-drops-only-surface",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let emptyRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: emptyRequest) == "tools/list")
+
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: emptyRequest),
+                    tools: []
+                )
+            )
+        )
+        try await seededStaleCatalog.wait(
+            description: "waiting for stale catalog to be seeded before empty record"
+        )
+
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            _ = try await waitWithTimeout(
+                "waiting for empty refresh to fail without returning empty tools",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+        }
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.contains(target.processID)
+            }
+        )
+    }
+
     @Test func sessionManagerTreatsSingleProcessEmptyToolsCatalogAsMissingSurface()
         async throws
     {
@@ -5768,6 +5852,72 @@ struct RuntimeCoordinatorTests {
             Issue.record("empty process catalog should not quarantine the upstream")
             return
         }
+    }
+
+    @Test func sessionManagerCancelsMissingProcessCatalogRetryOnDebugReset()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80444, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_empty_process_catalog_reset",
+            processIDs: [target.processID]
+        )
+        let emptyRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: emptyRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: emptyRequest),
+                    tools: []
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.isCancelled(at: 0) == false)
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.contains(target.processID)
+            }
+        )
+
+        manager.debugReset()
+
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fire(at: 0) == false)
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.isEmpty
+            }
+        )
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
     }
 
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
@@ -6145,7 +6295,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
-    @Test func sessionManagerDoesNotReseedCanonicalCatalogFromStaleProcessSurfaceGeneration()
+    @Test func sessionManagerDoesNotRecordCatalogFromStaleProcessSurfaceGeneration()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -6209,7 +6359,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.cachedToolsListResult() == nil)
 
         await releaseStaleRecord.signal()
-        await #expect(throws: CancellationError.self) {
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             _ = try await waitWithTimeout(
                 "waiting for stale-generation tools/list result",
                 timeout: .seconds(2)
@@ -6217,7 +6367,7 @@ struct RuntimeCoordinatorTests {
                 try await task.value
             }
         }
-        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil)
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
         #expect(manager.cachedToolsListResult() == nil)
         #expect(manager.canonicalBrokerState.generation() == invalidatedGeneration)
     }

@@ -256,9 +256,7 @@ extension RuntimeCoordinator {
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.remove(route.target.processID)
         }
-        _ = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
-            $0.remove(route.target.processID)
-        }
+        cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
         resetProcessRouteActivation(
             processID: route.target.processID,

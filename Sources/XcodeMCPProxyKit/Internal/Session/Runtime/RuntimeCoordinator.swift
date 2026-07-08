@@ -90,6 +90,11 @@ struct XcodeProcessReconciliationLoopState: Sendable {
     var isRunning = false
 }
 
+struct ScheduledProcessToolsCatalogRetry: Sendable {
+    let generation: UInt64
+    let timeout: RuntimeScheduledTimeout
+}
+
 typealias XcodeProcessUpstreamFactory =
     @Sendable (_ target: XcodeProcessTarget) -> [any UpstreamSlotControlling]
 
@@ -421,7 +426,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
     let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
-    let scheduledProcessToolsCatalogRetryProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
+    let scheduledProcessToolsCatalogRetries =
+        NIOLockedValueBox<[pid_t: ScheduledProcessToolsCatalogRetry]>([:])
     let pendingProcessToolsCatalogRefreshProcessIDs = NIOLockedValueBox<Set<pid_t>>([])
     let xcodeProcessRouteActivationTracker = XcodeProcessRouteActivationTracker()
     let unavailableXcodeProcessRoutes =
@@ -839,7 +845,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamStderrLogLimiter.reset()
         resetAllProcessRouteActivations(reason: "debug_reset")
         unavailableXcodeProcessRoutes.withLockedValue { $0.removeAll() }
-        scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue { $0.removeAll() }
+        cancelAllScheduledProcessToolsCatalogRetries()
+        pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0.removeAll() }
         clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
@@ -874,7 +881,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
         resetAllProcessRouteActivations(reason: "shutdown")
         xcodeProcessEventMonitor.stop()
-        scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue { $0.removeAll() }
+        cancelAllScheduledProcessToolsCatalogRetries()
+        pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0.removeAll() }
 
         let runtimeDrain = runtimeTasks.beginShutdown()
         canonicalBrokerState.reset()
@@ -928,13 +936,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
     }
 
+    @discardableResult
     func applyToolCatalogSurfaceUpdate(
         _ update: ProcessToolCatalogRegistry.SurfaceUpdate,
         onlyIfGeneration expectedGeneration: UInt64? = nil
-    ) {
+    ) -> Bool {
         if let expectedGeneration,
            canonicalBrokerState.generation() != expectedGeneration {
-            return
+            return false
         }
         let applied: Bool
         switch update.canonicalAction {
@@ -954,6 +963,36 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         if applied, update.publishesToolsListChanged {
             publishToolsListChangedNotification()
+        }
+        return applied
+    }
+
+    func cancelScheduledProcessToolsCatalogRetry(
+        processID: pid_t,
+        generation expectedGeneration: UInt64? = nil
+    ) {
+        let retry: ScheduledProcessToolsCatalogRetry? =
+            scheduledProcessToolsCatalogRetries.withLockedValue { retries in
+                guard let retry = retries[processID] else {
+                    return nil
+                }
+                if let expectedGeneration, retry.generation != expectedGeneration {
+                    return nil
+                }
+                retries.removeValue(forKey: processID)
+                return retry
+            }
+        retry?.timeout.cancel()
+    }
+
+    func cancelAllScheduledProcessToolsCatalogRetries() {
+        let retries = scheduledProcessToolsCatalogRetries.withLockedValue { retries in
+            let retriesToCancel = Array(retries.values)
+            retries.removeAll()
+            return retriesToCancel
+        }
+        for retry in retries {
+            retry.timeout.cancel()
         }
     }
 

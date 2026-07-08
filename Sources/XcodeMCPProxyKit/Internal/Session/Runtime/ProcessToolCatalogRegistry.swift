@@ -109,11 +109,11 @@ final class ProcessToolCatalogRegistry: Sendable {
         )
         return state.withLockedValue { state in
             let hadProcessCatalog = state.catalogsByProcessID[target.processID] != nil
-            state.catalogsByProcessID[target.processID] = catalog
-            state.processIDByUpstreamIndex[upstreamIndex] = target.processID
-            for associatedUpstreamIndex in associatedUpstreamIndices {
-                state.processIDByUpstreamIndex[associatedUpstreamIndex] = target.processID
-            }
+            Self.recordCatalog(
+                catalog,
+                associatedUpstreamIndices: associatedUpstreamIndices,
+                in: &state
+            )
             return Self.surfaceUpdate(
                 in: state,
                 exposedProcessIDs: exposedProcessIDs,
@@ -127,6 +127,50 @@ final class ProcessToolCatalogRegistry: Sendable {
         state.withLockedValue { state in
             state.catalogsByProcessID.removeAll()
             state.processIDByUpstreamIndex.removeAll()
+        }
+    }
+
+    func restoreCatalogIfMissing(
+        _ catalog: Catalog,
+        associatedUpstreamIndices: [Int] = []
+    ) {
+        state.withLockedValue { state in
+            guard state.catalogsByProcessID[catalog.target.processID] == nil else {
+                return
+            }
+            Self.recordCatalog(
+                catalog,
+                associatedUpstreamIndices: associatedUpstreamIndices,
+                in: &state
+            )
+        }
+    }
+
+    func rollbackRecordCatalogIfCurrent(
+        processID: pid_t,
+        attemptedUpstreamIndex: Int,
+        attemptedRawResult: JSONValue,
+        previousCatalog: Catalog?,
+        associatedUpstreamIndices: [Int] = []
+    ) {
+        state.withLockedValue { state in
+            guard let current = state.catalogsByProcessID[processID],
+                  current.upstreamIndex == attemptedUpstreamIndex,
+                  current.rawResult == attemptedRawResult else {
+                return
+            }
+            if let previousCatalog {
+                Self.recordCatalog(
+                    previousCatalog,
+                    associatedUpstreamIndices: associatedUpstreamIndices,
+                    in: &state
+                )
+            } else {
+                state.catalogsByProcessID.removeValue(forKey: processID)
+                state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
+                    $0.value != processID
+                }
+            }
         }
     }
 
@@ -457,6 +501,18 @@ final class ProcessToolCatalogRegistry: Sendable {
             ),
             publishesToolsListChanged: publishesToolsListChanged
         )
+    }
+
+    private static func recordCatalog(
+        _ catalog: Catalog,
+        associatedUpstreamIndices: [Int],
+        in state: inout State
+    ) {
+        state.catalogsByProcessID[catalog.target.processID] = catalog
+        state.processIDByUpstreamIndex[catalog.upstreamIndex] = catalog.target.processID
+        for associatedUpstreamIndex in associatedUpstreamIndices {
+            state.processIDByUpstreamIndex[associatedUpstreamIndex] = catalog.target.processID
+        }
     }
 
     private static func schemaConflicts(in catalogs: [Catalog]) -> [String] {

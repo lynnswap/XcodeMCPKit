@@ -265,6 +265,13 @@ extension RuntimeCoordinator {
                     } catch is TimeoutError {
                         throw TimeoutError()
                     } catch {
+                        guard self.processToolsCatalogMutationIsCurrent(
+                            brokerGeneration,
+                            target: route.target,
+                            sourceUpstream: route.upstreamIndices.last ?? -1
+                        ) else {
+                            return .stale
+                        }
                         self.applyToolCatalogSurfaceUpdate(
                             self.processToolCatalogRegistry.removeProcess(
                                 processID: route.target.processID,
@@ -385,13 +392,14 @@ extension RuntimeCoordinator {
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.insert(processID)
         }
-        let shouldSchedule = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
-            $0.insert(processID).inserted
+        let delay = TimeAmount.milliseconds(250)
+        let generation = canonicalBrokerState.generation()
+        let shouldSchedule = scheduledProcessToolsCatalogRetries.withLockedValue {
+            $0[processID] == nil
         }
         guard shouldSchedule else {
             return
         }
-        let delay = TimeAmount.milliseconds(250)
         logger.debug(
             "Scheduling missing process tools/list catalog retry",
             metadata: [
@@ -400,12 +408,20 @@ extension RuntimeCoordinator {
                 "reason": .string(reason),
             ]
         )
-        _ = scheduleRuntimeTimeout(delay) { [weak self] in
+        let timeout = scheduleRuntimeTimeout(delay) { [weak self] in
             guard let self else { return }
-            _ = self.scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
-                $0.remove(processID)
+            let isScheduledRetry = self.scheduledProcessToolsCatalogRetries.withLockedValue {
+                retries -> Bool in
+                guard let retry = retries[processID],
+                      retry.generation == generation else {
+                    return false
+                }
+                retries.removeValue(forKey: processID)
+                return true
             }
-            guard self.processRoutingEnabled,
+            guard isScheduledRetry,
+                  self.canonicalBrokerState.generation() == generation,
+                  self.processRoutingEnabled,
                   self.xcodeProcessRoutes.contains(where: {
                       $0.target.processID == processID
                   }),
@@ -420,6 +436,19 @@ extension RuntimeCoordinator {
                 reason: "scheduled_\(reason)",
                 processIDs: [processID]
             )
+        }
+        let didSchedule = scheduledProcessToolsCatalogRetries.withLockedValue { retries in
+            guard retries[processID] == nil else {
+                return false
+            }
+            retries[processID] = ScheduledProcessToolsCatalogRetry(
+                generation: generation,
+                timeout: timeout
+            )
+            return true
+        }
+        if didSchedule == false {
+            timeout.cancel()
         }
     }
 
@@ -467,6 +496,13 @@ extension RuntimeCoordinator {
             )
             return nil
         }
+        guard processToolsCatalogMutationIsCurrent(
+            brokerGeneration,
+            target: target,
+            sourceUpstream: sourceUpstream
+        ) else {
+            return nil
+        }
         let hadProcessCatalog =
             processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil
         // Empty tools arrays are valid MCP wire shape, but they are not a
@@ -486,17 +522,43 @@ extension RuntimeCoordinator {
                 reason: "empty_process_catalog"
             )
             if hadProcessCatalog {
-                applyToolCatalogSurfaceUpdate(
+                let previousCatalog = processToolCatalogRegistry.catalog(
+                    forProcessID: target.processID
+                )
+                let applied = applyToolCatalogSurfaceUpdate(
                     processToolCatalogRegistry.removeProcess(
                         processID: target.processID,
                         exposedProcessIDs: processToolCatalogExposedProcessIDs()
                     ),
                     onlyIfGeneration: brokerGeneration
                 )
-                return availableToolsCatalogSurfaceResult(
-                    startedAt: startedAt,
-                    exposedProcessIDs: exposedProcessIDs,
-                    fallback: result
+                guard applied else {
+                    if let brokerGeneration {
+                        cancelScheduledProcessToolsCatalogRetry(
+                            processID: target.processID,
+                            generation: brokerGeneration
+                        )
+                    }
+                    if let previousCatalog {
+                        processToolCatalogRegistry.restoreCatalogIfMissing(
+                            previousCatalog,
+                            associatedUpstreamIndices: activeRoute.upstreamIndices
+                        )
+                    }
+                    return nil
+                }
+                guard let surface = processToolCatalogRegistry.availableToolCatalogSurface(
+                    processIDs: exposedProcessIDs
+                ),
+                    let surfaceSourceUpstream = surface.sourceUpstream
+                else {
+                    return nil
+                }
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: surface.rawResult,
+                    sourceUpstream: surfaceSourceUpstream,
+                    durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
+                    cacheableAsCanonical: surface.processIDs == exposedProcessIDs
                 )
             }
             return nil
@@ -541,7 +603,8 @@ extension RuntimeCoordinator {
                 return nil
             }
         }
-        applyToolCatalogSurfaceUpdate(
+        let previousCatalog = processToolCatalogRegistry.catalog(forProcessID: target.processID)
+        let applied = applyToolCatalogSurfaceUpdate(
             processToolCatalogRegistry.recordCatalog(
                 target: target,
                 upstreamIndex: sourceUpstream,
@@ -551,6 +614,16 @@ extension RuntimeCoordinator {
             ),
             onlyIfGeneration: brokerGeneration
         )
+        guard applied else {
+            processToolCatalogRegistry.rollbackRecordCatalogIfCurrent(
+                processID: target.processID,
+                attemptedUpstreamIndex: sourceUpstream,
+                attemptedRawResult: result.rawResult,
+                previousCatalog: previousCatalog,
+                associatedUpstreamIndices: activeRoute.upstreamIndices
+            )
+            return nil
+        }
         if resolvedActivation == nil {
             _ = markProcessRouteActivationCataloged(
                 target: target,
@@ -560,9 +633,7 @@ extension RuntimeCoordinator {
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.remove(target.processID)
         }
-        _ = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
-            $0.remove(target.processID)
-        }
+        cancelScheduledProcessToolsCatalogRetry(processID: target.processID)
         let surface = processToolCatalogRegistry.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
         )
@@ -572,6 +643,31 @@ extension RuntimeCoordinator {
             durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
             cacheableAsCanonical: surface?.processIDs == exposedProcessIDs
         )
+    }
+
+    private func processToolsCatalogMutationIsCurrent(
+        _ expectedGeneration: UInt64?,
+        target: XcodeProcessTarget,
+        sourceUpstream: Int
+    ) -> Bool {
+        guard let expectedGeneration else {
+            return true
+        }
+        guard canonicalBrokerState.generation() == expectedGeneration else {
+            logger.debug(
+                "Dropping stale process tools/list catalog",
+                metadata: [
+                    "pid": .string("\(target.processID)"),
+                    "app_path": .string(target.appPath),
+                    "xcode_version": .string(target.xcodeVersion),
+                    "upstream": .string("\(sourceUpstream)"),
+                    "expected_generation": .string("\(expectedGeneration)"),
+                    "current_generation": .string("\(canonicalBrokerState.generation())"),
+                ]
+            )
+            return false
+        }
+        return true
     }
 
     private func availableToolsCatalogActivation(

@@ -346,9 +346,7 @@ extension RuntimeCoordinator {
         _ = pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
             $0.remove(route.target.processID)
         }
-        _ = scheduledProcessToolsCatalogRetryProcessIDs.withLockedValue {
-            $0.remove(route.target.processID)
-        }
+        cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
         applyToolCatalogSurfaceUpdate(
             processToolCatalogRegistry.removeProcess(
                 processID: route.target.processID,
