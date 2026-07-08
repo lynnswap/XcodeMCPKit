@@ -193,6 +193,25 @@ extension RuntimeCoordinator {
         )
     }
 
+    func refreshProcessRouteActivationCatalogWaitAfterEmptyCatalog(
+        processID: pid_t,
+        upstreamIndex: Int,
+        attempt: Int
+    ) {
+        guard xcodeProcessRouteActivationTracker.finishCatalogWaitWithoutCatalog(
+            processID: processID,
+            upstreamIndex: upstreamIndex,
+            attempt: attempt
+        ) else {
+            return
+        }
+        scheduleProcessRouteActivationCatalogTimeout(
+            processID: processID,
+            upstreamIndex: upstreamIndex,
+            attempt: attempt
+        )
+    }
+
     func abandonProcessRouteActivation(processID: pid_t, reason: String) {
         xcodeProcessRouteActivationTracker.abandon(processID: processID, reason: reason)
         logger.info(

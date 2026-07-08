@@ -320,7 +320,7 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         processID: pid_t,
         upstreamIndex: Int,
         attempt: Int
-    ) {
+    ) -> Bool {
         let cleanup = state.withLockedValue {
             records -> (
                 timeout: RuntimeScheduledTimeout?,
@@ -340,8 +340,12 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             records[processID] = record
             return (timeout, rpcHandles)
         }
-        cleanup?.timeout?.cancel()
-        cleanup?.rpcHandles.forEach { $0.cancel() }
+        guard let cleanup else {
+            return false
+        }
+        cleanup.timeout?.cancel()
+        cleanup.rpcHandles.forEach { $0.cancel() }
+        return true
     }
 
     func abandon(processID: pid_t, reason: String) {

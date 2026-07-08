@@ -777,6 +777,22 @@ struct RuntimeCoordinatorTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
+        let refreshedCatalogTimeoutIndex = try await waitWithTimeout(
+            "waiting for refreshed activation catalog timeout",
+            timeout: .seconds(2)
+        ) {
+            while true {
+                if let index = (0..<timeoutScheduler.scheduledCount()).first(where: {
+                    $0 != catalogTimeoutIndex
+                        && timeoutScheduler.delay(at: $0)?.nanoseconds
+                            == TimeAmount.seconds(10).nanoseconds
+                        && timeoutScheduler.isCancelled(at: $0) == false
+                }) {
+                    return index
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
 
         #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex) == false)
@@ -815,6 +831,8 @@ struct RuntimeCoordinatorTests {
             manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
                 == .cataloged(upstreamIndex: 1, attempt: 1)
         )
+        #expect(timeoutScheduler.isCancelled(at: refreshedCatalogTimeoutIndex))
+        #expect(timeoutScheduler.fire(at: refreshedCatalogTimeoutIndex) == false)
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
             "Only26",
             "Only27Recovered",

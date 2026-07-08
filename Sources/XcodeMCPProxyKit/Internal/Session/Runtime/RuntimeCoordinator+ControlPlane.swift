@@ -560,7 +560,7 @@ extension RuntimeCoordinator {
                 ]
             )
             if let activationUpstreamIndex, let activationAttempt {
-                xcodeProcessRouteActivationTracker.finishCatalogWaitWithoutCatalog(
+                refreshProcessRouteActivationCatalogWaitAfterEmptyCatalog(
                     processID: target.processID,
                     upstreamIndex: activationUpstreamIndex,
                     attempt: activationAttempt
