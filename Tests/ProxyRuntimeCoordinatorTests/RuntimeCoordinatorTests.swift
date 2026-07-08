@@ -754,6 +754,13 @@ struct RuntimeCoordinatorTests {
         ) {
             try await primary.nextSent(at: 1)
         }
+        try await waitForProcessRouteActivationInitialized(
+            manager,
+            processID: newerTarget.processID,
+            upstreamIndex: 1,
+            attempt: 1,
+            message: "waiting for primary activation initialized state"
+        )
 
         let secondaryToolsRequest = try await waitWithTimeout(
             "waiting for secondary fallback tools/list",
@@ -948,23 +955,13 @@ struct RuntimeCoordinatorTests {
         ) {
             try await retryPrimary.nextSent(at: 1)
         }
-        _ = try await waitWithTimeout(
-            "waiting for retry activation initialized state",
-            timeout: .seconds(2)
-        ) {
-            while true {
-                if case .initialized(let upstreamIndex, let attempt, _) =
-                    manager.xcodeProcessRouteActivationTracker.phase(
-                        processID: newerTarget.processID
-                    ),
-                    upstreamIndex == 1,
-                    attempt == 2
-                {
-                    return
-                }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
+        try await waitForProcessRouteActivationInitialized(
+            manager,
+            processID: newerTarget.processID,
+            upstreamIndex: 1,
+            attempt: 2,
+            message: "waiting for retry activation initialized state"
+        )
         let retryToolsRequest = try await waitWithTimeout(
             "waiting for retry activation tools/list",
             timeout: .seconds(2)
@@ -13213,6 +13210,27 @@ struct RuntimeCoordinatorTests {
 
         #expect(started.withLockedValue { $0 } == ["first@0", "third@1", "second@0"])
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
+    }
+
+    private func waitForProcessRouteActivationInitialized(
+        _ manager: RuntimeCoordinator,
+        processID: pid_t,
+        upstreamIndex expectedUpstreamIndex: Int,
+        attempt expectedAttempt: Int,
+        message: String
+    ) async throws {
+        _ = try await waitWithTimeout(message, timeout: .seconds(2)) {
+            while true {
+                if case .initialized(let upstreamIndex, let attempt, _) =
+                    manager.xcodeProcessRouteActivationTracker.phase(processID: processID),
+                    upstreamIndex == expectedUpstreamIndex,
+                    attempt == expectedAttempt
+                {
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
     }
 
 }
