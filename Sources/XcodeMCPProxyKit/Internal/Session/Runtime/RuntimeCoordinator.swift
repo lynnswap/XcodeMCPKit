@@ -43,6 +43,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
     var processToolsCatalogFailureCleanupBeforeApply:
         (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
+    var processToolCatalogSurfaceUpdatePassedInitialGenerationCheck: (@Sendable () -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamRequestQueued:
         (@Sendable (
@@ -62,6 +63,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
             (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
         processToolsCatalogFailureCleanupBeforeApply:
             (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
+        processToolCatalogSurfaceUpdatePassedInitialGenerationCheck:
+            (@Sendable () -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamRequestQueued:
             (@Sendable (
@@ -78,6 +81,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.processToolsCatalogLoadedBeforeRecord = processToolsCatalogLoadedBeforeRecord
         self.processToolsCatalogFailureCleanupBeforeApply = processToolsCatalogFailureCleanupBeforeApply
+        self.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck =
+            processToolCatalogSurfaceUpdatePassedInitialGenerationCheck
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
@@ -946,15 +951,23 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         _ update: ProcessToolCatalogRegistry.SurfaceUpdate,
         onlyIfGeneration expectedGeneration: UInt64? = nil
     ) -> Bool {
-        if let expectedGeneration,
-           canonicalBrokerState.generation() != expectedGeneration {
+        func generationIsCurrent() -> Bool {
+            guard let expectedGeneration else {
+                return true
+            }
+            return canonicalBrokerState.generation() == expectedGeneration
+        }
+
+        guard generationIsCurrent() else {
             return false
         }
+        testHooks.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck?()
         let applied: Bool
         switch update.canonicalAction {
         case .noChange:
-            applied = true
-            break
+            // Registry mutations happen before this method is called. A
+            // no-change canonical action still has to reject a stale mutation.
+            applied = generationIsCurrent()
         case .syncCanonical(let rawResult, let sourceUpstream):
             applied = canonicalBrokerState.syncCanonicalToolsCatalog(
                 rawResult,

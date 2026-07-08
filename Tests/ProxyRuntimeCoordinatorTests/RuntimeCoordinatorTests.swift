@@ -6787,6 +6787,77 @@ struct RuntimeCoordinatorTests {
         #expect(manager.canonicalBrokerState.generation() == invalidatedGeneration)
     }
 
+    @Test func sessionManagerRollsBackNoChangeProcessCatalogWhenGenerationChangesAfterRecord()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let recordedTarget = xcodeProcessTarget(processID: 80451, xcodeVersion: "26.6")
+        let missingTarget = xcodeProcessTarget(processID: 80452, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: recordedTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: missingTarget, upstreamIndices: [1]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolCatalogSurfaceUpdatePassedInitialGenerationCheck: {
+                    runtimeBox.value?.canonicalBrokerState.clearToolsCatalog()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+
+        let generation = manager.canonicalBrokerState.generation()
+        let rawResult = try jsonValue([
+            "tools": [
+                toolDescriptor(name: "IncompleteSurfaceTool"),
+            ],
+        ])
+        let previousCatalog = manager.processToolCatalogRegistry.catalog(
+            forProcessID: recordedTarget.processID
+        )
+        let update = manager.processToolCatalogRegistry.recordCatalog(
+            target: recordedTarget,
+            upstreamIndex: 0,
+            associatedUpstreamIndices: [0],
+            rawResult: rawResult,
+            exposedProcessIDs: [
+                recordedTarget.processID,
+                missingTarget.processID,
+            ]
+        )
+        guard case .noChange = update.canonicalAction else {
+            Issue.record("partial process catalog should produce a no-change canonical update")
+            return
+        }
+
+        let applied = manager.applyToolCatalogSurfaceUpdate(
+            update,
+            onlyIfGeneration: generation
+        )
+        #expect(applied == false)
+        manager.processToolCatalogRegistry.rollbackRecordCatalogIfCurrent(
+            processID: recordedTarget.processID,
+            attemptedUpstreamIndex: 0,
+            attemptedRawResult: rawResult,
+            previousCatalog: previousCatalog,
+            associatedUpstreamIndices: [0]
+        )
+
+        #expect(manager.processToolCatalogRegistry.catalog(
+            forProcessID: recordedTarget.processID
+        ) == nil)
+        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.canonicalBrokerState.generation() == generation + 1)
+    }
+
     @Test func sessionManagerRestoresProcessCatalogWhenStaleFailureCleanupLosesGenerationRace()
         async throws
     {
