@@ -436,8 +436,20 @@ extension RuntimeCoordinator {
         }
         let delay = TimeAmount.milliseconds(250)
         let generation = canonicalBrokerState.generation()
-        let shouldSchedule = scheduledProcessToolsCatalogRetries.withLockedValue {
-            $0[processID] == nil
+        let staleRetry = scheduledProcessToolsCatalogRetries.withLockedValue {
+            retries -> ScheduledProcessToolsCatalogRetry? in
+            guard let retry = retries[processID] else {
+                return nil
+            }
+            guard retry.generation != generation else {
+                return nil
+            }
+            retries.removeValue(forKey: processID)
+            return retry
+        }
+        staleRetry?.timeout.cancel()
+        let shouldSchedule = scheduledProcessToolsCatalogRetries.withLockedValue { retries in
+            retries[processID] == nil
         }
         guard shouldSchedule else {
             return

@@ -6165,6 +6165,77 @@ struct RuntimeCoordinatorTests {
         #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
     }
 
+    @Test func sessionManagerReplacesStaleMissingProcessCatalogRetryAfterGenerationChange()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80445, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+
+        manager.scheduleMissingProcessToolsCatalogRetry(
+            processID: target.processID,
+            reason: "test_stale_generation_first"
+        )
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.isCancelled(at: 0) == false)
+
+        manager.canonicalBrokerState.clearToolsCatalog()
+        manager.scheduleMissingProcessToolsCatalogRetry(
+            processID: target.processID,
+            reason: "test_stale_generation_second"
+        )
+
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fire(at: 0) == false)
+        #expect(timeoutScheduler.scheduledCount() == 2)
+        #expect(timeoutScheduler.isCancelled(at: 1) == false)
+        #expect(
+            timeoutScheduler.delay(at: 1)?.nanoseconds
+                == TimeAmount.milliseconds(250).nanoseconds
+        )
+        #expect(timeoutScheduler.fire(at: 1))
+
+        let retryRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: retryRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: retryRequest),
+                    tools: [
+                        toolDescriptor(name: "RecoveredAfterStaleRetry"),
+                    ]
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "RecoveredAfterStaleRetry",
+        ])
+    }
+
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
