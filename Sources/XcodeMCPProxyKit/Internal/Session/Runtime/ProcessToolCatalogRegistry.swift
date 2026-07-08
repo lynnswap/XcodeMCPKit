@@ -40,6 +40,16 @@ final class ProcessToolCatalogRegistry: Sendable {
             canonicalAction: .noChange,
             publishesToolsListChanged: false
         )
+
+        var isNoChange: Bool {
+            guard publishesToolsListChanged == false else {
+                return false
+            }
+            if case .noChange = canonicalAction {
+                return true
+            }
+            return false
+        }
     }
 
     struct DebugSnapshot: Codable, Sendable {
@@ -191,12 +201,7 @@ final class ProcessToolCatalogRegistry: Sendable {
             let hadProcessCatalog = state.catalogsByProcessID.removeValue(forKey: processID) != nil
             let hadUpstreamMapping = state.processIDByUpstreamIndex.values.contains(processID)
             guard hadProcessCatalog || hadUpstreamMapping else {
-                return Self.surfaceUpdate(
-                    in: state,
-                    exposedProcessIDs: exposedProcessIDs,
-                    clearWhenIncomplete: true,
-                    publishesToolsListChanged: exposedProcessIDs != nil
-                )
+                return .noChange
             }
             state.processIDByUpstreamIndex = state.processIDByUpstreamIndex.filter {
                 $0.value != processID
@@ -206,6 +211,20 @@ final class ProcessToolCatalogRegistry: Sendable {
                 exposedProcessIDs: exposedProcessIDs,
                 clearWhenIncomplete: true,
                 publishesToolsListChanged: hadProcessCatalog || exposedProcessIDs != nil
+            )
+        }
+    }
+
+    func recomputeSurface(
+        exposedProcessIDs: Set<pid_t>,
+        publishesToolsListChanged: Bool
+    ) -> SurfaceUpdate {
+        state.withLockedValue { state in
+            Self.surfaceUpdate(
+                in: state,
+                exposedProcessIDs: exposedProcessIDs,
+                clearWhenIncomplete: true,
+                publishesToolsListChanged: publishesToolsListChanged
             )
         }
     }

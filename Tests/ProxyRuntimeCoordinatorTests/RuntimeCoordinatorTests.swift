@@ -6496,6 +6496,116 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
     }
 
+    @Test func sessionManagerRouteUnavailableAfterUpstreamClearDoesNotRepublishToolsListChanged()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80446, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let sessionID = "session-process-catalog-duplicate-unavailable-after-clear"
+        let session = manager.session(id: sessionID)
+        manager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current,
+            buffersUnmappedNotificationsUntilClientConnects: true
+        )
+        _ = session.router.drainBufferedNotifications()
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "ClearedOnlyTool")]),
+            ]
+        )
+        let generationBeforeClear = manager.canonicalBrokerState.generation()
+
+        #expect(manager.clearUpstreamState(upstreamIndex: 0))
+        let generationAfterClear = manager.canonicalBrokerState.generation()
+        let notificationsAfterClear = session.router.drainBufferedNotifications().compactMap {
+            methodName(from: $0)
+        }
+        #expect(notificationsAfterClear == ["notifications/tools/list_changed"])
+        #expect(generationAfterClear == generationBeforeClear + 1)
+        #expect(manager.cachedToolsListResult() == nil)
+
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_duplicate_unavailable_after_clear"
+        )
+
+        #expect(session.router.drainBufferedNotifications().isEmpty)
+        #expect(manager.canonicalBrokerState.generation() == generationAfterClear)
+        #expect(manager.cachedToolsListResult() == nil)
+    }
+
+    @Test func sessionManagerMarkingSameProcessRouteUnavailableTwiceDoesNotRepublishToolsListChanged()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80447, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let sessionID = "session-process-catalog-duplicate-unavailable"
+        let session = manager.session(id: sessionID)
+        manager.sessionRegistry.markInitialized(
+            id: sessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current,
+            buffersUnmappedNotificationsUntilClientConnects: true
+        )
+        _ = session.router.drainBufferedNotifications()
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "UnavailableOnlyTool")]),
+            ]
+        )
+        let generationBeforeUnavailable = manager.canonicalBrokerState.generation()
+
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_first_unavailable"
+        )
+        let generationAfterUnavailable = manager.canonicalBrokerState.generation()
+        let notificationsAfterUnavailable =
+            session.router.drainBufferedNotifications().compactMap {
+                methodName(from: $0)
+            }
+        #expect(notificationsAfterUnavailable == ["notifications/tools/list_changed"])
+        #expect(generationAfterUnavailable == generationBeforeUnavailable + 1)
+        #expect(manager.cachedToolsListResult() == nil)
+
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_second_unavailable"
+        )
+
+        #expect(session.router.drainBufferedNotifications().isEmpty)
+        #expect(manager.canonicalBrokerState.generation() == generationAfterUnavailable)
+        #expect(manager.cachedToolsListResult() == nil)
+    }
+
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUncatalogedProcessRouteRetires()
         async throws
     {
@@ -6542,6 +6652,78 @@ struct RuntimeCoordinatorTests {
                 == [remainingTarget.processID]
         )
         #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 1)
+    }
+
+    @Test func sessionManagerNoOpProcessRemovalDoesNotStaleInFlightProcessCatalogCompletion()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80448, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let noOpRemovalChecked = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogLoadedBeforeRecord: { loadedTarget, _ in
+                    guard loadedTarget == target,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    let generation = runtime.canonicalBrokerState.generation()
+                    runtime.applyToolCatalogSurfaceUpdate(
+                        runtime.processToolCatalogRegistry.removeProcess(
+                            processID: 998_448,
+                            exposedProcessIDs: runtime.processToolCatalogExposedProcessIDs()
+                        )
+                    )
+                    #expect(runtime.canonicalBrokerState.generation() == generation)
+                    noOpRemovalChecked.signal()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-noop-removal-in-flight",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let catalogRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: catalogRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: catalogRequest),
+                    tools: [
+                        toolDescriptor(name: "FreshAfterNoOpRemoval"),
+                    ]
+                )
+            )
+        )
+
+        let result = try await waitWithTimeout("waiting for fresh process catalog result") {
+            try await task.value
+        }
+        try await noOpRemovalChecked.wait(
+            description: "waiting for no-op removal generation check"
+        )
+        #expect(toolNames(in: result) == ["FreshAfterNoOpRemoval"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
+            "FreshAfterNoOpRemoval",
+        ])
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 0)
     }
 
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUpstreamStateClears()
