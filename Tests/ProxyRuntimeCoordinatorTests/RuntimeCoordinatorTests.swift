@@ -846,7 +846,9 @@ struct RuntimeCoordinatorTests {
         let olderTarget = xcodeProcessTarget(processID: 26627, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let config = makeConfig(requestTimeout: 1)
         let fixture = RuntimeCoordinatorFixture(
+            config: config,
             upstreams: [olderUpstream],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
@@ -901,12 +903,6 @@ struct RuntimeCoordinatorTests {
             .message(try makeInitializeResponse(id: try extractUpstreamID(from: secondaryInitialize)))
         )
         _ = try await waitWithTimeout(
-            "waiting for secondary initialized notification",
-            timeout: .seconds(2)
-        ) {
-            try await secondary.nextSent(at: 1)
-        }
-        _ = try await waitWithTimeout(
             "waiting for secondary initialized state",
             timeout: .seconds(2)
         ) {
@@ -914,6 +910,16 @@ struct RuntimeCoordinatorTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
+        _ = try await waitWithTimeout(
+            "waiting for pre-activation secondary tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await secondary.nextSent(
+                startingAt: 1,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        let secondarySentBeforeFallback = await secondary.sentCount()
 
         await primary.yield(
             .message(try makeInitializeResponse(id: try extractUpstreamID(from: primaryInitialize)))
@@ -932,12 +938,37 @@ struct RuntimeCoordinatorTests {
             message: "waiting for primary activation initialized state"
         )
 
+        let primaryToolsRequest = try await waitWithTimeout(
+            "waiting for activation catalog tools/list on primary",
+            timeout: .seconds(2)
+        ) {
+            try await primary.nextSent(
+                startingAt: 1,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await primary.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: primaryToolsRequest),
+                        "error": [
+                            "code": -32000,
+                            "message": "primary tools/list failed",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
         let secondaryToolsRequest = try await waitWithTimeout(
             "waiting for secondary fallback tools/list",
             timeout: .seconds(5)
         ) {
             try await secondary.nextSent(
-                startingAt: 2,
+                startingAt: secondarySentBeforeFallback,
                 matching: { methodName(from: $0) == "tools/list" }
             )
         }
