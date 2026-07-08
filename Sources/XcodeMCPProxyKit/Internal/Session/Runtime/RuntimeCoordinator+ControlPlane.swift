@@ -559,9 +559,10 @@ extension RuntimeCoordinator {
         }
         let hadProcessCatalog =
             processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil
-        // Empty tools arrays are valid MCP wire shape, but they are not a
-        // usable process-bound Xcode catalog surface.
-        guard ProcessToolCatalogRegistry.hasUsableTools(in: result.rawResult) else {
+        // Control-plane catalog loads see upstream results before client-facing
+        // disabled-tool filtering. Empty tools arrays are valid MCP wire shape,
+        // but they are not a usable process-bound Xcode catalog surface.
+        guard ProcessToolCatalogRegistry.hasUsableUpstreamToolsCatalog(in: result.rawResult) else {
             logger.debug(
                 "Dropping empty process tools/list catalog",
                 metadata: [

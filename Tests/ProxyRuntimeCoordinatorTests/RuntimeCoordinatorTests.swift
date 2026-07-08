@@ -5775,6 +5775,74 @@ struct RuntimeCoordinatorTests {
         #expect(await existingUpstream.sentCount() == 0)
     }
 
+    @Test func sessionManagerRecordsProcessCatalogBeforeDisabledToolFiltering()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 80434, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.disabledToolNames = ["HiddenOnlyTool"]
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-before-disabled-filtering",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        defer { task.cancel() }
+
+        let request = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: request) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: request),
+                    tools: [
+                        toolDescriptor(name: "HiddenOnlyTool"),
+                    ]
+                )
+            )
+        )
+
+        let rawResult = try await waitWithTimeout(
+            "waiting for hidden-only process catalog",
+            timeout: .seconds(2)
+        ) {
+            try await task.value
+        }
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(toolNames(in: rawResult) == ["HiddenOnlyTool"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["HiddenOnlyTool"])
+        #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) != nil)
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.contains(target.processID)
+            } == false
+        )
+
+        let clientVisibleResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
+            rawResult,
+            mode: config.refreshCodeIssuesMode,
+            hiddenToolNames: config.disabledToolNames
+        )
+        #expect(toolNames(in: clientVisibleResult).isEmpty)
+    }
+
     @Test func sessionManagerDropsExistingProcessToolsCatalogWhenEmptyRefreshCompletes()
         async throws
     {

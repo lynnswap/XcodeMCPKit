@@ -398,7 +398,7 @@ final class ProcessToolCatalogRegistry: Sendable {
         return toolsByName
     }
 
-    static func hasUsableTools(in result: JSONValue) -> Bool {
+    static func hasUsableUpstreamToolsCatalog(in result: JSONValue) -> Bool {
         toolsByName(in: result).isEmpty == false
     }
 
