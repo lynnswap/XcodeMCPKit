@@ -169,12 +169,6 @@ final class ProcessRouteStore: Sendable {
         }
     }
 
-    func invalidateExposure() {
-        state.withLockedValue { state in
-            state.generation &+= 1
-        }
-    }
-
     func resetExposureState() {
         state.withLockedValue { state in
             state.generation &+= 1
@@ -437,6 +431,21 @@ final class ProcessRouteStore: Sendable {
                 }
             }
         }
+    }
+
+    func containsExposedRoute(
+        id routeID: ProcessRouteID,
+        policy: ExposureSnapshot.Policy,
+        upstreamUsability: UpstreamUsabilitySnapshot,
+        nowUptimeNs: UInt64
+    ) -> Bool {
+        exposure(
+            policy: policy,
+            upstreamUsability: upstreamUsability,
+            nowUptimeNs: nowUptimeNs
+        )
+        .routes
+        .contains { $0.route.id == routeID }
     }
 
     func exposure(

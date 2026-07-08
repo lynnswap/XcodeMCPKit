@@ -161,7 +161,6 @@ final class ProcessRouteReadinessStore: Sendable {
         let routeID: ProcessRouteID
         let upstreamIndex: Int
         let attempt: Int
-        let exposureEpoch: UInt64
     }
 
     func beginInitialization(routeID: ProcessRouteID, upstreamIndex: Int, nowUptimeNs: UInt64) -> Start?
@@ -183,7 +182,7 @@ Owns process-bound tool catalogs and exposed surface projection.
 Responsibility: store usable process catalogs, keep upstream-to-process
 catalog mappings, and project the catalog set for the currently exposed
 process IDs into a canonical surface update. Current route identity and
-exposure epoch are validated immediately before callers mutate this store;
+current route exposure are validated immediately before callers mutate this store;
 the store owns the idempotent catalog mutation and canonical projection result.
 
 ```swift
@@ -262,7 +261,7 @@ let surface = surfaceStore.availableToolCatalogSurface(processIDs: exposure.proc
 if surface?.processIDs == exposure.processIDs {
     return .init(rawResult: surface.rawResult, sourceUpstream: surface.sourceUpstream)
 }
-readiness.scheduleCatalogAcquisition(for: missingRoutes(in: exposure), exposureEpoch: exposure.epoch)
+readiness.scheduleCatalogAcquisition(for: missingRoutes(in: exposure))
 return partialSurfaceOrUnavailable(surface)
 ```
 
@@ -271,7 +270,7 @@ Catalog completion:
 ```swift
 let transition = readiness.finishCatalog(.usable(rawResult: raw), lease: lease)
 guard case .catalogUsable = transition else { return }
-guard routeLeaseIsCurrent(lease.routeID, exposureEpoch: lease.exposureEpoch) else { return }
+guard routeLeaseIsCurrent(lease.routeID, policy: .toolsCatalog) else { return }
 
 let result = surfaceStore.recordCatalog(
     routeID: lease.routeID,
@@ -309,7 +308,7 @@ Still present by design:
 - `RuntimeCoordinator.applyToolCatalogSurfaceUpdate(...)` remains the
   canonical projection applicator, but not the process-surface stale filter.
 - `cacheableAsCanonical` remains at the generic `ControlPlaneCoordinator`
-  boundary; process route currentness is carried by route ID and exposure epoch.
+  boundary; process route currentness is carried by route ID and current exposure.
 - `cachedOwnerBoundToolNames()` remains only for non process-routing fallback.
 - `tabIdentifier` and `workspacePath` arguments remain process-routing signals
   even when process tool catalogs are still loading.
@@ -339,7 +338,7 @@ Owner-level tests replace call-site recipe tests:
   - empty catalog, catalog timeout, failure, and late response are lease-bound.
   - retry is one per route generation.
 - `ProcessToolSurfaceStoreTests`
-  - usable catalog commit requires current route ID and exposure epoch.
+  - usable catalog commit requires current route ID and current route exposure.
   - empty catalog cannot overwrite usable catalog.
   - remove route with remaining complete surface syncs remaining surface.
   - no-op remove does not publish or bump canonical projection.
@@ -354,7 +353,7 @@ Owner-level tests replace call-site recipe tests:
 | --- | --- |
 | `RuntimeCoordinator` shared state across extension files | Move route, readiness, and surface state into three owner stores. |
 | Active/retired owned separately from unavailable/cooldown | `ProcessRouteStore` owns all route membership and exposure. |
-| Registry mutation before canonical generation guard | Runtime validates route ID, exposure epoch, and broker generation before `ProcessToolSurfaceStore` mutation; mutation and canonical projection share one generation-gated boundary, so rollback APIs are removed. |
+| Registry mutation before canonical generation guard | Runtime validates route ID, current route exposure, and broker generation before `ProcessToolSurfaceStore` mutation; mutation and canonical projection share one generation-gated boundary, so rollback APIs are removed. |
 | Activation retry and missing catalog retry are sibling paths | `ProcessRouteReadinessStore` owns one lease and retry state machine. |
 | Canonical cache used as routing metadata fallback | Owner-bound routing reads exposed process surface metadata, and treats request `tabIdentifier` / `workspacePath` arguments as owner hints while catalogs are still loading. |
 | Partial surface represented by loose `cacheableAsCanonical` flag | Process surface projection carries the present process IDs; `cacheableAsCanonical` is only the final control-plane projection decision. |
@@ -364,9 +363,9 @@ Owner-level tests replace call-site recipe tests:
 - `RuntimeCoordinator` no longer stores process route unavailable, process
   catalog pending retry, or activation tracker state.
 - Process route exposure is read from `ProcessRouteStore.ExposureSnapshot`.
-- Exposure epoch changes whenever route membership, cooldown, or cooldown
-  pruning changes the exposed process set.
-- Process catalog mutation cannot occur before route ID, exposure epoch, and
+- Exposure changes whenever route membership, cooldown, or cooldown pruning
+  changes the exposed process set.
+- Process catalog mutation cannot occur before route ID, current exposure, and
   broker generation are checked.
 - `tools/list` canonical cache is not used as a process-surface stale filter.
 - Owner-bound tool routing does not read canonical cache while process routing

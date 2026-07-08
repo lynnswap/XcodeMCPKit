@@ -6981,84 +6981,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
     }
 
-    @Test func sessionManagerDoesNotRecordCatalogFromStaleRouteExposureEpoch()
-        async throws
-    {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 80440, xcodeVersion: "27.0")
-        let upstream = TestUpstreamClient()
-        let staleLoadReachedRecord = TestSignal()
-        let releaseStaleRecord = AsyncGate()
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0]),
-            ],
-            testHooks: RuntimeCoordinatorTestHooks(
-                processToolsCatalogLoadedBeforeRecord: { loadedTarget, sourceUpstream in
-                    guard loadedTarget == target, sourceUpstream == 0 else {
-                        return
-                    }
-                    staleLoadReachedRecord.signal()
-                    try? await releaseStaleRecord.wait()
-                }
-            ),
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-
-        let task = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-stale-route-epoch",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
-        let catalogRequest = try await waitWithTimeout(
-            "waiting for process tools/list request",
-            timeout: .seconds(2)
-        ) {
-            try await upstream.nextSent(
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
-        await upstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: catalogRequest),
-                    tools: [
-                        toolDescriptor(name: "StaleGenerationTool"),
-                    ]
-                )
-            )
-        )
-        try await staleLoadReachedRecord.wait(
-            description: "waiting for process catalog load before record"
-        )
-
-        manager.processRouteStore.invalidateExposure()
-        let invalidatedEpoch = manager.processRouteStore.currentEpoch()
-        #expect(manager.cachedToolsListResult() == nil)
-
-        await releaseStaleRecord.signal()
-        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
-            _ = try await waitWithTimeout(
-                "waiting for stale-route-epoch tools/list result",
-                timeout: .seconds(2)
-            ) {
-                try await task.value
-            }
-        }
-        #expect(manager.processToolSurfaceStore.catalog(forProcessID: target.processID) == nil)
-        #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.processRouteStore.currentEpoch() == invalidatedEpoch)
-    }
-
-    @Test func sessionManagerDoesNotRecordCatalogAfterCooldownPruneChangesExposure()
+    @Test func sessionManagerRecordsCatalogAfterUnrelatedCooldownPruneChangesExposure()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -7102,7 +7025,7 @@ struct RuntimeCoordinatorTests {
 
         let task = Task {
             try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-stale-cooldown-prune",
+                sessionID: "session-process-catalog-cooldown-prune",
                 requestTimeoutOverride: TimeAmount.seconds(5)
             )
         }
@@ -7130,15 +7053,16 @@ struct RuntimeCoordinatorTests {
 
         uptimeClock.advance(by: .nanoseconds(100))
         await releaseStaleRecord.signal()
-        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
-            _ = try await waitWithTimeout(
-                "waiting for stale cooldown-prune tools/list result",
-                timeout: .seconds(2)
-            ) {
-                try await task.value
-            }
+        let result = try await waitWithTimeout(
+            "waiting for cooldown-prune tools/list result",
+            timeout: .seconds(2)
+        ) {
+            try await task.value
         }
-        #expect(manager.processToolSurfaceStore.catalog(forProcessID: activeTarget.processID) == nil)
+        #expect(toolNames(in: result) == ["PartialCooldownSurfaceTool"])
+        #expect(toolNames(in: manager.processToolSurfaceStore.catalog(
+            forProcessID: activeTarget.processID
+        )?.rawResult ?? .null) == ["PartialCooldownSurfaceTool"])
         #expect(manager.cachedToolsListResult() == nil)
         #expect(await cooledDownUpstream.sentCount() == 0)
     }

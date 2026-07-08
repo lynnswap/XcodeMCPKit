@@ -58,7 +58,6 @@ extension RuntimeCoordinator {
         let routeID: ProcessRouteID
         let target: XcodeProcessTarget
         let upstreamIndices: [Int]
-        let exposureEpoch: UInt64
         let brokerGeneration: UInt64
         let activationUpstreamIndex: Int?
         let activationAttempt: Int?
@@ -116,7 +115,6 @@ extension RuntimeCoordinator {
                 routeID: route.id,
                 target: route.target,
                 upstreamIndices: upstreamIndices,
-                exposureEpoch: exposure.epoch,
                 brokerGeneration: brokerGeneration,
                 activationUpstreamIndex: activation?.upstreamIndex,
                 activationAttempt: activation?.attempt
@@ -180,7 +178,7 @@ extension RuntimeCoordinator {
                 rawResult: surface.rawResult,
                 sourceUpstream: sourceUpstream,
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+                cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
             )
         } catch {
             guard let surface = currentSurface,
@@ -191,7 +189,7 @@ extension RuntimeCoordinator {
                 rawResult: surface.rawResult,
                 sourceUpstream: sourceUpstream,
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+                cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
             )
         }
     }
@@ -251,8 +249,7 @@ extension RuntimeCoordinator {
                             activationAttempt: route.activationAttempt,
                             result: result,
                             startedAt: startedAt,
-                            exposedProcessIDs: exposedProcessIDs,
-                            exposureEpoch: route.exposureEpoch,
+                            exposedProcessIDs: exposedProcessIDs
                         ) else {
                             return .stale
                         }
@@ -267,7 +264,6 @@ extension RuntimeCoordinator {
                     } catch {
                         guard self.processToolsCatalogLoadLeaseIsCurrent(
                             routeID: route.routeID,
-                            exposureEpoch: route.exposureEpoch,
                             brokerGeneration: route.brokerGeneration,
                             target: route.target,
                             sourceUpstream: route.upstreamIndices.last ?? -1
@@ -279,7 +275,6 @@ extension RuntimeCoordinator {
                         }
                         guard self.processToolsCatalogLoadLeaseIsCurrent(
                             routeID: route.routeID,
-                            exposureEpoch: route.exposureEpoch,
                             brokerGeneration: route.brokerGeneration,
                             target: route.target,
                             sourceUpstream: route.upstreamIndices.last ?? -1
@@ -302,7 +297,8 @@ extension RuntimeCoordinator {
                                     durationMilliseconds: self.elapsedMilliseconds(
                                         sinceUptimeNanoseconds: startedAt
                                     ),
-                                    cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+                                    cacheableAsCanonical:
+                                        self.processToolSurfaceIsCompleteForCurrentExposure(surface)
                                 )
                             )
                         }
@@ -386,7 +382,6 @@ extension RuntimeCoordinator {
                 routeID: route.id,
                 target: route.target,
                 upstreamIndices: upstreamIndices,
-                exposureEpoch: exposure.epoch,
                 brokerGeneration: brokerGeneration,
                 activationUpstreamIndex: activation?.upstreamIndex,
                 activationAttempt: activation?.attempt
@@ -493,8 +488,19 @@ extension RuntimeCoordinator {
             rawResult: surface.rawResult,
             sourceUpstream: surface.sourceUpstream ?? fallback.sourceUpstream,
             durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-            cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+            cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
         )
+    }
+
+    private func processToolSurfaceIsCompleteForCurrentExposure(
+        _ surface: ProcessToolSurfaceStore.AvailableToolCatalog?
+    ) -> Bool {
+        guard let surface else {
+            return false
+        }
+        let currentExposedProcessIDs = processToolCatalogExposedProcessIDs()
+        return currentExposedProcessIDs.isEmpty == false
+            && surface.processIDs == currentExposedProcessIDs
     }
 
     private func recordAvailableToolsCatalog(
@@ -505,8 +511,7 @@ extension RuntimeCoordinator {
         activationAttempt: Int?,
         result: CanonicalToolsCatalogLoadResult,
         startedAt: UInt64,
-        exposedProcessIDs: Set<pid_t>,
-        exposureEpoch: UInt64
+        exposedProcessIDs: Set<pid_t>
     ) -> CanonicalToolsCatalogLoadResult? {
         guard let sourceUpstream = result.sourceUpstream else {
             return result
@@ -527,7 +532,6 @@ extension RuntimeCoordinator {
         }
         guard processToolsCatalogLoadLeaseIsCurrent(
             routeID: routeID,
-            exposureEpoch: exposureEpoch,
             brokerGeneration: brokerGeneration,
             target: target,
             sourceUpstream: sourceUpstream
@@ -583,7 +587,7 @@ extension RuntimeCoordinator {
                     rawResult: surface.rawResult,
                     sourceUpstream: surfaceSourceUpstream,
                     durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                    cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+                    cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
                 )
             }
             scheduleMissingProcessToolsCatalogRetry(
@@ -662,19 +666,25 @@ extension RuntimeCoordinator {
             rawResult: surface?.rawResult ?? result.rawResult,
             sourceUpstream: surface?.sourceUpstream ?? sourceUpstream,
             durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-            cacheableAsCanonical: surface?.processIDs == exposedProcessIDs
+            cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
         )
     }
 
     private func processToolsCatalogRouteLeaseIsCurrent(
         routeID: ProcessRouteID,
-        exposureEpoch: UInt64,
         target: XcodeProcessTarget,
         sourceUpstream: Int
     ) -> Bool {
-        let currentExposure = processRouteExposure(policy: .toolsCatalog)
-        guard currentExposure.epoch == exposureEpoch,
-              currentExposure.routes.contains(where: { $0.route.id == routeID }) else {
+        let nowUptimeNs = nowUptimeNanoseconds()
+        guard processRouteStore.containsExposedRoute(
+            id: routeID,
+            policy: .toolsCatalog,
+            upstreamUsability: processRouteUpstreamUsabilitySnapshot(
+                policy: .toolsCatalog,
+                nowUptimeNs: nowUptimeNs
+            ),
+            nowUptimeNs: nowUptimeNs
+        ) else {
             logger.debug(
                 "Dropping stale process tools/list catalog",
                 metadata: [
@@ -682,8 +692,6 @@ extension RuntimeCoordinator {
                     "app_path": .string(target.appPath),
                     "xcode_version": .string(target.xcodeVersion),
                     "upstream": .string("\(sourceUpstream)"),
-                    "expected_exposure_epoch": .string("\(exposureEpoch)"),
-                    "current_exposure_epoch": .string("\(currentExposure.epoch)"),
                 ]
             )
             return false
@@ -693,7 +701,6 @@ extension RuntimeCoordinator {
 
     private func processToolsCatalogLoadLeaseIsCurrent(
         routeID: ProcessRouteID,
-        exposureEpoch: UInt64,
         brokerGeneration: UInt64,
         target: XcodeProcessTarget,
         sourceUpstream: Int
@@ -715,7 +722,6 @@ extension RuntimeCoordinator {
         }
         return processToolsCatalogRouteLeaseIsCurrent(
             routeID: routeID,
-            exposureEpoch: exposureEpoch,
             target: target,
             sourceUpstream: sourceUpstream
         )
@@ -763,8 +769,7 @@ extension RuntimeCoordinator {
             let currentRouteIDs = Set(exposure.routes.map(\.route.id))
             let exposedProcessIDs = exposure.processIDs
             let currentRoutes = routes.filter {
-                $0.exposureEpoch == exposure.epoch
-                    && $0.brokerGeneration == generation
+                $0.brokerGeneration == generation
                     && currentRouteIDs.contains($0.routeID)
             }
             guard currentRoutes.isEmpty == false else {

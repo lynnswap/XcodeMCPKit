@@ -371,7 +371,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func processRouteUpstreamUsabilitySnapshot(
+    func processRouteUpstreamUsabilitySnapshot(
         policy: ProcessRouteStore.ExposureSnapshot.Policy,
         nowUptimeNs: UInt64
     ) -> ProcessRouteStore.UpstreamUsabilitySnapshot {
