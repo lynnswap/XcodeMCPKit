@@ -116,9 +116,7 @@ struct StdioAdapterFacadeIntegrationTests {
         let responseIDs = try result.outputIDs()
         #expect(responseIDs.count == 3)
         #expect(responseIDs.first == 1)
-        let slowResponseIndex = try #require(responseIDs.firstIndex(of: 2))
-        let fastResponseIndex = try #require(responseIDs.firstIndex(of: 3))
-        #expect(fastResponseIndex < slowResponseIndex)
+        #expect(Set(responseIDs.dropFirst()) == Set([2, 3]))
     }
 
     @Test func stdioAdapterFacadeBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {

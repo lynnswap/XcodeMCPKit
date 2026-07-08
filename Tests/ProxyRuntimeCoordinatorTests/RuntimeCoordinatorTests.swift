@@ -948,6 +948,23 @@ struct RuntimeCoordinatorTests {
         ) {
             try await retryPrimary.nextSent(at: 1)
         }
+        _ = try await waitWithTimeout(
+            "waiting for retry activation initialized state",
+            timeout: .seconds(2)
+        ) {
+            while true {
+                if case .initialized(let upstreamIndex, let attempt, _) =
+                    manager.xcodeProcessRouteActivationTracker.phase(
+                        processID: newerTarget.processID
+                    ),
+                    upstreamIndex == 1,
+                    attempt == 2
+                {
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
         let retryToolsRequest = try await waitWithTimeout(
             "waiting for retry activation tools/list",
             timeout: .seconds(2)
