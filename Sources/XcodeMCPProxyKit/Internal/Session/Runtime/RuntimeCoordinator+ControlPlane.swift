@@ -275,6 +275,33 @@ extension RuntimeCoordinator {
                         if let hook = self.testHooks.processToolsCatalogFailureCleanupBeforeApply {
                             await hook(route.target, route.upstreamIndices.last ?? -1)
                         }
+                        guard self.processToolsCatalogMutationIsCurrent(
+                            brokerGeneration,
+                            target: route.target,
+                            sourceUpstream: route.upstreamIndices.last ?? -1
+                        ) else {
+                            return .stale
+                        }
+                        if self.processToolCatalogRegistry.catalog(
+                            forProcessID: route.target.processID
+                        ) != nil,
+                            let surface = self.processToolCatalogRegistry.availableToolCatalogSurface(
+                                processIDs: exposedProcessIDs
+                            ),
+                            let surfaceSourceUpstream = surface.sourceUpstream
+                        {
+                            return .success(
+                                route: route,
+                                result: CanonicalToolsCatalogLoadResult(
+                                    rawResult: surface.rawResult,
+                                    sourceUpstream: surfaceSourceUpstream,
+                                    durationMilliseconds: self.elapsedMilliseconds(
+                                        sinceUptimeNanoseconds: startedAt
+                                    ),
+                                    cacheableAsCanonical: surface.processIDs == exposedProcessIDs
+                                )
+                            )
+                        }
                         let previousCatalog = self.processToolCatalogRegistry.catalog(
                             forProcessID: route.target.processID
                         )

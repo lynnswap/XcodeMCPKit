@@ -6609,6 +6609,89 @@ struct RuntimeCoordinatorTests {
         #expect(manager.cachedToolsListResult() == nil)
     }
 
+    @Test func sessionManagerDoesNotClearOverlappingCatalogOnSameGenerationFailureCleanup()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80450, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let overlappingCatalogRecorded = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogFailureCleanupBeforeApply: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    do {
+                        try seedProcessToolCatalogs(
+                            on: runtime,
+                            entries: [
+                                (target, 0, [toolDescriptor(name: "OverlappingSuccessTool")]),
+                            ]
+                        )
+                    } catch {
+                        Issue.record("failed to seed overlapping process catalog: \(error)")
+                    }
+                    overlappingCatalogRecorded.signal()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-overlapping-failure-cleanup",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let catalogRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: catalogRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: catalogRequest),
+                        "error": [
+                            "code": -32000,
+                            "message": "overlapping failure cleanup",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        try await overlappingCatalogRecorded.wait(
+            description: "waiting for overlapping catalog before failure cleanup"
+        )
+        let result = try await waitWithTimeout(
+            "waiting for overlapping catalog result",
+            timeout: .seconds(2)
+        ) {
+            try await task.value
+        }
+
+        #expect(toolNames(in: result) == ["OverlappingSuccessTool"])
+        #expect(toolNames(in: manager.processToolCatalogRegistry.catalog(
+            forProcessID: target.processID
+        )?.rawResult ?? .null) == ["OverlappingSuccessTool"])
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["OverlappingSuccessTool"])
+    }
+
     @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()
         async throws
     {
