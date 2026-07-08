@@ -316,16 +316,13 @@ final class XcodeProcessRouteActivationTracker: Sendable {
         }
     }
 
-    func finishCatalogWaitWithoutCatalog(
+    func finishCatalogRequestWithoutCatalog(
         processID: pid_t,
         upstreamIndex: Int,
         attempt: Int
     ) -> Bool {
-        let cleanup = state.withLockedValue {
-            records -> (
-                timeout: RuntimeScheduledTimeout?,
-                rpcHandles: [ControlPlane.RPCHandle]
-            )? in
+        let rpcHandles = state.withLockedValue {
+            records -> [ControlPlane.RPCHandle]? in
             guard var record = records[processID],
                   case .initialized(let currentUpstreamIndex, let currentAttempt, _) = record.phase,
                   currentUpstreamIndex == upstreamIndex,
@@ -333,18 +330,15 @@ final class XcodeProcessRouteActivationTracker: Sendable {
             else {
                 return nil
             }
-            let timeout = record.catalogTimeout
             let rpcHandles = record.catalogRPCHandles
-            record.catalogTimeout = nil
             record.catalogRPCHandles.removeAll()
             records[processID] = record
-            return (timeout, rpcHandles)
+            return rpcHandles
         }
-        guard let cleanup else {
+        guard let rpcHandles else {
             return false
         }
-        cleanup.timeout?.cancel()
-        cleanup.rpcHandles.forEach { $0.cancel() }
+        rpcHandles.forEach { $0.cancel() }
         return true
     }
 

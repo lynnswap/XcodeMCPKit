@@ -573,7 +573,7 @@ extension RuntimeCoordinator {
                 ]
             )
             if let activationUpstreamIndex, let activationAttempt {
-                refreshProcessRouteActivationCatalogWaitAfterEmptyCatalog(
+                finishProcessRouteActivationCatalogRequestAfterEmptyCatalog(
                     processID: target.processID,
                     upstreamIndex: activationUpstreamIndex,
                     attempt: activationAttempt

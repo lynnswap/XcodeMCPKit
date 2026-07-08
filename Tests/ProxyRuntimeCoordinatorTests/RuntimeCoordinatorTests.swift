@@ -669,7 +669,7 @@ struct RuntimeCoordinatorTests {
         ]))
     }
 
-    @Test func processRouteActivationEmptyCatalogRetryCancelsCatalogTimeout()
+    @Test func processRouteActivationEmptyCatalogRetryPreservesCatalogTimeout()
         async throws
     {
         var config = makeConfig(requestTimeout: 20)
@@ -712,7 +712,7 @@ struct RuntimeCoordinatorTests {
 
         manager.reconcileXcodeProcessTargets(
             [olderTarget, newerTarget],
-            reason: "test_empty_catalog_retry_cancels_catalog_timeout"
+            reason: "test_empty_catalog_retry_preserves_catalog_timeout"
         )
 
         let activationUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
@@ -777,25 +777,8 @@ struct RuntimeCoordinatorTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
-        let refreshedCatalogTimeoutIndex = try await waitWithTimeout(
-            "waiting for refreshed activation catalog timeout",
-            timeout: .seconds(2)
-        ) {
-            while true {
-                if let index = (0..<timeoutScheduler.scheduledCount()).first(where: {
-                    $0 != catalogTimeoutIndex
-                        && timeoutScheduler.delay(at: $0)?.nanoseconds
-                            == TimeAmount.seconds(10).nanoseconds
-                        && timeoutScheduler.isCancelled(at: $0) == false
-                }) {
-                    return index
-                }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
 
-        #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
-        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex) == false)
+        #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex) == false)
         #expect(createdUpstreams.withLockedValue(\.count) == 1)
         #expect(timeoutScheduler.fire(at: retryIndex))
         let retryToolsRequest = try await waitWithTimeout(
@@ -831,8 +814,8 @@ struct RuntimeCoordinatorTests {
             manager.xcodeProcessRouteActivationTracker.phase(processID: newerTarget.processID)
                 == .cataloged(upstreamIndex: 1, attempt: 1)
         )
-        #expect(timeoutScheduler.isCancelled(at: refreshedCatalogTimeoutIndex))
-        #expect(timeoutScheduler.fire(at: refreshedCatalogTimeoutIndex) == false)
+        #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
+        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex) == false)
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
             "Only26",
             "Only27Recovered",
@@ -1308,6 +1291,74 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot?.upstreamIndex == 0)
         #expect(snapshot?.requestIDKey == "tools/list")
         #expect(rpcHandle.isCancelled())
+    }
+
+    @Test func processRouteActivationEmptyCatalogFinishKeepsCatalogTimeout() {
+        let tracker = XcodeProcessRouteActivationTracker()
+        let processID: pid_t = 27021
+        let scheduler = RecordingRuntimeTimeoutScheduler()
+        let catalogTimeout = scheduler.scheduler()(.seconds(10)) {}
+        let rpcHandle = ControlPlane.RPCHandle()
+        let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
+        let registrationToken = UUID()
+
+        rpcHandle.installCancel { snapshot in
+            cancellation.withLockedValue { $0 = snapshot }
+        }
+        tracker.prepare(processID: processID)
+        let start = tracker.beginAttaching(
+            processID: processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 10
+        )
+        #expect(start?.attempt == 1)
+        _ = tracker.markInitialized(
+            processID: processID,
+            upstreamIndex: 0,
+            nowUptimeNs: 20
+        )
+        tracker.storeCatalogTimeout(
+            processID: processID,
+            upstreamIndex: 0,
+            attempt: 1,
+            timeout: catalogTimeout
+        )
+        tracker.storeCatalogRPCHandle(
+            processID: processID,
+            upstreamIndex: 0,
+            attempt: 1,
+            rpcHandle: rpcHandle
+        )
+        #expect(rpcHandle.markRegistered(
+            registrationToken: registrationToken,
+            upstreamIndex: 0
+        ))
+        #expect(rpcHandle.markAssigned(
+            registrationToken: registrationToken,
+            upstreamIndex: 0,
+            requestIDKey: "tools/list"
+        ))
+
+        #expect(tracker.finishCatalogRequestWithoutCatalog(
+            processID: processID,
+            upstreamIndex: 0,
+            attempt: 1
+        ))
+
+        #expect(scheduler.isCancelled(at: 0) == false)
+        let snapshot = cancellation.withLockedValue { $0 }
+        #expect(snapshot?.registrationToken == registrationToken)
+        #expect(snapshot?.upstreamIndex == 0)
+        #expect(snapshot?.requestIDKey == "tools/list")
+        #expect(rpcHandle.isCancelled())
+
+        let timeout = tracker.handleCatalogTimeout(
+            processID: processID,
+            upstreamIndex: 0,
+            attempt: 1
+        )
+        #expect(timeout != nil)
+        #expect(scheduler.isCancelled(at: 0))
     }
 
     @Test func processRouteActivationCatalogTimeoutLetsForegroundToolsListReturnRetryCatalog()
