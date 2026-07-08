@@ -12,6 +12,7 @@ import XcodeMCPProxyTestSupport
 
 enum HTTPTestError: Error {
     case missingResponseHead
+    case missingPendingResponse
 }
 
 private let httpTestSessionRegistry = NIOLockedValueBox<[String: any RuntimeCoordinating]>([:])
@@ -1038,13 +1039,15 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.initialized = value }
     }
 
-    func deliverNextPendingResponse() {
+    func deliverNextPendingResponse() throws {
         let update = state.withLockedValue { state -> (State.PendingResponse, Int)? in
             guard state.pendingResponses.isEmpty == false else { return nil }
             let pending = state.pendingResponses.removeFirst()
             return (pending, state.pendingResponses.count)
         }
-        guard let (pending, pendingCount) = update else { return }
+        guard let (pending, pendingCount) = update else {
+            throw HTTPTestError.missingPendingResponse
+        }
         pendingResponseCountRecords.append(pendingCount)
         let session = session(id: pending.sessionID)
         session.router.handleIncoming(pending.data)

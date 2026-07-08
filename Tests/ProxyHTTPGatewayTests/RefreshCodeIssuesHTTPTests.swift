@@ -2023,7 +2023,7 @@ extension HTTPHandlerTests {
             for expectedCount in 1...requestCount {
                 #expect(sessionManager.sentUpstreamCount() == expectedCount)
                 #expect(sessionManager.pendingResponseCount() == 1)
-                sessionManager.deliverNextPendingResponse()
+                try sessionManager.deliverNextPendingResponse()
                 if expectedCount < requestCount {
                     try await sessionManager.waitForPendingResponseCount(1)
                     #expect(sessionManager.sentUpstreamCount() == expectedCount + 1)
@@ -2145,7 +2145,7 @@ extension HTTPHandlerTests {
             for expectedRequests in 1...requestCount {
                 #expect(sessionManager.sentUpstreamCount() == expectedRequests * 2)
                 #expect(sessionManager.pendingResponseCount() == 1)
-                sessionManager.deliverNextPendingResponse()
+                try sessionManager.deliverNextPendingResponse()
                 if expectedRequests < requestCount {
                     try await sessionManager.waitForPendingResponseCount(1)
                     #expect(sessionManager.sentUpstreamCount() == (expectedRequests + 1) * 2)
@@ -2618,7 +2618,8 @@ extension HTTPHandlerTests {
             #expect(inFlightLease.releaseReason == nil)
             #expect(inFlightLease.timeoutAt == nil)
 
-            sessionManager.deliverNextPendingResponse()
+            try await sessionManager.waitForPendingResponseCount(1)
+            try sessionManager.deliverNextPendingResponse()
 
             let response = try await requestTask.value
             #expect(response.statusCode == 200)
