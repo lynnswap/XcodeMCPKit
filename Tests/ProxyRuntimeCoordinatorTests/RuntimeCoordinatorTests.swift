@@ -1914,6 +1914,7 @@ struct RuntimeCoordinatorTests {
         _ = store.markUnavailable(
             upstreamIndex: 1,
             scope: .catalog,
+            nowUptimeNs: 0,
             unavailableUntilUptimeNs: 100
         )
         let cooledDownExposure = store.exposure(
@@ -7020,6 +7021,7 @@ struct RuntimeCoordinatorTests {
         manager.processRouteStore.markUnavailable(
             upstreamIndex: 1,
             scope: ProcessRouteStore.CooldownScope.catalog,
+            nowUptimeNs: 0,
             unavailableUntilUptimeNs: 100
         )
 
@@ -7399,6 +7401,53 @@ struct RuntimeCoordinatorTests {
         #expect(manager.processToolSurfaceStore.catalog(forProcessID: missingTarget.processID) == nil)
         #expect(failureCleanupReached.isSignaled() == false)
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["ExistingSurfaceTool"])
+    }
+
+    @Test func sessionManagerUnavailableUncatalogedRouteRecomputesRemainingProcessSurface()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let catalogedTarget = xcodeProcessTarget(processID: 80463, xcodeVersion: "27.0")
+        let uncatalogedTarget = xcodeProcessTarget(processID: 80464, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: catalogedTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: uncatalogedTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let catalogedRoute = try #require(manager.processRouteStore.route(forUpstreamIndex: 0))
+        _ = manager.processToolSurfaceStore.recordCatalog(
+            routeID: catalogedRoute.id,
+            target: catalogedTarget,
+            upstreamIndex: 0,
+            associatedUpstreamIndices: catalogedRoute.upstreamIndices,
+            rawResult: try jsonValue([
+                "tools": [
+                    toolDescriptor(name: "RemainingSurfaceTool"),
+                ],
+            ]),
+            exposedProcessIDs: nil
+        )
+        manager.canonicalBrokerState.clearToolsCatalog()
+        #expect(manager.cachedToolsListResult() == nil)
+
+        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
+            upstreamIndex: 1,
+            reason: "test_uncataloged_route_unavailable"
+        )
+
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RemainingSurfaceTool"])
+        #expect(manager.canonicalBrokerState.toolsSourceUpstream() == 0)
+        #expect(manager.processToolSurfaceStore.catalog(forProcessID: uncatalogedTarget.processID) == nil)
     }
 
     @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()

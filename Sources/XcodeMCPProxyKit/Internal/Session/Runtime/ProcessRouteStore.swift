@@ -48,6 +48,11 @@ final class ProcessRouteStore: Sendable {
         let recoveryAwareUsableUpstreamIndices: Set<Int>
     }
 
+    struct MarkUnavailableResult: Sendable {
+        let route: XcodeProcessRoute
+        let didChangeExposure: Bool
+    }
+
     private struct InstanceKey: Hashable, Sendable {
         let processID: pid_t
         let appPath: String
@@ -324,8 +329,9 @@ final class ProcessRouteStore: Sendable {
     func markUnavailable(
         upstreamIndex: Int,
         scope: CooldownScope,
+        nowUptimeNs: UInt64,
         unavailableUntilUptimeNs: UInt64
-    ) -> XcodeProcessRoute? {
+    ) -> MarkUnavailableResult? {
         state.withLockedValue { state in
             for key in state.order {
                 guard var record = state.recordsByKey[key],
@@ -333,6 +339,7 @@ final class ProcessRouteStore: Sendable {
                       record.route.upstreamIndices.contains(upstreamIndex) else {
                     continue
                 }
+                let wasUnavailable = record.isUnavailable(nowUptimeNs: nowUptimeNs)
                 switch scope {
                 case .route:
                     let previousUnavailableUntilUptimeNs = record.routeUnavailableUntilUptimeNs
@@ -342,7 +349,7 @@ final class ProcessRouteStore: Sendable {
                     )
                     guard previousUnavailableUntilUptimeNs != record.routeUnavailableUntilUptimeNs
                     else {
-                        return record.route
+                        return nil
                     }
                 case .catalog:
                     let previousUnavailableUntilUptimeNs = record.catalogUnavailableUntilUptimeNs
@@ -352,13 +359,17 @@ final class ProcessRouteStore: Sendable {
                     )
                     guard previousUnavailableUntilUptimeNs != record.catalogUnavailableUntilUptimeNs
                     else {
-                        return record.route
+                        return nil
                     }
                 }
                 state.generation &+= 1
                 record.lastSeenGeneration = state.generation
                 state.recordsByKey[key] = record
-                return record.route
+                return MarkUnavailableResult(
+                    route: record.route,
+                    didChangeExposure: wasUnavailable == false
+                        && record.isUnavailable(nowUptimeNs: nowUptimeNs)
+                )
             }
             return nil
         }

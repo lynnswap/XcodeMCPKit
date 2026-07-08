@@ -255,19 +255,10 @@ extension RuntimeCoordinator {
             reason: "route_retired_\(reason)"
         )
 
-        let removalUpdate = applyToolCatalogSurfaceMutation {
-            processToolSurfaceStore.removeProcess(
-                processID: route.target.processID,
-                exposedProcessIDs: processToolCatalogExposedProcessIDs()
+        applyToolCatalogSurfaceMutation {
+            removeProcessToolCatalogAfterExposureLoss(
+                processID: route.target.processID
             )
-        }
-        if removalUpdate?.isNoChange == true {
-            applyToolCatalogSurfaceMutation {
-                processToolSurfaceStore.recomputeSurface(
-                    exposedProcessIDs: processToolCatalogExposedProcessIDs(),
-                    publishesToolsListChanged: true
-                )
-            }
         }
 
         var resetInitialize = false

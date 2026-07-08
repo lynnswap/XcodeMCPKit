@@ -272,22 +272,26 @@ extension RuntimeCoordinator {
         cooldownNanoseconds: UInt64,
         scope: ProcessRouteStore.CooldownScope
     ) {
-        let unavailableUntil = nowUptimeNanoseconds()
+        let nowUptimeNs = nowUptimeNanoseconds()
+        let unavailableUntil = nowUptimeNs
             &+ cooldownNanoseconds
-        guard let route = processRouteStore.markUnavailable(
+        guard let unavailable = processRouteStore.markUnavailable(
             upstreamIndex: upstreamIndex,
             scope: scope,
+            nowUptimeNs: nowUptimeNs,
             unavailableUntilUptimeNs: unavailableUntil
         ) else {
             return
         }
+        let route = unavailable.route
         processRouteReadinessStore.removePendingCatalogRefresh(processID: route.target.processID)
         cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
-        applyToolCatalogSurfaceMutation {
-            processToolSurfaceStore.removeProcess(
-                processID: route.target.processID,
-                exposedProcessIDs: processToolCatalogExposedProcessIDs()
-            )
+        if unavailable.didChangeExposure {
+            applyToolCatalogSurfaceMutation {
+                removeProcessToolCatalogAfterExposureLoss(
+                    processID: route.target.processID
+                )
+            }
         }
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(

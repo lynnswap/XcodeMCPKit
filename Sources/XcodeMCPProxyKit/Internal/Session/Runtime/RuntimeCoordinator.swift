@@ -1060,6 +1060,30 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         catalogExposedUsableProcessIDs()
     }
 
+    func removeProcessToolCatalogAfterExposureLoss(
+        processID: pid_t
+    ) -> ProcessToolSurfaceStore.SurfaceUpdate {
+        let exposedProcessIDs = processToolCatalogExposedProcessIDs()
+        let removalUpdate = processToolSurfaceStore.removeProcess(
+            processID: processID,
+            exposedProcessIDs: exposedProcessIDs
+        )
+        guard removalUpdate.isNoChange else {
+            return removalUpdate
+        }
+        let surface = processToolSurfaceStore.availableToolCatalogSurface(
+            processIDs: exposedProcessIDs
+        )
+        guard surface?.processIDs == exposedProcessIDs
+            || canonicalBrokerState.toolsCatalogRaw() != nil else {
+            return .noChange
+        }
+        return processToolSurfaceStore.recomputeSurface(
+            exposedProcessIDs: exposedProcessIDs,
+            publishesToolsListChanged: true
+        )
+    }
+
     func processToolSurfaceStoreHasCompleteConfiguredCatalog() -> Bool {
         let configuredProcessIDs = catalogEligibleConfiguredProcessIDs()
         guard configuredProcessIDs.isEmpty == false else {
