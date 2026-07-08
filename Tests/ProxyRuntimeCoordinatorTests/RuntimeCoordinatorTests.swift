@@ -5769,10 +5769,12 @@ struct RuntimeCoordinatorTests {
         let refreshedTarget = xcodeProcessTarget(processID: 80432, xcodeVersion: "27.0")
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let seededStaleCatalog = TestSignal()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
             upstreams: [remainingUpstream, refreshedUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: refreshedTarget, upstreamIndices: [1]),
                 XcodeProcessRoute(target: remainingTarget, upstreamIndices: [0]),
@@ -5802,6 +5804,14 @@ struct RuntimeCoordinatorTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.canonicalBrokerState.syncCanonicalInitialize(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -5850,6 +5860,71 @@ struct RuntimeCoordinatorTests {
             manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
                 $0.contains(refreshedTarget.processID)
             }
+        )
+        _ = try await waitWithTimeout(
+            "waiting for empty process catalog refresh task to finish",
+            timeout: .seconds(2)
+        ) {
+            while true {
+                if manager.availableToolsCatalogRefreshKeys.withLockedValue(\.isEmpty) {
+                    return true
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let retryIndex = try await waitWithTimeout(
+            "waiting for empty process catalog retry",
+            timeout: .seconds(2)
+        ) {
+            while true {
+                if let index = (0..<timeoutScheduler.scheduledCount()).first(where: {
+                    timeoutScheduler.delay(at: $0)?.nanoseconds
+                        == TimeAmount.milliseconds(250).nanoseconds
+                        && timeoutScheduler.isCancelled(at: $0) == false
+                }) {
+                    return index
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        #expect(timeoutScheduler.fire(at: retryIndex))
+        let retryRequest = try await waitWithTimeout(
+            "waiting for empty process catalog retry tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await refreshedUpstream.nextSent(
+                startingAt: 1,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await refreshedUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: retryRequest),
+                    tools: [
+                        toolDescriptor(name: "RecoveredRouteTool"),
+                    ]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for empty process catalog retry completion",
+            timeout: .seconds(2)
+        ) {
+            while true {
+                if Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
+                    "RemainingRouteTool",
+                    "RecoveredRouteTool",
+                ]) {
+                    return true
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        #expect(
+            manager.pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue {
+                $0.contains(refreshedTarget.processID)
+            } == false
         )
         guard case .healthy = manager.testStateSnapshot().upstreams[1].healthState else {
             Issue.record("empty process catalog should leave upstream health usable")

@@ -566,10 +566,6 @@ extension RuntimeCoordinator {
                     attempt: activationAttempt
                 )
             }
-            scheduleMissingProcessToolsCatalogRetry(
-                processID: target.processID,
-                reason: "empty_process_catalog"
-            )
             if hadProcessCatalog {
                 let previousCatalog = processToolCatalogRegistry.catalog(
                     forProcessID: target.processID
@@ -582,12 +578,6 @@ extension RuntimeCoordinator {
                     onlyIfGeneration: brokerGeneration
                 )
                 guard applied else {
-                    if let brokerGeneration {
-                        cancelScheduledProcessToolsCatalogRetry(
-                            processID: target.processID,
-                            generation: brokerGeneration
-                        )
-                    }
                     if let previousCatalog {
                         processToolCatalogRegistry.restoreCatalogIfMissing(
                             previousCatalog,
@@ -596,6 +586,10 @@ extension RuntimeCoordinator {
                     }
                     return nil
                 }
+                scheduleMissingProcessToolsCatalogRetry(
+                    processID: target.processID,
+                    reason: "empty_process_catalog"
+                )
                 guard let surface = processToolCatalogRegistry.availableToolCatalogSurface(
                     processIDs: exposedProcessIDs
                 ),
@@ -610,6 +604,10 @@ extension RuntimeCoordinator {
                     cacheableAsCanonical: surface.processIDs == exposedProcessIDs
                 )
             }
+            scheduleMissingProcessToolsCatalogRetry(
+                processID: target.processID,
+                reason: "empty_process_catalog"
+            )
             return nil
         }
         let resolvedActivation: (upstreamIndex: Int, attempt: Int)?
