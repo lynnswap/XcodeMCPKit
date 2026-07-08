@@ -255,7 +255,8 @@ struct HTTPHandlerTests {
             #expect(activeLease.sessionID == "session-debug-state")
             #expect(activeLease.upstreamIndex == nil)
 
-            sessionManager.deliverNextPendingResponse()
+            try await sessionManager.waitForPendingResponseCount(1)
+            try sessionManager.deliverNextPendingResponse()
             _ = try await refreshTask.value
 
             let (completedResponse, completedData) = try await getHTTPData(
