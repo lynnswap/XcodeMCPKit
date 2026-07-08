@@ -733,18 +733,21 @@ extension RuntimeCoordinator {
         if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
            let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
         {
-            processToolCatalogRegistry.removeUpstreamMapping(
-                forUpstreamIndex: upstreamIndex,
-                replacementUpstreamIndex: replacementUpstreamIndex
-            )
-            resyncProcessToolsCatalogSurfaceAfterRemoving(upstreamIndex: upstreamIndex)
+            applyToolCatalogSurfaceMutation {
+                processToolSurfaceStore.removeUpstream(
+                    upstreamIndex: upstreamIndex,
+                    replacementUpstreamIndex: replacementUpstreamIndex,
+                    exposedProcessIDs: processToolCatalogExposedProcessIDs()
+                )
+            }
         } else {
-            let removedProcessID = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.target.processID
-            processToolCatalogRegistry.removeCatalog(forUpstreamIndex: upstreamIndex)
-            resyncProcessToolsCatalogSurfaceAfterRemoving(
-                upstreamIndex: upstreamIndex,
-                processID: removedProcessID
-            )
+            applyToolCatalogSurfaceMutation {
+                processToolSurfaceStore.removeUpstream(
+                    upstreamIndex: upstreamIndex,
+                    replacementUpstreamIndex: nil,
+                    exposedProcessIDs: processToolCatalogExposedProcessIDs()
+                )
+            }
             removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         }
         return true

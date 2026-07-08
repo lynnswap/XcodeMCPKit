@@ -11,7 +11,7 @@ final class HTTPControlService: Sendable {
         let controlPlane: ControlPlane.DebugSnapshot?
         let upstreams: [ProxyDebug.UpstreamSnapshot]
         let processRoutes: [ProxyDebug.ProcessRouteSnapshot]
-        let processToolCatalogs: [ProcessToolCatalogRegistry.DebugSnapshot]
+        let processToolCatalogs: [ProcessToolSurfaceStore.DebugSnapshot]
         let recentTraffic: [ProxyDebug.TrafficEvent]
         let sessions: [SessionRequestPipeline.DebugSnapshot]
         let leases: [LeaseManager.DebugSnapshot]

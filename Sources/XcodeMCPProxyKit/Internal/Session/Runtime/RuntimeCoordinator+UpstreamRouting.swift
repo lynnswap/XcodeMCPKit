@@ -547,7 +547,7 @@ extension RuntimeCoordinator {
             allSessionIDs: sessionRegistry.sessionIDs()
         )
         let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
-        let processToolCatalogs = processToolCatalogRegistry.debugSnapshots(
+        let processToolCatalogs = processToolSurfaceStore.debugSnapshots(
             exposedCatalog: brokerSnapshot.toolsCatalogRaw,
             canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
             tabOwnerCountsByProcessID: ownerCountsByProcessID(
@@ -559,14 +559,14 @@ extension RuntimeCoordinator {
         )
         let processIDsWithToolCatalog = Set(processToolCatalogs.map(\.processID))
         let pendingToolCatalogProcessIDs =
-            pendingProcessToolsCatalogRefreshProcessIDs.withLockedValue { $0 }
+            processRouteReadinessStore.pendingCatalogRefreshProcessIDsSnapshot()
         let unavailableProcessIDs = unavailableXcodeProcessIDs()
 
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
             cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
-            processRoutes: xcodeProcessRegistry.debugSnapshots(
+            processRoutes: processRouteStore.debugSnapshots(
                 usableSlotCount: { [weak self] route in
                     guard let self else { return 0 }
                     return self.usableInitializedUpstreamIndices(in: route).count

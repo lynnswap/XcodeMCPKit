@@ -271,13 +271,13 @@ func seedProcessToolCatalogs(
         let result = try jsonValue([
             "tools": entry.tools,
         ])
-        manager.processToolCatalogRegistry.record(
+        manager.processToolSurfaceStore.record(
             target: entry.target,
             upstreamIndex: entry.upstreamIndex,
             rawResult: result
         )
     }
-    if let surface = manager.processToolCatalogRegistry.availableToolCatalogSurface(),
+    if let surface = manager.processToolSurfaceStore.availableToolCatalogSurface(),
        let sourceUpstream = surface.sourceUpstream
     {
         manager.setCachedToolsListResult(surface.rawResult, sourceUpstream: sourceUpstream)

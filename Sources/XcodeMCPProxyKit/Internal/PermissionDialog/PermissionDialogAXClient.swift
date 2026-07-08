@@ -50,14 +50,18 @@ extension XcodePermissionDialog {
     }
 
     enum AXFailureClassifier {
-        private static let externalViewServiceBundleIdentifier = "com.apple.dt.ExternalViewService"
+        private static let transientAXWindowsCannotCompleteBundleIdentifiers: Set<String> = [
+            "com.apple.dt.ExternalViewService",
+            "com.apple.dt.Xcode",
+        ]
         private static let windowsAttribute = kAXWindowsAttribute as String
 
         static func isBenignOpenWindowsFailure(
             _ error: Error,
             processBundleIdentifier: String?
         ) -> Bool {
-            guard processBundleIdentifier == externalViewServiceBundleIdentifier else {
+            guard let processBundleIdentifier,
+                  transientAXWindowsCannotCompleteBundleIdentifiers.contains(processBundleIdentifier) else {
                 return false
             }
             guard let error = error as? XcodePermissionDialog.AXError else {

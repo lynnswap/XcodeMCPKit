@@ -347,7 +347,7 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(isBenign)
     }
 
-    @Test func openWindowsFailureClassifierRejectsXcodeAXWindowsCannotComplete() {
+    @Test func openWindowsFailureClassifierTreatsXcodeAXWindowsCannotCompleteAsBenign() {
         let isBenign = XcodePermissionDialog.AXFailureClassifier.isBenignOpenWindowsFailure(
             XcodePermissionDialog.AXError.copyAttributeFailed(
                 attribute: kAXWindowsAttribute as String,
@@ -356,7 +356,7 @@ struct XcodePermissionDialogAutoApproverTests {
             processBundleIdentifier: "com.apple.dt.Xcode"
         )
 
-        #expect(isBenign == false)
+        #expect(isBenign)
     }
 
     @Test func openWindowsFailureClassifierRejectsExternalViewServiceForDifferentAttribute() {
