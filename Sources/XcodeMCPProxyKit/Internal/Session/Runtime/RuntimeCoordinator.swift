@@ -41,6 +41,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
     var processToolsCatalogLoadedBeforeRecord:
         (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
+    var processToolsCatalogFailureCleanupBeforeApply:
+        (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamRequestQueued:
         (@Sendable (
@@ -58,6 +60,8 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
         processToolsCatalogLoadedBeforeRecord:
             (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
+        processToolsCatalogFailureCleanupBeforeApply:
+            (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamRequestQueued:
             (@Sendable (
@@ -73,6 +77,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.processToolsCatalogLoadedBeforeRecord = processToolsCatalogLoadedBeforeRecord
+        self.processToolsCatalogFailureCleanupBeforeApply = processToolsCatalogFailureCleanupBeforeApply
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted

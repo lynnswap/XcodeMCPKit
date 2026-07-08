@@ -272,13 +272,28 @@ extension RuntimeCoordinator {
                         ) else {
                             return .stale
                         }
-                        self.applyToolCatalogSurfaceUpdate(
+                        if let hook = self.testHooks.processToolsCatalogFailureCleanupBeforeApply {
+                            await hook(route.target, route.upstreamIndices.last ?? -1)
+                        }
+                        let previousCatalog = self.processToolCatalogRegistry.catalog(
+                            forProcessID: route.target.processID
+                        )
+                        let applied = self.applyToolCatalogSurfaceUpdate(
                             self.processToolCatalogRegistry.removeProcess(
                                 processID: route.target.processID,
                                 exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
                             ),
                             onlyIfGeneration: brokerGeneration
                         )
+                        guard applied else {
+                            if let previousCatalog {
+                                self.processToolCatalogRegistry.restoreCatalogIfMissing(
+                                    previousCatalog,
+                                    associatedUpstreamIndices: route.upstreamIndices
+                                )
+                            }
+                            return .stale
+                        }
                         return .failure(
                             route: route,
                             upstreamIndex: route.upstreamIndices.last ?? -1,

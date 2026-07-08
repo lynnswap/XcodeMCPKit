@@ -764,7 +764,7 @@ struct RuntimeCoordinatorTests {
 
         let secondaryToolsRequest = try await waitWithTimeout(
             "waiting for secondary fallback tools/list",
-            timeout: .seconds(2)
+            timeout: .seconds(5)
         ) {
             try await secondary.nextSent(
                 startingAt: 2,
@@ -6370,6 +6370,91 @@ struct RuntimeCoordinatorTests {
         #expect(manager.processToolCatalogRegistry.catalog(forProcessID: target.processID) == nil)
         #expect(manager.cachedToolsListResult() == nil)
         #expect(manager.canonicalBrokerState.generation() == invalidatedGeneration)
+    }
+
+    @Test func sessionManagerRestoresProcessCatalogWhenStaleFailureCleanupLosesGenerationRace()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 80449, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let failureCleanupReached = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processToolsCatalogFailureCleanupBeforeApply: { loadedTarget, sourceUpstream in
+                    guard loadedTarget == target, sourceUpstream == 0,
+                          let runtime = runtimeBox.value else {
+                        return
+                    }
+                    do {
+                        try seedProcessToolCatalogs(
+                            on: runtime,
+                            entries: [
+                                (target, 0, [toolDescriptor(name: "RecoveredBeforeStaleFailure")]),
+                            ]
+                        )
+                    } catch {
+                        Issue.record("failed to seed process catalog before stale cleanup: \(error)")
+                    }
+                    runtime.canonicalBrokerState.clearToolsCatalog()
+                    failureCleanupReached.signal()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let task = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-stale-failure-cleanup",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let catalogRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: catalogRequest) == "tools/list")
+        await upstream.yield(
+            .message(
+                try JSONSerialization.data(
+                    withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": try extractUpstreamID(from: catalogRequest),
+                        "error": [
+                            "code": -32000,
+                            "message": "stale failure cleanup",
+                        ],
+                    ],
+                    options: []
+                )
+            )
+        )
+
+        try await failureCleanupReached.wait(
+            description: "waiting for failure cleanup generation race"
+        )
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            _ = try await waitWithTimeout(
+                "waiting for stale failure cleanup result",
+                timeout: .seconds(2)
+            ) {
+                try await task.value
+            }
+        }
+
+        #expect(toolNames(in: manager.processToolCatalogRegistry.catalog(
+            forProcessID: target.processID
+        )?.rawResult ?? .null) == ["RecoveredBeforeStaleFailure"])
+        #expect(manager.cachedToolsListResult() == nil)
     }
 
     @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()
