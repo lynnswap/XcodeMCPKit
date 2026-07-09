@@ -8,6 +8,11 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
     func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
     func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
+    func rewriteOwnerBoundRequest(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        upstreamIndex: Int
+    ) -> (bodyData: Data, parsedRequestJSON: Any)
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
     func activateRequestLease(
         _ leaseID: LeaseManager.ID,
@@ -18,6 +23,14 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
 }
 
 extension ProxyUpstreamRequestRuntimePort {
+    func rewriteOwnerBoundRequest(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        upstreamIndex _: Int
+    ) -> (bodyData: Data, parsedRequestJSON: Any) {
+        (bodyData, parsedRequestJSON)
+    }
+
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
@@ -92,9 +105,14 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             upstreamIndex = chosen
         }
 
+        let rewritten = port.rewriteOwnerBoundRequest(
+            bodyData: bodyData,
+            parsedRequestJSON: parsedRequestJSON,
+            upstreamIndex: upstreamIndex
+        )
         let transform = try RequestInspector.transform(
-            bodyData,
-            parsedJSON: parsedRequestJSON,
+            rewritten.bodyData,
+            parsedJSON: rewritten.parsedRequestJSON,
             sessionID: sessionID,
             mapID: { sessionID, originalID in
                 port.assignUpstreamID(

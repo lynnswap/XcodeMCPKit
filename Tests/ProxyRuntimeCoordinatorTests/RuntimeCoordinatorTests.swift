@@ -8483,7 +8483,9 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected merged XcodeListWindows structuredContent")
             return
         }
-        #expect(mergedMessage == "\(message0)\n\(message1)")
+        #expect(mergedMessage.components(separatedBy: "xcode-mcpkit:").count == 3)
+        #expect(mergedMessage.contains("/Work/A.xcworkspace"))
+        #expect(mergedMessage.contains("/Work/B.xcworkspace"))
 
         try seedProcessToolCatalogs(
             on: manager,
@@ -8611,7 +8613,8 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected XcodeListWindows structuredContent")
             return
         }
-        #expect(resultMessage == message)
+        #expect(resultMessage.contains("xcode-mcpkit:"))
+        #expect(resultMessage.contains("/Work/S.xcworkspace"))
         #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
         try seedProcessToolCatalogs(
             on: manager,
@@ -8689,7 +8692,8 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected XcodeListWindows structuredContent")
             return
         }
-        #expect(resultMessage == message)
+        #expect(resultMessage.contains("xcode-mcpkit:"))
+        #expect(resultMessage.contains("/Work/T.xcworkspace"))
         #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
         try seedProcessToolCatalogs(
             on: manager,
@@ -8708,7 +8712,7 @@ struct RuntimeCoordinatorTests {
         ]) != nil)
     }
 
-    @Test func sessionManagerCachesDuplicateWorkspaceOwnerByRoutePriority() async throws {
+    @Test func sessionManagerRejectsDuplicateWorkspaceOwnersAcrossProcesses() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -8781,7 +8785,8 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected merged XcodeListWindows structuredContent")
             return
         }
-        #expect(mergedMessage == "\(message0)\n\(message1)")
+        #expect(mergedMessage.components(separatedBy: "xcode-mcpkit:").count == 3)
+        #expect(mergedMessage.contains(workspacePath))
 
         try seedProcessToolCatalogs(
             on: manager,
@@ -8808,7 +8813,21 @@ struct RuntimeCoordinatorTests {
                 ],
             ],
         ]
-        #expect(manager.preferredUpstreamIndex(for: workspaceRequest) == 0)
+        #expect(manager.preferredUpstreamIndex(for: workspaceRequest) == nil)
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 8701,
+                name: "XcodeSomeWorkspaceScopedTool",
+                arguments: ["workspacePath": workspacePath]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .reject(let errors, _) = decision else {
+            Issue.record("expected duplicate workspace owner to reject")
+            return
+        }
+        #expect(errors.map(\.id.key) == ["8701"])
+        #expect(errors.first?.message.contains("conflicting Xcode window owners") == true)
     }
 
     @Test func sessionManagerSkipsUninitializedProcessRoutesDuringWindowFanout()
@@ -9359,6 +9378,238 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [0])
     }
 
+    @Test func rawTabCollisionRequiresWorkspaceDisambiguation() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target0 = xcodeProcessTarget(processID: 612, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 613, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: windowtab1, workspacePath: /Work/A.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: windowtab1, workspacePath: /Work/B.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+
+        let ambiguousDecision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 9301,
+                name: "BuildProject",
+                arguments: ["tabIdentifier": "windowtab1"]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .reject(let errors, _) = ambiguousDecision else {
+            Issue.record("expected raw tab-only request to reject")
+            return
+        }
+        #expect(errors.map(\.id.key) == ["9301"])
+        #expect(errors.first?.message.contains("ambiguous raw Xcode tabIdentifier") == true)
+
+        let disambiguatedDecision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 9302,
+                name: "BuildProject",
+                arguments: [
+                    "tabIdentifier": "windowtab1",
+                    "workspacePath": "/Work/B.xcworkspace",
+                ]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAny(let preferredUpstreamIndices) = disambiguatedDecision else {
+            Issue.record("expected workspacePath to disambiguate raw tab")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
+    }
+
+    @Test func workspacePathTakesPrecedenceOverRawTabFallback() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: windowtab1, workspacePath: /Work/A.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 9401,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "windowtab1"]
+                )
+            ) == 0
+        )
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 9402,
+                    name: "BuildProject",
+                    arguments: [
+                        "tabIdentifier": "windowtab1",
+                        "workspacePath": "/Work/Other.xcworkspace",
+                    ]
+                )
+            ) == nil
+        )
+    }
+
+    @Test func proxyTabIdentifierIsRewrittenBeforeForwarding() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 614, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target,
+                    0,
+                    [
+                        toolDescriptor(name: "XcodeListWindows"),
+                        toolDescriptor(
+                            name: "BuildProject",
+                            inputProperties: [
+                                "tabIdentifier": ["type": "string"],
+                                "workspacePath": ["type": "string"],
+                            ],
+                            required: ["tabIdentifier"]
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let listRequest = try await upstream.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: listRequest),
+                    message: "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace"
+                )
+            )
+        )
+        let result = try await task.value
+        guard case .object(let resultObject) = result,
+              case .object(let structuredContent)? = resultObject["structuredContent"],
+              case .string(let message)? = structuredContent["message"],
+              let proxyTab = firstTabIdentifier(in: message) else {
+            Issue.record("expected proxied XcodeListWindows tab")
+            return
+        }
+        #expect(proxyTab.hasPrefix("xcode-mcpkit:"))
+        #expect(proxyTab != "tab-a")
+
+        let proxyTabRequest = toolsCallObject(
+            id: 9303,
+            name: "BuildProject",
+            arguments: ["tabIdentifier": proxyTab]
+        )
+        let proxyTabData = try JSONSerialization.data(withJSONObject: proxyTabRequest, options: [])
+        let rewrittenProxyTab = manager.rewriteOwnerBoundRequest(
+            bodyData: proxyTabData,
+            parsedRequestJSON: proxyTabRequest,
+            upstreamIndex: 0
+        )
+        #expect(tabIdentifier(in: rewrittenProxyTab.bodyData) == "tab-a")
+
+        let workspaceOnlyRequest = toolsCallObject(
+            id: 9304,
+            name: "BuildProject",
+            arguments: ["workspacePath": "/Work/A.xcworkspace"]
+        )
+        let workspaceOnlyData = try JSONSerialization.data(
+            withJSONObject: workspaceOnlyRequest,
+            options: []
+        )
+        let rewrittenWorkspaceOnly = manager.rewriteOwnerBoundRequest(
+            bodyData: workspaceOnlyData,
+            parsedRequestJSON: workspaceOnlyRequest,
+            upstreamIndex: 0
+        )
+        #expect(tabIdentifier(in: rewrittenWorkspaceOnly.bodyData) == "tab-a")
+    }
+
     @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -9798,7 +10049,8 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected structured XcodeListWindows message")
             return
         }
-        #expect(message.contains("tab-a"))
+        #expect(message.contains("xcode-mcpkit:"))
+        #expect(message.contains("/Work/A.xcworkspace"))
     }
 
     @Test func liveXcodeListWindowsIgnoresCatalogsFromUnavailableRoutes() async throws {
@@ -9862,7 +10114,8 @@ struct RuntimeCoordinatorTests {
             Issue.record("expected structured XcodeListWindows message")
             return
         }
-        #expect(message.contains("tab-b"))
+        #expect(message.contains("xcode-mcpkit:"))
+        #expect(message.contains("/Work/B.xcworkspace"))
     }
 
     @Test func liveXcodeListWindowsClearsOwnersForCatalogFilteredRoutes() async throws {
@@ -14586,6 +14839,27 @@ private actor AutoToolsListUpstreamClient: UpstreamSlotControlling {
     func sentCount() async -> Int {
         await sentMessages.count()
     }
+}
+
+private func firstTabIdentifier(in message: String) -> String? {
+    for line in message.split(separator: "\n") {
+        let prefix = "* tabIdentifier: "
+        guard line.hasPrefix(prefix),
+              let delimiter = line.range(of: ", workspacePath: ") else {
+            continue
+        }
+        return String(line[line.index(line.startIndex, offsetBy: prefix.count)..<delimiter.lowerBound])
+    }
+    return nil
+}
+
+private func tabIdentifier(in data: Data) -> String? {
+    guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+          let params = object["params"] as? [String: Any],
+          let arguments = params["arguments"] as? [String: Any] else {
+        return nil
+    }
+    return arguments["tabIdentifier"] as? String
 }
 
 private final class BlockingSequencedXcodeTargetDiscovery:

@@ -429,8 +429,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     var xcodeProcessRoutes: [XcodeProcessRoute] {
         processRouteStore.activeRoutes()
     }
-    let tabOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
-    let workspaceOwnerProcessIDs = NIOLockedValueBox<[String: pid_t]>([:])
+    let windowOwnerIndex = NIOLockedValueBox(WindowOwnerIndex())
     let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
     let processRouteReadinessStore = ProcessRouteReadinessStore()
     let prewarmDocumentationProviderOnStartup: Bool
