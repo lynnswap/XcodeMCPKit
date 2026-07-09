@@ -892,7 +892,7 @@ extension RuntimeCoordinator {
         ])
     }
 
-    private func rewriteXcodeListWindowsResultForClients(
+    func rewriteXcodeListWindowsResultForClients(
         _ result: JSONValue,
         upstreamIndex: Int
     ) -> JSONValue {

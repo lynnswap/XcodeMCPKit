@@ -10386,6 +10386,81 @@ struct RuntimeCoordinatorTests {
         #expect(message.contains("/Work/A.xcworkspace"))
     }
 
+    @Test func pinnedLiveXcodeListWindowsReturnsClientProxyTabIdentifiers()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 634, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+            ]
+        )
+
+        let task = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .pinnedUpstream(0),
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let request = try await upstream.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request),
+                    message: "* tabIdentifier: raw-pinned-tab, "
+                        + "workspacePath: /Work/Pinned.xcworkspace"
+                )
+            )
+        )
+
+        let result = try await task.value
+        guard case .object(let object) = result,
+              case .object(let structuredContent)? = object["structuredContent"],
+              case .string(let message)? = structuredContent["message"],
+              let proxyTabIdentifier = firstTabIdentifier(in: message) else {
+            Issue.record("expected pinned XcodeListWindows to return a proxied tab")
+            return
+        }
+        #expect(proxyTabIdentifier.hasPrefix("xcode-mcpkit:"))
+        #expect(proxyTabIdentifier != "raw-pinned-tab")
+        #expect(message.contains("/Work/Pinned.xcworkspace"))
+
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 8707,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": proxyTabIdentifier]
+                )
+            ) == 0
+        )
+    }
+
     @Test func liveXcodeListWindowsIgnoresCatalogsFromUnavailableRoutes() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

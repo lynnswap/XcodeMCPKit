@@ -1442,6 +1442,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
             if case .pinnedUpstream(let upstreamIndex) = route {
                 recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
+                if processRoutingEnabled {
+                    return rewriteXcodeListWindowsResultForClients(
+                        result,
+                        upstreamIndex: upstreamIndex
+                    )
+                }
             }
             return result
         }
