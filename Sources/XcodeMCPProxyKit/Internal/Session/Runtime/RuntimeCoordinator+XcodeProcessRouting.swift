@@ -526,18 +526,19 @@ extension RuntimeCoordinator {
                 for: requests,
                 unresolvedOwnerBoundRequests: ownerResolution.unresolved
             )
-        if ownerResolution.unresolved.isEmpty == false {
-            if inferredOwnerProcessID == nil {
-                _ = try? await refreshXcodeWindowOwnersForRouting(
-                    requestTimeoutOverride: requestTimeoutOverride
+        let needsOwnerRefresh =
+            ownerResolution.conflicts.isEmpty == false
+            || (ownerResolution.unresolved.isEmpty == false && inferredOwnerProcessID == nil)
+        if needsOwnerRefresh {
+            _ = try? await refreshXcodeWindowOwnersForRouting(
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+            ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+            inferredOwnerProcessID =
+                inferredUnambiguousOwnerProcessID(
+                    for: requests,
+                    unresolvedOwnerBoundRequests: ownerResolution.unresolved
                 )
-                ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
-                inferredOwnerProcessID =
-                    inferredUnambiguousOwnerProcessID(
-                        for: requests,
-                        unresolvedOwnerBoundRequests: ownerResolution.unresolved
-                    )
-            }
         }
 
         if ownerResolution.conflicts.isEmpty == false {
@@ -1368,13 +1369,13 @@ extension RuntimeCoordinator {
                 forRawTabIdentifier: tabIdentifier,
                 eligibleProcessIDs: eligibleProcessIDs
             )
-            let processIDs = Set(rawIdentities.map(\.processID))
-            switch processIDs.count {
+            switch rawIdentities.count {
             case 0:
                 return .unresolved
             case 1:
-                return .resolved(processID: processIDs.first!, ownerLabel: tabIdentifier)
+                return .resolved(processID: rawIdentities[0].processID, ownerLabel: tabIdentifier)
             default:
+                let processIDs = Set(rawIdentities.map(\.processID))
                 let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
                 return .conflict(
                     "ambiguous raw Xcode tabIdentifier '\(tabIdentifier)'"

@@ -8794,12 +8794,18 @@ struct RuntimeCoordinatorTests {
                 (
                     target0,
                     0,
-                    [ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool")]
+                    [
+                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
                 ),
                 (
                     target1,
                     1,
-                    [ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool")]
+                    [
+                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
                 ),
             ]
         )
@@ -8814,14 +8820,47 @@ struct RuntimeCoordinatorTests {
             ],
         ]
         #expect(manager.preferredUpstreamIndex(for: workspaceRequest) == nil)
-        let decision = await manager.toolRoutingDecision(
-            for: toolsCallObject(
-                id: 8701,
-                name: "XcodeSomeWorkspaceScopedTool",
-                arguments: ["workspacePath": workspacePath]
-            ),
-            requestTimeoutOverride: .seconds(2)
+        let refreshStart0 = await upstream0.sentCount()
+        let refreshStart1 = await upstream1.sentCount()
+        let decisionTask = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 8701,
+                    name: "XcodeSomeWorkspaceScopedTool",
+                    arguments: ["workspacePath": workspacePath]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let refreshRequest0 = try await upstream0.nextSent(
+            startingAt: refreshStart0,
+            matching: {
+                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+            }
         )
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: refreshRequest0),
+                    message: message0
+                )
+            )
+        )
+        let refreshRequest1 = try await upstream1.nextSent(
+            startingAt: refreshStart1,
+            matching: {
+                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+            }
+        )
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: refreshRequest1),
+                    message: message1
+                )
+            )
+        )
+        let decision = await decisionTask.value
         guard case .reject(let errors, _) = decision else {
             Issue.record("expected duplicate workspace owner to reject")
             return
@@ -8981,11 +9020,12 @@ struct RuntimeCoordinatorTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 620, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient()],
+            upstreams: [upstream],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
             ],
@@ -8996,23 +9036,60 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
 
         let workspaceA = "/Work/RawCollisionA.xcworkspace"
         let workspaceB = "/Work/RawCollisionB.xcworkspace"
+        let windowsMessage = "* tabIdentifier: reused-tab, workspacePath: \(workspaceA)\n"
+            + "* tabIdentifier: reused-tab, workspacePath: \(workspaceB)"
         #expect(
             manager.recordXcodeWindowOwners(
                 from: try jsonValue([
                     "structuredContent": [
-                        "message": "* tabIdentifier: reused-tab, workspacePath: \(workspaceA)\n"
-                            + "* tabIdentifier: reused-tab, workspacePath: \(workspaceB)",
+                        "message": windowsMessage,
                     ],
                 ]),
                 upstreamIndex: 0
             )
         )
+
+        let ambiguousTask = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 8705,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "reused-tab"]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let refreshRequest = try await upstream.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: refreshRequest),
+                    message: windowsMessage
+                )
+            )
+        )
+        let ambiguousDecision = await ambiguousTask.value
+        guard case .reject(let errors, _) = ambiguousDecision else {
+            Issue.record("expected raw tab collision within one process to reject")
+            return
+        }
+        #expect(errors.map(\.id.key) == ["8705"])
+        #expect(errors.first?.message.contains("ambiguous raw Xcode tabIdentifier") == true)
 
         let proxyTabA = WindowOwnerIndex().proxyTabIdentifier(
             processID: target.processID,
@@ -9597,12 +9674,14 @@ struct RuntimeCoordinatorTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
         let target0 = xcodeProcessTarget(processID: 612, xcodeVersion: "27.0")
         let target1 = xcodeProcessTarget(processID: 613, xcodeVersion: "26.6")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            upstreams: [upstream0, upstream1],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target0, upstreamIndices: [0]),
                 XcodeProcessRoute(target: target1, upstreamIndices: [1]),
@@ -9615,8 +9694,22 @@ struct RuntimeCoordinatorTests {
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
             ]
         )
         #expect(
@@ -9640,14 +9733,39 @@ struct RuntimeCoordinatorTests {
             )
         )
 
-        let ambiguousDecision = await manager.toolRoutingDecision(
-            for: toolsCallObject(
-                id: 9301,
-                name: "BuildProject",
-                arguments: ["tabIdentifier": "windowtab1"]
-            ),
-            requestTimeoutOverride: .seconds(2)
+        let ambiguousTask = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 9301,
+                    name: "BuildProject",
+                    arguments: ["tabIdentifier": "windowtab1"]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        let refresh0 = try await upstream0.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: refresh0),
+                    message: "* tabIdentifier: windowtab1, workspacePath: /Work/A.xcworkspace"
+                )
+            )
         )
+        let refresh1 = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: refresh1),
+                    message: "* tabIdentifier: windowtab1, workspacePath: /Work/B.xcworkspace"
+                )
+            )
+        )
+        let ambiguousDecision = await ambiguousTask.value
         guard case .reject(let errors, _) = ambiguousDecision else {
             Issue.record("expected raw tab-only request to reject")
             return
@@ -10751,6 +10869,124 @@ struct RuntimeCoordinatorTests {
         let decision = await task.value
         guard case .forwardAny(let preferredUpstreamIndices) = decision else {
             Issue.record("expected refreshed owner-bound request to forward")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
+    }
+
+    @Test func ownerBoundToolRefreshesStaleWorkspaceConflictBeforeRejecting()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let target0 = xcodeProcessTarget(processID: 632, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 633, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "BuildProject"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+            ]
+        )
+
+        let workspacePath = "/Work/StaleConflict.xcworkspace"
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: stale-tab, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: live-tab, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+        #expect(
+            manager.preferredUpstreamIndex(
+                for: toolsCallObject(
+                    id: 8706,
+                    name: "BuildProject",
+                    arguments: ["workspacePath": workspacePath]
+                )
+            ) == nil
+        )
+
+        let task = Task {
+            await manager.toolRoutingDecision(
+                for: toolsCallObject(
+                    id: 8706,
+                    name: "BuildProject",
+                    arguments: ["workspacePath": workspacePath]
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+
+        let request0 = try await upstream0.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream0.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request0),
+                    message: ""
+                )
+            )
+        )
+        let request1 = try await upstream1.nextSent {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+        }
+        await upstream1.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: request1),
+                    message: "* tabIdentifier: live-tab, workspacePath: \(workspacePath)"
+                )
+            )
+        )
+
+        let decision = await task.value
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected stale workspace conflict to refresh before rejecting")
             return
         }
         #expect(preferredUpstreamIndices == [1])
