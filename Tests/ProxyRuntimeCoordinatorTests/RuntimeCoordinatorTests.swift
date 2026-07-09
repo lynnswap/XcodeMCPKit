@@ -8830,6 +8830,79 @@ struct RuntimeCoordinatorTests {
         #expect(errors.first?.message.contains("conflicting Xcode window owners") == true)
     }
 
+    @Test func unavailableCachedWorkspaceOwnerDoesNotConflictWithAvailableOwner()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let unavailableTarget = xcodeProcessTarget(processID: 616, xcodeVersion: "27.0")
+        let availableTarget = xcodeProcessTarget(processID: 617, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: unavailableTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: availableTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (unavailableTarget, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (availableTarget, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+        manager.markXcodeProcessRouteUnavailable(
+            upstreamIndex: 0,
+            reason: "test_unavailable_stale_owner"
+        )
+        #expect(manager.unavailableXcodeProcessIDs().contains(unavailableTarget.processID))
+
+        let workspacePath = "/Work/SharedAfterUnavailable.xcworkspace"
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: stale-tab, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: live-tab, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+
+        let request = toolsCallObject(
+            id: 8702,
+            name: "BuildProject",
+            arguments: ["workspacePath": workspacePath]
+        )
+        #expect(manager.preferredUpstreamIndex(for: request) == 1)
+        let decision = await manager.toolRoutingDecision(
+            for: request,
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected unavailable stale owner to be ignored")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
+    }
+
     @Test func sessionManagerSkipsUninitializedProcessRoutesDuringWindowFanout()
         async throws
     {

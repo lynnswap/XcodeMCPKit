@@ -1266,21 +1266,26 @@ extension RuntimeCoordinator {
         tabIdentifier: String?,
         workspacePath: String?
     ) -> CachedOwnerResolution {
-        windowOwnerIndex.withLockedValue { index in
+        let eligibleProcessIDs = activeAvailableOwnerProcessIDs()
+        return windowOwnerIndex.withLockedValue { index in
             let nonEmptyWorkspacePath = workspacePath.flatMap { $0.isEmpty ? nil : $0 }
             let nonEmptyTabIdentifier = tabIdentifier.flatMap { $0.isEmpty ? nil : $0 }
 
             if let workspacePath = nonEmptyWorkspacePath {
-                switch index.owner(forWorkspacePath: workspacePath) {
+                switch index.owner(
+                    forWorkspacePath: workspacePath,
+                    eligibleProcessIDs: eligibleProcessIDs
+                ) {
                 case .resolved(let processID):
                     if let tabIdentifier = nonEmptyTabIdentifier,
                        let conflict = tabConflictMessage(
                            tabIdentifier: tabIdentifier,
                            workspacePath: workspacePath,
                            ownerProcessID: processID,
-                           index: index
+                           index: index,
+                           eligibleProcessIDs: eligibleProcessIDs
                        ) {
-                        return .conflict(conflict)
+                        return CachedOwnerResolution.conflict(conflict)
                     }
                     return .resolved(processID: processID, ownerLabel: workspacePath)
                 case .conflicting(let processIDs):
@@ -1310,6 +1315,11 @@ extension RuntimeCoordinator {
                 return .unresolved
             }
             if let identity = index.identity(forProxyTabIdentifier: tabIdentifier) {
+                guard eligibleProcessIDs.contains(identity.processID) else {
+                    return .conflict(
+                        "stale or unavailable XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+                    )
+                }
                 return .resolved(
                     processID: identity.processID,
                     ownerLabel: identity.proxyTabIdentifier
@@ -1321,7 +1331,10 @@ extension RuntimeCoordinator {
                 )
             }
 
-            let rawIdentities = index.identities(forRawTabIdentifier: tabIdentifier)
+            let rawIdentities = index.identities(
+                forRawTabIdentifier: tabIdentifier,
+                eligibleProcessIDs: eligibleProcessIDs
+            )
             let processIDs = Set(rawIdentities.map(\.processID))
             switch processIDs.count {
             case 0:
@@ -1338,11 +1351,23 @@ extension RuntimeCoordinator {
         }
     }
 
+    private func activeAvailableOwnerProcessIDs() -> Set<pid_t> {
+        let unavailable = unavailableXcodeProcessIDs()
+        return Set(
+            xcodeProcessRoutes.compactMap { route in
+                unavailable.contains(route.target.processID)
+                    ? nil
+                    : route.target.processID
+            }
+        )
+    }
+
     private func tabConflictMessage(
         tabIdentifier: String,
         workspacePath: String,
         ownerProcessID: pid_t,
-        index: WindowOwnerIndex
+        index: WindowOwnerIndex,
+        eligibleProcessIDs: Set<pid_t>
     ) -> String? {
         if let identity = index.identity(forProxyTabIdentifier: tabIdentifier) {
             guard identity.processID == ownerProcessID,
@@ -1354,7 +1379,10 @@ extension RuntimeCoordinator {
         if tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) {
             return "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
         }
-        let rawIdentities = index.identities(forRawTabIdentifier: tabIdentifier)
+        let rawIdentities = index.identities(
+            forRawTabIdentifier: tabIdentifier,
+            eligibleProcessIDs: eligibleProcessIDs
+        )
         guard rawIdentities.isEmpty == false else {
             return nil
         }

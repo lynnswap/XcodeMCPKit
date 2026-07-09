@@ -73,10 +73,14 @@ struct WindowOwnerIndex: Sendable, Equatable {
         return identities != before
     }
 
-    func owner(forWorkspacePath workspacePath: String) -> ProcessOwnerLookup {
+    func owner(
+        forWorkspacePath workspacePath: String,
+        eligibleProcessIDs: Set<pid_t>
+    ) -> ProcessOwnerLookup {
         let processIDs = Set(
             identities
                 .filter { $0.workspacePath == workspacePath }
+                .filter { eligibleProcessIDs.contains($0.processID) }
                 .map(\.processID)
         )
         switch processIDs.count {
@@ -93,8 +97,14 @@ struct WindowOwnerIndex: Sendable, Equatable {
         identities.first { $0.proxyTabIdentifier == tabIdentifier }
     }
 
-    func identities(forRawTabIdentifier tabIdentifier: String) -> [Identity] {
-        identities.filter { $0.rawTabIdentifier == tabIdentifier }
+    func identities(
+        forRawTabIdentifier tabIdentifier: String,
+        eligibleProcessIDs: Set<pid_t>
+    ) -> [Identity] {
+        identities.filter {
+            $0.rawTabIdentifier == tabIdentifier
+                && eligibleProcessIDs.contains($0.processID)
+        }
     }
 
     func identities(
