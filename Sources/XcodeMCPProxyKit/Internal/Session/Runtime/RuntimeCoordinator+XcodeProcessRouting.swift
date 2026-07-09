@@ -1108,7 +1108,7 @@ extension RuntimeCoordinator {
            rawTabIdentifier != tabIdentifier {
             arguments["tabIdentifier"] = rawTabIdentifier
             changed = true
-        } else if arguments["tabIdentifier"] == nil,
+        } else if (arguments["tabIdentifier"] as? String)?.isEmpty ?? true,
                   let workspacePath = arguments["workspacePath"] as? String,
                   workspacePath.isEmpty == false,
                   processToolSurfaceStore.tool(
@@ -1273,7 +1273,7 @@ extension RuntimeCoordinator {
         tabIdentifier: String?,
         workspacePath: String?
     ) -> CachedOwnerResolution {
-        let eligibleProcessIDs = activeAvailableOwnerProcessIDs()
+        let eligibleProcessIDs = ownerRoutingEligibleProcessIDs()
         return windowOwnerIndex.withLockedValue { index in
             let nonEmptyWorkspacePath = workspacePath.flatMap { $0.isEmpty ? nil : $0 }
             let nonEmptyTabIdentifier = tabIdentifier.flatMap { $0.isEmpty ? nil : $0 }
@@ -1385,15 +1385,8 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func activeAvailableOwnerProcessIDs() -> Set<pid_t> {
-        let unavailable = unavailableXcodeProcessIDs()
-        return Set(
-            xcodeProcessRoutes.compactMap { route in
-                unavailable.contains(route.target.processID)
-                    ? nil
-                    : route.target.processID
-            }
-        )
+    private func ownerRoutingEligibleProcessIDs() -> Set<pid_t> {
+        processRouteExposure(policy: .ownerRouting).processIDs
     }
 
     private func tabConflictMessage(

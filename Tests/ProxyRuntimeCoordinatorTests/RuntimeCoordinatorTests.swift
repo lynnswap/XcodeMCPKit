@@ -8942,6 +8942,73 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
+    @Test func unusableCachedWorkspaceOwnerDoesNotConflictWithUsableOwner()
+        async throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let unusableTarget = xcodeProcessTarget(processID: 636, xcodeVersion: "27.0")
+        let usableTarget = xcodeProcessTarget(processID: 637, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: unusableTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: usableTarget, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (unusableTarget, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (usableTarget, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+
+        let workspacePath = "/Work/SharedAfterUnusable.xcworkspace"
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: stale-tab, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: live-tab, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+
+        let request = toolsCallObject(
+            id: 8708,
+            name: "BuildProject",
+            arguments: ["workspacePath": workspacePath]
+        )
+        #expect(manager.preferredUpstreamIndex(for: request) == 1)
+        let decision = await manager.toolRoutingDecision(
+            for: request,
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected unusable stale owner to be ignored")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
+    }
+
     @Test func proxyTabIdentifierDisambiguatesDuplicateWorkspaceOwners() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -9941,6 +10008,25 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
         #expect(tabIdentifier(in: rewrittenWorkspaceOnly.bodyData) == "tab-a")
+
+        let emptyTabWorkspaceRequest = toolsCallObject(
+            id: 9305,
+            name: "BuildProject",
+            arguments: [
+                "tabIdentifier": "",
+                "workspacePath": "/Work/A.xcworkspace",
+            ]
+        )
+        let emptyTabWorkspaceData = try JSONSerialization.data(
+            withJSONObject: emptyTabWorkspaceRequest,
+            options: []
+        )
+        let rewrittenEmptyTabWorkspace = manager.rewriteOwnerBoundRequest(
+            bodyData: emptyTabWorkspaceData,
+            parsedRequestJSON: emptyTabWorkspaceRequest,
+            upstreamIndex: 0
+        )
+        #expect(tabIdentifier(in: rewrittenEmptyTabWorkspace.bodyData) == "tab-a")
     }
 
     @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {
