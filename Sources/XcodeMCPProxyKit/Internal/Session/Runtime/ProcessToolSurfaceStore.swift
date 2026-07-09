@@ -303,6 +303,17 @@ final class ProcessToolSurfaceStore: Sendable {
         catalog(forProcessID: processID)?.toolsByName[toolName] != nil
     }
 
+    func tool(
+        _ toolName: String,
+        processID: pid_t,
+        requiresArgument argumentName: String
+    ) -> Bool {
+        guard let tool = catalog(forProcessID: processID)?.toolsByName[toolName] else {
+            return false
+        }
+        return Self.tool(tool, requiresArgument: argumentName)
+    }
+
     func toolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
         catalog(forUpstreamIndex: upstreamIndex)?.rawResult
     }
@@ -381,6 +392,18 @@ final class ProcessToolSurfaceStore: Sendable {
             }
         }
         return false
+    }
+
+    static func tool(_ tool: JSONValue, requiresArgument argumentName: String) -> Bool {
+        guard case .object(let toolObject) = tool,
+              case .object(let inputSchema)? = toolObject["inputSchema"],
+              case .array(let required)? = inputSchema["required"] else {
+            return false
+        }
+        return required.contains { value in
+            guard case .string(let key) = value else { return false }
+            return key == argumentName
+        }
     }
 
     private static func ownerBoundToolNames(in result: JSONValue) -> Set<String> {

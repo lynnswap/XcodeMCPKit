@@ -38,6 +38,17 @@ extension RuntimeCoordinator {
         case reject
     }
 
+    private struct OwnerResolutionConflict: Sendable {
+        let request: ToolRoutingRequest
+        let message: String
+    }
+
+    private enum CachedOwnerResolution: Sendable {
+        case resolved(processID: pid_t, ownerLabel: String)
+        case unresolved
+        case conflict(String)
+    }
+
     func liveXcodeListWindowsAcrossProcessRoutes(
         deadlineUptimeNs: UInt64?,
         routeScope: XcodeListWindowsRouteScope
@@ -132,7 +143,12 @@ extension RuntimeCoordinator {
 
             let orderedRouteResults = results.sorted { $0.ordinal < $1.ordinal }
             recordXcodeWindowOwners(fromOrderedRouteResults: orderedRouteResults)
-            let orderedResults = orderedRouteResults.map(\.result)
+            let orderedResults = orderedRouteResults.map {
+                rewriteXcodeListWindowsResultForClients(
+                    $0.result,
+                    upstreamIndex: $0.upstreamIndex
+                )
+            }
             if let merged = Self.mergedXcodeListWindowsResult(orderedResults) {
                 return merged
             }
@@ -327,17 +343,33 @@ extension RuntimeCoordinator {
     }
 
     func removeXcodeWindowOwners(forProcessID processID: pid_t) {
-        tabOwnerProcessIDs.withLockedValue { owners in
-            owners = owners.filter { $0.value != processID }
+        let changed = windowOwnerIndex.withLockedValue { index in
+            index.remove(processID: processID)
         }
-        workspaceOwnerProcessIDs.withLockedValue { owners in
-            owners = owners.filter { $0.value != processID }
+        if changed {
+            invalidateControlPlane(
+                reason: "xcode_window_owners_updated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
         }
     }
 
     func clearXcodeWindowOwners() {
-        tabOwnerProcessIDs.withLockedValue { $0.removeAll() }
-        workspaceOwnerProcessIDs.withLockedValue { $0.removeAll() }
+        let changed = windowOwnerIndex.withLockedValue { index in
+            guard index.isEmpty == false else {
+                return false
+            }
+            index.removeAll()
+            return true
+        }
+        if changed {
+            invalidateControlPlane(
+                reason: "xcode_window_owners_updated",
+                clearInitialize: false,
+                clearToolsCatalog: true
+            )
+        }
     }
 
     func documentationUpstreamIndex(for target: XcodeProcessTarget) -> Int? {
@@ -494,18 +526,35 @@ extension RuntimeCoordinator {
                 for: requests,
                 unresolvedOwnerBoundRequests: ownerResolution.unresolved
             )
-        if ownerResolution.unresolved.isEmpty == false {
-            if inferredOwnerProcessID == nil {
-                _ = try? await refreshXcodeWindowOwnersForRouting(
-                    requestTimeoutOverride: requestTimeoutOverride
+        let needsOwnerRefresh =
+            ownerResolution.conflicts.isEmpty == false
+            || (ownerResolution.unresolved.isEmpty == false && inferredOwnerProcessID == nil)
+        if needsOwnerRefresh {
+            _ = try? await refreshXcodeWindowOwnersForRouting(
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+            ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+            inferredOwnerProcessID =
+                inferredUnambiguousOwnerProcessID(
+                    for: requests,
+                    unresolvedOwnerBoundRequests: ownerResolution.unresolved
                 )
-                ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
-                inferredOwnerProcessID =
-                    inferredUnambiguousOwnerProcessID(
-                        for: requests,
-                        unresolvedOwnerBoundRequests: ownerResolution.unresolved
-                    )
+        }
+
+        if ownerResolution.conflicts.isEmpty == false {
+            let errors = ownerResolution.conflicts.compactMap { conflict -> ToolRoutingError? in
+                guard let id = conflict.request.id else { return nil }
+                return ToolRoutingError(id: id, message: conflict.message)
             }
+            return .reject(
+                errors: errors.isEmpty
+                    ? toolRoutingErrors(
+                        for: requests,
+                        message: "conflicting Xcode window owners for one or more tools"
+                    )
+                    : errors,
+                forceBatchArray: requestJSON is [Any]
+            )
         }
 
         if ownerResolution.unresolved.isEmpty == false, inferredOwnerProcessID == nil {
@@ -752,15 +801,28 @@ extension RuntimeCoordinator {
         fromOrderedRouteResults results: [(ordinal: Int, upstreamIndex: Int, result: JSONValue)]
     ) {
         let processIDs = Set(results.compactMap { processID(forUpstreamIndex: $0.upstreamIndex) })
-        for processID in processIDs {
-            removeXcodeWindowOwners(forProcessID: processID)
+        let entriesByProcessID: [(processID: pid_t, entries: [XcodeListWindowsEntry])] =
+            results.compactMap { result in
+                guard let processID = processID(forUpstreamIndex: result.upstreamIndex) else {
+                    return nil
+                }
+                return (processID, Self.windowEntries(in: result.result))
+            }
+        let changed = windowOwnerIndex.withLockedValue { index in
+            let before = index
+            for processID in processIDs {
+                index.remove(processID: processID)
+            }
+            for entry in entriesByProcessID {
+                index.record(processID: entry.processID, entries: entry.entries)
+            }
+            return index != before
         }
-        for result in results {
-            _ = recordXcodeWindowOwners(
-                from: result.result,
-                upstreamIndex: result.upstreamIndex,
-                removeExistingOwners: false,
-                overwriteExistingOwners: false
+        if changed {
+            invalidateControlPlane(
+                reason: "xcode_window_owners_updated",
+                clearInitialize: false,
+                clearToolsCatalog: true
             )
         }
     }
@@ -770,43 +832,28 @@ extension RuntimeCoordinator {
         from result: JSONValue,
         upstreamIndex: Int,
         removeExistingOwners: Bool,
-        overwriteExistingOwners: Bool
+        overwriteExistingOwners _: Bool
     ) -> Bool {
         guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
             return false
         }
-        let previousTabOwners = tabOwnerProcessIDs.withLockedValue { $0 }
-        let previousWorkspaceOwners = workspaceOwnerProcessIDs.withLockedValue { $0 }
-        if removeExistingOwners {
-            removeXcodeWindowOwners(forProcessID: processID)
-        }
         let entries = Self.windowEntries(in: result)
-        guard entries.isEmpty == false else {
-            return false
-        }
-        tabOwnerProcessIDs.withLockedValue { owners in
-            for entry in entries {
-                if overwriteExistingOwners || owners[entry.tabIdentifier] == nil {
-                    owners[entry.tabIdentifier] = processID
-                }
+        let changed = windowOwnerIndex.withLockedValue { index in
+            let before = index
+            if removeExistingOwners {
+                index.remove(processID: processID)
             }
+            index.record(processID: processID, entries: entries)
+            return index != before
         }
-        workspaceOwnerProcessIDs.withLockedValue { owners in
-            for entry in entries {
-                if overwriteExistingOwners || owners[entry.workspacePath] == nil {
-                    owners[entry.workspacePath] = processID
-                }
-            }
-        }
-        if tabOwnerProcessIDs.withLockedValue({ $0 }) != previousTabOwners
-            || workspaceOwnerProcessIDs.withLockedValue({ $0 }) != previousWorkspaceOwners {
+        if changed {
             invalidateControlPlane(
                 reason: "xcode_window_owners_updated",
                 clearInitialize: false,
                 clearToolsCatalog: true
             )
         }
-        return true
+        return entries.isEmpty == false
     }
 
     static func mergedXcodeListWindowsResult(
@@ -823,6 +870,54 @@ extension RuntimeCoordinator {
                 ?? results.first
         }
         let message = messages.joined(separator: "\n")
+        let encodedMessage: String
+        if let data = try? JSONSerialization.data(
+            withJSONObject: ["message": message],
+            options: [.sortedKeys]
+        ) {
+            encodedMessage = String(decoding: data, as: UTF8.self)
+        } else {
+            encodedMessage = message
+        }
+        return .object([
+            "content": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string(encodedMessage),
+                ]),
+            ]),
+            "structuredContent": .object([
+                "message": .string(message),
+            ]),
+        ])
+    }
+
+    func rewriteXcodeListWindowsResultForClients(
+        _ result: JSONValue,
+        upstreamIndex: Int
+    ) -> JSONValue {
+        guard let processID = processID(forUpstreamIndex: upstreamIndex) else {
+            return result
+        }
+        let entries = Self.windowEntries(in: result)
+        guard entries.isEmpty == false else {
+            return result
+        }
+        let message = windowOwnerIndex.withLockedValue { index in
+            entries.map { entry in
+                let proxyTabIdentifier = index.proxyTabIdentifier(
+                    processID: processID,
+                    rawTabIdentifier: entry.tabIdentifier,
+                    workspacePath: entry.workspacePath
+                )
+                return "* tabIdentifier: \(proxyTabIdentifier), workspacePath: \(entry.workspacePath)"
+            }
+            .joined(separator: "\n")
+        }
+        return Self.xcodeListWindowsResult(message: message)
+    }
+
+    private static func xcodeListWindowsResult(message: String) -> JSONValue {
         let encodedMessage: String
         if let data = try? JSONSerialization.data(
             withJSONObject: ["message": message],
@@ -944,6 +1039,129 @@ extension RuntimeCoordinator {
         xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.target.processID
     }
 
+    func rewriteOwnerBoundRequest(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        upstreamIndex: Int
+    ) -> (bodyData: Data, parsedRequestJSON: Any) {
+        guard processRoutingEnabled,
+              let processID = processID(forUpstreamIndex: upstreamIndex) else {
+            return (bodyData, parsedRequestJSON)
+        }
+        let rewritten = rewriteOwnerBoundRequestJSON(
+            parsedRequestJSON,
+            processID: processID
+        )
+        guard rewritten.changed else {
+            return (bodyData, parsedRequestJSON)
+        }
+        guard JSONSerialization.isValidJSONObject(rewritten.value),
+              let data = try? JSONSerialization.data(
+                withJSONObject: rewritten.value,
+                options: []
+              ) else {
+            return (bodyData, parsedRequestJSON)
+        }
+        return (data, rewritten.value)
+    }
+
+    private func rewriteOwnerBoundRequestJSON(
+        _ value: Any,
+        processID: pid_t
+    ) -> (value: Any, changed: Bool) {
+        if let object = value as? [String: Any] {
+            return rewriteOwnerBoundRequestObject(object, processID: processID)
+        }
+        guard let array = value as? [Any] else {
+            return (value, false)
+        }
+        var changed = false
+        let rewritten = array.map { item -> Any in
+            guard let object = item as? [String: Any] else {
+                return item
+            }
+            let result = rewriteOwnerBoundRequestObject(object, processID: processID)
+            changed = changed || result.changed
+            return result.value
+        }
+        return (rewritten, changed)
+    }
+
+    private func rewriteOwnerBoundRequestObject(
+        _ object: [String: Any],
+        processID: pid_t
+    ) -> (value: [String: Any], changed: Bool) {
+        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
+              var params = object["params"] as? [String: Any],
+              let toolName = params["name"] as? String,
+              var arguments = params["arguments"] as? [String: Any] else {
+            return (object, false)
+        }
+        var changed = false
+
+        if let tabIdentifier = arguments["tabIdentifier"] as? String,
+           tabIdentifier.isEmpty == false,
+           let rawTabIdentifier = rawTabIdentifierForForwarding(
+            tabIdentifier: tabIdentifier,
+            processID: processID
+           ),
+           rawTabIdentifier != tabIdentifier {
+            arguments["tabIdentifier"] = rawTabIdentifier
+            changed = true
+        } else if (arguments["tabIdentifier"] as? String)?.isEmpty ?? true,
+                  let workspacePath = arguments["workspacePath"] as? String,
+                  workspacePath.isEmpty == false,
+                  processToolSurfaceStore.tool(
+                    toolName,
+                    processID: processID,
+                    requiresArgument: "tabIdentifier"
+                  ),
+                  let rawTabIdentifier = singleRawTabIdentifier(
+                    workspacePath: workspacePath,
+                    processID: processID
+                  ) {
+            arguments["tabIdentifier"] = rawTabIdentifier
+            changed = true
+        }
+
+        guard changed else {
+            return (object, false)
+        }
+        params["arguments"] = arguments
+        var rewritten = object
+        rewritten["params"] = params
+        return (rewritten, true)
+    }
+
+    private func rawTabIdentifierForForwarding(
+        tabIdentifier: String,
+        processID: pid_t
+    ) -> String? {
+        windowOwnerIndex.withLockedValue { index in
+            guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier),
+                  identity.processID == processID else {
+                return nil
+            }
+            return identity.rawTabIdentifier
+        }
+    }
+
+    private func singleRawTabIdentifier(
+        workspacePath: String,
+        processID: pid_t
+    ) -> String? {
+        windowOwnerIndex.withLockedValue { index in
+            let identities = index.identities(
+                workspacePath: workspacePath,
+                processID: processID
+            )
+            guard identities.count == 1 else {
+                return nil
+            }
+            return identities[0].rawTabIdentifier
+        }
+    }
+
     private func preferredUpstreamIndex(in object: [String: Any]) -> Int? {
         guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
               let params = object["params"] as? [String: Any],
@@ -954,19 +1172,23 @@ extension RuntimeCoordinator {
         guard isKnownOwnerBoundTool(toolName) else {
             return nil
         }
-        if let tabIdentifier = arguments["tabIdentifier"] as? String,
-           tabIdentifier.isEmpty == false,
-           let upstreamIndex = upstreamIndexForOwner(tabIdentifier: tabIdentifier)
-        {
-            return upstreamIndex
+        let tabIdentifier = (arguments["tabIdentifier"] as? String).flatMap {
+            $0.isEmpty ? nil : $0
         }
-        if let workspacePath = arguments["workspacePath"] as? String,
-           workspacePath.isEmpty == false,
-           let upstreamIndex = upstreamIndexForOwner(workspacePath: workspacePath)
-        {
-            return upstreamIndex
+        let workspacePath = (arguments["workspacePath"] as? String).flatMap {
+            $0.isEmpty ? nil : $0
         }
-        return nil
+        guard tabIdentifier != nil || workspacePath != nil,
+              case .resolved(let processID, _) = cachedOwnerResolution(
+                  tabIdentifier: tabIdentifier,
+                  workspacePath: workspacePath
+              ),
+              let route = xcodeProcessRoutes.first(where: {
+                  $0.target.processID == processID
+              }) else {
+            return nil
+        }
+        return firstUsableInitializedUpstreamIndex(in: route)
     }
 
     private func toolRoutingRequests(in value: Any) -> [ToolRoutingRequest] {
@@ -1040,46 +1262,186 @@ extension RuntimeCoordinator {
         )
     }
 
+    private func cachedOwnerResolution(for request: ToolRoutingRequest) -> CachedOwnerResolution {
+        cachedOwnerResolution(
+            tabIdentifier: request.tabIdentifier,
+            workspacePath: request.workspacePath
+        )
+    }
+
+    private func cachedOwnerResolution(
+        tabIdentifier: String?,
+        workspacePath: String?
+    ) -> CachedOwnerResolution {
+        let eligibleProcessIDs = ownerRoutingEligibleProcessIDs()
+        return windowOwnerIndex.withLockedValue { index in
+            let nonEmptyWorkspacePath = workspacePath.flatMap { $0.isEmpty ? nil : $0 }
+            let nonEmptyTabIdentifier = tabIdentifier.flatMap { $0.isEmpty ? nil : $0 }
+
+            func proxyTabResolution(
+                tabIdentifier: String,
+                workspacePath: String?
+            ) -> CachedOwnerResolution? {
+                guard tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) else {
+                    return nil
+                }
+                guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier) else {
+                    return .conflict(
+                        "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+                    )
+                }
+                guard eligibleProcessIDs.contains(identity.processID) else {
+                    return .conflict(
+                        "stale or unavailable XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+                    )
+                }
+                if let workspacePath, identity.workspacePath != workspacePath {
+                    return .conflict(
+                        "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath"
+                            + " '\(workspacePath)'"
+                    )
+                }
+                return .resolved(
+                    processID: identity.processID,
+                    ownerLabel: identity.proxyTabIdentifier
+                )
+            }
+
+            if let workspacePath = nonEmptyWorkspacePath {
+                if let tabIdentifier = nonEmptyTabIdentifier,
+                   let resolution = proxyTabResolution(
+                       tabIdentifier: tabIdentifier,
+                       workspacePath: workspacePath
+                   ) {
+                    return resolution
+                }
+
+                switch index.owner(
+                    forWorkspacePath: workspacePath,
+                    eligibleProcessIDs: eligibleProcessIDs
+                ) {
+                case .resolved(let processID):
+                    if let tabIdentifier = nonEmptyTabIdentifier,
+                       let conflict = tabConflictMessage(
+                           tabIdentifier: tabIdentifier,
+                           workspacePath: workspacePath,
+                           ownerProcessID: processID,
+                           index: index,
+                           eligibleProcessIDs: eligibleProcessIDs
+                       ) {
+                        return CachedOwnerResolution.conflict(conflict)
+                    }
+                    return .resolved(processID: processID, ownerLabel: workspacePath)
+                case .conflicting(let processIDs):
+                    let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
+                    return .conflict(
+                        "conflicting Xcode window owners for workspacePath '\(workspacePath)'"
+                            + " (processes: \(candidates))"
+                    )
+                case .unresolved:
+                    if let tabIdentifier = nonEmptyTabIdentifier {
+                        if index.identity(forProxyTabIdentifier: tabIdentifier) != nil {
+                            return .conflict(
+                                "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
+                            )
+                        }
+                        if tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) {
+                            return .conflict(
+                                "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+                            )
+                        }
+                    }
+                    return .unresolved
+                }
+            }
+
+            guard let tabIdentifier = nonEmptyTabIdentifier else {
+                return .unresolved
+            }
+            if let resolution = proxyTabResolution(
+                tabIdentifier: tabIdentifier,
+                workspacePath: nil
+            ) {
+                return resolution
+            }
+
+            let rawIdentities = index.identities(
+                forRawTabIdentifier: tabIdentifier,
+                eligibleProcessIDs: eligibleProcessIDs
+            )
+            switch rawIdentities.count {
+            case 0:
+                return .unresolved
+            case 1:
+                return .resolved(processID: rawIdentities[0].processID, ownerLabel: tabIdentifier)
+            default:
+                let processIDs = Set(rawIdentities.map(\.processID))
+                let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
+                return .conflict(
+                    "ambiguous raw Xcode tabIdentifier '\(tabIdentifier)'"
+                        + " (processes: \(candidates))"
+                )
+            }
+        }
+    }
+
+    private func ownerRoutingEligibleProcessIDs() -> Set<pid_t> {
+        processRouteExposure(policy: .ownerRouting).processIDs
+    }
+
+    private func tabConflictMessage(
+        tabIdentifier: String,
+        workspacePath: String,
+        ownerProcessID: pid_t,
+        index: WindowOwnerIndex,
+        eligibleProcessIDs: Set<pid_t>
+    ) -> String? {
+        if let identity = index.identity(forProxyTabIdentifier: tabIdentifier) {
+            guard identity.processID == ownerProcessID,
+                  identity.workspacePath == workspacePath else {
+                return "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
+            }
+            return nil
+        }
+        if tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) {
+            return "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+        }
+        let rawIdentities = index.identities(
+            forRawTabIdentifier: tabIdentifier,
+            eligibleProcessIDs: eligibleProcessIDs
+        )
+        guard rawIdentities.isEmpty == false else {
+            return nil
+        }
+        let matchesWorkspaceOwner = rawIdentities.contains {
+            $0.processID == ownerProcessID && $0.workspacePath == workspacePath
+        }
+        return matchesWorkspaceOwner
+            ? nil
+            : "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
+    }
+
     private func resolvedOwnerProcessIDs(
         for requests: [ToolRoutingRequest]
     ) -> (
         resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)],
-        unresolved: [ToolRoutingRequest]
+        unresolved: [ToolRoutingRequest],
+        conflicts: [OwnerResolutionConflict]
     ) {
         var resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)] = []
         var unresolved: [ToolRoutingRequest] = []
+        var conflicts: [OwnerResolutionConflict] = []
         for request in requests {
-            if let tabIdentifier = request.tabIdentifier,
-               tabIdentifier.isEmpty == false,
-               let processID = tabOwnerProcessIDs.withLockedValue({ $0[tabIdentifier] }) {
-                resolved.append((request, processID, tabIdentifier))
-                continue
+            switch cachedOwnerResolution(for: request) {
+            case .resolved(let processID, let ownerLabel):
+                resolved.append((request, processID, ownerLabel))
+            case .unresolved:
+                unresolved.append(request)
+            case .conflict(let message):
+                conflicts.append(OwnerResolutionConflict(request: request, message: message))
             }
-            if let workspacePath = request.workspacePath,
-               workspacePath.isEmpty == false,
-               let processID = workspaceOwnerProcessIDs.withLockedValue({ $0[workspacePath] }) {
-                resolved.append((request, processID, workspacePath))
-                continue
-            }
-            unresolved.append(request)
         }
-        return (resolved, unresolved)
-    }
-
-    private func upstreamIndexForOwner(tabIdentifier: String) -> Int? {
-        guard let processID = tabOwnerProcessIDs.withLockedValue({ $0[tabIdentifier] }),
-              let route = xcodeProcessRoutes.first(where: { $0.target.processID == processID }) else {
-            return nil
-        }
-        return firstUsableInitializedUpstreamIndex(in: route)
-    }
-
-    private func upstreamIndexForOwner(workspacePath: String) -> Int? {
-        guard let processID = workspaceOwnerProcessIDs.withLockedValue({ $0[workspacePath] }),
-              let route = xcodeProcessRoutes.first(where: { $0.target.processID == processID }) else {
-            return nil
-        }
-        return firstUsableInitializedUpstreamIndex(in: route)
+        return (resolved, unresolved, conflicts)
     }
 
     private func cachedOwnerBoundToolNames() -> Set<String> {

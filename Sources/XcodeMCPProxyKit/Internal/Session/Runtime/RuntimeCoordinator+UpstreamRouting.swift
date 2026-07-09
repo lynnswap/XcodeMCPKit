@@ -550,12 +550,12 @@ extension RuntimeCoordinator {
         let processToolCatalogs = processToolSurfaceStore.debugSnapshots(
             exposedCatalog: brokerSnapshot.toolsCatalogRaw,
             canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-            tabOwnerCountsByProcessID: ownerCountsByProcessID(
-                tabOwnerProcessIDs.withLockedValue { $0 }
-            ),
-            workspaceOwnerCountsByProcessID: ownerCountsByProcessID(
-                workspaceOwnerProcessIDs.withLockedValue { $0 }
-            )
+            tabOwnerCountsByProcessID: windowOwnerIndex.withLockedValue {
+                $0.tabOwnerCountsByProcessID()
+            },
+            workspaceOwnerCountsByProcessID: windowOwnerIndex.withLockedValue {
+                $0.workspaceOwnerCountsByProcessID()
+            }
         )
         let processIDsWithToolCatalog = Set(processToolCatalogs.map(\.processID))
         let pendingToolCatalogProcessIDs =
@@ -602,12 +602,6 @@ extension RuntimeCoordinator {
         descriptor: SessionRequestPipeline.Descriptor
     ) -> LeaseManager.ID {
         leaseManager.createLease(descriptor: descriptor)
-    }
-
-    private func ownerCountsByProcessID(_ owners: [String: pid_t]) -> [pid_t: Int] {
-        owners.values.reduce(into: [:]) { counts, processID in
-            counts[processID, default: 0] += 1
-        }
     }
 
     func activateRequestLease(
