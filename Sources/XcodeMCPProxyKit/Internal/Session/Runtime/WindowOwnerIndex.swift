@@ -13,16 +13,18 @@ struct WindowOwnerIndex: Sendable, Equatable {
             self.rawTabIdentifier = rawTabIdentifier
             self.proxyTabIdentifier = Self.proxyTabIdentifier(
                 processID: processID,
-                rawTabIdentifier: rawTabIdentifier
+                rawTabIdentifier: rawTabIdentifier,
+                workspacePath: workspacePath
             )
             self.workspacePath = workspacePath
         }
 
         private static func proxyTabIdentifier(
             processID: pid_t,
-            rawTabIdentifier: String
+            rawTabIdentifier: String,
+            workspacePath: String
         ) -> String {
-            let input = "\(processID)\u{0}\(rawTabIdentifier)"
+            let input = "\(processID)\u{0}\(rawTabIdentifier)\u{0}\(workspacePath)"
             let digest = SHA256.hash(data: Data(input.utf8))
             let token = digest.map { byte -> String in
                 let hex = String(byte, radix: 16)

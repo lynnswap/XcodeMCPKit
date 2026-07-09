@@ -8977,6 +8977,74 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
+    @Test func proxyTabIdentifierDisambiguatesRawTabCollisionWithinProcess() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 620, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+
+        let workspaceA = "/Work/RawCollisionA.xcworkspace"
+        let workspaceB = "/Work/RawCollisionB.xcworkspace"
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: reused-tab, workspacePath: \(workspaceA)\n"
+                            + "* tabIdentifier: reused-tab, workspacePath: \(workspaceB)",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+
+        let proxyTabA = WindowOwnerIndex().proxyTabIdentifier(
+            processID: target.processID,
+            rawTabIdentifier: "reused-tab",
+            workspacePath: workspaceA
+        )
+        let proxyTabB = WindowOwnerIndex().proxyTabIdentifier(
+            processID: target.processID,
+            rawTabIdentifier: "reused-tab",
+            workspacePath: workspaceB
+        )
+        #expect(proxyTabA != proxyTabB)
+        let request = toolsCallObject(
+            id: 8704,
+            name: "BuildProject",
+            arguments: [
+                "tabIdentifier": proxyTabB,
+                "workspacePath": workspaceB,
+            ]
+        )
+        #expect(manager.preferredUpstreamIndex(for: request) == 0)
+        let decision = await manager.toolRoutingDecision(
+            for: request,
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected proxy tab identifier to include workspace identity")
+            return
+        }
+        #expect(preferredUpstreamIndices == [0])
+    }
+
     @Test func sessionManagerSkipsUninitializedProcessRoutesDuringWindowFanout()
         async throws
     {
