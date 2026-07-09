@@ -1171,17 +1171,23 @@ extension RuntimeCoordinator {
         guard isKnownOwnerBoundTool(toolName) else {
             return nil
         }
-        if let workspacePath = arguments["workspacePath"] as? String,
-           workspacePath.isEmpty == false {
-            return upstreamIndexForOwner(workspacePath: workspacePath)
+        let tabIdentifier = (arguments["tabIdentifier"] as? String).flatMap {
+            $0.isEmpty ? nil : $0
         }
-        if let tabIdentifier = arguments["tabIdentifier"] as? String,
-           tabIdentifier.isEmpty == false,
-           let upstreamIndex = upstreamIndexForOwner(tabIdentifier: tabIdentifier)
-        {
-            return upstreamIndex
+        let workspacePath = (arguments["workspacePath"] as? String).flatMap {
+            $0.isEmpty ? nil : $0
         }
-        return nil
+        guard tabIdentifier != nil || workspacePath != nil,
+              case .resolved(let processID, _) = cachedOwnerResolution(
+                  tabIdentifier: tabIdentifier,
+                  workspacePath: workspacePath
+              ),
+              let route = xcodeProcessRoutes.first(where: {
+                  $0.target.processID == processID
+              }) else {
+            return nil
+        }
+        return firstUsableInitializedUpstreamIndex(in: route)
     }
 
     private func toolRoutingRequests(in value: Any) -> [ToolRoutingRequest] {
@@ -1271,7 +1277,44 @@ extension RuntimeCoordinator {
             let nonEmptyWorkspacePath = workspacePath.flatMap { $0.isEmpty ? nil : $0 }
             let nonEmptyTabIdentifier = tabIdentifier.flatMap { $0.isEmpty ? nil : $0 }
 
+            func proxyTabResolution(
+                tabIdentifier: String,
+                workspacePath: String?
+            ) -> CachedOwnerResolution? {
+                guard tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) else {
+                    return nil
+                }
+                guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier) else {
+                    return .conflict(
+                        "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+                    )
+                }
+                guard eligibleProcessIDs.contains(identity.processID) else {
+                    return .conflict(
+                        "stale or unavailable XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
+                    )
+                }
+                if let workspacePath, identity.workspacePath != workspacePath {
+                    return .conflict(
+                        "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath"
+                            + " '\(workspacePath)'"
+                    )
+                }
+                return .resolved(
+                    processID: identity.processID,
+                    ownerLabel: identity.proxyTabIdentifier
+                )
+            }
+
             if let workspacePath = nonEmptyWorkspacePath {
+                if let tabIdentifier = nonEmptyTabIdentifier,
+                   let resolution = proxyTabResolution(
+                       tabIdentifier: tabIdentifier,
+                       workspacePath: workspacePath
+                   ) {
+                    return resolution
+                }
+
                 switch index.owner(
                     forWorkspacePath: workspacePath,
                     eligibleProcessIDs: eligibleProcessIDs
@@ -1314,21 +1357,11 @@ extension RuntimeCoordinator {
             guard let tabIdentifier = nonEmptyTabIdentifier else {
                 return .unresolved
             }
-            if let identity = index.identity(forProxyTabIdentifier: tabIdentifier) {
-                guard eligibleProcessIDs.contains(identity.processID) else {
-                    return .conflict(
-                        "stale or unavailable XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
-                    )
-                }
-                return .resolved(
-                    processID: identity.processID,
-                    ownerLabel: identity.proxyTabIdentifier
-                )
-            }
-            if tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) {
-                return .conflict(
-                    "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
-                )
+            if let resolution = proxyTabResolution(
+                tabIdentifier: tabIdentifier,
+                workspacePath: nil
+            ) {
+                return resolution
             }
 
             let rawIdentities = index.identities(
@@ -1415,28 +1448,6 @@ extension RuntimeCoordinator {
             }
         }
         return (resolved, unresolved, conflicts)
-    }
-
-    private func upstreamIndexForOwner(tabIdentifier: String) -> Int? {
-        guard case .resolved(let processID, _) = cachedOwnerResolution(
-            tabIdentifier: tabIdentifier,
-            workspacePath: nil
-        ),
-              let route = xcodeProcessRoutes.first(where: { $0.target.processID == processID }) else {
-            return nil
-        }
-        return firstUsableInitializedUpstreamIndex(in: route)
-    }
-
-    private func upstreamIndexForOwner(workspacePath: String) -> Int? {
-        guard case .resolved(let processID, _) = cachedOwnerResolution(
-            tabIdentifier: nil,
-            workspacePath: workspacePath
-        ),
-              let route = xcodeProcessRoutes.first(where: { $0.target.processID == processID }) else {
-            return nil
-        }
-        return firstUsableInitializedUpstreamIndex(in: route)
     }
 
     private func cachedOwnerBoundToolNames() -> Set<String> {

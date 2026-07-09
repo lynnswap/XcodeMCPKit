@@ -8903,6 +8903,80 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
+    @Test func proxyTabIdentifierDisambiguatesDuplicateWorkspaceOwners() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target0 = xcodeProcessTarget(processID: 618, xcodeVersion: "27.0")
+        let target1 = xcodeProcessTarget(processID: 619, xcodeVersion: "26.6")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
+                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
+                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
+            ]
+        )
+
+        let workspacePath = "/Work/SharedWithProxyTab.xcworkspace"
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-a, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: tab-b, workspacePath: \(workspacePath)",
+                    ],
+                ]),
+                upstreamIndex: 1
+            )
+        )
+
+        let proxyTabIdentifier = WindowOwnerIndex().proxyTabIdentifier(
+            processID: target1.processID,
+            rawTabIdentifier: "tab-b",
+            workspacePath: workspacePath
+        )
+        let request = toolsCallObject(
+            id: 8703,
+            name: "BuildProject",
+            arguments: [
+                "tabIdentifier": proxyTabIdentifier,
+                "workspacePath": workspacePath,
+            ]
+        )
+        #expect(manager.preferredUpstreamIndex(for: request) == 1)
+        let decision = await manager.toolRoutingDecision(
+            for: request,
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAny(let preferredUpstreamIndices) = decision else {
+            Issue.record("expected proxy tab identifier to disambiguate duplicate workspace")
+            return
+        }
+        #expect(preferredUpstreamIndices == [1])
+    }
+
     @Test func sessionManagerSkipsUninitializedProcessRoutesDuringWindowFanout()
         async throws
     {
