@@ -138,6 +138,7 @@ actor StdioAdapter {
         self.shutdownPolicy = shutdownPolicy
         self.authority = MCPClientSessionAuthority.makeForwarded(
             recipe: recipe,
+            defaultTimeout: requestTimeout,
             clock: shutdownPolicy.clock
         )
     }
