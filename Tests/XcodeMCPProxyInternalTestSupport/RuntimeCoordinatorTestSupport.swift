@@ -1082,6 +1082,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
         self.continuation = streamContinuation
     }
 
+    nonisolated func cancel() {}
+
     func send(_ data: Data) async -> Upstream.SendResult {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
             as? [String: Any],

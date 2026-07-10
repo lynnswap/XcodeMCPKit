@@ -18,7 +18,6 @@ extension CLI {
         case upstreamProcesses = "--upstream-processes"
         case sessionID = "--session-id"
         case refreshCodeIssuesMode = "--refresh-code-issues-mode"
-        case stdio = "--stdio"
         case url = "--url"
         case printURL = "--print-url"
         case lazyInit = "--lazy-init"
@@ -34,7 +33,7 @@ extension CLI {
                  .upstreamCommand, .upstreamArgs, .upstreamArg, .upstreamProcesses,
                  .sessionID, .refreshCodeIssuesMode, .prefix, .bindir:
                 return true
-            case .helpShort, .help, .version, .autoApprove, .stdio, .url, .printURL,
+            case .helpShort, .help, .version, .autoApprove, .url, .printURL,
                  .lazyInit, .xcodePID, .dryRun, .forceRestart:
                 return false
             }
@@ -46,7 +45,7 @@ extension CLI {
                  .upstreamCommand, .upstreamArgs, .upstreamArg, .upstreamProcesses,
                  .sessionID, .refreshCodeIssuesMode:
                 return true
-            case .helpShort, .help, .version, .requestTimeout, .stdio, .url, .printURL,
+            case .helpShort, .help, .version, .requestTimeout, .url, .printURL,
                  .lazyInit, .xcodePID, .dryRun, .forceRestart, .prefix, .bindir:
                 return false
             }
@@ -58,7 +57,7 @@ extension CLI {
                  .upstreamArg, .upstreamProcesses, .sessionID, .maxBodyBytes,
                  .requestTimeout, .refreshCodeIssuesMode:
                 return true
-            case .helpShort, .help, .version, .autoApprove, .stdio, .url, .printURL,
+            case .helpShort, .help, .version, .autoApprove, .url, .printURL,
                  .lazyInit, .xcodePID, .dryRun, .forceRestart, .prefix, .bindir:
                 return false
             }

@@ -31,36 +31,13 @@ package enum MCPTransportFailure: Error, Sendable, Equatable {
 package protocol XcodeMCPTransport: Sendable {
     var events: AsyncStream<XcodeMCPTransportEvent> { get }
 
-    func send(_ data: Data) async throws
     func send(
         _ data: Data,
         headers: MCPConnectionHeaders,
         deadline: Deadline?
     ) async throws
     func startEventStream(headers: MCPConnectionHeaders) async
-    func close() async
     func close(headers: MCPConnectionHeaders) async
-}
-
-extension XcodeMCPTransport {
-    package func send(
-        _ data: Data,
-        headers: MCPConnectionHeaders,
-        deadline: Deadline?
-    ) async throws {
-        _ = headers
-        _ = deadline
-        try await send(data)
-    }
-
-    package func startEventStream(headers: MCPConnectionHeaders) async {
-        _ = headers
-    }
-
-    package func close(headers: MCPConnectionHeaders) async {
-        _ = headers
-        await close()
-    }
 }
 
 package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
@@ -119,9 +96,19 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
 
     deinit {
         bridgeTask.cancel()
+        session.cancel()
     }
 
-    package func send(_ data: Data) async throws {
+    package func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        // A local stdio bridge has no HTTP session headers. The typed boundary
+        // remains explicit so adding another transport input cannot silently
+        // fall back to a legacy send path.
+        _ = headers
+        _ = deadline
         switch await session.send(data) {
         case .accepted:
             return
@@ -132,7 +119,13 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         }
     }
 
-    package func close() async {
+    package func startEventStream(headers: MCPConnectionHeaders) async {
+        // The local process event stream starts with the process session.
+        _ = headers
+    }
+
+    package func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         bridgeTask.cancel()
         await session.stop()
         await bridgeTask.value

@@ -5,36 +5,6 @@ import Testing
 
 @Suite
 struct CLIUsageContractTests {
-    @Test func adapterUsageRemainsStable() {
-        let usage = XcodeMCPProxyStdioAdapter.adapterUsage(
-            discoveryFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-contract/endpoint.json")
-        )
-
-        #expect(
-            usage == """
-            Usage:
-              xcode-mcp-proxy [options]
-
-            Description:
-              STDIO compatibility adapter that forwards MCP traffic to a running xcode-mcp-proxy-server (Streamable HTTP).
-
-            Options:
-              --request-timeout seconds  Request timeout (default: 300, 0 disables)
-              --url url                  Explicit upstream URL (default: env/discovery/http://localhost:8765/mcp)
-              --version                  Show version
-              -h, --help                 Show help
-
-            Environment:
-              XCODE_MCP_PROXY_ENDPOINT   Upstream proxy URL (overrides discovery)
-
-            Notes:
-              - Proxy server: xcode-mcp-proxy-server
-              - --config is only supported by xcode-mcp-proxy-server
-              - Discovery file: /tmp/xcode-mcp-contract/endpoint.json
-            """
-        )
-    }
-
     @Test func serverUsageRemainsStable() {
         #expect(
             XcodeMCPProxyServer.serverUsage == """

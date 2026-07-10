@@ -30,6 +30,9 @@ extension Upstream {
 
 package protocol UpstreamSession: AnyObject, Sendable {
     var events: AsyncStream<Upstream.Event> { get }
+    /// Sends a synchronous best-effort stop signal to the owned process I/O.
+    /// Completion remains the responsibility of ``stop()``.
+    nonisolated func cancel()
     func send(_ data: Data) async -> Upstream.SendResult
     func stop() async
 }

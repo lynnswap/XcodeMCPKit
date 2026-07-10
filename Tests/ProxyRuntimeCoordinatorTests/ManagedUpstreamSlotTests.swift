@@ -290,6 +290,8 @@ private actor RecordingUpstreamSession: UpstreamSession {
         self.continuation = continuation
     }
 
+    nonisolated func cancel() {}
+
     func send(_ data: Data) async -> Upstream.SendResult {
         _ = data
         return .accepted
