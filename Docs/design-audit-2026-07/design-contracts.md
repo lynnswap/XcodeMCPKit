@@ -1,6 +1,6 @@
 # 修正設計の候補契約
 
-**Design status: NOT APPROVED.** このファイルは監査finding(READMEのF1〜F9)から導いた制約と候補patternであり、canonical designではない。Task A/B/Cのinterface、isolation、atomicity、deadline、移行、削除対象、contract testは各design gateで確定する。本文は実装開始の承認を意味しない。
+**Design status: SUPERSEDED BY APPROVED DESIGN.** このファイルは監査finding(READMEのF1〜F9)から導いた候補patternである。承認済みのinterface、isolation、atomicity、deadline、移行、削除対象、contract testは [canonical-design.md](canonical-design.md) を正本とする。
 
 **Compatibility decision: BREAKING CHANGES ALLOWED.** source/CLI compatibility維持を目的とするwrapper、redirect、deprecated mirror APIは既定で追加しない。design gateでは残すconsumer storyと単一標準形を先に決め、削除/型変更するsymbol・flag・wire impactを明示する。
 

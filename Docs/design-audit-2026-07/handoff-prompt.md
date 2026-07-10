@@ -3,7 +3,7 @@
 このファイルは、監査で特定した構造問題の修正に着手するエージェント/担当者への引き継ぎ。
 別セッションにそのまま貼れる自己完結プロンプトとして書いてある。着手前に `Docs/design-audit-2026-07/README.md` と、必要に応じて `evidence/` `verification/` を読むこと。
 
-**Design status: NOT APPROVED.** このhandoffは監査由来の要求と候補契約であり、canonical designではない。タスクA/B/Cのinterface、owner、isolation、deadline、互換・削除方針、contract testはそれぞれdesign gateを通してから実装する。
+**Design status: SUPERSEDED BY APPROVED DESIGN.** このhandoffは監査時点の要求と候補契約である。実装時は承認済み [canonical-design.md](canonical-design.md) を正本とし、本書と競合する記述を採用しない。
 
 ---
 
@@ -19,7 +19,7 @@
 - Git: `lynnswap` owner なので push/PR は明示依頼時のみ。着手前に `git status --short` と元 HEAD の SHA を記録。成果が複数になる作業は task branch に commit して SHA で受け渡す(未コミット差分を積み上げない)。
 - 互換方針: **BREAKING CHANGES ALLOWED**(2026-07-10ユーザー決定)。source/CLI compatibility layerやdeprecated redirectは既定で追加しない。残すcontractを先に決め、不要surfaceは直接削除・型変更する。wire/package/product境界を変える場合も、consumer impactと移行後の単一標準形はcanonical designへ明記する。
 - Apple/Swift API・MCP spec の事実は記憶で断定せず一次情報で確認(Xcode DocumentationSearch / ios-dev-docs / Apple Developer Docs、MCP は [2025-06-18 Transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) / [Lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle) / [Cancellation](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation))。
-- 候補契約: [design-contracts.md](design-contracts.md)(statusはNOT APPROVED)。各タスクの該当節をdesign gateで評価し、採否をcanonical designへ記録する。
+- 候補契約: [design-contracts.md](design-contracts.md)。採否は承認済み [canonical-design.md](canonical-design.md) に確定済み。
 - **won't-fix リスト(README「反証済み」節)に載っている項目は再修正・再指摘しない。** 特に: 旧 surface 返却 branch を「バグ」として guard 追加しない(到達不能 dead code なので削除のみ)、`proxyTabIdentifier` 合成を「第二 truth」として直さない、`?? 0` を単独で「捏造」として直さない(current-primary owner 統合の一部としてのみ扱う)。
 
 ---
@@ -36,7 +36,7 @@
 
 **これは対症療法ではなく構造修正。局所 guard の追加・撤回サイクルを止めるのが目的。`rearchitect` スキルの手順(現状実測 → api-design 規範に沿った目標設計 → design gate 承認 → 移行)に従う。着手前に design-audit スキルではなく rearchitect を起動する。**
 
-**Design status: NOT APPROVED.** まず canonical Task A design doc を作る。既定scopeは単一 `XcodeMCPProxyKit` target内部の再設計で、public Swift API、CLI、wire shape、package/product/target境界は変えない。変更が必要と判明した場合だけ consumer story・変更理由・移行/削除方針をdesign gateへ追加する。owner map、API-first transition sketch、atomicity/isolation、dependency direction、test seam、削除する旧責務を文書化し、承認前に実装へ入らない。
+**Design gate: APPROVED.** Task A の owner map、API-first transition、atomicity/isolation、dependency direction、test seam、削除責務は [canonical-design.md](canonical-design.md) §5 に確定済み。
 
 ### 回復すべき invariant(3 つ、これが成果の評価軸)
 
@@ -84,7 +84,7 @@
 
 ## タスク B(P2): lifecycle / protocol 契約整合
 
-タスクAと独立に進められる。各項目はMCP spec 2025-06-18を一次確認してから着手。B全体の設計statusは**NOT APPROVED**: B-1はowner/state machine/deadline/replay/public state contract、B-2はprotocol policyのユーザー判断、B-3はpublic failure/observability contractをdesign gateで確定する。
+タスクAと独立に進められる。各項目はMCP spec 2025-06-18を一次確認してから着手。B全体のdesign gateは**APPROVED**で、owner/state machine/deadline/replay/public state、protocol fallback、failure/observability contractは [canonical-design.md](canonical-design.md) §6 に確定済み。
 
 1. **SDK / stdio adapterのlifecycle回復**(F7):
    - `Mcp-Session-Id`を実際に付けた要求への404だけをtransportがtyped `.sessionExpired`として報告する。session IDなしinitialize/endpoint 404はsession recoveryに分類しない。spec MUSTは新sessionのinitializeであり、元要求のreplayはproduct contractとして別に定義する。

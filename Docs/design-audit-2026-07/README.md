@@ -6,7 +6,7 @@
 - **注意: 本文の file:line は基準 commit 時点のスナップショット。**修正着手時は現 HEAD で再確認すること。
 - 付随資料: [evidence/](evidence/)(収集レポート 7 本)、[verification/](verification/)(検証レポート 8 本)、[handoff-prompt.md](handoff-prompt.md)(修正作業の引き継ぎプロンプト)
 - 監査証拠 status: **CORRECTED**(2026-07-10、`eab7260d` で再照合)。
-- 設計status: **NOT APPROVED**。以下のowner mapとprimary fixは監査から導いた設計仮説であり、実装契約ではない。タスクA/B/Cはそれぞれcanonical design/contractを作り、design gateを通してから実装する。
+- 設計status: **APPROVED** (2026-07-10)。実装契約の正本は [canonical-design.md](canonical-design.md)。以下のowner mapとprimary fixは監査時の仮説であり、競合時はcanonical designを優先する。
 - 互換方針: **BREAKING CHANGES ALLOWED**(2026-07-10ユーザー決定)。既存source/CLI surfaceのcompatibility layerは既定で追加せず、残すcontractをdesign gateで確定して不要APIを直接削除・型変更する。wire/package/product境界まで変える場合は、許可の有無とは別にconsumer storyと影響をcanonical designへ記録する。
 
 ## 結論
@@ -172,6 +172,7 @@ P1 は `rearchitect` スキルの design gate に乗せる規模。`git show 2c6
 | [evidence/mcp-contract.md](evidence/mcp-contract.md) | MCP spec 2025-06-18 契約テーブル(全 verdict 付き) |
 | [evidence/module-boundaries.md](evidence/module-boundaries.md) | target 構成・package 宣言・test topology 監査 |
 | [verification/*.md](verification/) | 上記への adversarial 検証(CONFIRMED/WEAKENED/REFUTED + 失敗トレース) |
-| [design-contracts.md](design-contracts.md) | design gateで評価する候補契約集(status: NOT APPROVED)— F7/lifecycle/P1向け制約とアンチパターン |
+| [design-contracts.md](design-contracts.md) | 監査findingから導いた候補契約集。承認済みの採否はcanonical designを参照 |
+| [canonical-design.md](canonical-design.md) | 承認済みのowner、API、isolation、削除、移行、contract testの正本 |
 
 注意: evidence/ は検証前の収集レポートであり、一部の主張は verification/ で反証・弱化されている。**単独で引用せず、必ず verification/ の verdict と突き合わせること。**
