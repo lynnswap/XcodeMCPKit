@@ -315,7 +315,7 @@ public actor XcodeMCP {
                 "tools/list",
                 params: params,
                 options: pageOptions,
-                deadline: deadline,
+                resolvedDeadline: deadline,
                 onProgress: nil
             )
             let generation = await session.connectionState().generation
@@ -372,6 +372,7 @@ public actor XcodeMCP {
         guard name.isEmpty == false else {
             throw XcodeMCPError.invalidRequest("tool name must not be empty")
         }
+        let resolvedDeadline = try operationDeadline(options.timeout)
 
         let params: [String: MCPJSONValue] = [
             "name": .string(name),
@@ -393,6 +394,7 @@ public actor XcodeMCP {
             "tools/call",
             params: .object(params),
             options: options,
+            resolvedDeadline: resolvedDeadline,
             onProgress: progressHandler
         )
         return try MCPToolResult(json: result)
@@ -418,7 +420,13 @@ public actor XcodeMCP {
         params: MCPJSONValue? = nil,
         options: XcodeMCPRequestOptions = .init()
     ) async throws -> MCPJSONValue {
-        try await request(method, params: params, options: options, onProgress: nil)
+        try await request(
+            method,
+            params: params,
+            options: options,
+            resolvedDeadline: try operationDeadline(options.timeout),
+            onProgress: nil
+        )
     }
 
     /// Returns the current atomic connection snapshot.
@@ -456,14 +464,14 @@ extension XcodeMCP {
         _ method: String,
         params: MCPJSONValue? = nil,
         options: XcodeMCPRequestOptions = .init(),
-        deadline: Deadline? = nil,
+        resolvedDeadline: Deadline?,
         onProgress: InitializedMCPClientSession.ProgressHandler?
     ) async throws -> MCPJSONValue {
         do {
             let result = try await session.request(
                 method,
                 params: params?.jsonValue,
-                deadline: deadline ?? (try operationDeadline(options.timeout)),
+                deadline: resolvedDeadline,
                 replayPolicy: options.replayPolicy == .never
                     ? .never
                     : .onceWhenRejectedBeforeProcessing,

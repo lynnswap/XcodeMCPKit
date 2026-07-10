@@ -318,7 +318,7 @@ package actor InitializedMCPClientSession {
     package func request(
         _ method: String,
         params: JSONValue? = nil,
-        deadline: Deadline? = nil,
+        deadline: Deadline?,
         replayPolicy: MCPReplayPolicy = .onceWhenRejectedBeforeProcessing,
         onProgress: ProgressHandler? = nil
     ) async throws -> JSONValue {
@@ -357,10 +357,7 @@ package actor InitializedMCPClientSession {
         }
 
         let payload = try makeJSONRPCPayload(id: id, method: method, params: requestParams)
-        let requestDeadline = deadline ?? Deadline.fromNow(
-            configuration.requestTimeout,
-            clock: configuration.clock
-        )
+        let requestDeadline = deadline
         if requestDeadline?.hasExpired == true {
             throw MCPBridgeRuntimeError.requestTimedOut(method: method)
         }

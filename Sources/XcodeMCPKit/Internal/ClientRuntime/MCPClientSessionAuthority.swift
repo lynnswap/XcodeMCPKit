@@ -218,7 +218,6 @@ package actor MCPClientSessionAuthority {
     private let eventContinuation: AsyncStream<MCPClientSessionEvent>.Continuation
     private let recipe: MCPTransportRecipe
     private let initializationMode: MCPClientInitializationMode
-    private let defaultTimeout: Duration?
     private let clock: ClockClient
     private let subscribers = MCPConnectionSubscriberRegistry()
 
@@ -245,7 +244,6 @@ package actor MCPClientSessionAuthority {
     private init(
         recipe: MCPTransportRecipe,
         mode: MCPClientInitializationMode,
-        defaultTimeout: Duration?,
         clock: ClockClient
     ) {
         let pair = AsyncStream.makeStream(of: MCPClientSessionEvent.self)
@@ -253,7 +251,6 @@ package actor MCPClientSessionAuthority {
         self.eventContinuation = pair.continuation
         self.recipe = recipe
         self.initializationMode = mode
-        self.defaultTimeout = defaultTimeout
         self.clock = clock
     }
 
@@ -266,7 +263,6 @@ package actor MCPClientSessionAuthority {
         let authority = MCPClientSessionAuthority(
             recipe: recipe,
             mode: .managed(initialize),
-            defaultTimeout: defaultTimeout,
             clock: clock
         )
         do {
@@ -282,13 +278,11 @@ package actor MCPClientSessionAuthority {
 
     package static func makeForwarded(
         recipe: MCPTransportRecipe,
-        defaultTimeout: Duration?,
         clock: ClockClient = .liveValue
     ) -> MCPClientSessionAuthority {
         MCPClientSessionAuthority(
             recipe: recipe,
             mode: .forwarded,
-            defaultTimeout: defaultTimeout,
             clock: clock
         )
     }
@@ -846,7 +840,6 @@ private extension MCPClientSessionAuthority {
         }
         publish(.recovering)
         let id = UUID()
-        let sharedDeadline = Deadline.fromNow(defaultTimeout ?? .seconds(30), clock: clock)
         let task = Task { [weak self] in
             let result: Result<Void, Error>
             do {
@@ -856,9 +849,6 @@ private extension MCPClientSessionAuthority {
                 ) else { return }
                 try await Self.closeDetachedConnection(plan)
                 try Task.checkCancellation()
-                guard sharedDeadline?.hasExpired == false else {
-                    throw MCPBridgeRuntimeError.requestTimedOut(method: "session recovery")
-                }
                 let transport = try await plan.recipe.makeTransport()
                 do {
                     try Task.checkCancellation()
@@ -889,7 +879,7 @@ private extension MCPClientSessionAuthority {
                         responseStream: responseStream,
                         transport: connection.transport,
                         headers: MCPConnectionHeaders(),
-                        deadline: sharedDeadline,
+                        deadline: nil,
                         clock: plan.clock
                     )
                 } catch {
@@ -919,7 +909,7 @@ private extension MCPClientSessionAuthority {
                     try await connection.transport.send(
                         initialized.data,
                         headers: headers,
-                        deadline: sharedDeadline
+                        deadline: nil
                     )
                     await connection.transport.startEventStream(headers: headers)
                 }

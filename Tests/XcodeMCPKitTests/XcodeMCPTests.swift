@@ -300,7 +300,8 @@ struct XcodeMCPTests {
                 "arguments": .object([
                     "query": .string("Runtime"),
                 ]),
-            ])
+            ]),
+            deadline: Deadline.fromNow(.seconds(2))
         ) { progress in
             await progressValues.append(progress)
         }
@@ -350,7 +351,11 @@ struct XcodeMCPTests {
             await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
                 "progress requests require object params"
             )) {
-                _ = try await session.request("tools/call", params: .string("invalid")) { _ in
+                _ = try await session.request(
+                    "tools/call",
+                    params: .string("invalid"),
+                    deadline: Deadline.fromNow(.seconds(2))
+                ) { _ in
                     _ = capturedProbe
                 }
             }
@@ -471,7 +476,10 @@ struct XcodeMCPTests {
 
         let sleepBaseline = await timeoutClock.requestedSleepCount()
         let requestTask = Task {
-            try await session.request("tools/list")
+            try await session.request(
+                "tools/list",
+                deadline: Deadline.fromNow(.seconds(2), clock: await timeoutClock.client())
+            )
         }
         defer {
             requestTask.cancel()
@@ -1409,8 +1417,7 @@ struct XcodeMCPTests {
         let transport = LifecycleContractTransport(name: "forwarded")
         let factory = LifecycleTransportFactory([transport])
         let authority = MCPClientSessionAuthority.makeForwarded(
-            recipe: MCPTransportRecipe { try await factory.make() },
-            defaultTimeout: .seconds(2)
+            recipe: MCPTransportRecipe { try await factory.make() }
         )
 
         await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
@@ -1481,6 +1488,93 @@ struct XcodeMCPTests {
         let replayed = await replacement.sentMessages().compactMap(\.method)
         #expect(replayed.filter { $0 == "initialize" }.count == 1)
         #expect(Set(replayed.filter { $0 == "alpha" || $0 == "beta" }) == Set(["alpha", "beta"]))
+        await authority.close()
+    }
+
+    @Test func disabledRequestDeadlineOutlivesConfiguredRecoveryTimeout() async throws {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let expired = LifecycleContractTransport(
+            name: "expired-disabled-request",
+            expirations: ["tools/list": 1]
+        )
+        let replacement = LifecycleContractTransport(name: "replacement-disabled-request")
+        let factory = BlockingRecoveryTransportFactory(first: expired, blocked: replacement)
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+
+        let request = Task {
+            try await authority.send(try lifecycleOperation(
+                method: "tools/list",
+                deadline: nil
+            ))
+        }
+        try await factory.waitUntilBlockedMakeStarts()
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await factory.releaseBlockedMake()
+        try await request.value
+
+        #expect(await replacement.sentMessages().contains { $0.method == "tools/list" })
+        await authority.close()
+    }
+
+    @Test func longerOperationDeadlineOutlivesConfiguredRecoveryTimeout() async throws {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let expired = LifecycleContractTransport(
+            name: "expired-long-request",
+            expirations: ["tools/list": 1]
+        )
+        let replacement = LifecycleContractTransport(name: "replacement-long-request")
+        let factory = BlockingRecoveryTransportFactory(first: expired, blocked: replacement)
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+
+        let request = Task {
+            try await authority.send(try lifecycleOperation(
+                method: "tools/list",
+                deadline: Deadline.fromNow(.seconds(10), clock: clock)
+            ))
+        }
+        try await factory.waitUntilBlockedMakeStarts()
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await factory.releaseBlockedMake()
+        try await request.value
+
+        #expect(await replacement.sentMessages().contains { $0.method == "tools/list" })
+        await authority.close()
+    }
+
+    @Test func disabledReconnectOutlivesConfiguredRecoveryTimeout() async throws {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let current = LifecycleContractTransport(name: "current-disabled-reconnect")
+        let replacement = LifecycleContractTransport(name: "replacement-disabled-reconnect")
+        let factory = BlockingRecoveryTransportFactory(first: current, blocked: replacement)
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+
+        let reconnect = Task {
+            try await authority.reconnect(deadline: nil)
+        }
+        try await factory.waitUntilBlockedMakeStarts()
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await factory.releaseBlockedMake()
+        try await reconnect.value
+
+        #expect(await authority.connectionState().phase == .ready)
         await authority.close()
     }
 
@@ -1662,7 +1756,8 @@ private func lifecycleToolsPage(
 private func lifecycleOperation(
     method: String,
     id: Int = 1,
-    replayPolicy: MCPReplayPolicy = .onceWhenRejectedBeforeProcessing
+    replayPolicy: MCPReplayPolicy = .onceWhenRejectedBeforeProcessing,
+    deadline: Deadline? = Deadline.fromNow(.seconds(2))
 ) throws -> MCPClientOperation {
     let data = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
         id: Int64(id),
@@ -1670,7 +1765,7 @@ private func lifecycleOperation(
     ))
     return MCPClientOperation(
         envelope: try MCPClientEnvelope(data: data),
-        deadline: Deadline.fromNow(.seconds(2)),
+        deadline: deadline,
         replayPolicy: replayPolicy
     )
 }
@@ -3104,16 +3199,22 @@ private actor ManualSessionTimeoutClock {
     private var sleepRequests: [SleepRequest] = []
     private var cancelledSleepRequestIDs: Set<UUID> = []
     private var durationWaiters: [DurationWaiter] = []
+    private nonisolated let uptime = ManualUptimeState()
 
     func client() -> ClockClient {
-        ClockClient(
+        let uptime = uptime
+        return ClockClient(
             now: { Date(timeIntervalSince1970: 0) },
-            uptimeNanoseconds: { 0 },
+            uptimeNanoseconds: { uptime.now() },
             sleep: { duration in
                 await self.sleep(for: duration)
             },
             sleepForTimeInterval: { _ in }
         )
+    }
+
+    func advanceUptime(by duration: Duration) {
+        uptime.advance(by: duration)
     }
 
     func requestedSleepCount() -> Int {
@@ -3200,6 +3301,32 @@ private actor ManualSessionTimeoutClock {
             }
         }
         durationWaiters = remaining
+    }
+}
+
+private final class ManualUptimeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    func now() -> UInt64 {
+        lock.withLock { value }
+    }
+
+    func advance(by duration: Duration) {
+        let components = duration.components
+        let seconds = UInt64(max(0, components.seconds))
+        let nanos = UInt64(max(0, components.attoseconds) / 1_000_000_000)
+        let secondsResult = seconds.multipliedReportingOverflow(by: 1_000_000_000)
+        let amount: UInt64
+        if secondsResult.overflow {
+            amount = .max
+        } else {
+            let sum = secondsResult.partialValue.addingReportingOverflow(nanos)
+            amount = sum.overflow ? .max : sum.partialValue
+        }
+        lock.withLock {
+            value = value &+ min(amount, UInt64.max &- value)
+        }
     }
 }
 

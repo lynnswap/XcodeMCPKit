@@ -1,6 +1,38 @@
 import Foundation
 import Logging
+import Synchronization
 import XcodeMCPKit
+
+private final class StdioReadTaskActivation: Sendable {
+    private struct State {
+        var isActivated = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+
+    private let state = Mutex(State())
+
+    func activate() {
+        let waiters: [CheckedContinuation<Void, Never>] = state.withLock { state in
+            guard state.isActivated == false else { return [] }
+            state.isActivated = true
+            let waiters = state.waiters
+            state.waiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func waitUntilActivated() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = state.withLock { state in
+                guard state.isActivated == false else { return true }
+                state.waiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
+    }
+}
 
 package struct StdioAdapterShutdownPolicy: Sendable {
     package let requestDrainTimeout: Duration
@@ -37,11 +69,14 @@ actor StdioAdapter {
     private let logger: Logger
     private let authority: MCPClientSessionAuthority
     private let shutdownPolicy: StdioAdapterShutdownPolicy
+    private let readTaskActivation = StdioReadTaskActivation()
 
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
+    private var orderedHandshakeTail: Task<Void, Never>?
     private var readTask: Task<Void, Never>?
     private var authorityEventTask: Task<Void, Never>?
+    private var closeTask: Task<Void, Never>?
     private var lifecycle: Lifecycle = .idle
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -103,7 +138,6 @@ actor StdioAdapter {
         self.shutdownPolicy = shutdownPolicy
         self.authority = MCPClientSessionAuthority.makeForwarded(
             recipe: recipe,
-            defaultTimeout: requestTimeout,
             clock: shutdownPolicy.clock
         )
     }
@@ -117,7 +151,9 @@ actor StdioAdapter {
         lifecycle = .running
         startAuthorityEventTask()
         let input = inputHandle
+        let readTaskActivation = readTaskActivation
         readTask = Task { [weak self] in
+            readTaskActivation.activate()
             var terminalError: (any Error)?
             do {
                 for try await byte in input.bytes {
@@ -137,21 +173,30 @@ actor StdioAdapter {
         await authority.connectionState()
     }
 
+    func pendingOutputByteCount() async -> Int {
+        await outputWriter.pendingByteCount()
+    }
+
     func waitUntilStopped() async {
-        guard lifecycle != .closed else { return }
+        if lifecycle == .closed { return }
+        if let closeTask {
+            await closeTask.value
+            return
+        }
         await withCheckedContinuation { closeWaiters.append($0) }
     }
 
     func stop() async {
-        let task = readTask
-        await close(cancelReadTask: true)
-        await task?.value
+        let task = beginClose(cancelReadTask: true)
+        await task.value
     }
 
     isolated deinit {
         readTask?.cancel()
         authorityEventTask?.cancel()
         for task in requestTasks.values { task.cancel() }
+        closeTask?.cancel()
+        outputWriter.cancel()
         for waiter in closeWaiters { waiter.resume() }
     }
 }
@@ -163,7 +208,7 @@ private extension StdioAdapter {
         }
         if lifecycle == .running {
             await drainRequestTasksAfterInputClosed()
-            await close(cancelReadTask: false)
+            _ = beginClose(cancelReadTask: false)
         }
     }
 
@@ -177,30 +222,21 @@ private extension StdioAdapter {
             do {
                 envelope = try MCPClientEnvelope(data: message)
             } catch {
-                await emitError(for: requestEnvelope, message: "invalid upstream response")
+                enqueueErrorWrite(
+                    id: requestID,
+                    requestEnvelope: requestEnvelope,
+                    message: "invalid upstream response"
+                )
                 continue
             }
             let deadline = Deadline.fromNow(requestTimeout, clock: shutdownPolicy.clock)
             let replayPolicy = replayPolicy(for: envelope)
+            let previous = requiresOrderedHandshake(envelope) ? orderedHandshakeTail : nil
             let authority = authority
-            if requiresOrderedHandshake(envelope) {
-                do {
-                    try await authority.send(MCPClientOperation(
-                        envelope: envelope,
-                        deadline: deadline,
-                        replayPolicy: replayPolicy
-                    ))
-                } catch {
-                    guard error is CancellationError == false, lifecycle == .running else {
-                        continue
-                    }
-                    logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
-                    await emitError(for: requestEnvelope, message: adapterErrorMessage(error))
-                }
-                continue
-            }
             let task = Task { [weak self] in
+                if let previous { await previous.value }
                 do {
+                    try Task.checkCancellation()
                     try await authority.send(MCPClientOperation(
                         envelope: envelope,
                         deadline: deadline,
@@ -220,6 +256,9 @@ private extension StdioAdapter {
                 }
             }
             requestTasks[requestID] = task
+            if requiresOrderedHandshake(envelope) {
+                orderedHandshakeTail = task
+            }
         }
 
         guard let violation = result.protocolViolation else { return }
@@ -231,7 +270,7 @@ private extension StdioAdapter {
                 "preview": "\(violation.preview)",
             ]
         )
-        await close(cancelReadTask: true)
+        _ = beginClose(cancelReadTask: true)
     }
 
     func operationFinished(
@@ -239,10 +278,16 @@ private extension StdioAdapter {
         requestEnvelope: JSONRPC.Request.Envelope,
         error: (any Error)?
     ) async {
+        if let error, error is CancellationError == false, lifecycle == .running {
+            logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
+            if await emitError(
+                for: requestEnvelope,
+                message: adapterErrorMessage(error)
+            ) == false {
+                _ = beginClose(cancelReadTask: true)
+            }
+        }
         requestTasks.removeValue(forKey: id)
-        guard let error, error is CancellationError == false, lifecycle == .running else { return }
-        logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
-        await emitError(for: requestEnvelope, message: adapterErrorMessage(error))
     }
 
     func replayPolicy(for envelope: MCPClientEnvelope) -> MCPReplayPolicy {
@@ -274,12 +319,15 @@ private extension StdioAdapter {
         let events = authority.events
         let writer = outputWriter
         let logger = logger
-        authorityEventTask = Task {
+        authorityEventTask = Task { [weak self] in
             for await event in events {
                 guard Task.isCancelled == false else { return }
                 switch event {
                 case .message(_, let envelope):
-                    await writer.send(envelope.data)
+                    guard await writer.send(envelope.data) else {
+                        await self?.outputDidFail()
+                        return
+                    }
                 case .connectionState(let snapshot):
                     if case .unavailable(let failure) = snapshot.phase {
                         logger.warning(
@@ -292,29 +340,46 @@ private extension StdioAdapter {
         }
     }
 
-    func close(cancelReadTask: Bool) async {
-        switch lifecycle {
-        case .closed:
-            return
-        case .closing:
-            await withCheckedContinuation { closeWaiters.append($0) }
-            return
-        case .idle, .running:
-            lifecycle = .closing
-        }
+    func outputDidFail() {
+        guard lifecycle == .running else { return }
+        _ = beginClose(cancelReadTask: true)
+    }
 
+    func beginClose(cancelReadTask: Bool) -> Task<Void, Never> {
+        if let closeTask { return closeTask }
+        if lifecycle == .closed { return Task {} }
+        lifecycle = .closing
         if cancelReadTask {
             readTask?.cancel()
+        }
+        outputWriter.cancel()
+        for task in requestTasks.values { task.cancel() }
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performClose()
+        }
+        closeTask = task
+        return task
+    }
+
+    func performClose() async {
+        if readTask != nil {
+            await readTaskActivation.waitUntilActivated()
             try? inputHandle.close()
         }
-        for task in requestTasks.values { task.cancel() }
         await authority.close()
         await drainRequestTasks()
         authorityEventTask?.cancel()
         let eventTask = authorityEventTask
         authorityEventTask = nil
         await eventTask?.value
+        await outputWriter.close()
+        let reader = readTask
+        await reader?.value
+        readTask = nil
+        orderedHandshakeTail = nil
         lifecycle = .closed
+        closeTask = nil
         let waiters = closeWaiters
         closeWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
@@ -381,14 +446,44 @@ private extension StdioAdapter {
         return "upstream unavailable"
     }
 
-    func emitError(for envelope: JSONRPC.Request.Envelope, message: String) async {
-        guard envelope.expectsResponse else { return }
+    func emitError(for envelope: JSONRPC.Request.Envelope, message: String) async -> Bool {
+        guard envelope.expectsResponse else { return true }
         guard let payload = try? JSONRPC.Wire.errorResponseData(
             idValues: envelope.ids,
             code: -32000,
             message: message
-        ) else { return }
-        await outputWriter.send(payload)
+        ) else { return true }
+        return await outputWriter.send(payload)
+    }
+
+    func enqueueErrorWrite(
+        id: UUID,
+        requestEnvelope: JSONRPC.Request.Envelope,
+        message: String
+    ) {
+        let writer = outputWriter
+        let payload = try? JSONRPC.Wire.errorResponseData(
+            idValues: requestEnvelope.ids,
+            code: -32000,
+            message: message
+        )
+        let task = Task { [weak self] in
+            let succeeded: Bool
+            if let payload {
+                succeeded = await writer.send(payload)
+            } else {
+                succeeded = true
+            }
+            await self?.standaloneOutputFinished(id: id, succeeded: succeeded)
+        }
+        requestTasks[id] = task
+    }
+
+    func standaloneOutputFinished(id: UUID, succeeded: Bool) {
+        requestTasks.removeValue(forKey: id)
+        if succeeded == false, lifecycle == .running {
+            _ = beginClose(cancelReadTask: true)
+        }
     }
 
     static func nanoseconds(in duration: Duration) -> UInt64 {
