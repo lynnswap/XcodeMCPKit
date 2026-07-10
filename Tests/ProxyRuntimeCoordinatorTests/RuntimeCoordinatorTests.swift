@@ -496,36 +496,6 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
     }
 
-    @Test func processRouteActivationCatalogUsesControlPlaneTimeoutWhenAutoApproveEnabled()
-        async throws
-    {
-        var config = makeConfig(requestTimeout: 5)
-        config.autoApproveXcodeDialog = true
-        let target = xcodeProcessTarget(processID: 27010, xcodeVersion: "27.0")
-        let upstream = TestUpstreamClient()
-        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
-        let route = XcodeProcessRoute(target: target, upstreamIndices: [0])
-        let fixture = RuntimeCoordinatorFixture(
-            config: config,
-            upstreams: [upstream],
-            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            xcodeProcessRoutes: [route],
-            processRoutingEnabled: true,
-            startImmediately: false
-        )
-        defer { fixture.shutdownAndWait() }
-        let manager = fixture.manager
-        _ = manager.beginProcessRouteAttachingForTesting(
-            processID: target.processID,
-            upstreamIndex: 0,
-            nowUptimeNs: 0
-        )
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-
-        #expect(timeoutScheduler.scheduledCount() == 1)
-        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(5).nanoseconds)
-    }
-
     @Test func processRouteActivationCatalogTimeoutReplacesSlotAndDropsStaleCatalog()
         async throws
     {
@@ -891,46 +861,6 @@ struct RuntimeCoordinatorTests {
         #expect(methodName(from: retryInitialize) == "initialize")
     }
 
-    @Test func processRouteActivationTimeoutDoesNotReplaceAfterStateWasCleared()
-        async throws
-    {
-        let target = xcodeProcessTarget(processID: 27020, xcodeVersion: "27.0")
-        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
-        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
-        let fixture = RuntimeCoordinatorFixture(
-            upstreams: [TestUpstreamClient()],
-            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0]),
-            ],
-            processRoutingEnabled: true,
-            dynamicUpstreamFactory: { _ in
-                let replacement = TestUpstreamClient()
-                createdUpstreams.withLockedValue { $0.append(replacement) }
-                return [replacement]
-            },
-            startImmediately: false
-        )
-        defer { fixture.shutdownAndWait() }
-        let manager = fixture.manager
-        let start = try #require(
-            manager.beginProcessRouteAttachingForTesting(
-                processID: target.processID,
-                upstreamIndex: 0,
-                nowUptimeNs: 0
-            )
-        )
-
-        manager.handleProcessRouteActivationTimeout(
-            upstreamID: 123,
-            start: start
-        )
-
-        #expect(timeoutScheduler.scheduledCount() == 0)
-        #expect(createdUpstreams.withLockedValue { $0.isEmpty })
-        #expect(manager.processControlPlane.attemptSnapshot(processID: target.processID) == nil)
-    }
-
     @Test func processRouteActivationUnsupportedInitializeCompletesPendingClient()
         async throws
     {
@@ -1011,6 +941,66 @@ struct RuntimeCoordinatorTests {
         #expect(try await upstream.nextStopCount() == 1)
         #expect(try await replacements[1].nextStopCount() == 1)
         #expect(await replacements[0].stopCount() == 0)
+    }
+
+    @Test func processRouteActivationRecoversAfterReplacementFactoryIsTemporarilyEmpty()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 27023, xcodeVersion: "27.0")
+        let initialUpstream = TestUpstreamClient()
+        let recoveredUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let factoryCallCount = NIOLockedValueBox(0)
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [initialUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let call = factoryCallCount.withLockedValue { count in
+                    count += 1
+                    return count
+                }
+                guard call > 1 else { return [] }
+                let upstream = TestUpstreamClient()
+                recoveredUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        manager.startProcessRouteActivation(for: route)
+        _ = try await initialUpstream.nextSent(at: 0)
+        #expect(timeoutScheduler.fire(at: 0))
+        #expect(try await initialUpstream.nextStopCount() == 1)
+        #expect(manager.processControlPlane.route(forProcessID: target.processID) == nil)
+        #expect(manager.upstreamTopology.snapshot().slotIDs.isEmpty)
+
+        manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_recover_after_empty_replacement"
+        )
+
+        let recoveredUpstream = try #require(recoveredUpstreams.withLockedValue { $0.first })
+        let initialize = try await waitWithTimeout(
+            "waiting for activation after replacement factory recovery",
+            timeout: .seconds(2)
+        ) {
+            try await recoveredUpstream.nextSent(at: 0)
+        }
+        #expect(methodName(from: initialize) == "initialize")
+        let recoveredRoute = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        #expect(recoveredRoute.upstreamIndices == [1])
+        #expect(manager.upstreamTopology.snapshot().slotIDs == [UpstreamSlotID(rawValue: 1)])
     }
 
     @Test func processRouteActivationOwnsInitializeWhileReadinessWaits() async throws {

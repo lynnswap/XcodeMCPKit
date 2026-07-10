@@ -709,18 +709,6 @@ final class UpstreamHealthManager: Sendable {
 
     func replaceInitTimeout(
         _ timeout: RuntimeScheduledTimeout,
-        upstreamIndex: Int
-    ) -> RuntimeScheduledTimeout? {
-        state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return nil }
-            let existing = state.upstreamStates[upstreamIndex].initTimeout
-            state.upstreamStates[upstreamIndex].initTimeout = timeout
-            return existing
-        }
-    }
-
-    func replaceInitTimeout(
-        _ timeout: RuntimeScheduledTimeout,
         for claim: InitializeClaim
     ) -> TimeoutAttachment {
         state.withLockedValue { state in
@@ -733,37 +721,12 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
-    func clearWarmInitializeIfMatching(upstreamIndex: Int, upstreamID: Int64) -> Bool {
-        state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return false }
-            guard state.upstreamStates[upstreamIndex].initUpstreamID == upstreamID else { return false }
-            state.upstreamStates[upstreamIndex].initTimeout = nil
-            state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].isInitialized = false
-            state.upstreamStates[upstreamIndex].initUpstreamID = nil
-            state.upstreamStates[upstreamIndex].initializeClaim = nil
-            state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
-            return true
-        }
-    }
-
     func markInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard Self.isActive(upstreamIndex, state: state) else { return }
             state.upstreamStates[upstreamIndex].initInFlight = true
             state.upstreamStates[upstreamIndex].initUpstreamID = upstreamID
             state.upstreamStates[upstreamIndex].isInitialized = false
-        }
-    }
-
-    func clearInitInFlight(upstreamIndex: Int) {
-        state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return }
-            state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].initUpstreamID = nil
-            state.upstreamStates[upstreamIndex].initTimeout = nil
-            state.upstreamStates[upstreamIndex].initializeClaim = nil
-            state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
         }
     }
 
@@ -895,6 +858,19 @@ final class UpstreamHealthManager: Sendable {
             let replaced = state.upstreamStates[claim.upstreamIndex].initTimeout
             state.upstreamStates[claim.upstreamIndex].initTimeout = timeout
             return TimeoutAttachment(accepted: true, replaced: replaced)
+        }
+    }
+
+    func currentCatalogActivationClaim(
+        upstreamIndex: Int
+    ) -> InitializeClaim? {
+        state.withLockedValue { state in
+            guard Self.isActive(upstreamIndex, state: state),
+                  let claim = state.upstreamStates[upstreamIndex].initializeClaim,
+                  claim.owner == .processRouteActivation,
+                  state.upstreamStates[upstreamIndex].initializeClaimPhase
+                    == .initializedAwaitingCatalog else { return nil }
+            return claim
         }
     }
 

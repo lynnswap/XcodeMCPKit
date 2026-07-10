@@ -490,7 +490,7 @@ extension RuntimeCoordinator {
                     data: data
                 )
             case .backpressure:
-                self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+                self.markUpstreamOverloaded(context.proof)
                 self.failPendingSend(
                     originalRequestData: data,
                     upstreamIndex: upstreamIndex,
@@ -617,7 +617,7 @@ extension RuntimeCoordinator {
             )
             return .accepted
         case .backpressure:
-            markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+            markUpstreamOverloaded(context.proof)
             return .backpressure
         case .unavailable(let reason):
             return .unavailable(reason)

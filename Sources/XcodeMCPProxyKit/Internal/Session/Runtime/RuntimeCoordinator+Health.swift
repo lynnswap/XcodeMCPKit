@@ -26,6 +26,10 @@ extension RuntimeCoordinator {
         _ = upstreamHealthManager.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
     }
 
+    func markUpstreamOverloaded(_ proof: UpstreamTopologyProof) {
+        _ = upstreamHealthManager.markUpstreamOverloaded(proof)
+    }
+
     func markRequestTimedOut(upstreamIndex: Int) {
         let nowUptimeNs = nowUptimeNanoseconds()
         let result = upstreamHealthManager.markRequestTimedOut(
@@ -46,7 +50,8 @@ extension RuntimeCoordinator {
         }
     }
 
-    func probeUpstreamHealth(upstreamIndex: Int, probeGeneration: UInt64) {
+    func probeUpstreamHealth(_ probe: UpstreamHealthManager.ProbeRequest) {
+        let upstreamIndex = probe.upstreamIndex
         let internalSessionID = controlPlaneSessionID(for: "health_probe", route: nil)
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
@@ -66,8 +71,7 @@ extension RuntimeCoordinator {
         let request = JSONRPC.Wire.requestObject(id: upstreamID, method: "tools/list")
         guard let requestData = try? JSONRPC.Wire.data(from: request) else {
             finishHealthProbe(
-                upstreamIndex: upstreamIndex,
-                probeGeneration: probeGeneration,
+                probe,
                 success: false,
                 reason: "encode_request_failed"
             )
@@ -93,16 +97,14 @@ extension RuntimeCoordinator {
                 else {
                     self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                     self.finishHealthProbe(
-                        upstreamIndex: upstreamIndex,
-                        probeGeneration: probeGeneration,
+                        probe,
                         success: false,
                         reason: "invalid_response"
                     )
                     return
                 }
                 self.finishHealthProbe(
-                    upstreamIndex: upstreamIndex,
-                    probeGeneration: probeGeneration,
+                    probe,
                     success: true,
                     reason: "ok"
                 )
@@ -113,8 +115,7 @@ extension RuntimeCoordinator {
                 }
                 self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
                 self.finishHealthProbe(
-                    upstreamIndex: upstreamIndex,
-                    probeGeneration: probeGeneration,
+                    probe,
                     success: false,
                     reason: "timeout"
                 )
@@ -123,15 +124,14 @@ extension RuntimeCoordinator {
     }
 
     func finishHealthProbe(
-        upstreamIndex: Int,
-        probeGeneration: UInt64,
+        _ probe: UpstreamHealthManager.ProbeRequest,
         success: Bool,
         reason: String
     ) {
+        let upstreamIndex = probe.upstreamIndex
         let nowUptimeNs = nowUptimeNanoseconds()
         upstreamHealthManager.finishHealthProbe(
-            upstreamIndex: upstreamIndex,
-            probeGeneration: probeGeneration,
+            probe,
             success: success,
             nowUptimeNs: nowUptimeNs
         )

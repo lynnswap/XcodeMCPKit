@@ -177,10 +177,6 @@ final class CanonicalHandshakeState: Sendable {
         }
     }
 
-    func revokeInitializePublication(_ publication: InitializePublication) {
-        cancelInitializePublication(publication.lease)
-    }
-
     func clearInitialize() {
         state.withLockedValue { state in
             state.initializeResult = nil

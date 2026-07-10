@@ -16,21 +16,33 @@ extension RuntimeCoordinator {
         lease: CatalogLease,
         nowUptimeNanoseconds: UInt64
     ) -> CatalogCommit {
-        var catalogCommit: CatalogCommit?
-        let activationCommit = upstreamHealthManager.commitCatalogActivation(
+        guard let initializeClaim = upstreamHealthManager.currentCatalogActivationClaim(
             upstreamIndex: lease.upstreamIndex
-        ) { initializeClaim in
-            guard let proof = initializeClaim.topologyProof,
-                  upstreamTopology.validate(proof) else { return .keepWaiting }
-            let result = processControlPlane.completeCatalog(
+        ), let proof = initializeClaim.topologyProof else {
+            return processControlPlane.completeCatalog(
                 outcome,
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds
             )
-            catalogCommit = result
-            guard case .usable = outcome,
-                  case .accepted = result else { return .keepWaiting }
-            return .complete
+        }
+        var catalogCommit: CatalogCommit?
+        var activationCommit: UpstreamHealthManager.CatalogActivationCommit?
+        guard upstreamTopology.withValidated(proof, {
+            activationCommit = upstreamHealthManager.commitCatalogActivation(
+                upstreamIndex: lease.upstreamIndex
+            ) { _ in
+                let result = processControlPlane.completeCatalog(
+                    outcome,
+                    lease: lease,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds
+                )
+                catalogCommit = result
+                guard case .usable = outcome,
+                      case .accepted = result else { return .keepWaiting }
+                return .complete
+            }
+        }) != nil, let activationCommit else {
+            return .discarded(.upstreamReplaced, .none)
         }
         switch activationCommit {
         case .notOwned:
@@ -134,39 +146,6 @@ extension RuntimeCoordinator {
             ]
         )
         return start
-    }
-
-    func handleProcessRouteActivationTimeout(
-        upstreamID: Int64,
-        start: ProcessControlPlaneAuthority.ActivationStart
-    ) {
-        guard let timeout = processControlPlane.handleActivationTimeout(start) else {
-            return
-        }
-        let processID = start.processID
-        let upstreamIndex = start.upstreamIndex
-        let attempt = start.attempt
-
-        applyProcessControlPlaneTransition(timeout.transition)
-        logger.info(
-            "route_activation_timeout",
-            metadata: [
-                "pid": .string("\(processID)"),
-                "upstream": .string("\(upstreamIndex)"),
-                "attempt": .string("\(attempt)"),
-            ]
-        )
-
-        _ = upstreamID
-        guard replaceProcessBoundUpstreamSlot(processID: processID, upstreamIndex: upstreamIndex) else {
-            return
-        }
-        scheduleProcessRouteActivationRetry(
-            processID: processID,
-            retry: timeout.retry,
-            lease: timeout.activationLease,
-            reason: "timeout"
-        )
     }
 
     func markProcessRouteActivationInitialized(upstreamIndex: Int) {
@@ -401,19 +380,26 @@ extension RuntimeCoordinator {
         attempt: Int,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
+        guard let proof = initializeClaim.topologyProof else { return }
         var timeout: ProcessControlPlaneAuthority.AttemptTimeout?
-        guard let cleared = upstreamHealthManager.timeoutCatalogActivation(
-            initializeClaim,
-            commit: { currentClaim in
-            guard let proof = currentClaim.topologyProof,
-                  upstreamTopology.validate(proof) else { return false }
-            timeout = processControlPlane.handleCatalogChannelTimeout(
-                upstreamIndex: upstreamIndex,
-                nowUptimeNs: nowUptimeNanoseconds()
+        var cleared: (
+            timeout: RuntimeScheduledTimeout?,
+            initUpstreamID: Int64?,
+            didReceiveInitializeResponse: Bool,
+            didSendInitialized: Bool
+        )?
+        guard upstreamTopology.withValidated(proof, {
+            cleared = upstreamHealthManager.timeoutCatalogActivation(
+                initializeClaim,
+                commit: { _ in
+                    timeout = processControlPlane.handleCatalogChannelTimeout(
+                        upstreamIndex: upstreamIndex,
+                        nowUptimeNs: nowUptimeNanoseconds()
+                    )
+                    return true
+                }
             )
-            return true
-            }
-        ) else { return }
+        }) != nil, let cleared else { return }
         finishClearingUpstreamState(
             upstreamIndex: upstreamIndex,
             cleared: cleared,
@@ -526,54 +512,4 @@ extension RuntimeCoordinator {
         return false
     }
 
-    @discardableResult
-    func replaceProcessBoundUpstreamSlot(
-        processID: pid_t,
-        upstreamIndex: Int
-    ) -> Bool {
-        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              route.target.processID == processID
-        else {
-            abandonProcessRouteActivation(
-                processID: processID,
-                reason: "replacement_route_unavailable"
-            )
-            return false
-        }
-        let replacements = dynamicUpstreamFactory?(route.target) ?? []
-        guard let replacement = replacements.first else {
-            abandonProcessRouteActivation(
-                processID: processID,
-                reason: "replacement_unavailable"
-            )
-            return false
-        }
-
-        guard let topologyTransition = upstreamTopology.replace(
-            UpstreamSlotID(rawValue: upstreamIndex),
-            with: replacement
-        ), let previous = topologyTransition.replaced?.slot else {
-            for unusedReplacement in replacements {
-                addRuntimeTask {
-                    await unusedReplacement.stop()
-                }
-            }
-            abandonProcessRouteActivation(
-                processID: processID,
-                reason: "replacement_slot_unavailable"
-            )
-            return false
-        }
-        publishUpstreamTopology(topologyTransition.snapshot)
-        observeUpstreamEvents(replacement, upstreamIndex: upstreamIndex)
-        addRuntimeTask {
-            await previous.stop()
-        }
-        for unusedReplacement in replacements.dropFirst() {
-            addRuntimeTask {
-                await unusedReplacement.stop()
-            }
-        }
-        return true
-    }
 }

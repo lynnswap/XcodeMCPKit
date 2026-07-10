@@ -1,5 +1,6 @@
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import Testing
 import XcodeMCPKit
 import XcodeMCPProxyTestSupport
@@ -322,7 +323,7 @@ struct ControlPlaneAuthorityTests {
         #expect(health.beginWarmInitialize(upstreamIndex: 0))
 
         let replacement = try #require(topology.replace(
-            UpstreamSlotID(rawValue: 0),
+            oldProof,
             with: TestUpstreamClient()
         ))
         let replacementProof = try #require(
@@ -342,6 +343,17 @@ struct ControlPlaneAuthorityTests {
         #expect(
             health.activeStatesSnapshot().first { $0.id == UpstreamSlotID(rawValue: 0) }?
                 .state.initInFlight == false
+        )
+        let replacementInitializeID = router.assignInitialize(upstreamIndex: 0)
+        let replacementClaim = try #require(health.claimWarmInitialize(upstreamIndex: 0))
+        #expect(router.consume(proof: oldProof, upstreamID: replacementInitializeID) == nil)
+        #expect(health.markProtocolViolation(oldProof, nowUptimeNs: 1) == nil)
+        #expect(health.validate(replacementClaim))
+        #expect(
+            router.consume(
+                proof: replacementProof,
+                upstreamID: replacementInitializeID
+            )?.isInitialize == true
         )
 
         let retired = topology.retire([UpstreamSlotID(rawValue: 1)])
@@ -366,6 +378,49 @@ struct ControlPlaneAuthorityTests {
             Issue.record("stale topology proof must not mutate the replacement health state")
             return
         }
+    }
+
+    @Test func catalogActivationSuccessAndTimeoutHaveSingleTerminalWinner() throws {
+        let topology = UpstreamTopologyAuthority([TestUpstreamClient()])
+        let snapshot = topology.snapshot()
+        let proof = try #require(snapshot.proof(UpstreamSlotID(rawValue: 0)))
+        let health = UpstreamHealthManager()
+        health.applyTopology(snapshot)
+        let claim = try #require(health.claimWarmInitialize(
+            upstreamIndex: 0,
+            owner: .processRouteActivation
+        ))
+        #expect(health.beginInitializeSend(claim))
+        #expect(health.setWarmInitializeUpstreamID(41, for: claim))
+        #expect(health.transferInitializeResponse(claim, expectedUpstreamID: 41))
+        #expect(health.markInitializedNotificationSent(claim, expectedUpstreamID: 41))
+        _ = try #require(health.markInitialized(
+            claim,
+            expectedUpstreamID: 41,
+            commit: { true }
+        ))
+
+        let terminalWinners = NIOLockedValueBox<[String]>([])
+        DispatchQueue.concurrentPerform(iterations: 2) { contender in
+            _ = topology.withValidated(proof) {
+                if contender == 0 {
+                    switch health.commitCatalogActivation(upstreamIndex: 0, commit: { _ in
+                        .complete
+                    }) {
+                    case .completed:
+                        terminalWinners.withLockedValue { $0.append("success") }
+                    case .notOwned, .kept:
+                        break
+                    }
+                    return
+                }
+                if health.timeoutCatalogActivation(claim, commit: { _ in true }) != nil {
+                    terminalWinners.withLockedValue { $0.append("timeout") }
+                }
+            }
+        }
+
+        #expect(terminalWinners.withLockedValue(\.count) == 1)
     }
 
     @Test func forwardingAdmissionRejectsRouteAndTopologyChangesIndependently() throws {
@@ -402,7 +457,7 @@ struct ControlPlaneAuthorityTests {
             replacementAuthority.admit(replacementRouteProof)
         )
         _ = try #require(topology.replace(
-            UpstreamSlotID(rawValue: 0),
+            topologyProof,
             with: TestUpstreamClient()
         ))
         #expect(replacementAuthority.validate(replacementRouteLease))

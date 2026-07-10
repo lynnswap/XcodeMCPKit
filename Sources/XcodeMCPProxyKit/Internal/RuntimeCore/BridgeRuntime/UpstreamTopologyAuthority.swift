@@ -83,27 +83,6 @@ final class UpstreamTopologyAuthority: Sendable {
     }
 
     func replace(
-        _ id: UpstreamSlotID,
-        with slot: any UpstreamSlotControlling
-    ) -> Transition? {
-        state.withLockedValue { state -> Transition? in
-            guard let previous = state.entriesByID[id] else { return nil }
-            state.entriesByID[id] = Entry(
-                id: id,
-                generation: previous.generation &+ 1,
-                slot: slot
-            )
-            state.topologyEpoch &+= 1
-            return Transition(
-                snapshot: Self.snapshot(state),
-                addedIDs: [],
-                retired: [],
-                replaced: previous
-            )
-        }
-    }
-
-    func replace(
         _ proof: UpstreamTopologyProof,
         with slot: any UpstreamSlotControlling
     ) -> Transition? {

@@ -853,10 +853,6 @@ extension RuntimeCoordinator {
         upstreamHealthManager.markInitInFlight(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
     }
 
-    func clearUpstreamInitInFlight(upstreamIndex: Int) {
-        upstreamHealthManager.clearInitInFlight(upstreamIndex: upstreamIndex)
-    }
-
     @discardableResult
     func clearUpstreamState(upstreamIndex: Int, expectedUpstreamID: Int64? = nil) -> Bool {
         guard let cleared = upstreamHealthManager.clearUpstreamState(

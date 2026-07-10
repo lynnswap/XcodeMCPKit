@@ -1474,26 +1474,12 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
-    func handleActivationTimeout(_ start: ActivationStart) -> AttemptTimeout? {
-        finishActivationAttemptForRetry(
-            lease: start.lease,
-            allowedPhases: [.attaching]
-        )
-    }
-
     func handleChannelInitializeTimeout(
         _ lease: ActivationLease
     ) -> AttemptTimeout? {
         finishActivationAttemptForRetry(
             lease: lease,
             allowedPhases: [.attaching, .initialized]
-        )
-    }
-
-    func handleCatalogTimeout(_ lease: ActivationLease) -> AttemptTimeout? {
-        finishActivationAttemptForRetry(
-            lease: lease,
-            allowedPhases: [.pending, .initialized, .loadingCatalog, .backoff]
         )
     }
 
@@ -1699,40 +1685,6 @@ final class ProcessControlPlaneAuthority: Sendable {
                     schemaConflicts: conflicts
                 )
             }
-        }
-    }
-
-    private func finishAttemptForRetry(
-        lease: CatalogLease,
-        allowedPhases: Set<AttemptPhase>
-    ) -> AttemptTimeout? {
-        state.withLockedValue { state in
-            guard lease.catalogEpoch == state.catalogEpoch,
-            let key = Self.key(routeID: lease.routeID, in: state),
-            var record = state.recordsByKey[key], var attempt = record.attempt,
-            attempt.id == lease.attemptID,
-            attempt.upstreamID == lease.upstreamID,
-            allowedPhases.contains(attempt.phase) else { return nil }
-            let effects = attempt.detachedEffects()
-            attempt.readinessToken = nil
-            attempt.retryTimeout = nil
-            attempt.retryKind = .activation
-            attempt.loads.removeAll()
-            attempt.phase = .backoff
-            record.attempt = attempt
-            state.recordsByKey[key] = record
-            return AttemptTimeout(
-                transition: ProcessControlPlaneTransition(
-                    addedRoutes: [], retiredRoutes: [], effects: effects,
-                    publishesToolsListChanged: false
-                ),
-                retry: Self.retry(forAttempt: attempt.id.rawValue),
-                activationLease: ActivationLease(
-                    routeID: lease.routeID,
-                    attemptID: attempt.id,
-                    upstreamID: attempt.upstreamID
-                )
-            )
         }
     }
 
@@ -2011,29 +1963,6 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
         for key in state.order {
             guard var record = state.recordsByKey[key], let attempt = record.attempt else { continue }
-            effects.append(contentsOf: attempt.detachedEffects())
-            record.attempt = nil
-            state.recordsByKey[key] = record
-        }
-        return effects
-    }
-
-    private static func invalidateCatalogAttempts(
-        in state: inout State
-    ) -> [ProcessControlPlaneEffect] {
-        var effects: [ProcessControlPlaneEffect] = []
-        if let attempt = state.unboundAttempt {
-            effects.append(contentsOf: attempt.detachedEffects())
-            state.unboundAttempt = nil
-        }
-        for key in state.order {
-            guard var record = state.recordsByKey[key],
-                  let attempt = record.attempt,
-                  attempt.phase == .loadingCatalog
-                    || (
-                        attempt.retryKind == .catalog
-                            && [.pending, .backoff].contains(attempt.phase)
-                    ) else { continue }
             effects.append(contentsOf: attempt.detachedEffects())
             record.attempt = nil
             state.recordsByKey[key] = record

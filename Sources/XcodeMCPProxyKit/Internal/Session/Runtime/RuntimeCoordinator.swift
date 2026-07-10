@@ -1062,10 +1062,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             case .cancelInitTimeout(let timeout):
                 timeout.cancel()
             case .startHealthProbe(let probe):
-                probeUpstreamHealth(
-                    upstreamIndex: probe.upstreamIndex,
-                    probeGeneration: probe.probeGeneration
-                )
+                probeUpstreamHealth(probe)
             case .clearPins:
                 break
             case .failQueuedIfNoRecovery:
@@ -1076,10 +1073,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     private func startHealthProbes(_ probes: [UpstreamHealthManager.ProbeRequest]) {
         for probe in probes {
-            probeUpstreamHealth(
-                upstreamIndex: probe.upstreamIndex,
-                probeGeneration: probe.probeGeneration
-            )
+            probeUpstreamHealth(probe)
         }
     }
 
