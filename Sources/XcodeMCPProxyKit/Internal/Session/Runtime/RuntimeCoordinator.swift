@@ -24,6 +24,15 @@ final class SessionContext: Sendable {
             },
             sendNotification: { [weak notificationHub] data in
                 notificationHub?.broadcast(data)
+            },
+            onNotificationBufferOverflow: { droppedNotificationCount in
+                ProxyLogging.make("http.session").warning(
+                    "SSE notification buffer overflow",
+                    metadata: [
+                        "session": .string(id),
+                        "dropped_notifications": .string("\(droppedNotificationCount)"),
+                    ]
+                )
             }
         )
     }

@@ -1688,7 +1688,6 @@ struct DocumentationProviderTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:LongRunning",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )

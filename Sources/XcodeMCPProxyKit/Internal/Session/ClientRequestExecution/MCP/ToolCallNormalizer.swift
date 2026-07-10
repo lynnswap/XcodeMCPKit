@@ -15,58 +15,21 @@ struct ToolCallNormalizer: Sendable {
     func normalizeResponseDataIfNeeded(
         method: String? = nil,
         toolName: String? = nil,
-        responseMethodsByIDKey: [String: String] = [:],
-        responseToolNamesByIDKey: [String: String] = [:],
         toolsCatalogOverride: JSONValue? = nil,
         upstreamIndex: Int? = nil,
         upstreamData: Data
     ) -> Data {
-        guard let payload = try? JSONSerialization.jsonObject(with: upstreamData, options: []) else {
+        guard let object = try? JSONRPC.Wire.object(fromData: upstreamData) else {
             return upstreamData
         }
-
-        if let object = payload as? [String: Any] {
-            guard let rewritten = normalizeResponseObjectIfNeeded(
-                object,
-                method: method,
-                explicitToolName: toolName,
-                responseMethodsByIDKey: responseMethodsByIDKey,
-                responseToolNamesByIDKey: responseToolNamesByIDKey,
-                toolsCatalogOverride: toolsCatalogOverride
-                    ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
-            ),
-                let rewrittenData = try? JSONRPC.Wire.data(from: rewritten)
-            else {
-                return upstreamData
-            }
-            return rewrittenData
-        }
-
-        guard let array = payload as? [Any] else {
-            return upstreamData
-        }
-
-        var rewroteAny = false
-        let rewrittenArray = array.map { item -> Any in
-            guard let object = item as? [String: Any],
-                let rewritten = normalizeResponseObjectIfNeeded(
-                    object,
-                    method: nil,
-                    explicitToolName: nil,
-                    responseMethodsByIDKey: responseMethodsByIDKey,
-                    responseToolNamesByIDKey: responseToolNamesByIDKey,
-                    toolsCatalogOverride: toolsCatalogOverride
-                        ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
-                )
-            else {
-                return item
-            }
-            rewroteAny = true
-            return rewritten
-        }
-
-        guard rewroteAny,
-            let rewrittenData = try? JSONRPC.Wire.data(from: rewrittenArray)
+        guard let rewritten = normalizeResponseObjectIfNeeded(
+            object,
+            method: method,
+            toolName: toolName,
+            toolsCatalogOverride: toolsCatalogOverride
+                ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
+        ),
+            let rewrittenData = try? JSONRPC.Wire.data(from: rewritten)
         else {
             return upstreamData
         }
@@ -76,23 +39,12 @@ struct ToolCallNormalizer: Sendable {
     private func normalizeResponseObjectIfNeeded(
         _ object: [String: Any],
         method: String?,
-        explicitToolName: String?,
-        responseMethodsByIDKey: [String: String],
-        responseToolNamesByIDKey: [String: String],
+        toolName: String?,
         toolsCatalogOverride: JSONValue?
     ) -> [String: Any]? {
-        guard resolvedMethod(
-            for: object,
-            explicitMethod: method,
-            responseMethodsByIDKey: responseMethodsByIDKey
-        ) == "tools/call" else {
+        guard method == "tools/call" else {
             return nil
         }
-
-        let toolName = explicitToolName ?? resolvedToolName(
-            for: object,
-            responseToolNamesByIDKey: responseToolNamesByIDKey
-        )
         guard let toolName, shouldNormalize(toolName: toolName, toolsCatalogOverride: toolsCatalogOverride)
         else {
             return nil
@@ -128,30 +80,6 @@ struct ToolCallNormalizer: Sendable {
         var rewritten = object
         rewritten["result"] = result
         return rewritten
-    }
-
-    private func resolvedMethod(
-        for object: [String: Any],
-        explicitMethod: String?,
-        responseMethodsByIDKey: [String: String]
-    ) -> String? {
-        if let explicitMethod {
-            return explicitMethod
-        }
-        guard let responseID = JSONRPC.Message.Inspector.responseID(from: object) else {
-            return nil
-        }
-        return responseMethodsByIDKey[responseID.key]
-    }
-
-    private func resolvedToolName(
-        for object: [String: Any],
-        responseToolNamesByIDKey: [String: String]
-    ) -> String? {
-        guard let responseID = JSONRPC.Message.Inspector.responseID(from: object) else {
-            return nil
-        }
-        return responseToolNamesByIDKey[responseID.key]
     }
 
     private func shouldNormalize(toolName: String, toolsCatalogOverride: JSONValue?) -> Bool {

@@ -7,45 +7,7 @@ final class ClientMCPRequestExecutor: Sendable {
     struct FilteredToolCallRequest: Sendable {
         let bodyData: Data?
         let localResponseData: Data?
-        let forwardedResponseIDs: [JSONRPC.ID]
-        let forceBatchArray: Bool
-
-        init(
-            bodyData: Data?,
-            localResponseData: Data?,
-            forwardedResponseIDs: [JSONRPC.ID],
-            forceBatchArray: Bool
-        ) {
-            self.bodyData = bodyData
-            self.localResponseData = localResponseData
-            self.forwardedResponseIDs = forwardedResponseIDs
-            self.forceBatchArray = forceBatchArray
-        }
-    }
-
-    struct LocalToolBatchResult: Sendable {
-        let responseData: Data?
-        let fallbackForwardedRequest: FilteredToolCallRequest?
-
-        init(
-            responseData: Data?,
-            fallbackForwardedRequest: FilteredToolCallRequest?
-        ) {
-            self.responseData = responseData
-            self.fallbackForwardedRequest = fallbackForwardedRequest
-        }
-    }
-
-    private struct LocalToolFallbackForwardingResult {
-        let request: FilteredToolCallRequest
-        let resolution: ClientMCPRequestExecutor.Resolution
-    }
-
-    struct LocalToolFilterOperation {
-        let localResponseFuture: EventLoopFuture<LocalToolBatchResult>
-        let forwardedRequest: FilteredToolCallRequest
-        let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle
-        let deadline: Date?
+        let forwardedResponseID: JSONRPC.ID?
     }
 
     let sessionManager: any RuntimeClientMCPRequestPort
@@ -106,341 +68,199 @@ final class ClientMCPRequestExecutor: Sendable {
         requestTimeoutOverride: TimeAmount? = nil,
         parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) -> ClientMCPRequestExecutor.Operation {
-        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
-        let requestMetadata = MCPErrorResponder.requestMetadata(fromParsed: parsedRequestJSON)
-        let requestIDs = requestMetadata.ids
-        let requestIsBatch = requestMetadata.isBatch
-
-        if let localRequest = Self.localHandlingRequest(from: parsedRequestJSON),
-            let localHandling = localResponder.handle(
-                object: localRequest.object,
-                headerSessionID: headerSessionID,
-                headerSessionExists: headerSessionExists,
-                eventLoop: eventLoop,
-                requestTimeoutOverride: requestTimeoutOverride
+        let parsedJSON: Any
+        do {
+            parsedJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
+        } catch {
+            return immediate(
+                .mcpError(
+                    id: nil,
+                    code: -32700,
+                    message: "invalid json",
+                    sessionID: headerSessionID,
+                    prefersEventStream: prefersEventStream
+                ),
+                on: eventLoop
             )
-        {
+        }
+        guard let requestObject = parsedJSON as? [String: Any] else {
+            return immediate(
+                .mcpError(
+                    id: nil,
+                    code: -32600,
+                    message: "invalid request",
+                    sessionID: headerSessionID,
+                    prefersEventStream: prefersEventStream
+                ),
+                on: eventLoop
+            )
+        }
+
+        if let localHandling = localResponder.handle(
+            object: requestObject,
+            headerSessionID: headerSessionID,
+            headerSessionExists: headerSessionExists,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
             return ClientMCPRequestExecutor.Operation(
                 future: resolveLocalHandling(
                     localHandling,
                     prefersEventStream: prefersEventStream,
-                    eventLoop: eventLoop,
-                    forceBatchArray: localRequest.forceBatchArray
+                    eventLoop: eventLoop
                 ),
                 cancellationHandle: nil
             )
         }
 
         guard let sessionID = headerSessionID, sessionID.isEmpty == false else {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .plain(
-                        status: .badRequest,
-                        body: "session id required",
-                        sessionID: nil
-                    )
-                ),
-                cancellationHandle: nil
+            return immediate(
+                .plain(status: .badRequest, body: "session id required", sessionID: nil),
+                on: eventLoop
             )
         }
-
         guard headerSessionExists else {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .plain(
-                        status: .notFound,
-                        body: "session not found",
-                        sessionID: sessionID
-                    )
-                ),
-                cancellationHandle: nil
+            return immediate(
+                .plain(status: .notFound, body: "session not found", sessionID: sessionID),
+                on: eventLoop
             )
         }
 
-        if let requestObject = parsedRequestJSON as? [String: Any] {
-            switch JSONRPC.Message.Inspector.kind(of: requestObject) {
-            case .malformed(let invalidID):
-                return ClientMCPRequestExecutor.Operation(
-                    future: eventLoop.makeSucceededFuture(
-                        .mcpError(
-                            id: invalidID,
-                            ids: [],
-                            code: -32600,
-                            message: "invalid request",
-                            forceBatchArray: false,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
-                    ),
-                    cancellationHandle: nil
-                )
-            case .response(let responseID):
-                return makeClientResponseForwardingOperation(
-                    responseObject: requestObject,
+        switch JSONRPC.Message.Inspector.kind(of: requestObject) {
+        case .malformed(let invalidID):
+            return immediate(
+                .mcpError(
+                    id: invalidID,
+                    code: -32600,
+                    message: "invalid request",
                     sessionID: sessionID,
-                    responseID: responseID,
-                    eventLoop: eventLoop
-                )
-            case .request, .notification, .other:
-                break
-            }
+                    prefersEventStream: prefersEventStream
+                ),
+                on: eventLoop
+            )
+        case .response(let responseID):
+            return makeClientResponseForwardingOperation(
+                responseObject: requestObject,
+                sessionID: sessionID,
+                responseID: responseID,
+                eventLoop: eventLoop
+            )
+        case .request, .notification, .other:
+            break
         }
 
+        let responseID = JSONRPC.Message.Inspector.requestID(from: requestObject)
         if sessionManager.isInitialized() == false {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    Self.makeExpectedInitializeResolution(
-                        requestIDs: requestIDs,
-                        requestIsBatch: requestIsBatch,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                ),
-                cancellationHandle: nil
-            )
-        }
-
-        guard let parsedRequestJSON else {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: [],
-                        code: -32700,
-                        message: "invalid json",
-                        forceBatchArray: false,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                ),
-                cancellationHandle: nil
-            )
-        }
-
-        if headerSessionID == nil,
-            let initializeResolution = Self.makeMissingInitializeResolution(
-                parsedRequestJSON: parsedRequestJSON,
-                requestIDs: requestIDs,
-                requestIsBatch: requestIsBatch,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream
-            )
-        {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(initializeResolution),
-                cancellationHandle: nil
-            )
-        }
-
-        let routing: ToolCallRouting
-        do {
-            routing = try routeToolCalls(
-                bodyData: bodyData,
-                sessionID: sessionID,
-                forceBatchArray: requestIsBatch,
-                eventLoop: eventLoop,
-                requestTimeoutOverride: requestTimeoutOverride
-            )
-        } catch {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: [],
-                        code: -32700,
-                        message: "invalid json",
-                        forceBatchArray: false,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                ),
-                cancellationHandle: nil
-            )
-        }
-
-        if let localToolFilter = routing.localOperation {
-            if let parentCancellationHandle,
-                parentCancellationHandle.bindChildHandle(localToolFilter.cancellationHandle) == false
-            {
-                localToolFilter.cancellationHandle.cancel(using: sessionManager)
-                return ClientMCPRequestExecutor.Operation(
-                    future: eventLoop.makeSucceededFuture(
-                        .empty(status: .accepted, sessionID: sessionID)
-                    ),
-                    cancellationHandle: nil
-                )
-            }
-
-            let forwardingFuture = makeLocalToolForwardingFuture(
-                request: localToolFilter.forwardedRequest,
-                sessionID: sessionID,
-                headerSessionID: headerSessionID,
-                requestIsBatch: requestIsBatch,
-                prefersEventStream: prefersEventStream,
-                eventLoop: eventLoop,
-                deadline: localToolFilter.deadline,
-                cancellationHandle: localToolFilter.cancellationHandle
-            )
-            let localAndFallbackFuture = localToolFilter.localResponseFuture.flatMap {
-                localBatchResult -> EventLoopFuture<(
-                    LocalToolBatchResult,
-                    LocalToolFallbackForwardingResult?
-                )> in
-                guard let fallbackRequest = localBatchResult.fallbackForwardedRequest else {
-                    return eventLoop.makeSucceededFuture((localBatchResult, nil))
-                }
-                return self.makeLocalToolForwardingFuture(
-                    request: fallbackRequest,
+            return immediate(
+                Self.makeExpectedInitializeResolution(
+                    requestID: responseID,
                     sessionID: sessionID,
-                    headerSessionID: headerSessionID,
-                    requestIsBatch: requestIsBatch,
+                    prefersEventStream: prefersEventStream
+                ),
+                on: eventLoop
+            )
+        }
+
+        switch routeToolCall(
+            object: requestObject,
+            bodyData: bodyData,
+            sessionID: sessionID,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
+        case .local(let responseData):
+            return immediate(
+                Self.makeLocalResponseResolution(
+                    responseData: responseData,
+                    sessionID: sessionID,
                     prefersEventStream: prefersEventStream,
-                    eventLoop: eventLoop,
-                    deadline: localToolFilter.deadline,
-                    cancellationHandle: localToolFilter.cancellationHandle
-                ).map { fallbackResolution in
-                    (
-                        localBatchResult,
-                        LocalToolFallbackForwardingResult(
-                            request: fallbackRequest,
-                            resolution: fallbackResolution
-                        )
-                    )
-                }
+                    emptyStatus: .accepted
+                ),
+                on: eventLoop
+            )
+
+        case .localOperation(let operation):
+            if let parentCancellationHandle,
+                parentCancellationHandle.bindChildHandle(operation.cancellationHandle) == false
+            {
+                operation.cancellationHandle.cancel(using: sessionManager)
+                return immediate(.empty(status: .accepted, sessionID: sessionID), on: eventLoop)
             }
-            let future = forwardingFuture.and(localAndFallbackFuture).map {
-                forwardingResolution,
-                localAndFallback in
-                let (localBatchResult, fallbackForwarding) = localAndFallback
-                let initialResolution = Self.mergeLocalToolResponseData(
-                    localBatchResult.responseData,
-                    into: forwardingResolution,
-                    fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
-                    forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray,
+            let future = operation.responseFuture.map { responseData in
+                operation.cancellationHandle.markCompleted()
+                self.sessionManager.completeRequestLease(operation.cancellationHandle.leaseID)
+                return Self.makeLocalResponseResolution(
+                    responseData: responseData,
                     sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
+                    prefersEventStream: prefersEventStream,
+                    emptyStatus: .accepted
                 )
-                guard let fallbackForwarding else {
-                    return initialResolution
-                }
-                let initialData = Self.responseDataForBatchResolution(
-                    initialResolution,
-                    fallbackRequestIDs: localToolFilter.forwardedRequest.forwardedResponseIDs,
-                    forceBatchArray: localToolFilter.forwardedRequest.forceBatchArray
-                )
-                return Self.mergeLocalToolResponseData(
-                    initialData,
-                    into: fallbackForwarding.resolution,
-                    fallbackRequestIDs: fallbackForwarding.request.forwardedResponseIDs,
-                    forceBatchArray: fallbackForwarding.request.forceBatchArray,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                )
-            }
-            future.whenComplete { result in
-                guard (try? result.get()) != nil else { return }
-                localToolFilter.cancellationHandle.markCompleted()
-                self.sessionManager.completeRequestLease(localToolFilter.cancellationHandle.leaseID)
             }
             return ClientMCPRequestExecutor.Operation(
                 future: future,
-                cancellationHandle: localToolFilter.cancellationHandle
+                cancellationHandle: operation.cancellationHandle
+            )
+
+        case .forward(let request):
+            return makeForwardingOperation(
+                filteredRequest: request,
+                sessionID: sessionID,
+                prefersEventStream: prefersEventStream,
+                eventLoop: eventLoop,
+                requestTimeoutOverride: requestTimeoutOverride,
+                parentCancellationHandle: parentCancellationHandle
             )
         }
-
-        return makeForwardingOperation(
-            filteredRequest: routing.forwardedRequest,
-            sessionID: sessionID,
-            headerSessionID: headerSessionID,
-            requestIsBatch: requestIsBatch,
-            prefersEventStream: prefersEventStream,
-            eventLoop: eventLoop,
-            requestTimeoutOverride: requestTimeoutOverride,
-            parentCancellationHandle: parentCancellationHandle
-        )
-    }
-
-    private func makeLocalToolForwardingFuture(
-        request: FilteredToolCallRequest,
-        sessionID: String,
-        headerSessionID: String?,
-        requestIsBatch: Bool,
-        prefersEventStream: Bool,
-        eventLoop: EventLoop,
-        deadline: Date?,
-        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle
-    ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
-        let forwardingTimeout = remainingRequestTimeout(until: deadline)
-        if deadline != nil,
-            forwardingTimeout == nil,
-            request.bodyData != nil
-        {
-            return eventLoop.makeSucceededFuture(
-                .mcpError(
-                    id: nil,
-                    ids: request.forwardedResponseIDs,
-                    code: -32000,
-                    message: "upstream timeout",
-                    forceBatchArray: request.forceBatchArray,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                )
-            )
-        }
-        return makeForwardingOperation(
-            filteredRequest: request,
-            sessionID: sessionID,
-            headerSessionID: headerSessionID,
-            requestIsBatch: requestIsBatch,
-            prefersEventStream: prefersEventStream,
-            eventLoop: eventLoop,
-            requestTimeoutOverride: forwardingTimeout,
-            parentCancellationHandle: cancellationHandle
-        ).future
     }
 
     func makeForwardingOperation(
         filteredRequest: FilteredToolCallRequest,
         sessionID: String,
-        headerSessionID: String?,
-        requestIsBatch: Bool,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
         parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
     ) -> ClientMCPRequestExecutor.Operation {
         guard let forwardedBodyData = filteredRequest.bodyData else {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    Self.makeLocalResponseResolution(
-                        responseData: filteredRequest.localResponseData,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream,
-                        emptyStatus: .accepted
-                    )
+            return immediate(
+                Self.makeLocalResponseResolution(
+                    responseData: filteredRequest.localResponseData,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream,
+                    emptyStatus: .accepted
                 ),
-                cancellationHandle: nil
+                on: eventLoop
+            )
+        }
+        guard let forwardedRequestJSON = try? JSONRPC.Wire.object(fromData: forwardedBodyData) else {
+            return immediate(
+                .mcpError(
+                    id: nil,
+                    code: -32600,
+                    message: "invalid request",
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream
+                ),
+                on: eventLoop
             )
         }
 
-        let forwardedRequestJSON: Any
-        do {
-            forwardedRequestJSON = try JSONSerialization.jsonObject(with: forwardedBodyData, options: [])
-        } catch {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .mcpError(
-                        id: nil,
-                        ids: [],
-                        code: -32700,
-                        message: "invalid json",
-                        forceBatchArray: false,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream
-                    )
-                ),
-                cancellationHandle: nil
-            )
+        let descriptor = Self.topLevelRequestDescriptor(
+            sessionID: sessionID,
+            parsedRequestJSON: forwardedRequestJSON,
+            responseID: filteredRequest.forwardedResponseID
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
+        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: filteredRequest.forwardedResponseID.map { [$0.key] } ?? []
+        )
+        if let parentCancellationHandle,
+            parentCancellationHandle.bindChildHandle(cancellationHandle) == false
+        {
+            cancellationHandle.cancel(using: sessionManager)
+            return immediate(.empty(status: .accepted, sessionID: sessionID), on: eventLoop)
         }
 
         let forwardingDeadline = timeoutDeadline(
@@ -450,37 +270,14 @@ final class ClientMCPRequestExecutor: Sendable {
                     defaultSeconds: requestTimeoutSeconds
                 )
         )
-        let forwardedRequestIDs = filteredRequest.forwardedResponseIDs
-        let localResponseData = filteredRequest.localResponseData
-        let descriptor = Self.topLevelRequestDescriptor(
-            sessionID: sessionID,
-            parsedRequestJSON: forwardedRequestJSON,
-            requestIsBatch: requestIsBatch,
-            requestIDs: forwardedRequestIDs
-        )
-        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
-            leaseID: leaseID,
-            sessionID: sessionID,
-            requestIDKeys: forwardedRequestIDs.map(\.key)
-        )
-        if let parentCancellationHandle,
-            parentCancellationHandle.bindChildHandle(cancellationHandle) == false
-        {
-            cancellationHandle.cancel(using: sessionManager)
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .empty(status: .accepted, sessionID: sessionID)
-                ),
-                cancellationHandle: nil
-            )
-        }
         let session = sessionManager.session(id: sessionID)
-        let refreshRouting = refreshRequestRouting(from: forwardedRequestJSON)
-        if refreshRouting != nil, forwardedRequestIDs.isEmpty == false {
+
+        if refreshCodeIssuesRequest(from: forwardedRequestJSON) != nil,
+            filteredRequest.forwardedResponseID != nil
+        {
             sessionManager.activateRequestLease(
                 leaseID,
-                requestIDKey: forwardedRequestIDs.first?.key,
+                requestIDKey: filteredRequest.forwardedResponseID?.key,
                 upstreamIndex: nil,
                 timeout: requestTimeoutOverride
                     ?? Self.topLevelRequestTimeoutOverride(
@@ -492,8 +289,6 @@ final class ClientMCPRequestExecutor: Sendable {
                 future: makeTopLevelRequestFuture(
                     filteredRequest: filteredRequest,
                     sessionID: sessionID,
-                    headerSessionID: headerSessionID,
-                    requestIsBatch: requestIsBatch,
                     prefersEventStream: prefersEventStream,
                     eventLoop: eventLoop,
                     session: session,
@@ -505,10 +300,11 @@ final class ClientMCPRequestExecutor: Sendable {
                 cancellationHandle: cancellationHandle
             )
         }
-        @Sendable func remainingForwardingTimeout() -> TimeAmount? {
+
+        @Sendable func forwardingTimeout() -> TimeAmount? {
             remainingRequestTimeout(until: forwardingDeadline)
         }
-        @Sendable func makeForwardingTimeoutFuture() -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
+        @Sendable func timeoutResolution() -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
             cancellationHandle.markCompleted()
             self.sessionManager.failRequestLease(
                 leaseID,
@@ -516,31 +312,28 @@ final class ClientMCPRequestExecutor: Sendable {
                 reason: .timedOut
             )
             return eventLoop.makeSucceededFuture(
-                Self.makePartialBatchErrorResolution(
-                    localResponseData: localResponseData,
-                    responseIDs: forwardedRequestIDs,
+                .mcpError(
+                    id: filteredRequest.forwardedResponseID,
                     code: -32000,
                     message: "upstream timeout",
                     sessionID: sessionID,
-                    prefersEventStream: prefersEventStream,
-                    forceBatchArray: requestIsBatch || filteredRequest.forceBatchArray,
-                    fallbackStatus: .ok,
-                    fallbackBody: ""
+                    prefersEventStream: prefersEventStream
                 )
             )
         }
-        @Sendable func makeRoutingFuture(
-            decision: ToolRoutingDecision
+        @Sendable func route(
+            _ decision: ToolRoutingDecision
         ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
             guard cancellationHandle.isCancelled == false else {
                 return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
-            func makeForwardingFuture(
-                preferredUpstreamIndices: [Int]?
-            ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
-                let forwardingTimeout = remainingForwardingTimeout()
-                if forwardingDeadline != nil, forwardingTimeout == nil {
-                    return makeForwardingTimeoutFuture()
+
+            func forward(preferredUpstreamIndices: [Int]?)
+                -> EventLoopFuture<ClientMCPRequestExecutor.Resolution>
+            {
+                let remainingTimeout = forwardingTimeout()
+                if forwardingDeadline != nil, remainingTimeout == nil {
+                    return timeoutResolution()
                 }
                 return self.sessionManager.enqueueOnUpstreamSlot(
                     leaseID: leaseID,
@@ -558,134 +351,76 @@ final class ClientMCPRequestExecutor: Sendable {
                     return self.makeTopLevelRequestFuture(
                         filteredRequest: filteredRequest,
                         sessionID: sessionID,
-                        headerSessionID: headerSessionID,
-                        requestIsBatch: requestIsBatch,
                         prefersEventStream: prefersEventStream,
                         eventLoop: eventLoop,
                         session: session,
                         leaseID: leaseID,
                         upstreamIndex: upstreamIndex,
                         cancellationHandle: cancellationHandle,
-                        requestTimeoutOverride: forwardingTimeout
+                        requestTimeoutOverride: remainingTimeout
                     )
                 }.flatMapError { error in
                     if error is CancellationError {
                         return eventLoop.makeFailedFuture(error)
                     }
-                    let releaseReason: LeaseManager.ReleaseReason =
-                        error is UpstreamSlotScheduler.AcquisitionError
-                        ? .upstreamUnavailable
-                        : .upstreamOverloaded
                     cancellationHandle.markCompleted()
                     self.sessionManager.failRequestLease(
                         leaseID,
                         terminalState: .failed,
-                        reason: releaseReason
+                        reason: error is UpstreamSlotScheduler.AcquisitionError
+                            ? .upstreamUnavailable
+                            : .upstreamOverloaded
                     )
                     return eventLoop.makeSucceededFuture(
                         Self.makeUpstreamUnavailableResolution(
-                            localResponseData: localResponseData,
-                            responseIDs: forwardedRequestIDs,
-                            forceBatchArray: filteredRequest.forceBatchArray,
-                            requestIsBatch: requestIsBatch,
+                            responseID: filteredRequest.forwardedResponseID,
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
                     )
                 }
             }
+
             switch decision {
-            case .reject(let errors, let forceBatchArray):
-                let routedErrorIDKeys = Set(errors.map(\.id.key))
-                let unroutedRequestIDs = forwardedRequestIDs.filter {
-                    routedErrorIDKeys.contains($0.key) == false
-                }
-                let errorData = Self.makeToolRoutingErrorResponseData(
-                    errors: errors,
-                    forceBatchArray: forceBatchArray || requestIsBatch
-                )
-                let unroutedErrorData = Self.makeJSONRPCErrorResponseData(
-                    ids: unroutedRequestIDs,
-                    code: -32000,
-                    message: "request not forwarded because tool routing rejected the batch",
-                    forceBatchArray: true
-                )
-                let responseData = Self.mergeBatchResponsePayloads(
-                    [
-                        errorData,
-                        unroutedErrorData,
-                        localResponseData,
-                    ],
-                    forceBatchArray: forceBatchArray || requestIsBatch
-                )
+            case .reject(let errors):
                 cancellationHandle.markCompleted()
                 self.sessionManager.completeRequestLease(leaseID)
                 return eventLoop.makeSucceededFuture(
                     Self.makeLocalResponseResolution(
-                        responseData: responseData,
+                        responseData: Self.makeToolRoutingErrorResponseData(errors: errors),
                         sessionID: sessionID,
                         prefersEventStream: prefersEventStream,
                         emptyStatus: .accepted
                     )
                 )
             case .localXcodeListWindows:
-                guard forwardedRequestIDs.isEmpty == false else {
+                guard let responseID = filteredRequest.forwardedResponseID else {
                     cancellationHandle.markCompleted()
                     self.sessionManager.completeRequestLease(leaseID)
                     return eventLoop.makeSucceededFuture(
-                        Self.makeLocalResponseResolution(
-                            responseData: localResponseData,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream,
-                            emptyStatus: .accepted
-                        )
+                        .empty(status: .accepted, sessionID: sessionID)
                     )
                 }
-                let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
-                let responseIDs = forwardedRequestIDs
-                let forceBatchArray = requestIsBatch || filteredRequest.forceBatchArray
-                let windowsTimeout = remainingForwardingTimeout()
-                if forwardingDeadline != nil, windowsTimeout == nil {
-                    return makeForwardingTimeoutFuture()
+                let remainingTimeout = forwardingTimeout()
+                if forwardingDeadline != nil, remainingTimeout == nil {
+                    return timeoutResolution()
                 }
+                let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
                 let task = Task { [self] in
                     let responseData: Data?
-                    if Task.isCancelled {
-                        responseData = localResponseData
-                    } else {
-                        do {
-                            let result = try await sessionManager.liveXcodeListWindowsResult(
-                                route: .anyHealthy,
-                                requestTimeoutOverride: windowsTimeout
-                            )
-                            let resultData = Self.makeJSONRPCResultResponseData(
-                                ids: responseIDs,
-                                result: result,
-                                forceBatchArray: forceBatchArray
-                            )
-                            responseData = Self.mergeBatchResponsePayloads(
-                                [
-                                    resultData,
-                                    localResponseData,
-                                ],
-                                forceBatchArray: forceBatchArray
-                            )
-                        } catch {
-                            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
-                            let errorData = Self.makeJSONRPCErrorResponseData(
-                                ids: responseIDs,
-                                code: mapped.code,
-                                message: mapped.message,
-                                forceBatchArray: forceBatchArray
-                            )
-                            responseData = Self.mergeBatchResponsePayloads(
-                                [
-                                    errorData,
-                                    localResponseData,
-                                ],
-                                forceBatchArray: forceBatchArray
-                            )
-                        }
+                    do {
+                        let result = try await sessionManager.liveXcodeListWindowsResult(
+                            route: .anyHealthy,
+                            requestTimeoutOverride: remainingTimeout
+                        )
+                        responseData = Self.makeJSONRPCResultResponseData(id: responseID, result: result)
+                    } catch {
+                        let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+                        responseData = Self.makeJSONRPCErrorResponseData(
+                            id: responseID,
+                            code: mapped.code,
+                            message: mapped.message
+                        )
                     }
                     eventLoopCompletionExecutor.execute(on: eventLoop) {
                         cancellationHandle.markCompleted()
@@ -703,13 +438,9 @@ final class ClientMCPRequestExecutor: Sendable {
                 cancellationHandle.bindRefreshTask(task)
                 return promise.futureResult
             case .forward(let preferredUpstreamIndex):
-                return makeForwardingFuture(
-                    preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] }
-                )
+                return forward(preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] })
             case .forwardAny(let preferredUpstreamIndices):
-                return makeForwardingFuture(
-                    preferredUpstreamIndices: preferredUpstreamIndices
-                )
+                return forward(preferredUpstreamIndices: preferredUpstreamIndices)
             }
         }
 
@@ -717,31 +448,31 @@ final class ClientMCPRequestExecutor: Sendable {
             for: forwardedRequestJSON
         ) {
             return ClientMCPRequestExecutor.Operation(
-                future: makeRoutingFuture(decision: immediateDecision),
+                future: route(immediateDecision),
                 cancellationHandle: cancellationHandle
             )
         }
 
-        let routingPromise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
-        let routingTask = Task { [self] in
-            let routingTimeout = remainingRequestTimeout(until: forwardingDeadline)
-            if forwardingDeadline != nil, routingTimeout == nil {
+        let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
+        let task = Task { [self] in
+            let remainingTimeout = forwardingTimeout()
+            if forwardingDeadline != nil, remainingTimeout == nil {
                 eventLoopCompletionExecutor.execute(on: eventLoop) {
-                    makeForwardingTimeoutFuture().cascade(to: routingPromise)
+                    timeoutResolution().cascade(to: promise)
                 }
                 return
             }
             let decision = await sessionManager.toolRoutingDecision(
                 for: forwardedRequestJSON,
-                requestTimeoutOverride: routingTimeout
+                requestTimeoutOverride: remainingTimeout
             )
             eventLoopCompletionExecutor.execute(on: eventLoop) {
-                makeRoutingFuture(decision: decision).cascade(to: routingPromise)
+                route(decision).cascade(to: promise)
             }
         }
-        cancellationHandle.bindRefreshTask(routingTask)
+        cancellationHandle.bindRefreshTask(task)
         return ClientMCPRequestExecutor.Operation(
-            future: routingPromise.futureResult,
+            future: promise.futureResult,
             cancellationHandle: cancellationHandle
         )
     }
@@ -753,15 +484,13 @@ final class ClientMCPRequestExecutor: Sendable {
         eventLoop: EventLoop
     ) -> ClientMCPRequestExecutor.Operation {
         guard let responseData = try? JSONRPC.Wire.data(from: responseObject) else {
-            return ClientMCPRequestExecutor.Operation(
-                future: eventLoop.makeSucceededFuture(
-                    .plain(
-                        status: .badRequest,
-                        body: "invalid json-rpc response",
-                        sessionID: sessionID
-                    )
+            return immediate(
+                .plain(
+                    status: .badRequest,
+                    body: "invalid json-rpc response",
+                    sessionID: sessionID
                 ),
-                cancellationHandle: nil
+                on: eventLoop
             )
         }
         let future = sessionManager.forwardServerRequestResponse(
@@ -769,8 +498,8 @@ final class ClientMCPRequestExecutor: Sendable {
             sessionID: sessionID,
             responseID: responseID,
             on: eventLoop
-        ).map { forwardingResult -> ClientMCPRequestExecutor.Resolution in
-            switch forwardingResult {
+        ).map { result -> ClientMCPRequestExecutor.Resolution in
+            switch result {
             case .accepted, .missingRoute:
                 return .empty(status: .accepted, sessionID: sessionID)
             case .invalidResponse:
@@ -787,8 +516,15 @@ final class ClientMCPRequestExecutor: Sendable {
                 )
             }
         }
-        return ClientMCPRequestExecutor.Operation(
-            future: future,
+        return ClientMCPRequestExecutor.Operation(future: future, cancellationHandle: nil)
+    }
+
+    private func immediate(
+        _ resolution: ClientMCPRequestExecutor.Resolution,
+        on eventLoop: EventLoop
+    ) -> ClientMCPRequestExecutor.Operation {
+        ClientMCPRequestExecutor.Operation(
+            future: eventLoop.makeSucceededFuture(resolution),
             cancellationHandle: nil
         )
     }

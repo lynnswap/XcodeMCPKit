@@ -46,34 +46,25 @@ struct JSONRPCWireContractTests {
         #expect(result["ok"] as? Bool == true)
     }
 
-    @Test func batchErrorsAndResponseParsingRemainStable() throws {
-        let stringID = try #require(JSONRPC.ID(any: "a"))
+    @Test func errorResponseAndParsingRemainStable() throws {
         let numberID = try #require(JSONRPC.ID(any: NSNumber(value: 7)))
-        let batchData = try #require(
-            try JSONRPC.Wire.errorResponseData(
-                ids: [stringID, numberID],
-                code: -32002,
-                message: "upstream overloaded",
-                forceBatchArray: true,
-                includeNullIDWhenEmpty: false
-            )
+        let errorData = try JSONRPC.Wire.errorResponseData(
+            id: numberID,
+            code: -32002,
+            message: "upstream overloaded"
         )
-        let batch = try #require(
-            JSONSerialization.jsonObject(with: batchData) as? [[String: Any]]
+        let response = try #require(
+            JSONSerialization.jsonObject(with: errorData) as? [String: Any]
         )
-        let firstError = try #require(batch[0]["error"] as? [String: Any])
-        let secondError = try #require(batch[1]["error"] as? [String: Any])
+        let error = try #require(response["error"] as? [String: Any])
 
-        #expect(batch.count == 2)
-        #expect(batch[0]["jsonrpc"] as? String == "2.0")
-        #expect(batch[0]["id"] as? String == "a")
-        #expect((firstError["code"] as? NSNumber)?.intValue == -32002)
-        #expect(firstError["message"] as? String == "upstream overloaded")
-        #expect((batch[1]["id"] as? NSNumber)?.intValue == 7)
-        #expect((secondError["code"] as? NSNumber)?.intValue == -32002)
+        #expect(response["jsonrpc"] as? String == "2.0")
+        #expect((response["id"] as? NSNumber)?.intValue == 7)
+        #expect((error["code"] as? NSNumber)?.intValue == -32002)
+        #expect(error["message"] as? String == "upstream overloaded")
 
         let rewrittenData = try JSONRPC.Wire.dataByReplacingID(
-            in: batch[0],
+            in: response,
             with: numberID
         )
         let rewritten = try #require(

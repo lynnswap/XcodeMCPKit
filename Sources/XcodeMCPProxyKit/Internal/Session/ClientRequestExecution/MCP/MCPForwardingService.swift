@@ -84,11 +84,7 @@ struct MCPForwardingService: Sendable {
                 method: started.transform.method,
                 toolName: started.transform.toolName,
                 originalID: started.transform.originalID,
-                responseMethodsByIDKey: started.transform.responseMethodsByIDKey,
-                responseToolNamesByIDKey: started.transform.responseToolNamesByIDKey,
-                responseOriginalIDsByKey: started.transform.responseOriginalIDsByKey,
-                normalizationToolsListResponseIDKey: started.transform.normalizationToolsListResponseIDKey,
-                cacheableToolsListResponseIDKey: started.transform.cacheableToolsListResponseIDKey,
+                cachesToolsListResult: started.transform.isCacheableToolsListRequest,
                 upstreamIndex: started.upstreamIndex,
                 upstreamData: data
             )
@@ -192,7 +188,6 @@ struct MCPForwardingService: Sendable {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:\(name)",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -226,7 +221,7 @@ struct MCPForwardingService: Sendable {
                     }
                     prepared = candidate
                     internalCancellationHandle.bindRequestIDKeys(
-                        prepared.transform.responseIDs.map(\.key)
+                        prepared.transform.responseID.map { [$0.key] } ?? []
                     )
                     if let cancellationHandle,
                         cancellationHandle.bindChildHandle(internalCancellationHandle) == false
@@ -251,7 +246,7 @@ struct MCPForwardingService: Sendable {
                             self.sessionManager.handleRequestLeaseTimeout(
                                 leaseID,
                                 sessionID: sessionID,
-                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
+                                requestIDKeys: prepared.transform.responseID.map { [$0.key] } ?? [],
                                 upstreamIndex: prepared.upstreamIndex
                             )
                         }

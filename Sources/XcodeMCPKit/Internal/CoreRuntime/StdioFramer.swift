@@ -4,6 +4,7 @@ package final class StdioFramer {
     package struct ProtocolViolation: Sendable {
         package enum Reason: String, Codable, Sendable {
             case unexpectedLeadingByte
+            case unexpectedTopLevelArray
             case invalidContentLengthHeader
             case invalidJSON
             case bufferLimitExceeded

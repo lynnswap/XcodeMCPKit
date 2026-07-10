@@ -32,17 +32,6 @@ extension RuntimeCoordinator {
         case ownerDiscovery
     }
 
-    private enum XcodeListWindowsRoutingEligibility {
-        case localOnly
-        case forwardWholeBatch
-        case reject
-    }
-
-    private struct OwnerResolutionConflict: Sendable {
-        let request: ToolRoutingRequest
-        let message: String
-    }
-
     private enum CachedOwnerResolution: Sendable {
         case resolved(processID: pid_t, ownerLabel: String)
         case unresolved
@@ -448,14 +437,11 @@ extension RuntimeCoordinator {
     }
 
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
-        guard processRoutingEnabled else {
+        guard processRoutingEnabled,
+              let object = requestJSON as? [String: Any] else {
             return nil
         }
-        let indices = preferredUpstreamIndices(in: requestJSON)
-        guard indices.count == 1 else {
-            return nil
-        }
-        return indices.first
+        return preferredUpstreamIndex(in: object)
     }
 
     func toolRoutingDecision(
@@ -475,34 +461,16 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return .forward(preferredUpstreamIndex: nil)
         }
-        let requests = toolRoutingRequests(in: requestJSON)
-        let xcodeListWindowsRequests = requests.filter {
-            $0.id != nil && $0.toolName == "XcodeListWindows"
+        guard let object = requestJSON as? [String: Any],
+              let request = toolRoutingRequest(in: object) else {
+            return .forward(preferredUpstreamIndex: nil)
         }
-        if xcodeListWindowsRequests.isEmpty == false {
-            switch xcodeListWindowsRoutingEligibility(in: requestJSON) {
-            case .localOnly:
-                return .localXcodeListWindows
-            case .forwardWholeBatch:
-                break
-            case .reject:
-                return .reject(
-                    errors: toolRoutingErrors(
-                        for: requests,
-                        message: "XcodeListWindows must be resolved locally before forwarding mixed batches"
-                    ),
-                    forceBatchArray: requestJSON is [Any]
-                )
-            }
+        if request.id != nil, request.toolName == "XcodeListWindows" {
+            return .localXcodeListWindows
         }
-        let ownerBoundRequests = requests.filter {
-            isOwnerBoundRoutingRequest($0)
-        }
-        guard ownerBoundRequests.isEmpty == false else {
+        guard isOwnerBoundRoutingRequest(request) else {
             if let catalogDecision = catalogToolRoutingDecision(
-                for: requests,
-                requiredProcessID: nil,
-                forceBatchArray: requestJSON is [Any]
+                for: request
             ) {
                 return catalogDecision
             }
@@ -515,118 +483,88 @@ extension RuntimeCoordinator {
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
-        let requests = toolRoutingRequests(in: requestJSON)
-        let ownerBoundRequests = requests.filter {
-            isOwnerBoundRoutingRequest($0)
+        guard let object = requestJSON as? [String: Any],
+              let request = toolRoutingRequest(in: object) else {
+            return .forward(preferredUpstreamIndex: nil)
         }
 
-        var ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+        var ownerResolution = cachedOwnerResolution(for: request)
         var inferredOwnerProcessID =
             inferredUnambiguousOwnerProcessID(
-                for: requests,
-                unresolvedOwnerBoundRequests: ownerResolution.unresolved
+                for: request,
+                ownerResolution: ownerResolution
             )
         let needsOwnerRefresh =
-            ownerResolution.conflicts.isEmpty == false
-            || (ownerResolution.unresolved.isEmpty == false && inferredOwnerProcessID == nil)
+            if case .conflict = ownerResolution {
+                true
+            } else if case .unresolved = ownerResolution {
+                inferredOwnerProcessID == nil
+            } else {
+                false
+            }
         if needsOwnerRefresh {
             _ = try? await refreshXcodeWindowOwnersForRouting(
                 requestTimeoutOverride: requestTimeoutOverride
             )
-            ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+            ownerResolution = cachedOwnerResolution(for: request)
             inferredOwnerProcessID =
                 inferredUnambiguousOwnerProcessID(
-                    for: requests,
-                    unresolvedOwnerBoundRequests: ownerResolution.unresolved
+                    for: request,
+                    ownerResolution: ownerResolution
                 )
         }
 
-        if ownerResolution.conflicts.isEmpty == false {
-            let errors = ownerResolution.conflicts.compactMap { conflict -> ToolRoutingError? in
-                guard let id = conflict.request.id else { return nil }
-                return ToolRoutingError(id: id, message: conflict.message)
+        let ownerProcessID: pid_t
+        switch ownerResolution {
+        case .resolved(let processID, _):
+            ownerProcessID = processID
+        case .conflict(let message):
+            return .reject(
+                errors: toolRoutingErrors(for: request, message: message)
+            )
+        case .unresolved:
+            guard let inferredOwnerProcessID else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: request,
+                        message: "unable to resolve Xcode window owner for tool"
+                    )
+                )
             }
-            return .reject(
-                errors: errors.isEmpty
-                    ? toolRoutingErrors(
-                        for: requests,
-                        message: "conflicting Xcode window owners for one or more tools"
-                    )
-                    : errors,
-                forceBatchArray: requestJSON is [Any]
-            )
+            ownerProcessID = inferredOwnerProcessID
         }
 
-        if ownerResolution.unresolved.isEmpty == false, inferredOwnerProcessID == nil {
-            return .reject(
-                errors: toolRoutingErrors(
-                    for: requests,
-                    message: "unable to resolve Xcode window owner for one or more tools"
-                ),
-                forceBatchArray: requestJSON is [Any]
-            )
-        }
-
-        var distinctOwners = Set(ownerResolution.resolved.map(\.processID))
-        if let inferredOwnerProcessID {
-            distinctOwners.insert(inferredOwnerProcessID)
-        }
-        if distinctOwners.count > 1 {
-            return .reject(
-                errors: requests.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "mixed Xcode window owners in one batch are not supported"
-                    )
-                },
-                forceBatchArray: true
-            )
-        }
-
-        guard let ownerProcessID = distinctOwners.first else {
-            return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
-        }
         guard let ownerRoute = xcodeProcessRoutes.first(where: {
             $0.target.processID == ownerProcessID
         }) else {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "Xcode process that owns one or more tools is no longer available"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "Xcode process that owns the tool is no longer available"
+                )
             )
         }
         let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
 
-        let hasMissingTools = requests.contains { request in
-            guard processToolSurfaceStore.catalog(forProcessID: ownerProcessID) != nil,
-                  processToolSurfaceStore.hasTool(
-                      request.toolName,
-                      processID: ownerProcessID
-                  ) == false else {
-                return false
-            }
-            return true
-        }
-        if hasMissingTools {
+        if processToolSurfaceStore.catalog(forProcessID: ownerProcessID) != nil,
+           processToolSurfaceStore.hasTool(
+            request.toolName,
+            processID: ownerProcessID
+           ) == false {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "one or more tools are not available in the selected Xcode process"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "tool is not available in the selected Xcode process"
+                )
             )
         }
 
         guard ownerUpstreamIndices.isEmpty == false else {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "no available upstream for Xcode process that owns one or more tools"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "no available upstream for the Xcode process that owns the tool"
+                )
             )
         }
 
@@ -650,11 +588,11 @@ extension RuntimeCoordinator {
     }
 
     private func inferredUnambiguousOwnerProcessID(
-        for requests: [ToolRoutingRequest],
-        unresolvedOwnerBoundRequests: [ToolRoutingRequest]
+        for request: ToolRoutingRequest,
+        ownerResolution: CachedOwnerResolution
     ) -> pid_t? {
-        guard unresolvedOwnerBoundRequests.isEmpty == false,
-              unresolvedOwnerBoundRequests.allSatisfy({ hasNoOwnerHint($0) }) else {
+        guard case .unresolved = ownerResolution,
+              hasNoOwnerHint(request) else {
             return nil
         }
         let usableRoutes = xcodeProcessRoutes.filter {
@@ -665,18 +603,10 @@ extension RuntimeCoordinator {
             return usableRoutes[0].target.processID
         }
 
-        let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
-            let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
-            return processIDs.isEmpty ? nil : processIDs
-        }
-        guard processIDSets.isEmpty == false else {
-            return nil
-        }
-        let candidateProcessIDs = processIDSets.dropFirst().reduce(processIDSets[0]) {
-            $0.intersection($1)
-        }
         let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
-        let usableCandidates = candidateProcessIDs.intersection(usableProcessIDs)
+        let usableCandidates = processToolSurfaceStore
+            .processIDsHavingTool(request.toolName)
+            .intersection(usableProcessIDs)
         guard usableCandidates.count == 1 else {
             return nil
         }
@@ -699,61 +629,26 @@ extension RuntimeCoordinator {
     }
 
     private func toolRoutingErrors(
-        for requests: [ToolRoutingRequest],
+        for request: ToolRoutingRequest,
         message: String
     ) -> [ToolRoutingError] {
-        requests.compactMap { request in
-            guard let id = request.id else { return nil }
-            return ToolRoutingError(id: id, message: message)
-        }
+        guard let id = request.id else { return [] }
+        return [ToolRoutingError(id: id, message: message)]
     }
 
     private func catalogToolRoutingDecision(
-        for requests: [ToolRoutingRequest],
-        requiredProcessID: pid_t?,
-        forceBatchArray: Bool
+        for request: ToolRoutingRequest
     ) -> ToolRoutingDecision? {
-        let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
-            let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
-            return processIDs.isEmpty ? nil : processIDs
-        }
-        guard processIDSets.isEmpty == false else {
+        let candidateProcessIDs = processToolSurfaceStore.processIDsHavingTool(request.toolName)
+        guard candidateProcessIDs.isEmpty == false else {
             return nil
         }
-
-        let candidateProcessIDs = processIDSets.dropFirst().reduce(processIDSets[0]) {
-            $0.intersection($1)
-        }
-        let effectiveCandidates: Set<pid_t>
-        if let requiredProcessID {
-            effectiveCandidates = candidateProcessIDs.contains(requiredProcessID)
-                ? [requiredProcessID]
-                : []
-        } else {
-            effectiveCandidates = candidateProcessIDs
-        }
-        guard effectiveCandidates.isEmpty == false else {
+        guard let route = preferredAvailableRoute(in: candidateProcessIDs) else {
             return .reject(
-                errors: requests.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "no single Xcode process provides all requested tools"
-                    )
-                },
-                forceBatchArray: forceBatchArray
-            )
-        }
-        guard let route = preferredAvailableRoute(in: effectiveCandidates) else {
-            return .reject(
-                errors: requests.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "no available upstream for an Xcode process that provides tool '\(request.toolName)'"
-                    )
-                },
-                forceBatchArray: forceBatchArray
+                errors: toolRoutingErrors(
+                    for: request,
+                    message: "no available upstream for an Xcode process that provides tool '\(request.toolName)'"
+                )
             )
         }
         return .forwardAny(
@@ -940,20 +835,6 @@ extension RuntimeCoordinator {
         ])
     }
 
-    private func preferredUpstreamIndices(in value: Any) -> Set<Int> {
-        if let object = value as? [String: Any] {
-            return Set(preferredUpstreamIndex(in: object).map { [$0] } ?? [])
-        }
-        guard let array = value as? [Any] else {
-            return []
-        }
-        return array.reduce(into: Set<Int>()) { result, item in
-            for upstreamIndex in preferredUpstreamIndices(in: item) {
-                result.insert(upstreamIndex)
-            }
-        }
-    }
-
     func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
         processRouteStore.route(forUpstreamIndex: upstreamIndex)
     }
@@ -1048,10 +929,10 @@ extension RuntimeCoordinator {
               let processID = processID(forUpstreamIndex: upstreamIndex) else {
             return (bodyData, parsedRequestJSON)
         }
-        let rewritten = rewriteOwnerBoundRequestJSON(
-            parsedRequestJSON,
-            processID: processID
-        )
+        guard let object = parsedRequestJSON as? [String: Any] else {
+            return (bodyData, parsedRequestJSON)
+        }
+        let rewritten = rewriteOwnerBoundRequestObject(object, processID: processID)
         guard rewritten.changed else {
             return (bodyData, parsedRequestJSON)
         }
@@ -1063,28 +944,6 @@ extension RuntimeCoordinator {
             return (bodyData, parsedRequestJSON)
         }
         return (data, rewritten.value)
-    }
-
-    private func rewriteOwnerBoundRequestJSON(
-        _ value: Any,
-        processID: pid_t
-    ) -> (value: Any, changed: Bool) {
-        if let object = value as? [String: Any] {
-            return rewriteOwnerBoundRequestObject(object, processID: processID)
-        }
-        guard let array = value as? [Any] else {
-            return (value, false)
-        }
-        var changed = false
-        let rewritten = array.map { item -> Any in
-            guard let object = item as? [String: Any] else {
-                return item
-            }
-            let result = rewriteOwnerBoundRequestObject(object, processID: processID)
-            changed = changed || result.changed
-            return result.value
-        }
-        return (rewritten, changed)
     }
 
     private func rewriteOwnerBoundRequestObject(
@@ -1189,62 +1048,6 @@ extension RuntimeCoordinator {
             return nil
         }
         return firstUsableInitializedUpstreamIndex(in: route)
-    }
-
-    private func toolRoutingRequests(in value: Any) -> [ToolRoutingRequest] {
-        if let object = value as? [String: Any] {
-            return toolRoutingRequest(in: object).map { [$0] } ?? []
-        }
-        guard let array = value as? [Any] else {
-            return []
-        }
-        return array.compactMap { item in
-            guard let object = item as? [String: Any] else { return nil }
-            return toolRoutingRequest(in: object)
-        }
-    }
-
-    private func xcodeListWindowsRoutingEligibility(
-        in value: Any
-    ) -> XcodeListWindowsRoutingEligibility {
-        if let object = value as? [String: Any] {
-            return JSONRPC.Message.Inspector.requestID(from: object) != nil
-                && isXcodeListWindowsToolCall(object)
-                ? .localOnly
-                : .reject
-        }
-        guard let array = value as? [Any],
-              array.isEmpty == false else {
-            return .reject
-        }
-        var sawResponseBearingItem = false
-        var sawNotificationOrUnroutedItem = false
-        for item in array {
-            guard let object = item as? [String: Any] else {
-                return .reject
-            }
-            guard JSONRPC.Message.Inspector.requestID(from: object) != nil else {
-                sawNotificationOrUnroutedItem = true
-                continue
-            }
-            sawResponseBearingItem = true
-            guard isXcodeListWindowsToolCall(object) else {
-                return .reject
-            }
-        }
-        guard sawResponseBearingItem else {
-            return .reject
-        }
-        return sawNotificationOrUnroutedItem ? .forwardWholeBatch : .localOnly
-    }
-
-    private func isXcodeListWindowsToolCall(_ object: [String: Any]) -> Bool {
-        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
-              let params = object["params"] as? [String: Any],
-              params["name"] as? String == "XcodeListWindows" else {
-            return false
-        }
-        return true
     }
 
     private func toolRoutingRequest(in object: [String: Any]) -> ToolRoutingRequest? {
@@ -1419,29 +1222,6 @@ extension RuntimeCoordinator {
         return matchesWorkspaceOwner
             ? nil
             : "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
-    }
-
-    private func resolvedOwnerProcessIDs(
-        for requests: [ToolRoutingRequest]
-    ) -> (
-        resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)],
-        unresolved: [ToolRoutingRequest],
-        conflicts: [OwnerResolutionConflict]
-    ) {
-        var resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)] = []
-        var unresolved: [ToolRoutingRequest] = []
-        var conflicts: [OwnerResolutionConflict] = []
-        for request in requests {
-            switch cachedOwnerResolution(for: request) {
-            case .resolved(let processID, let ownerLabel):
-                resolved.append((request, processID, ownerLabel))
-            case .unresolved:
-                unresolved.append(request)
-            case .conflict(let message):
-                conflicts.append(OwnerResolutionConflict(request: request, message: message))
-            }
-        }
-        return (resolved, unresolved, conflicts)
     }
 
     private func cachedOwnerBoundToolNames() -> Set<String> {
