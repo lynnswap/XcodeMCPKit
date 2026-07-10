@@ -466,14 +466,25 @@ package actor XcodeMCPTestTransport: XcodeMCPTransport {
         self.runtime = runtime
     }
 
-    package func send(_ data: Data) async throws {
+    package func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         guard closed == false else {
             throw XcodeMCPError.closed
         }
         try await runtime.receive(data, from: id)
     }
 
-    package func close() async {
+    package func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    package func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         guard closed == false else {
             return
         }

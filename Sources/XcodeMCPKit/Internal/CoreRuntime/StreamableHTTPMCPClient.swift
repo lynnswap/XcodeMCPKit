@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 package struct StreamableHTTPMCPClientSendResult: Sendable {
     package let messageCount: Int
@@ -12,6 +13,11 @@ package enum StreamableHTTPMCPClientMessageDisposition: Sendable {
 package enum StreamableHTTPMCPClientError: Error, Sendable {
     case httpStatus(Int, body: String, payloads: [Data])
     case sessionExpired(sessionID: String)
+}
+
+package enum StreamableHTTPURLSessionOwnership: Equatable, Sendable {
+    case owned
+    case injected
 }
 
 /// One connection-level Streamable HTTP client.
@@ -30,14 +36,19 @@ package final class StreamableHTTPMCPClient: Sendable {
 
     private let endpoint: URL
     private let urlSession: URLSession
+    private let urlSessionOwnership: StreamableHTTPURLSessionOwnership
     private let eventStreamReconnectSleep: @Sendable (Duration) async throws -> Void
     private let eventContinuation: AsyncStream<Data>.Continuation
     private let expirationContinuation: AsyncStream<String>.Continuation
     private let state = StreamableHTTPMCPConnectionState()
+    private let eventStreamCancellation = StreamableHTTPTaskCancellationBackstop()
+    private let closeAuthority = StreamableHTTPCloseAuthority()
+    private let urlSessionInvalidationAuthority: StreamableHTTPURLSessionInvalidationAuthority
 
     package init(
         endpoint: URL,
         urlSession: URLSession,
+        urlSessionOwnership: StreamableHTTPURLSessionOwnership,
         eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
         }
@@ -46,11 +57,22 @@ package final class StreamableHTTPMCPClient: Sendable {
         let expirationPair = AsyncStream.makeStream(of: String.self)
         self.endpoint = endpoint
         self.urlSession = urlSession
+        self.urlSessionOwnership = urlSessionOwnership
+        self.urlSessionInvalidationAuthority = StreamableHTTPURLSessionInvalidationAuthority(
+            ownership: urlSessionOwnership
+        )
         self.eventStreamReconnectSleep = eventStreamReconnectSleep
         self.events = eventPair.stream
         self.eventContinuation = eventPair.continuation
         self.sessionExpirations = expirationPair.stream
         self.expirationContinuation = expirationPair.continuation
+    }
+
+    deinit {
+        eventStreamCancellation.cancel()
+        urlSessionInvalidationAuthority.invalidate(urlSession)
+        eventContinuation.finish()
+        expirationContinuation.finish()
     }
 
     package static func validateEndpoint(_ endpoint: URL) throws {
@@ -118,9 +140,9 @@ package final class StreamableHTTPMCPClient: Sendable {
         let reconnectSleep = eventStreamReconnectSleep
         let eventContinuation = eventContinuation
         let expirationContinuation = expirationContinuation
-        let task = Task { [endpoint, urlSession, state] in
+        let task = Task { [endpoint, urlSession] in
             var attempt = 0
-            while await state.isOpen {
+            while Task.isCancelled == false {
                 if attempt > 0 {
                     do {
                         try await reconnectSleep(Self.eventStreamReconnectDelay(attempt: attempt))
@@ -161,6 +183,7 @@ package final class StreamableHTTPMCPClient: Sendable {
                 }
             }
         }
+        eventStreamCancellation.install(task)
         await state.installEventStreamTask(task)
     }
 
@@ -170,8 +193,54 @@ package final class StreamableHTTPMCPClient: Sendable {
         deleteSessionGrace: Duration? = nil,
         clock: ClockClient = .liveValue
     ) async {
-        let eventTask = await state.close()
-        eventTask?.cancel()
+        let endpoint = endpoint
+        let urlSession = urlSession
+        let urlSessionOwnership = urlSessionOwnership
+        let state = state
+        let eventStreamCancellation = eventStreamCancellation
+        let eventContinuation = eventContinuation
+        let expirationContinuation = expirationContinuation
+        let urlSessionInvalidationAuthority = urlSessionInvalidationAuthority
+        let task = closeAuthority.task {
+            Task.detached {
+                await Self.performClose(
+                    endpoint: endpoint,
+                    urlSession: urlSession,
+                    urlSessionOwnership: urlSessionOwnership,
+                    state: state,
+                    eventStreamCancellation: eventStreamCancellation,
+                    eventContinuation: eventContinuation,
+                    expirationContinuation: expirationContinuation,
+                    urlSessionInvalidationAuthority: urlSessionInvalidationAuthority,
+                    headers: headers,
+                    deleteTimeout: deleteTimeout,
+                    deleteSessionGrace: deleteSessionGrace,
+                    clock: clock
+                )
+            }
+        }
+        await task.value
+    }
+}
+
+private extension StreamableHTTPMCPClient {
+    static func performClose(
+        endpoint: URL,
+        urlSession: URLSession,
+        urlSessionOwnership: StreamableHTTPURLSessionOwnership,
+        state: StreamableHTTPMCPConnectionState,
+        eventStreamCancellation: StreamableHTTPTaskCancellationBackstop,
+        eventContinuation: AsyncStream<Data>.Continuation,
+        expirationContinuation: AsyncStream<String>.Continuation,
+        urlSessionInvalidationAuthority: StreamableHTTPURLSessionInvalidationAuthority,
+        headers: MCPConnectionHeaders,
+        deleteTimeout: Duration?,
+        deleteSessionGrace: Duration?,
+        clock: ClockClient
+    ) async {
+        let eventTask = await state.close() ?? eventStreamCancellation.task
+        eventStreamCancellation.cancel()
+        let deleteTask: Task<Void, Never>?
         if let sessionID = headers.sessionID {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "DELETE"
@@ -180,15 +249,24 @@ package final class StreamableHTTPMCPClient: Sendable {
             if let protocolVersion = headers.protocolVersion {
                 request.setValue(protocolVersion, forHTTPHeaderField: Self.protocolVersionHeader)
             }
-            await performDelete(request, grace: deleteSessionGrace, clock: clock)
+            deleteTask = await performDelete(
+                request,
+                urlSession: urlSession,
+                urlSessionOwnership: urlSessionOwnership,
+                grace: deleteSessionGrace,
+                clock: clock
+            )
+        } else {
+            deleteTask = nil
         }
+        urlSessionInvalidationAuthority.invalidate(urlSession)
         await eventTask?.value
+        await deleteTask?.value
+        eventStreamCancellation.clear()
         eventContinuation.finish()
         expirationContinuation.finish()
     }
-}
 
-private extension StreamableHTTPMCPClient {
     static func makePostRequest(
         endpoint: URL,
         body: Data,
@@ -256,17 +334,51 @@ private extension StreamableHTTPMCPClient {
         return count
     }
 
-    func performDelete(_ request: URLRequest, grace: Duration?, clock: ClockClient) async {
+    static func performDelete(
+        _ request: URLRequest,
+        urlSession: URLSession,
+        urlSessionOwnership: StreamableHTTPURLSessionOwnership,
+        grace: Duration?,
+        clock: ClockClient
+    ) async -> Task<Void, Never> {
+        let race = AsyncStream.makeStream(
+            of: StreamableHTTPDeleteWinner.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let completion = AsyncStream.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let dataTask = urlSession.dataTask(with: request) { _, _, _ in
+            race.continuation.yield(.request)
+            completion.continuation.yield(())
+            completion.continuation.finish()
+        }
+        let task = Task {
+            var iterator = completion.stream.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+        dataTask.resume()
         guard let grace else {
-            _ = try? await urlSession.data(for: request)
-            return
+            await task.value
+            race.continuation.finish()
+            return task
         }
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { [urlSession] in _ = try? await urlSession.data(for: request) }
-            group.addTask { await clock.sleep(grace) }
-            _ = await group.next()
-            group.cancelAll()
+        precondition(urlSessionOwnership == .owned)
+        let graceTask = Task {
+            await clock.sleep(grace)
+            guard Task.isCancelled == false else { return }
+            race.continuation.yield(.grace)
         }
+        var iterator = race.stream.makeAsyncIterator()
+        let winner = await iterator.next() ?? .grace
+        race.continuation.finish()
+        if case .grace = winner {
+            dataTask.cancel()
+        }
+        graceTask.cancel()
+        await graceTask.value
+        return task
     }
 
     static func makeEventStreamRequest(
@@ -351,18 +463,17 @@ private extension StreamableHTTPMCPClient {
     }
 }
 
-private actor StreamableHTTPMCPConnectionState {
+package actor StreamableHTTPMCPConnectionState {
     private var closed = false
     private var eventStreamTask: Task<Void, Never>?
     private var eventStreamStartReserved = false
+    private var closeWaiters: [CheckedContinuation<Task<Void, Never>?, Never>] = []
 
-    var isOpen: Bool { closed == false }
-
-    func ensureOpen() throws {
+    package func ensureOpen() throws {
         if closed { throw MCPBridgeRuntimeError.closed }
     }
 
-    func reserveEventStreamStart() -> Bool {
+    package func reserveEventStreamStart() -> Bool {
         guard closed == false, eventStreamTask == nil, eventStreamStartReserved == false else {
             return false
         }
@@ -370,22 +481,112 @@ private actor StreamableHTTPMCPConnectionState {
         return true
     }
 
-    func installEventStreamTask(_ task: Task<Void, Never>) {
+    package func installEventStreamTask(_ task: Task<Void, Never>) {
         guard closed == false, eventStreamStartReserved, eventStreamTask == nil else {
             task.cancel()
             eventStreamStartReserved = false
+            let waiters = closeWaiters
+            closeWaiters.removeAll()
+            for waiter in waiters { waiter.resume(returning: task) }
             return
         }
         eventStreamStartReserved = false
         eventStreamTask = task
     }
 
-    func close() -> Task<Void, Never>? {
-        guard closed == false else { return nil }
-        closed = true
+    package func close() async -> Task<Void, Never>? {
+        if closed == false {
+            closed = true
+        }
+        if eventStreamStartReserved {
+            return await withCheckedContinuation { closeWaiters.append($0) }
+        }
         eventStreamStartReserved = false
         let task = eventStreamTask
         eventStreamTask = nil
         return task
     }
+
+    isolated deinit {
+        eventStreamTask?.cancel()
+        for waiter in closeWaiters { waiter.resume(returning: eventStreamTask) }
+    }
+}
+
+private final class StreamableHTTPCloseAuthority: Sendable {
+    private let taskState = Mutex<Task<Void, Never>?>(nil)
+
+    func task(create: () -> Task<Void, Never>) -> Task<Void, Never> {
+        taskState.withLock { task in
+            if let task { return task }
+            let created = create()
+            task = created
+            return created
+        }
+    }
+}
+
+private final class StreamableHTTPURLSessionInvalidationAuthority: Sendable {
+    private let isOwned: Bool
+    private let isInvalidated = Mutex(false)
+
+    init(ownership: StreamableHTTPURLSessionOwnership) {
+        self.isOwned = ownership == .owned
+    }
+
+    func invalidate(_ urlSession: URLSession) {
+        guard isOwned else { return }
+        let shouldInvalidate = isInvalidated.withLock { isInvalidated in
+            guard isInvalidated == false else { return false }
+            isInvalidated = true
+            return true
+        }
+        if shouldInvalidate {
+            urlSession.invalidateAndCancel()
+        }
+    }
+}
+
+private final class StreamableHTTPTaskCancellationBackstop: Sendable {
+    private struct State {
+        var isCancelled = false
+        var task: Task<Void, Never>?
+    }
+
+    private let state = Mutex(State())
+
+    var task: Task<Void, Never>? {
+        state.withLock(\.task)
+    }
+
+    func install(_ task: Task<Void, Never>) {
+        let shouldCancel = state.withLock { state in
+            guard state.isCancelled == false else { return true }
+            precondition(state.task == nil)
+            state.task = task
+            return false
+        }
+        if shouldCancel { task.cancel() }
+    }
+
+    func cancel() {
+        let task = state.withLock { state in
+            state.isCancelled = true
+            return state.task
+        }
+        task?.cancel()
+    }
+
+    func clear() {
+        state.withLock { $0.task = nil }
+    }
+
+    deinit {
+        cancel()
+    }
+}
+
+private enum StreamableHTTPDeleteWinner: Sendable {
+    case request
+    case grace
 }

@@ -18,8 +18,8 @@ The public API is intentionally small:
 
 Xcode decides the available tools at runtime, so the SDK does not provide
 tool-specific Swift wrappers. Use `listTools()` to discover tools, `callTool`
-to call them, and `request(_:params:)` or `notify(_:params:)` for dynamic MCP
-methods outside `tools/call`.
+to call them, and `request(_:params:)` for dynamic MCP methods outside
+`tools/call`.
 
 Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
 notifications, and tool results through the same `XcodeMCP` API without
@@ -107,8 +107,8 @@ accessors such as `objectValue`, `arrayValue`, `stringValue`, `boolValue`,
 Use `MCPJSONValue(jsonObject:)`, `MCPJSONValue(_:)`, and `jsonObject` to
 bridge between Foundation or Codable values and raw MCP JSON.
 
-For dynamic MCP methods that are not tool calls, use the raw request and
-notification escape hatches:
+For dynamic MCP methods that are not tool calls, use the raw request escape
+hatch:
 
 ```swift
 struct SymbolParams: Encodable {
@@ -122,11 +122,6 @@ let symbols = try await xcode.request(
         query: "NavigationStack",
         limit: 5
     ))
-)
-
-try await xcode.notify(
-    "notifications/custom",
-    params: try MCPJSONValue(jsonObject: ["enabled": true])
 )
 ```
 
@@ -152,8 +147,15 @@ long-lived SSE GET parsing, and best-effort session DELETE during `close()`.
 Create one `XcodeMCP` per MCP session. The async initializer connects the
 transport and completes initialization before returning. `callTool` returns the
 final MCP result; progress is callback-only and the underlying event stream is
-not public API. Call `close()` when finished. Closing is idempotent and rejects
-future requests.
+not public API. Per-operation timeouts and replay are configured with
+`XcodeMCPRequestOptions`.
+
+Use `connectionState()` for an atomic snapshot and `connectionStates()` for an
+independent stream whose first element is the current snapshot. A sequence gap
+means intermediate states were dropped. After an unavailable state, call
+`reconnect()` explicitly. Call `close()` when finished. Concurrent close calls
+share the same completion, the terminal state stream finishes, and future
+requests are rejected.
 
 ## Testing
 

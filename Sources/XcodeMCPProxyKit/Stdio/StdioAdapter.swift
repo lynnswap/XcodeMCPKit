@@ -73,6 +73,7 @@ actor StdioAdapter {
             return StreamableHTTPXcodeMCPTransport(
                 endpoint: upstreamURL,
                 urlSession: URLSession(configuration: configuration),
+                urlSessionOwnership: .owned,
                 requestTimeout: requestTimeout,
                 deleteSessionGrace: shutdownPolicy.deleteSessionGrace,
                 clock: shutdownPolicy.clock
@@ -371,6 +372,8 @@ private extension StdioAdapter {
                 return "invalid upstream response"
             case .requestTimedOut:
                 return "upstream request timed out"
+            case .httpStatus(let code, _):
+                return "upstream HTTP \(code)"
             case .closed, .serverError, .transportUnavailable:
                 return "upstream unavailable"
             }

@@ -275,6 +275,41 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
     }
 }
 
+private final class UpstreamProcessCancellation: @unchecked Sendable {
+    private struct State {
+        var driver: (any UpstreamProcessDriving)?
+        var isCancelled = false
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+
+    func install(_ driver: any UpstreamProcessDriving) {
+        let shouldCancel = lock.withLock { () -> Bool in
+            precondition(state.driver == nil)
+            state.driver = driver
+            return state.isCancelled
+        }
+        if shouldCancel { cancelDriver(driver) }
+    }
+
+    func cancel() {
+        let driver = lock.withLock { () -> (any UpstreamProcessDriving)? in
+            guard state.isCancelled == false else { return nil }
+            state.isCancelled = true
+            return state.driver
+        }
+        guard let driver else { return }
+        cancelDriver(driver)
+    }
+
+    private func cancelDriver(_ driver: any UpstreamProcessDriving) {
+        driver.closeStdin()
+        driver.stopOutput()
+        _ = driver.terminate()
+    }
+}
+
 package struct UpstreamProcess: UpstreamSessionFactory {
     package struct Config: Sendable {
         package var command: String
@@ -322,6 +357,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private let config: UpstreamProcess.Config
     private let logger: Logger = XcodeMCPRuntimeLogging.make("upstream")
     private let maxBufferedStderrBytes = 16 * 1024
+    private nonisolated let cancellation = UpstreamProcessCancellation()
 
     private var driver: (any UpstreamProcessDriving)?
     private var stdoutTask: Task<Void, Never>?
@@ -337,6 +373,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private var terminationDrainTimeoutTask: Task<Void, Never>?
     private var didFinishEvents = false
     private var isStopping = false
+    private var stopCompleted = false
 
     package static func start(
         configuration: UpstreamProcess.Config
@@ -354,6 +391,10 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
             streamContinuation = continuation
         }
         self.continuation = streamContinuation
+    }
+
+    package nonisolated func cancel() {
+        cancellation.cancel()
     }
 
     package func send(_ data: Data) async -> Upstream.SendResult {
@@ -389,24 +430,31 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     }
 
     package func stop() async {
-        guard !isStopping else {
-            return
-        }
-
-        isStopping = true
-        suppressExitEvent = true
-        terminationDrainTimeoutTask?.cancel()
-        terminationDrainTimeoutTask = nil
-        driver?.closeStdin()
-        driver?.stopOutput()
-
-        if driver?.terminate() != true {
+        guard stopCompleted == false else { return }
+        if isStopping == false {
+            isStopping = true
+            suppressExitEvent = true
+            terminationDrainTimeoutTask?.cancel()
+            terminationDrainTimeoutTask = nil
+            cancellation.cancel()
             terminationObserved = true
         }
 
+        let stdoutTask = stdoutTask
+        let stderrTask = stderrTask
         await stdoutTask?.value
         await stderrTask?.value
         finishEventsIfNeeded(force: true)
+        guard stopCompleted == false else { return }
+        stopCompleted = true
+    }
+
+    isolated deinit {
+        cancellation.cancel()
+        stdoutTask?.cancel()
+        stderrTask?.cancel()
+        terminationDrainTimeoutTask?.cancel()
+        continuation.finish()
     }
 }
 
@@ -424,9 +472,11 @@ private extension ProcessBackedUpstreamSession {
         terminationDrainTimeoutTask = nil
         didFinishEvents = false
         isStopping = false
+        stopCompleted = false
 
         let driver = config.driverFactory.makeDriver()
         self.driver = driver
+        cancellation.install(driver)
         let io: UpstreamProcessStartedIO
         do {
             io = try driver.start(
@@ -444,8 +494,7 @@ private extension ProcessBackedUpstreamSession {
                 }
             }
         } catch {
-            driver.stopOutput()
-            driver.closeStdin()
+            cancellation.cancel()
             self.driver = nil
             continuation.finish()
             throw error
@@ -568,13 +617,9 @@ private extension ProcessBackedUpstreamSession {
         }
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
-        driver?.closeStdin()
-        driver?.stopOutput()
-
-        if driver?.terminate() != true {
-            terminationObserved = true
-            finishEventsIfNeeded()
-        }
+        cancellation.cancel()
+        terminationObserved = true
+        finishEventsIfNeeded()
     }
 
     func completeQueuedWrite(bytes: Int, error: Error?) {
@@ -634,7 +679,7 @@ private extension ProcessBackedUpstreamSession {
             return
         }
 
-        driver?.stopOutput()
+        cancellation.cancel()
         finishEventsIfNeeded()
     }
 

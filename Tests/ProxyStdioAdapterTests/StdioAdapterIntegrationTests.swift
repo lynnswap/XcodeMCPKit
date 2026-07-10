@@ -257,7 +257,13 @@ private actor StalledStdioAdapterTransport: XcodeMCPTransport {
         self.eventContinuation = pair.continuation
     }
 
-    func send(_ data: Data) async throws {
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         await sendBodies.append(data)
         let object = try JSONRPC.Wire.object(fromData: data)
         switch object["method"] as? String {
@@ -289,7 +295,12 @@ private actor StalledStdioAdapterTransport: XcodeMCPTransport {
         }
     }
 
-    func close() async {
+    func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         await closeCalls.append(())
         eventContinuation.yield(.closed(nil))
         eventContinuation.finish()

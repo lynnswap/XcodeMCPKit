@@ -43,16 +43,18 @@ struct PublicProductContractTests {
             )
         }
 
-        let leakedHelperResult = try runSwiftBuild(
-            packageURL: fixture.url,
-            logURL: fixture.url.appendingPathComponent("\(runtimeHelperLeakCheck.targetName)-swift-build.log"),
-            targets: [runtimeHelperLeakCheck.targetName]
-        )
-        expectBuildFailed(
-            leakedHelperResult,
-            targetName: runtimeHelperLeakCheck.targetName,
-            expectedFragments: runtimeHelperLeakCheck.expectedFragments
-        )
+        for check in removedSDKSurfaceChecks {
+            let result = try runSwiftBuild(
+                packageURL: fixture.url,
+                logURL: fixture.url.appendingPathComponent("\(check.targetName)-swift-build.log"),
+                targets: [check.targetName]
+            )
+            expectBuildFailed(
+                result,
+                targetName: check.targetName,
+                expectedFragments: check.expectedFragments
+            )
+        }
     }
 
     private func makeFixturePackage(at packageURL: URL, repositoryRoot: URL) throws {
@@ -61,9 +63,8 @@ struct PublicProductContractTests {
             "XcodeMCPProxyKitClient",
             "XcodeMCPProxyKitOnlyClient",
             "XcodeMCPKitTestingClient",
-        ] + lowLevelImportChecks.map(\.targetName) + [
-            runtimeHelperLeakCheck.targetName
-        ]
+        ] + lowLevelImportChecks.map(\.targetName)
+            + removedSDKSurfaceChecks.map(\.targetName)
 
         for target in fixtureTargets {
             try FileManager.default.createDirectory(
@@ -110,12 +111,13 @@ struct PublicProductContractTests {
                     encoding: .utf8
                 )
         }
-        try runtimeHelperLeakClientSource
-            .write(
-                to: packageURL.appendingPathComponent("Sources/\(runtimeHelperLeakCheck.targetName)/Contract.swift"),
+        for check in removedSDKSurfaceChecks {
+            try check.source.write(
+                to: packageURL.appendingPathComponent("Sources/\(check.targetName)/Contract.swift"),
                 atomically: true,
                 encoding: .utf8
             )
+        }
     }
 
     private func packageManifest(repositoryRoot: URL) -> String {
@@ -175,37 +177,7 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPKitClientImportsCore",
-                    dependencies: [
-                        .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
-                    ],
-                    swiftSettings: [
-                        .swiftLanguageMode(.v6),
-                        .defaultIsolation(nil),
-                    ]
-                ),
-                .target(
-                    name: "XcodeMCPKitClientImportsProcessRuntime",
-                    dependencies: [
-                        .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
-                    ],
-                    swiftSettings: [
-                        .swiftLanguageMode(.v6),
-                        .defaultIsolation(nil),
-                    ]
-                ),
-                .target(
-                    name: "XcodeMCPProxyKitClientImportsCore",
-                    dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
-                    ],
-                    swiftSettings: [
-                        .swiftLanguageMode(.v6),
-                        .defaultIsolation(nil),
-                    ]
-                ),
-                .target(
-                    name: "XcodeMCPProxyKitClientImportsProcessRuntime",
+                    name: "XcodeMCPProxyKitClientImportsTestSupport",
                     dependencies: [
                         .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
                     ],
@@ -216,6 +188,26 @@ struct PublicProductContractTests {
                 ),
                 .target(
                     name: "XcodeMCPKitClientUsesProtocolHelper",
+                    dependencies: [
+                        .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
+                    ],
+                    swiftSettings: [
+                        .swiftLanguageMode(.v6),
+                        .defaultIsolation(nil),
+                    ]
+                ),
+                .target(
+                    name: "XcodeMCPKitClientUsesRemovedNotify",
+                    dependencies: [
+                        .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
+                    ],
+                    swiftSettings: [
+                        .swiftLanguageMode(.v6),
+                        .defaultIsolation(nil),
+                    ]
+                ),
+                .target(
+                    name: "XcodeMCPKitClientUsesSnapshotInitializer",
                     dependencies: [
                         .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
                     ],
@@ -585,20 +577,59 @@ private struct POSIXCommandError: Error, CustomStringConvertible {
 }
 
 private let lowLevelImportChecks: [(targetName: String, moduleName: String)] = [
-    ("XcodeMCPKitClientImportsCore", "XcodeMCPCore"),
-    ("XcodeMCPKitClientImportsProcessRuntime", "XcodeMCPProcessRuntime"),
-    ("XcodeMCPProxyKitClientImportsCore", "XcodeMCPCore"),
-    ("XcodeMCPProxyKitClientImportsProcessRuntime", "XcodeMCPProcessRuntime"),
+    ("XcodeMCPProxyKitClientImportsTestSupport", "XcodeMCPProxyTestSupport"),
 ]
 
-private let runtimeHelperLeakCheck = (
-    targetName: "XcodeMCPKitClientUsesProtocolHelper",
-    expectedFragments: [
-        "cannot find 'MCP' in scope",
-        "'MCP' is inaccessible",
-        "inaccessible due to 'package' protection level",
-    ]
-)
+private let removedSDKSurfaceChecks: [(
+    targetName: String,
+    source: String,
+    expectedFragments: [String]
+)] = [
+    (
+        "XcodeMCPKitClientUsesProtocolHelper",
+        """
+        import XcodeMCPKit
+
+        func compileOnlyRuntimeProtocolHelperShouldNotBeVisible() {
+            _ = MCP.ProtocolVersion.current
+        }
+        """,
+        [
+            "cannot find 'MCP' in scope",
+            "'MCP' is inaccessible",
+            "inaccessible due to 'package' protection level",
+        ]
+    ),
+    (
+        "XcodeMCPKitClientUsesRemovedNotify",
+        """
+        import XcodeMCPKit
+
+        func compileOnlyRemovedNotify(client: XcodeMCP) async throws {
+            try await client.notify("notifications/custom")
+        }
+        """,
+        ["has no member 'notify'"]
+    ),
+    (
+        "XcodeMCPKitClientUsesSnapshotInitializer",
+        """
+        import XcodeMCPKit
+
+        func compileOnlySnapshotInitializerShouldNotBePublic() {
+            _ = XcodeMCPConnectionSnapshot(
+                sequence: 0,
+                generation: 0,
+                phase: .initializing
+            )
+        }
+        """,
+        [
+            "initializer is inaccessible",
+            "'XcodeMCPConnectionSnapshot' initializer is inaccessible",
+        ]
+    ),
+]
 
 private struct CommandResult {
     let exitCode: Int32
@@ -788,12 +819,17 @@ func compileOnlyClientDomainSurface() throws {
 
 func compileOnlyClientLifecycleSurface(config: XcodeMCPConfiguration) async throws {
     let client = try await XcodeMCP(configuration: config)
-    _ = try await client.listTools()
+    _ = await client.connectionState()
+    _ = await client.connectionStates()
+    _ = try await client.listTools(
+        options: .init(timeout: .after(.seconds(30)))
+    )
     _ = try await client.callTool(
         "DocumentationSearch",
         arguments: [
             "query": "NavigationStack",
-        ]
+        ],
+        options: .init(replayPolicy: .onceWhenRejectedBeforeProcessing)
     ) { progress in
         _ = progress.message
     }
@@ -803,12 +839,7 @@ func compileOnlyClientLifecycleSurface(config: XcodeMCPConfiguration) async thro
             "query": "NavigationStack",
         ]
     )
-    try await client.notify(
-        "notifications/custom",
-        params: [
-            "enabled": true,
-        ]
-    )
+    try await client.reconnect(options: .init(timeout: .disabled))
     await client.close()
 }
 """
@@ -1076,11 +1107,3 @@ private func lowLevelImportClientSource(moduleName: String) -> String {
     func compileOnlyLowLevelModuleShouldNotBeVisible() {}
     """
 }
-
-private let runtimeHelperLeakClientSource = """
-import XcodeMCPKit
-
-func compileOnlyRuntimeProtocolHelperShouldNotBeVisible() {
-    _ = MCP.ProtocolVersion.current
-}
-"""

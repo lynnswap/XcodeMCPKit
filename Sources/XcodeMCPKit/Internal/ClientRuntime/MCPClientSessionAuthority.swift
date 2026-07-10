@@ -119,7 +119,12 @@ package enum MCPClientSessionEvent: Sendable {
 }
 
 private final class MCPConnectionSubscriberRegistry: Sendable {
-    private let continuations = Mutex<[UUID: AsyncStream<XcodeMCPConnectionSnapshot>.Continuation]>([:])
+    private struct State {
+        var continuations: [UUID: AsyncStream<XcodeMCPConnectionSnapshot>.Continuation] = [:]
+        var isFinished = false
+    }
+
+    private let state = Mutex(State())
 
     func makeStream(initial: XcodeMCPConnectionSnapshot) -> AsyncStream<XcodeMCPConnectionSnapshot> {
         let id = UUID()
@@ -127,25 +132,33 @@ private final class MCPConnectionSubscriberRegistry: Sendable {
             of: XcodeMCPConnectionSnapshot.self,
             bufferingPolicy: .bufferingNewest(1)
         )
-        continuations.withLock { $0[id] = pair.continuation }
+        let shouldFinish = state.withLock { state in
+            guard state.isFinished == false else { return true }
+            state.continuations[id] = pair.continuation
+            return false
+        }
         pair.continuation.onTermination = { [weak self] _ in
-            _ = self?.continuations.withLock { $0.removeValue(forKey: id) }
+            _ = self?.state.withLock { $0.continuations.removeValue(forKey: id) }
         }
         pair.continuation.yield(initial)
+        if shouldFinish { pair.continuation.finish() }
         return pair.stream
     }
 
     func publish(_ snapshot: XcodeMCPConnectionSnapshot) {
-        let current = continuations.withLock { Array($0.values) }
+        let current = state.withLock { Array($0.continuations.values) }
         for continuation in current {
             continuation.yield(snapshot)
         }
     }
 
     func finish() {
-        let current = continuations.withLock { state in
-            let values = Array(state.values)
-            state.removeAll()
+        let current = state.withLock { state
+            -> [AsyncStream<XcodeMCPConnectionSnapshot>.Continuation] in
+            guard state.isFinished == false else { return [] }
+            state.isFinished = true
+            let values = Array(state.continuations.values)
+            state.continuations.removeAll()
             return values
         }
         for continuation in current {
@@ -219,6 +232,8 @@ package actor MCPClientSessionAuthority {
         phase: .initializing
     )
     private var isClosed = false
+    private var closeCompleted = false
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var hiddenResponses: [String: AsyncThrowingStream<MCPClientEnvelope, Error>.Continuation] = [:]
     private var forwardedInitialize: ForwardedInitializeRecipe?
     private var forwardedInitializeFailure: MCPBridgeRuntimeError?
@@ -398,7 +413,11 @@ package actor MCPClientSessionAuthority {
     }
 
     package func close() async {
-        guard isClosed == false else { return }
+        guard isClosed == false else {
+            guard closeCompleted == false else { return }
+            await withCheckedContinuation { closeWaiters.append($0) }
+            return
+        }
         isClosed = true
         recovery?.task.cancel()
         let recoveryTask = recovery?.task
@@ -435,6 +454,10 @@ package actor MCPClientSessionAuthority {
         publish(.closed(.requested))
         subscribers.finish()
         eventContinuation.finish()
+        closeCompleted = true
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     isolated deinit {
@@ -448,6 +471,7 @@ package actor MCPClientSessionAuthority {
         for continuation in forwardedReadyWaiters.values { continuation.finish() }
         subscribers.finish()
         eventContinuation.finish()
+        for waiter in closeWaiters { waiter.resume() }
     }
 }
 

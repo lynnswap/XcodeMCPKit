@@ -176,29 +176,6 @@ struct XcodeMCPTests {
         ])
     }
 
-    @Test func rawNotifySendsDynamicNotificationWithoutRequestID() async throws {
-        let transport = FakeXcodeMCPTransport()
-        let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
-
-        try await xcode.notify(
-            "notifications/custom",
-            params: [
-                "enabled": true,
-            ]
-        )
-
-        let notification = try #require(
-            await transport.sentMessages().last { $0.method == "notifications/custom" }
-        )
-        #expect(notification.id == nil)
-        #expect(notification.params == [
-            "enabled": true,
-        ])
-    }
-
     @Test func callToolAddsProgressTokenAndRoutesMatchingProgress() async throws {
         let transport = FakeXcodeMCPTransport()
         let progressValues = RecordedValues<MCPProgress>()
@@ -244,6 +221,60 @@ struct XcodeMCPTests {
         await Task.yield()
         #expect(await progressValues.count() == 1)
         #expect(await callFinished.count() == 1)
+    }
+
+    @Test func progressCallbackCanCloseClientWithQueuedSuccessorWithoutSelfDeadlock() async throws {
+        let transport = FakeXcodeMCPTransport(
+            progressBeforeResponseCount: 2,
+            emitsProgressBarrierServerRequest: true
+        )
+        let callbackGate = ManualGate()
+        let callbackTerminalGate = ManualGate()
+        let callbackStarts = RecordedValues<Void>()
+        let callbackCloseReturns = RecordedValues<Void>()
+        let callbackCloseCounts = RecordedValues<Int>()
+        let closeCompletions = RecordedValues<String>()
+        let xcode = try await XcodeMCP(transport: transport)
+
+        let callTask = Task {
+            try await xcode.callTool("DocumentationSearch") { _ in
+                await callbackStarts.append(())
+                await callbackGate.wait()
+                await xcode.close()
+                await callbackCloseCounts.append(await transport.closeCount())
+                await callbackCloseReturns.append(())
+                await callbackTerminalGate.wait()
+                await closeCompletions.append("callback")
+            }
+        }
+
+        _ = try await callbackStarts.nextValue()
+        _ = try await transport.nextSentMessage { message in
+            message.method == nil && message.error != nil
+        }
+        await callbackGate.open()
+
+        _ = try await callbackCloseReturns.nextValue()
+        let secondCloseStarts = RecordedValues<Void>()
+        let secondCloseTask = Task {
+            await secondCloseStarts.append(())
+            await xcode.close()
+            await closeCompletions.append("second-close")
+        }
+        _ = try await secondCloseStarts.nextValue()
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+        #expect(await closeCompletions.count() == 0)
+
+        await callbackTerminalGate.open()
+        _ = try await callTask.value
+        await secondCloseTask.value
+        #expect(try await callbackCloseCounts.nextValue() == 1)
+        #expect(await callbackStarts.count() == 1)
+        #expect(try await closeCompletions.nextValue() == "callback")
+        #expect(try await closeCompletions.nextValue(startingAt: 1) == "second-close")
+        #expect(await xcode.connectionState().phase == .closed(.requested))
     }
 
     @Test func runtimeSessionRoutesProgressAndAnswersUnsupportedServerRequests() async throws {
@@ -371,6 +402,54 @@ struct XcodeMCPTests {
         }
         #expect(try await transport.nextCancellationRequestID() == .integer(1))
         await xcode.close()
+    }
+
+    @Test func closeDrainsInFlightSendBeforeReturningAndRejectsPostCloseNetworkWork() async throws {
+        let transport = HangingSendXcodeMCPTransport()
+        let xcode = try await XcodeMCP(
+                configuration: .init(requestTimeout: .seconds(60)),
+            transport: transport
+        )
+        let requestTask = Task { try await xcode.listTools() }
+
+        _ = try await transport.nextStarted(method: "tools/list")
+        await xcode.close()
+
+        _ = try await transport.nextCancelled(method: "tools/list")
+        await #expect(throws: XcodeMCPError.closed) {
+            _ = try await requestTask.value
+        }
+        let sendsAfterClose = await transport.startedCount()
+        await #expect(throws: XcodeMCPError.closed) {
+            _ = try await xcode.listTools()
+        }
+        #expect(await transport.startedCount() == sendsAfterClose)
+    }
+
+    @Test func expiredDeadlineDoesNotAdmitPendingOrNetworkWork() async throws {
+        let transport = FakeXcodeMCPTransport()
+        let session = try await InitializedMCPClientSession.start(
+            transport: transport,
+            configuration: .init(
+                clientName: "RuntimeSessionTest",
+                clientVersion: "1.0",
+                capabilities: [:],
+                requestTimeout: .seconds(2)
+            )
+        )
+        let sendsBeforeRequest = await transport.sentMessages().count
+
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(method: "tools/list")) {
+            _ = try await session.request(
+                "tools/list",
+                deadline: Deadline(uptimeNanoseconds: 0)
+            )
+        }
+        for _ in 0..<100 { await Task.yield() }
+
+        #expect(await transport.sentMessages().count == sendsBeforeRequest)
+        await session.close()
+        #expect(await transport.closeCount() == 1)
     }
 
     @Test func runtimeSessionRequestTimeoutUsesInjectedClock() async throws {
@@ -752,6 +831,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
@@ -811,6 +891,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
@@ -859,6 +940,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
@@ -897,6 +979,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         let xcode = try await waitWithTimeout("SSE initialize response was not delivered") {
@@ -924,6 +1007,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
@@ -968,6 +1052,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
@@ -1006,6 +1091,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2),
             eventStreamReconnectSleep: { duration in
                 try await reconnectSleep.sleep(for: duration)
@@ -1036,6 +1122,191 @@ struct XcodeMCPTests {
         await xcode.close()
     }
 
+    @Test func streamableHTTPInjectedClientDeinitCancelsEventStreamTask() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            eventStreamFinishesImmediately: true
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        let reconnectSleep = ManualReconnectSleep()
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        var client: StreamableHTTPMCPClient? = StreamableHTTPMCPClient(
+            endpoint: endpoint,
+            urlSession: session,
+            urlSessionOwnership: .injected,
+            eventStreamReconnectSleep: { duration in
+                try await reconnectSleep.sleep(for: duration)
+            }
+        )
+        weak let weakClient = client
+        await client?.startEventStream(headers: MCPConnectionHeaders(
+            sessionID: "session-http-1",
+            protocolVersion: "2025-06-18"
+        ))
+        _ = try await server.nextRequest { $0.httpMethod == "GET" }
+        _ = try await reconnectSleep.nextRequestedDuration()
+
+        client = nil
+
+        #expect(weakClient == nil)
+        await reconnectSleep.waitForCancellation()
+    }
+
+    @Test func streamableHTTPOwnedClientDeinitInvalidatesOutstandingRequests() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            deleteClosesEventStream: false,
+            deleteFinishesLoading: false
+        )
+        let session = makeFakeHTTPURLSession(server: server)
+        let cancellationStart = await FakeStreamableHTTPURLProtocolRegistry.shared
+            .cancellationCount()
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        var client: StreamableHTTPMCPClient? = StreamableHTTPMCPClient(
+            endpoint: endpoint,
+            urlSession: session,
+            urlSessionOwnership: .owned
+        )
+        weak let weakClient = client
+        await client?.startEventStream(headers: MCPConnectionHeaders(
+            sessionID: "session-http-1",
+            protocolVersion: "2025-06-18"
+        ))
+        _ = try await server.nextRequest { $0.httpMethod == "GET" }
+
+        var deleteRequest = URLRequest(url: endpoint)
+        deleteRequest.httpMethod = "DELETE"
+        let deleteTask = Task {
+            _ = try? await session.data(for: deleteRequest)
+        }
+        _ = try await server.nextRequest { $0.httpMethod == "DELETE" }
+
+        client = nil
+
+        #expect(weakClient == nil)
+        _ = try await waitWithTimeout("owned session did not cancel its outstanding GET") {
+            try await FakeStreamableHTTPURLProtocolRegistry.shared.nextCancellation(
+                startingAt: cancellationStart,
+                method: "GET"
+            )
+        }
+        _ = try await waitWithTimeout("owned session did not cancel its outstanding DELETE") {
+            try await FakeStreamableHTTPURLProtocolRegistry.shared.nextCancellation(
+                startingAt: cancellationStart,
+                method: "DELETE"
+            )
+        }
+        await deleteTask.value
+    }
+
+    @Test func streamableHTTPConcurrentCloseDeletesAndInvalidatesOnce() async throws {
+        let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .none,
+            deleteClosesEventStream: false,
+            deleteFinishesLoading: false
+        )
+        let invalidations = URLSessionInvalidationRecorder()
+        let session = makeFakeHTTPURLSession(server: server, delegate: invalidations)
+        defer {
+            session.invalidateAndCancel()
+            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+        }
+
+        let client = StreamableHTTPMCPClient(
+            endpoint: endpoint,
+            urlSession: session,
+            urlSessionOwnership: .owned
+        )
+        let headers = MCPConnectionHeaders(
+            sessionID: "session-http-1",
+            protocolVersion: "2025-06-18"
+        )
+        await client.startEventStream(headers: headers)
+        _ = try await server.nextRequest { $0.httpMethod == "GET" }
+
+        let closeStarts = RecordedValues<Void>()
+        let closeCompletions = RecordedValues<Int>()
+        let firstClose = Task {
+            await closeStarts.append(())
+            await client.close(headers: headers, deleteTimeout: .seconds(2))
+            await closeCompletions.append(1)
+        }
+        let secondClose = Task {
+            await closeStarts.append(())
+            await client.close(headers: headers, deleteTimeout: .seconds(2))
+            await closeCompletions.append(2)
+        }
+
+        _ = try await closeStarts.nextValue()
+        _ = try await closeStarts.nextValue(startingAt: 1)
+        _ = try await server.nextRequest { $0.httpMethod == "DELETE" }
+        for _ in 0..<100 { await Task.yield() }
+
+        let requestsBeforeRelease = await server.recordedRequests()
+        #expect(requestsBeforeRelease.filter { $0.httpMethod == "DELETE" }.count == 1)
+        #expect(await closeCompletions.count() == 0)
+
+        await server.finishDelete()
+        try await waitWithTimeout("concurrent close callers did not share terminal completion") {
+            await firstClose.value
+            await secondClose.value
+        }
+        _ = try await invalidations.nextInvalidation()
+        for _ in 0..<100 { await Task.yield() }
+
+        #expect(await closeCompletions.count() == 2)
+        #expect(await invalidations.count() == 1)
+        let requests = await server.recordedRequests()
+        #expect(requests.filter { $0.httpMethod == "DELETE" }.count == 1)
+    }
+
+    @Test func streamableHTTPCloseWaitsForReservedEventTaskInstallationAndTerminal() async throws {
+        let state = StreamableHTTPMCPConnectionState()
+        #expect(await state.reserveEventStreamStart())
+
+        let lateTaskGate = ManualGate()
+        let lateTask = Task {
+            await lateTaskGate.wait()
+        }
+        let closeReturns = RecordedValues<Void>()
+        let closeTerminals = RecordedValues<Void>()
+        let closeTask = Task {
+            let task = await state.close()
+            await closeReturns.append(())
+            await task?.value
+            await closeTerminals.append(())
+        }
+
+        while true {
+            do {
+                try await state.ensureOpen()
+                await Task.yield()
+            } catch {
+                break
+            }
+        }
+        #expect(await closeReturns.count() == 0)
+
+        await state.installEventStreamTask(lateTask)
+        _ = try await closeReturns.nextValue()
+        #expect(await closeTerminals.count() == 0)
+
+        await lateTaskGate.open()
+        await closeTask.value
+        #expect(await closeTerminals.count() == 1)
+    }
+
     @Test func streamableHTTPPreservesInitializeServerError() async throws {
         let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
         let server = FakeStreamableHTTPServer(
@@ -1051,6 +1322,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         await #expect(throws: XcodeMCPError.serverError(
@@ -1081,6 +1353,7 @@ struct XcodeMCPTests {
         let transport = StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
             urlSession: session,
+            urlSessionOwnership: .injected,
             requestTimeout: .seconds(2)
         )
         await #expect(throws: XcodeMCPError.serverError(
@@ -1178,6 +1451,10 @@ struct XcodeMCPTests {
         #expect(await first.next() == nil)
         #expect(await second.next() == nil)
         #expect(await xcode.connectionState() == firstClosed)
+
+        var postClose = await xcode.connectionStates().makeAsyncIterator()
+        #expect(await postClose.next() == firstClosed)
+        #expect(await postClose.next() == nil)
     }
 
     @Test func recoveryIsSingleFlightForConcurrentExpiredOperations() async throws {
@@ -1528,10 +1805,6 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
         }
     }
 
-    func send(_ data: Data) async throws {
-        try await send(data, headers: MCPConnectionHeaders(), deadline: nil)
-    }
-
     func send(
         _ data: Data,
         headers: MCPConnectionHeaders,
@@ -1596,7 +1869,12 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
         }
     }
 
-    func close() async {
+    func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         guard closed == false else { return }
         closed = true
         closes += 1
@@ -1653,7 +1931,13 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
         self.continuation = stream.continuation
     }
 
-    func send(_ data: Data) async throws {
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         let object = try parse(data)
         let method = object["method"]?.stringValue ?? ""
         if method == "initialize" {
@@ -1690,7 +1974,12 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
         }
     }
 
-    func close() async {
+    func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         await sendBlocker.cancelAll()
         continuation.yield(.closed(nil))
         continuation.finish()
@@ -1706,6 +1995,10 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
 
     func nextCancellationRequestID() async throws -> MCPJSONValue {
         try await cancellationRequestIDs.nextValue()
+    }
+
+    func startedCount() async -> Int {
+        await startedValues.count()
     }
 
     private func yieldMessage(_ object: [String: MCPJSONValue]) throws {
@@ -1792,11 +2085,22 @@ private actor RuntimeFailingXcodeMCPTransport: XcodeMCPTransport {
         self.error = error
     }
 
-    func send(_ data: Data) async throws {
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         throw error
     }
 
-    func close() async {
+    func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         continuation.yield(.closed(nil))
         continuation.finish()
     }
@@ -1823,7 +2127,13 @@ private actor UnsupportedResponseFailingXcodeMCPTransport: XcodeMCPTransport {
         self.error = error
     }
 
-    func send(_ data: Data) async throws {
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         guard closed == false else {
             throw MCPBridgeRuntimeError.closed
         }
@@ -1860,7 +2170,12 @@ private actor UnsupportedResponseFailingXcodeMCPTransport: XcodeMCPTransport {
         ])
     }
 
-    func close() async {
+    func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         guard closed == false else {
             return
         }
@@ -1908,6 +2223,8 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let initializeResult: MCPJSONValue
     private let responseErrors: [String: MCPJSONValue]
+    private let progressBeforeResponseCount: Int
+    private let emitsProgressBarrierServerRequest: Bool
     private let sentMessageValues = RecordedValues<SentMessage>()
     private let closeValues = RecordedValues<Int>()
     private var messages: [SentMessage] = []
@@ -1923,16 +2240,26 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
             ]),
             "capabilities": .object([:]),
         ]),
-        responseErrors: [String: MCPJSONValue] = [:]
+        responseErrors: [String: MCPJSONValue] = [:],
+        progressBeforeResponseCount: Int = 1,
+        emitsProgressBarrierServerRequest: Bool = false
     ) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
         self.initializeResult = initializeResult
         self.responseErrors = responseErrors
+        self.progressBeforeResponseCount = progressBeforeResponseCount
+        self.emitsProgressBarrierServerRequest = emitsProgressBarrierServerRequest
     }
 
-    func send(_ data: Data) async throws {
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         guard closed == false else {
             throw XcodeMCPError.closed
         }
@@ -1956,16 +2283,26 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         if method == "tools/call",
            let progressToken = sent.params?.objectValue?["_meta"]?.objectValue?["progressToken"]
         {
-            try yieldMessage([
-                "jsonrpc": .string("2.0"),
-                "method": .string("notifications/progress"),
-                "params": .object([
-                    "progressToken": progressToken,
-                    "progress": .double(0.5),
-                    "total": .integer(1),
-                    "message": .string("halfway"),
-                ]),
-            ])
+            for index in 0..<progressBeforeResponseCount {
+                try yieldMessage([
+                    "jsonrpc": .string("2.0"),
+                    "method": .string("notifications/progress"),
+                    "params": .object([
+                        "progressToken": progressToken,
+                        "progress": .double(Double(index + 1) / Double(progressBeforeResponseCount + 1)),
+                        "total": .integer(1),
+                        "message": .string(index == 0 ? "halfway" : "queued"),
+                    ]),
+                ])
+            }
+            if emitsProgressBarrierServerRequest {
+                try yieldMessage([
+                    "jsonrpc": .string("2.0"),
+                    "id": .string("progress-barrier"),
+                    "method": .string("sampling/createMessage"),
+                    "params": .object([:]),
+                ])
+            }
         }
 
         if let error = responseErrors[method] {
@@ -1997,7 +2334,12 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         }
     }
 
-    func close() async {
+    func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         guard closed == false else {
             return
         }
@@ -2192,9 +2534,12 @@ private actor FakeStreamableHTTPServer {
     private let postSSEFinishesLoading: Bool
     private let initializeUsesSSE: Bool
     private let initializeFinishesLoading: Bool
+    private let deleteClosesEventStream: Bool
+    private let deleteFinishesLoading: Bool
     private let requestValues = RecordedValues<RecordedHTTPRequest>()
     private var requests: [RecordedHTTPRequest] = []
     private var eventConnection: ActiveHTTPConnection?
+    private var deleteConnection: ActiveHTTPConnection?
 
     init(
         progressDelivery: ProgressDelivery,
@@ -2204,7 +2549,9 @@ private actor FakeStreamableHTTPServer {
         initializeErrorStatusCode: Int = 200,
         postSSEFinishesLoading: Bool = true,
         initializeUsesSSE: Bool = false,
-        initializeFinishesLoading: Bool = true
+        initializeFinishesLoading: Bool = true,
+        deleteClosesEventStream: Bool = true,
+        deleteFinishesLoading: Bool = true
     ) {
         self.progressDelivery = progressDelivery
         self.sessionID = sessionID
@@ -2214,6 +2561,8 @@ private actor FakeStreamableHTTPServer {
         self.postSSEFinishesLoading = postSSEFinishesLoading
         self.initializeUsesSSE = initializeUsesSSE
         self.initializeFinishesLoading = initializeFinishesLoading
+        self.deleteClosesEventStream = deleteClosesEventStream
+        self.deleteFinishesLoading = deleteFinishesLoading
     }
 
     func response(
@@ -2241,11 +2590,17 @@ private actor FakeStreamableHTTPServer {
                 finishesLoading: eventStreamFinishesImmediately
             )
         case "DELETE":
-            eventConnection?.finish()
-            eventConnection = nil
+            if deleteClosesEventStream {
+                eventConnection?.finish()
+                eventConnection = nil
+            }
+            if deleteFinishesLoading == false {
+                deleteConnection = connection
+            }
             return FakeURLProtocolResponse(
                 headers: sessionID.map { ["Mcp-Session-Id": $0] } ?? [:],
-                chunks: []
+                chunks: [],
+                finishesLoading: deleteFinishesLoading
             )
         case "POST":
             return postResponse(for: recorded)
@@ -2256,6 +2611,11 @@ private actor FakeStreamableHTTPServer {
 
     func recordedRequests() -> [RecordedHTTPRequest] {
         requests
+    }
+
+    func finishDelete() {
+        deleteConnection?.finish()
+        deleteConnection = nil
     }
 
     func nextRequest(
@@ -2527,6 +2887,7 @@ private final class FakeStreamableHTTPURLProtocolRegistry: @unchecked Sendable {
     static let shared = FakeStreamableHTTPURLProtocolRegistry()
 
     private let lock = NSLock()
+    private let cancellationValues = RecordedValues<String>()
     private var server: FakeStreamableHTTPServer?
 
     func set(_ server: FakeStreamableHTTPServer) {
@@ -2545,6 +2906,20 @@ private final class FakeStreamableHTTPURLProtocolRegistry: @unchecked Sendable {
         lock.withLock {
             server = nil
         }
+    }
+
+    func recordCancellation(method: String) {
+        Task { [cancellationValues] in
+            await cancellationValues.append(method)
+        }
+    }
+
+    func cancellationCount() async -> Int {
+        await cancellationValues.count()
+    }
+
+    func nextCancellation(startingAt startIndex: Int, method: String) async throws -> String {
+        try await cancellationValues.nextValue(startingAt: startIndex) { $0 == method }
     }
 }
 
@@ -2591,14 +2966,43 @@ private final class FakeStreamableHTTPURLProtocol: URLProtocol, @unchecked Senda
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        FakeStreamableHTTPURLProtocolRegistry.shared.recordCancellation(
+            method: request.httpMethod ?? ""
+        )
+    }
 }
 
-private func makeFakeHTTPURLSession(server: FakeStreamableHTTPServer) -> URLSession {
+private func makeFakeHTTPURLSession(
+    server: FakeStreamableHTTPServer,
+    delegate: (any URLSessionDelegate)? = nil
+) -> URLSession {
     FakeStreamableHTTPURLProtocolRegistry.shared.set(server)
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [FakeStreamableHTTPURLProtocol.self]
-    return URLSession(configuration: config)
+    return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+}
+
+private final class URLSessionInvalidationRecorder: NSObject, URLSessionDelegate,
+    @unchecked Sendable
+{
+    private let values = RecordedValues<Int>()
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+        _ = session
+        _ = error
+        Task { [values] in
+            await values.append(1)
+        }
+    }
+
+    func nextInvalidation() async throws -> Int {
+        try await values.nextValue()
+    }
+
+    func count() async -> Int {
+        await values.count()
+    }
 }
 
 private actor RecordedValues<Value: Sendable> {
@@ -2814,6 +3218,8 @@ private actor ManualReconnectSleep {
     private var requestedDurations: [Duration] = []
     private var sleepWaiters: [SleepWaiter] = []
     private var durationWaiters: [DurationWaiter] = []
+    private var cancellationCount = 0
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
 
     func sleep(for duration: Duration) async throws {
         let waiterID = UUID()
@@ -2857,12 +3263,21 @@ private actor ManualReconnectSleep {
         waiter.continuation.resume()
     }
 
+    func waitForCancellation() async {
+        guard cancellationCount == 0 else { return }
+        await withCheckedContinuation { cancellationWaiters.append($0) }
+    }
+
     private func cancelSleepWaiter(id: UUID) {
         guard let index = sleepWaiters.firstIndex(where: { $0.id == id }) else {
             return
         }
         let waiter = sleepWaiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
+        cancellationCount += 1
+        let waiters = cancellationWaiters
+        cancellationWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     private func cancelDurationWaiter(id: UUID) {

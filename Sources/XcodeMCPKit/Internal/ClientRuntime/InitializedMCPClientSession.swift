@@ -1,6 +1,15 @@
 import Foundation
 import Synchronization
 
+private enum MCPClientTaskContext {
+    struct ProgressTaskIdentity: Equatable, Sendable {
+        let laneID: UUID
+        let taskID: UUID
+    }
+
+    @TaskLocal static var progressTaskIdentity: ProgressTaskIdentity?
+}
+
 private final class MCPProgressLane: Sendable {
     private struct State {
         var accepting = true
@@ -9,6 +18,7 @@ private final class MCPProgressLane: Sendable {
     }
 
     private let state = Mutex(State())
+    private let id = UUID()
 
     func submit(
         _ value: JSONValue,
@@ -18,10 +28,16 @@ private final class MCPProgressLane: Sendable {
             guard state.accepting else { return }
             let previous = state.tail
             let id = UUID()
+            let identity = MCPClientTaskContext.ProgressTaskIdentity(
+                laneID: self.id,
+                taskID: id
+            )
             let task = Task {
-                if let previous { await previous.value }
-                guard Task.isCancelled == false else { return }
-                await handler(value)
+                await MCPClientTaskContext.$progressTaskIdentity.withValue(identity) {
+                    if let previous { await previous.value }
+                    guard Task.isCancelled == false else { return }
+                    await handler(value)
+                }
             }
             state.tasks[id] = task
             state.tail = task
@@ -32,16 +48,35 @@ private final class MCPProgressLane: Sendable {
         state.withLock { $0.accepting = false }
     }
 
-    func closeAndDrain(cancel: Bool = false) async {
+    func closeAndDrain(cancel: Bool = false) async -> [Task<Void, Never>] {
+        let currentIdentity = MCPClientTaskContext.progressTaskIdentity
         let tasks = state.withLock { state in
             state.accepting = false
-            let tasks = Array(state.tasks.values)
-            state.tasks.removeAll()
+            let tasks = state.tasks
             state.tail = nil
             return tasks
         }
-        if cancel { for task in tasks { task.cancel() } }
-        for task in tasks { await task.value }
+        if currentIdentity?.laneID == id {
+            if cancel {
+                for (id, task) in tasks where id != currentIdentity?.taskID { task.cancel() }
+            }
+            // The current callback is waiting for this close call, and every
+            // successor waits for the current callback. Their completion is
+            // therefore outside this reentrant close stack. Successors are
+            // cancelled above and the current callback returns immediately
+            // after close completes its resource teardown.
+            return Array(tasks.values)
+        }
+        if cancel {
+            for task in tasks.values { task.cancel() }
+        }
+        for task in tasks.values { await task.value }
+        state.withLock { state in
+            for id in tasks.keys {
+                state.tasks.removeValue(forKey: id)
+            }
+        }
+        return []
     }
 
     func cancel() {
@@ -53,57 +88,152 @@ private final class MCPProgressLane: Sendable {
     }
 }
 
-private final class MCPClientPendingRequests: Sendable {
-    struct PendingRequest {
-        let continuation: CheckedContinuation<JSONValue, Error>
-        let progressLane: MCPProgressLane?
-        var sendTask: Task<Void, Never>?
+private final class MCPClientSendTaskOwner: Sendable {
+    private struct State {
+        var task: Task<Void, Never>?
+        var isActivated = false
+        var isCancelled = false
+        var activationWaiters: [CheckedContinuation<Void, Never>] = []
+        var installationWaiters: [CheckedContinuation<Task<Void, Never>, Never>] = []
     }
 
-    private let requests = Mutex<[String: PendingRequest]>([:])
+    private let state = Mutex(State())
+
+    func install(_ task: Task<Void, Never>) {
+        let result = state.withLock { state in
+            precondition(state.task == nil)
+            state.task = task
+            state.isActivated = true
+            let activationWaiters = state.activationWaiters
+            let installationWaiters = state.installationWaiters
+            state.activationWaiters.removeAll()
+            state.installationWaiters.removeAll()
+            return (state.isCancelled, activationWaiters, installationWaiters)
+        }
+        if result.0 { task.cancel() }
+        for waiter in result.1 { waiter.resume() }
+        for waiter in result.2 { waiter.resume(returning: task) }
+    }
+
+    func waitUntilActivated() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = state.withLock { state in
+                guard state.isActivated == false else { return true }
+                state.activationWaiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
+    }
+
+    func cancel() {
+        let task = state.withLock { state in
+            state.isCancelled = true
+            return state.task
+        }
+        task?.cancel()
+    }
+
+    func waitForCompletion() async {
+        let task = await withCheckedContinuation { continuation in
+            let installedTask = state.withLock { state -> Task<Void, Never>? in
+                guard let task = state.task else {
+                    state.installationWaiters.append(continuation)
+                    return nil
+                }
+                return task
+            }
+            if let installedTask { continuation.resume(returning: installedTask) }
+        }
+        await task.value
+    }
+
+    deinit {
+        cancel()
+    }
+}
+
+private final class MCPClientPendingRequests: Sendable {
+    struct PendingRequest {
+        let continuation: AsyncThrowingStream<JSONValue, Error>.Continuation
+        let progressLane: MCPProgressLane?
+        let sendTaskOwner: MCPClientSendTaskOwner
+    }
+
+    private struct State {
+        var requests: [String: PendingRequest] = [:]
+        var drainingSendTasks: [String: MCPClientSendTaskOwner] = [:]
+    }
+
+    private let state = Mutex(State())
 
     func add(
         idKey: String,
-        continuation: CheckedContinuation<JSONValue, Error>,
-        progressLane: MCPProgressLane?
+        continuation: AsyncThrowingStream<JSONValue, Error>.Continuation,
+        progressLane: MCPProgressLane?,
+        sendTaskOwner: MCPClientSendTaskOwner
     ) {
-        requests.withLock {
-            $0[idKey] = PendingRequest(
+        state.withLock {
+            precondition($0.requests[idKey] == nil)
+            $0.requests[idKey] = PendingRequest(
                 continuation: continuation,
-                progressLane: progressLane
+                progressLane: progressLane,
+                sendTaskOwner: sendTaskOwner
             )
         }
     }
 
-    func setSendTask(idKey: String, task: Task<Void, Never>) -> Bool {
-        requests.withLock {
-            guard $0[idKey] != nil else { return false }
-            $0[idKey]?.sendTask = task
-            return true
-        }
-    }
-
     func take(idKey: String) -> PendingRequest? {
-        requests.withLock { $0.removeValue(forKey: idKey) }
+        state.withLock { state in
+            guard let request = state.requests.removeValue(forKey: idKey) else { return nil }
+            state.drainingSendTasks[idKey] = request.sendTaskOwner
+            return request
+        }
     }
 
     func fail(idKey: String, error: any Error) {
         let request = take(idKey: idKey)
         request?.progressLane?.closeAdmission()
-        request?.sendTask?.cancel()
-        request?.continuation.resume(throwing: error)
+        request?.sendTaskOwner.cancel()
+        request?.continuation.finish(throwing: error)
     }
 
     func failAll(error: any Error) {
-        let pending = requests.withLock {
-            let current = $0
-            $0.removeAll()
+        let pending = state.withLock { state in
+            let current = state.requests
+            state.requests.removeAll()
+            for (idKey, request) in current {
+                state.drainingSendTasks[idKey] = request.sendTaskOwner
+            }
             return current
         }
         for request in pending.values {
             request.progressLane?.closeAdmission()
-            request.sendTask?.cancel()
-            request.continuation.resume(throwing: error)
+            request.sendTaskOwner.cancel()
+            request.continuation.finish(throwing: error)
+        }
+    }
+
+    func drainSendTask(idKey: String) async {
+        guard let owner = state.withLock({ $0.drainingSendTasks[idKey] }) else { return }
+        await owner.waitForCompletion()
+        state.withLock { state in
+            if state.drainingSendTasks[idKey] === owner {
+                state.drainingSendTasks.removeValue(forKey: idKey)
+            }
+        }
+    }
+
+    func drainAllSendTasks() async {
+        while true {
+            let owners = state.withLock { Array($0.drainingSendTasks.values) }
+            guard owners.isEmpty == false else { return }
+            for owner in owners { await owner.waitForCompletion() }
+            state.withLock { state in
+                for owner in owners {
+                    state.drainingSendTasks = state.drainingSendTasks.filter { $0.value !== owner }
+                }
+            }
         }
     }
 }
@@ -138,6 +268,10 @@ package actor InitializedMCPClientSession {
     private let pendingRequests = MCPClientPendingRequests()
     private var nextRequestID: Int64 = 1
     private var isClosed = false
+    private var closeCompleted = false
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var closeCompletionTask: Task<Void, Never>?
+    private var deferredProgressTasks: [Task<Void, Never>] = []
     private var eventTask: Task<Void, Never>?
     private var progressHandlers: [String: ProgressHandler] = [:]
     private var progressLanes: [String: MCPProgressLane] = [:]
@@ -223,74 +357,78 @@ package actor InitializedMCPClientSession {
         }
 
         let payload = try makeJSONRPCPayload(id: id, method: method, params: requestParams)
+        let requestDeadline = deadline ?? Deadline.fromNow(
+            configuration.requestTimeout,
+            clock: configuration.clock
+        )
+        if requestDeadline?.hasExpired == true {
+            throw MCPBridgeRuntimeError.requestTimedOut(method: method)
+        }
         let operation = MCPClientOperation(
             envelope: try MCPClientEnvelope(data: payload),
-            deadline: deadline,
+            deadline: requestDeadline,
             replayPolicy: replayPolicy
         )
         let sessionAuthority = authority
         let pendingRegistry = pendingRequests
+        let sendTaskOwner = MCPClientSendTaskOwner()
+        let resultPair = AsyncThrowingStream.makeStream(
+            of: JSONValue.self,
+            throwing: Error.self
+        )
+        pendingRegistry.add(
+            idKey: idKey,
+            continuation: resultPair.continuation,
+            progressLane: lane,
+            sendTaskOwner: sendTaskOwner
+        )
+        let sendTask = Task { [sessionAuthority] in
+            await sendTaskOwner.waitUntilActivated()
+            do {
+                try Task.checkCancellation()
+                try await sessionAuthority.send(operation)
+            } catch {
+                pendingRegistry.fail(
+                    idKey: idKey,
+                    error: Self.runtimeError(from: error)
+                )
+            }
+        }
+        sendTaskOwner.install(sendTask)
 
         do {
+            let resultStream = resultPair.stream
             let result = try await withRequestDeadline(
-                deadline ?? Deadline.fromNow(configuration.requestTimeout, clock: configuration.clock),
+                requestDeadline,
                 method: method
             ) {
                 try await withTaskCancellationHandler {
-                    try await withCheckedThrowingContinuation { continuation in
-                        pendingRegistry.add(
-                            idKey: idKey,
-                            continuation: continuation,
-                            progressLane: lane
-                        )
-                        let sendTask = Task { [sessionAuthority] in
-                            do {
-                                try await sessionAuthority.send(operation)
-                            } catch {
-                                pendingRegistry.fail(
-                                    idKey: idKey,
-                                    error: Self.runtimeError(from: error)
-                                )
-                            }
-                        }
-                        if pendingRegistry.setSendTask(idKey: idKey, task: sendTask) == false {
-                            sendTask.cancel()
-                        }
+                    var iterator = resultStream.makeAsyncIterator()
+                    guard let result = try await iterator.next() else {
+                        try Task.checkCancellation()
+                        throw MCPBridgeRuntimeError.closed
                     }
+                    return result
                 } onCancel: {
-                    self.pendingRequests.fail(idKey: idKey, error: CancellationError())
+                    pendingRegistry.fail(idKey: idKey, error: CancellationError())
                     lane?.cancel()
                 }
             }
-            await lane?.closeAndDrain()
+            await pendingRegistry.drainSendTask(idKey: idKey)
+            if isClosed == false {
+                _ = await lane?.closeAndDrain()
+            }
             return result
         } catch {
-            await lane?.closeAndDrain(cancel: true)
+            pendingRegistry.fail(idKey: idKey, error: error)
+            await pendingRegistry.drainSendTask(idKey: idKey)
+            if isClosed == false {
+                _ = await lane?.closeAndDrain(cancel: true)
+            }
             if method != "initialize", Self.requiresCancellationNotification(error) {
                 await sendCancellationNotification(for: id)
             }
             throw error
-        }
-    }
-
-    package func notify(
-        _ method: String,
-        params: JSONValue? = nil,
-        deadline: Deadline? = nil
-    ) async throws {
-        guard method.isEmpty == false else {
-            throw MCPBridgeRuntimeError.invalidRequest("method must not be empty")
-        }
-        try ensureOpen()
-        let payload = try makeJSONRPCPayload(id: nil, method: method, params: params)
-        do {
-            try await authority.send(MCPClientOperation(
-                envelope: MCPClientEnvelope(data: payload),
-                deadline: deadline,
-                replayPolicy: .never
-            ))
-        } catch {
-            throw Self.runtimeError(from: error)
         }
     }
 
@@ -308,26 +446,58 @@ package actor InitializedMCPClientSession {
     }
 
     package func close() async {
-        guard isClosed == false else { return }
+        guard isClosed == false else {
+            guard closeCompleted == false else { return }
+            if let closeCompletionTask {
+                await closeCompletionTask.value
+                return
+            }
+            await withCheckedContinuation { closeWaiters.append($0) }
+            return
+        }
         isClosed = true
-        pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
         let lanes = Array(progressLanes.values)
         progressHandlers.removeAll()
         progressLanes.removeAll()
+        pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
+        await pendingRequests.drainAllSendTasks()
+        var deferredProgressTasks: [Task<Void, Never>] = []
         for lane in lanes {
-            await lane.closeAndDrain(cancel: true)
+            deferredProgressTasks += await lane.closeAndDrain(cancel: true)
         }
         await authority.close()
         eventTask?.cancel()
         let task = eventTask
         eventTask = nil
         await task?.value
+        guard deferredProgressTasks.isEmpty == false else {
+            finishClose()
+            return
+        }
+        self.deferredProgressTasks = deferredProgressTasks
+        closeCompletionTask = Task { [weak self, deferredProgressTasks] in
+            for task in deferredProgressTasks { await task.value }
+            await self?.finishClose()
+        }
+    }
+
+    func finishClose() {
+        guard closeCompleted == false else { return }
+        closeCompleted = true
+        closeCompletionTask = nil
+        deferredProgressTasks.removeAll()
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     isolated deinit {
         eventTask?.cancel()
         for lane in progressLanes.values { lane.cancel() }
         pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
+        closeCompletionTask?.cancel()
+        for task in deferredProgressTasks { task.cancel() }
+        for waiter in closeWaiters { waiter.resume() }
     }
 }
 
@@ -424,11 +594,12 @@ private extension InitializedMCPClientSession {
                 }
                 guard let pending = pendingRequests.take(idKey: idKey) else { return }
                 pending.progressLane?.closeAdmission()
-                pending.sendTask?.cancel()
+                pending.sendTaskOwner.cancel()
                 if let errorValue = object["error"] {
-                    pending.continuation.resume(throwing: parseServerError(errorValue))
+                    pending.continuation.finish(throwing: parseServerError(errorValue))
                 } else {
-                    pending.continuation.resume(returning: object["result"] ?? .null)
+                    pending.continuation.yield(object["result"] ?? .null)
+                    pending.continuation.finish()
                 }
                 return
             }

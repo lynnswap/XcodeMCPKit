@@ -121,11 +121,12 @@ struct StdioAdapterFacadeIntegrationTests {
     }
 
     @Test func stdioAdapterFacadeBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {
-        let shutdownClocks = makeStdioAdapterShutdownClocks()
+        let deleteGrace = Duration.milliseconds(251)
+        let shutdownClocks = makeStdioAdapterShutdownClocks(deleteSessionGrace: deleteGrace)
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             hangsDELETE: true,
-            stdinLines: [initializeRequest],
+            stdinLines: [initializeRequest, initializedNotification],
             proxyArguments: ["--request-timeout", "0"],
             timeoutDescription: "STDIO adapter should not hang waiting for best-effort DELETE",
             adapterShutdownPolicy: shutdownClocks.policy,
@@ -135,12 +136,21 @@ struct StdioAdapterFacadeIntegrationTests {
                     try await server.recorder.nextRequest { $0.httpMethod == "GET" }
                 }
             },
-            afterInputClosed: { server in
+            onInputClosing: { server, activate in
+                let waiterRegistrations = LockedRecordedValues<Void>()
+                let sleeperObserver = Task.detached {
+                    try await shutdownClocks.timeoutClock.sleep(
+                        untilSuspendedFor: deleteGrace,
+                        onWaiterRegistered: { waiterRegistrations.append(()) }
+                    )
+                }
+                _ = try await waiterRegistrations.nextValue(at: 0)
+                activate()
+                try await sleeperObserver.value
                 _ = try await waitWithTimeout("waiting for hanging DELETE") {
                     try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
                 }
-                try await waitForSuspendedSleepers(on: shutdownClocks.timeoutClock)
-                advanceStdioAdapterShutdownClocks(shutdownClocks, by: .milliseconds(250))
+                advanceStdioAdapterShutdownClocks(shutdownClocks, by: deleteGrace)
             }
         )
 
@@ -222,6 +232,35 @@ struct StdioAdapterFacadeIntegrationTests {
         let errorObject = try #require(result.outputObjects.last?["error"] as? [String: Any])
         #expect((errorObject["code"] as? NSNumber)?.intValue == -32000)
         #expect(errorObject["message"] as? String == "upstream HTTP 500")
+    }
+
+    @Test func stdioAdapterFacadeRejectsUnmatchedJSONRPCErrorFromHTTPErrorStatus() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
+            responseMode: .json,
+            httpErrorResponsesByMethod: [
+                "tools/list": StubMCPHTTPErrorResponse(
+                    status: .badGateway,
+                    body: [
+                        "jsonrpc": "2.0",
+                        "id": 999,
+                        "error": [
+                            "code": -32002,
+                            "message": "foreign response",
+                        ],
+                    ]
+                )
+            ],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
+            timeoutDescription: "STDIO adapter should reject an unmatched HTTP error response"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 2)
+        let response = try #require(result.outputObjects.last)
+        #expect((response["id"] as? NSNumber)?.intValue == 2)
+        let errorObject = try #require(response["error"] as? [String: Any])
+        #expect(errorObject["message"] as? String == "upstream HTTP 502")
     }
 
     @Test func stdioAdapterFacadeSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
@@ -340,7 +379,8 @@ struct StdioAdapterFacadeIntegrationTests {
                     try await server.recorder.nextRequest { $0.httpMethod == "GET" }
                 }
             },
-            afterInputClosed: { server in
+            onInputClosing: { server, activate in
+                activate()
                 _ = try await waitWithTimeout("waiting for session DELETE") {
                     try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
                 }
@@ -393,7 +433,9 @@ private struct ControlledStdioAdapterShutdownClocks: Sendable {
     let uptimeClock: TestUptimeClock
 }
 
-private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownClocks {
+private func makeStdioAdapterShutdownClocks(
+    deleteSessionGrace: Duration = .milliseconds(250)
+) -> ControlledStdioAdapterShutdownClocks {
     let timeoutClock = TestClock()
     let uptimeClock = TestUptimeClock()
     let clock = ClockClient(
@@ -407,7 +449,10 @@ private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownC
         sleepForTimeInterval: { _ in }
     )
     return ControlledStdioAdapterShutdownClocks(
-        policy: StdioAdapterShutdownPolicy(clock: clock),
+        policy: StdioAdapterShutdownPolicy(
+            deleteSessionGrace: deleteSessionGrace,
+            clock: clock
+        ),
         timeoutClock: timeoutClock,
         uptimeClock: uptimeClock
     )
@@ -465,8 +510,11 @@ private struct StdioAdapterFacadeHarness {
         environment: [String: String] = [:],
         adapterShutdownPolicy: StdioAdapterShutdownPolicy = .live,
         closeInputBeforeRunning: Bool = true,
-        whileRunning: ((StubMCPHTTPServer) async throws -> Void)? = nil,
-        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)? = nil
+        whileRunning: (@Sendable (StubMCPHTTPServer) async throws -> Void)? = nil,
+        onInputClosing: (@Sendable (
+            StubMCPHTTPServer,
+            @Sendable () -> Void
+        ) async throws -> Void)? = nil
     ) async throws -> StdioAdapterFacadeRunResult {
         // Avoid false 5s timeouts when nested swift build contract tests run concurrently.
         try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
@@ -489,7 +537,7 @@ private struct StdioAdapterFacadeHarness {
                 adapterShutdownPolicy: adapterShutdownPolicy,
                 closeInputBeforeRunning: closeInputBeforeRunning,
                 whileRunning: whileRunning,
-                afterInputClosed: afterInputClosed
+                onInputClosing: onInputClosing
             )
         }
     }
@@ -512,8 +560,11 @@ private struct StdioAdapterFacadeHarness {
         environment: [String: String],
         adapterShutdownPolicy: StdioAdapterShutdownPolicy,
         closeInputBeforeRunning: Bool,
-        whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
-        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
+        whileRunning: (@Sendable (StubMCPHTTPServer) async throws -> Void)?,
+        onInputClosing: (@Sendable (
+            StubMCPHTTPServer,
+            @Sendable () -> Void
+        ) async throws -> Void)?
     ) async throws -> StdioAdapterFacadeRunResult {
         let server = try StubMCPHTTPServer.start(
             responseMode: responseMode,
@@ -539,7 +590,7 @@ private struct StdioAdapterFacadeHarness {
                 adapterShutdownPolicy: adapterShutdownPolicy,
                 closeInputBeforeRunning: closeInputBeforeRunning,
                 whileRunning: whileRunning,
-                afterInputClosed: afterInputClosed
+                onInputClosing: onInputClosing
             )
             try await server.shutdown()
             return result
@@ -558,8 +609,11 @@ private struct StdioAdapterFacadeHarness {
         environment: [String: String],
         adapterShutdownPolicy: StdioAdapterShutdownPolicy,
         closeInputBeforeRunning: Bool,
-        whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
-        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
+        whileRunning: (@Sendable (StubMCPHTTPServer) async throws -> Void)?,
+        onInputClosing: (@Sendable (
+            StubMCPHTTPServer,
+            @Sendable () -> Void
+        ) async throws -> Void)?
     ) async throws -> StdioAdapterFacadeRunResult {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
@@ -597,9 +651,28 @@ private struct StdioAdapterFacadeHarness {
         do {
             try await whileRunning?(server)
             if !closeInputBeforeRunning {
-                closeInput()
+                if let onInputClosing {
+                    let observerActivations = LockedRecordedValues<Void>()
+                    let inputClosingObserver = Task.detached {
+                        try await onInputClosing(server) {
+                            observerActivations.append(())
+                        }
+                    }
+                    _ = try await observerActivations.nextValue(at: 0)
+                    inputClosed = true
+                    let inputWriter = inputPipe.fileHandleForWriting
+                    let inputCloseTask = Task.detached {
+                        inputWriter.closeFile()
+                    }
+                    let observerResult = await inputClosingObserver.result
+                    await inputCloseTask.value
+                    try observerResult.get()
+                } else {
+                    closeInput()
+                }
+            } else {
+                try await onInputClosing?(server, {})
             }
-            try await afterInputClosed?(server)
             let exitCode = try await waitWithTimeout(
                 timeoutDescription,
                 timeout: timeout

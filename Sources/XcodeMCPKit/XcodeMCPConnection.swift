@@ -53,7 +53,7 @@ public struct XcodeMCPConnectionSnapshot: Equatable, Sendable {
     public let generation: UInt64
     public let phase: Phase
 
-    public init(sequence: UInt64, generation: UInt64, phase: Phase) {
+    package init(sequence: UInt64, generation: UInt64, phase: Phase) {
         self.sequence = sequence
         self.generation = generation
         self.phase = phase

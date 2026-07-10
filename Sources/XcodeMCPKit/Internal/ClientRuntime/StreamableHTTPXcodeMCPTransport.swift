@@ -39,9 +39,12 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
         requestTimeout: Duration?
     ) async throws -> StreamableHTTPXcodeMCPTransport {
         try StreamableHTTPMCPClient.validateEndpoint(endpoint)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = true
         return StreamableHTTPXcodeMCPTransport(
             endpoint: endpoint,
-            urlSession: .shared,
+            urlSession: URLSession(configuration: configuration),
+            urlSessionOwnership: .owned,
             requestTimeout: requestTimeout
         )
     }
@@ -62,6 +65,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
     package init(
         endpoint: URL,
         urlSession: URLSession,
+        urlSessionOwnership: StreamableHTTPURLSessionOwnership,
         requestTimeout: Duration? = nil,
         deleteSessionGrace: Duration? = nil,
         clock: ClockClient = .liveValue,
@@ -74,6 +78,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
         let client = StreamableHTTPMCPClient(
             endpoint: endpoint,
             urlSession: urlSession,
+            urlSessionOwnership: urlSessionOwnership,
             eventStreamReconnectSleep: eventStreamReconnectSleep
         )
 
@@ -100,15 +105,12 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
         clientExpirationTask.cancel()
     }
 
-    package func send(_ data: Data) async throws {
-        try await send(data, headers: MCPConnectionHeaders(), deadline: Deadline.fromNow(requestTimeout))
-    }
-
     package func send(
         _ data: Data,
         headers: MCPConnectionHeaders,
         deadline: Deadline?
     ) async throws {
+        let expectedResponseID = Self.requestID(in: data)
         do {
             _ = try await client.send(
                 data,
@@ -116,10 +118,18 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
                 timeout: deadline?.remainingDuration()
             ) { [streamContinuation] message, responseHeaders in
                 streamContinuation.yield(.messageWithHeaders(message, responseHeaders))
-                return .continue
+                guard let expectedResponseID,
+                      Self.responseID(in: message) == expectedResponseID else {
+                    return .continue
+                }
+                return .stop
             }
         } catch let error as StreamableHTTPMCPClientError {
-            if case .httpStatus(_, _, let payloads) = error, payloads.isEmpty == false {
+            if case .httpStatus(_, _, let payloads) = error,
+               let expectedResponseID,
+               payloads.isEmpty == false,
+               payloads.allSatisfy({ Self.responseID(in: $0) == expectedResponseID })
+            {
                 for payload in payloads {
                     streamContinuation.yield(.messageWithHeaders(payload, MCPConnectionHeaders()))
                 }
@@ -137,10 +147,6 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
 
     package func startEventStream(headers: MCPConnectionHeaders) async {
         await client.startEventStream(headers: headers)
-    }
-
-    package func close() async {
-        await close(headers: MCPConnectionHeaders())
     }
 
     package func close(headers: MCPConnectionHeaders) async {
@@ -161,12 +167,21 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
     private static func runtimeError(from error: StreamableHTTPMCPClientError) -> MCPBridgeRuntimeError {
         switch error {
         case .httpStatus(let statusCode, let body, _):
-            let suffix = body.isEmpty ? "" : ": \(body)"
-            return .transportUnavailable(
-                "Streamable HTTP request failed with status \(statusCode)\(suffix)"
-            )
+            return .httpStatus(code: statusCode, body: body)
         case .sessionExpired(let sessionID):
             return .transportUnavailable("Streamable HTTP session expired: \(sessionID)")
         }
+    }
+
+    private static func requestID(in data: Data) -> String? {
+        guard let envelope = try? MCPClientEnvelope(data: data),
+              case .request(let id, _) = envelope.kind else { return nil }
+        return id.key
+    }
+
+    private static func responseID(in data: Data) -> String? {
+        guard let envelope = try? MCPClientEnvelope(data: data),
+              case .response(let id) = envelope.kind else { return nil }
+        return id.key
     }
 }

@@ -211,6 +211,51 @@ struct UpstreamProcessTests {
         #expect(snapshot.stopOutputCount == 1)
         #expect(snapshot.terminateCount == 1)
     }
+
+    @Test func concurrentStopsShareOutputDrainCompletion() async throws {
+        let fakeDriver = FakeUpstreamProcessDriver(finishesOutputOnStop: false)
+        let session = try await makeFakeUpstreamSession(fakeDriver)
+        let completedStops = RecordedValues<Int>()
+
+        let first = Task {
+            await session.stop()
+            await completedStops.append(1)
+        }
+        _ = try await fakeDriver.nextStopOutput()
+        let second = Task {
+            await session.stop()
+            await completedStops.append(2)
+        }
+
+        await Task.yield()
+        #expect(await completedStops.count() == 0)
+        fakeDriver.finishStdout()
+        fakeDriver.finishStderr()
+        await first.value
+        await second.value
+        #expect(Set(await completedStops.snapshot()) == Set([1, 2]))
+    }
+
+    @Test func processTransportDeinitSynchronouslySignalsOwnedProcess() async throws {
+        let fakeDriver = FakeUpstreamProcessDriver()
+        let config = UpstreamProcess.Config(
+            command: "/fake/upstream",
+            args: [],
+            environment: [:],
+            maxQueuedWriteBytes: 1024,
+            driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
+        )
+        var transport: UpstreamProcessXcodeMCPTransport? = try await .start(config: config)
+        weak let weakTransport = transport
+
+        transport = nil
+
+        #expect(weakTransport == nil)
+        let snapshot = fakeDriver.snapshot()
+        #expect(snapshot.closeStdinCount == 1)
+        #expect(snapshot.stopOutputCount == 1)
+        #expect(snapshot.terminateCount == 1)
+    }
 }
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
@@ -328,12 +373,15 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
 
     private let lock = NSLock()
     private var state = State()
+    private let finishesOutputOnStop: Bool
+    private let stopOutputRecorder = DeterministicRecorder<Void>()
     private let stdoutContinuation: AsyncStream<Data>.Continuation
     private let stderrContinuation: AsyncStream<Data>.Continuation
     private let stdoutChunks: AsyncStream<Data>
     private let stderrChunks: AsyncStream<Data>
 
-    init() {
+    init(finishesOutputOnStop: Bool = true) {
+        self.finishesOutputOnStop = finishesOutputOnStop
         var stdoutContinuation: AsyncStream<Data>.Continuation!
         self.stdoutChunks = AsyncStream { continuation in
             stdoutContinuation = continuation
@@ -407,8 +455,15 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         lock.withLock {
             state.stopOutputCount += 1
         }
-        finishStdout()
-        finishStderr()
+        stopOutputRecorder.record(())
+        if finishesOutputOnStop {
+            finishStdout()
+            finishStderr()
+        }
+    }
+
+    func nextStopOutput() async throws {
+        _ = try await stopOutputRecorder.nextValue(at: 0)
     }
 
     func emitStdout(_ data: Data) {
