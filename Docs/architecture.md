@@ -5,7 +5,7 @@
 - HTTP-capable MCP clients connect directly to the proxy server (default: `http://localhost:8765/mcp`).
 - `xcode-mcp-proxy` remains as a supported STDIO compatibility adapter, forwarding to the proxy server as a modern Streamable HTTP client.
 - The proxy targets MCP protocol version `2025-06-18`, matching current Xcode `mcpbridge` negotiation.
-- JSON-RPC batch requests are rejected at the HTTP boundary.
+- Each HTTP request carries exactly one JSON-RPC object. JSON-RPC batch arrays are rejected at the HTTP boundary without downstream side effects.
 
 ## Diagrams
 
@@ -82,8 +82,19 @@ flowchart LR
   - fallback default (`http://localhost:8765/mcp`)
 
 ## Streamable HTTP Contract
+- Every request is checked by one Origin policy before route resolution, session creation, debug reset, or upstream I/O. This includes `/health`, `/debug/*`, MCP routes, and unknown routes.
+- A missing `Origin` header is allowed for non-browser clients. When `Origin` is present it must be one valid HTTP(S) origin whose host and port match the actual listener policy; empty, multiple, `null`, malformed, and cross-origin values return `403`.
 - `POST /mcp` requires `Content-Type: application/json` and `Accept` containing both `application/json` and `text/event-stream`.
 - The server generates `MCP-Session-Id` on `initialize`; caller-provided session ids are ignored for initialize.
-- After initialize, `POST`, `GET`, and `DELETE` require both `MCP-Session-Id` and `MCP-Protocol-Version: 2025-06-18`.
+- After initialize, `POST`, `GET`, and `DELETE` require `MCP-Session-Id`. An explicit `MCP-Protocol-Version` must be valid, supported, and match the negotiated version.
+- When `MCP-Protocol-Version` is omitted, the server uses the session's negotiated version. If no negotiated version exists, it evaluates the protocol-defined fallback `2025-03-26` and returns `400` when that version is unsupported.
 - Missing session ids return `400`; unknown or terminated session ids return `404`.
 - `DELETE /mcp` terminates the session; later requests with that session id return `404`.
+- Empty, singleton, and mixed JSON-RPC arrays return `400`; the internal executor and response router operate on typed single messages. An array response from an upstream is a protocol violation.
+- When a session's SSE notification buffer overflows, the session owner increments its dropped-notification counter and emits a rate-limited warning. Unhandled server notifications remain debug-level events.
+
+## Discovery Contract
+
+- The discovery record is a URL hint, not proof that a server is reachable. PID liveness is not used as a second source of truth.
+- Reachability is established only by connecting to the endpoint and completing the standard initialize handshake.
+- When discovery is enabled, writing the record is part of server startup. A write failure unwinds listener/runtime resources and makes startup fail.

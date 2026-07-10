@@ -3,25 +3,43 @@
 ## Module Layout
 
 - `XcodeMCPKit`
-  - Public client SDK facade, MCP value types, initialized single-client
-    session, configured client transports, and internal/package-scoped
-    JSON-RPC, stdio framing, timeout dispatch, request inspection, and local
-    process runtime primitives.
+  - Public client SDK facade and MCP value types.
+  - Package-scoped `MCPClientSessionAuthority` owns transport recipes,
+    connection identity, HTTP session recovery, connection state, and close
+    completion for both the direct SDK and the proxy STDIO adapter.
+  - `InitializedMCPClientSession` owns request IDs, response correlation, and
+    request-scoped progress lanes; it does not own transport/session lifecycle.
 - `XcodeMCPProxyKit`
-  - Public proxy facades plus internal session lifecycle, proxy config state,
-    initialize handshake, upstream process pool, leases, routing,
-    discovery-file clients, Xcode target discovery/window query/readiness,
-    `XcodeRefreshCodeIssuesInFile` workflow, HTTP gateway, STDIO adapter,
-    permission-dialog auto approval, process restart, and install-product
-    helpers.
+  - Public server/adapter embedding facades plus internal HTTP gateway, proxy
+    control plane, Xcode routing, upstream topology, discovery, permission
+    automation, and feature workflows.
+  - CLI composition, installer implementation, build metadata, and launch
+    diagnostics are package/executable concerns rather than public library API.
 
 ## Ownership Boundaries
 
-- `XcodeMCPProxyKit` session internals
-  - Owns client sessions, cached initialize state, canonical tools catalog, control-plane waiters, upstream routing, lease cleanup, and refresh-code-issues feature workflow.
+- `ProcessControlPlaneAuthority`
+  - Owns route membership/exposure, activation attempts and their resources,
+    per-process tool catalogs, and the canonical tool projection in one lock.
+    Transitions return cancellation/I/O effects for execution outside the lock.
+- `WindowOwnershipAuthority` and `WindowRoutingResolver`
+  - The authority owns window/tab identity and `windowEpoch`; the stateless
+    resolver combines its snapshot with an immutable route snapshot. Neither
+    mutates catalog lifecycle.
+- `UpstreamTopologyAuthority`
+  - Owns actual upstream slots, stable IDs, membership/order, and topology
+    epoch. Routers, health state, schedulers, and debug views key local state by
+    those IDs instead of mirroring the slot array.
+- `CanonicalHandshakeState` and `ControlPlaneCoordinator`
+  - Handshake state is independent from catalog/window epochs. The coordinator
+    owns shared load tasks and waiters, but writes semantic state only through
+    authority leases and transitions.
 - `XcodeMCPProxyKit` HTTP gateway internals
-  - Owns HTTP transport validation, server-issued session ids, protocol-version enforcement, and request/response transport concerns.
-  - Rejects JSON-RPC batch arrays at the HTTP boundary.
+  - `HTTPRequestSecurityPolicy` validates Origin for every route before any
+    side effect. The gateway also owns server-issued session IDs, negotiated
+    protocol-version enforcement, and typed single-message transport concerns.
+  - Rejects JSON-RPC batch arrays at the HTTP boundary without invoking the
+    session or upstream.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
 
 ## Dependency Direction
@@ -34,7 +52,10 @@
   gateway internals. Low-level proxy implementation files live under
   `Sources/XcodeMCPProxyKit/Internal`, including session implementation files
   under `Sources/XcodeMCPProxyKit/Internal/Session`.
-- Executable targets depend on `XcodeMCPProxyKit` only.
+- `XcodeMCPProxyCLI`, `XcodeMCPProxyServer`, and `XcodeMCPProxyInstall` depend on
+  `XcodeMCPProxyKit`; `XcodeMCPProxyToolVerifier` depends on `XcodeMCPKit`;
+  `ProxyBuildInfoTool` is a standalone build-tool dependency of
+  `ProxyBuildInfoPlugin`.
 
 Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
 the default suite includes public product compile contract tests and proxy
@@ -48,8 +69,15 @@ contract tests that exercise package and product boundaries.
   - Human-readable logging only.
 - HTTP request bodies
   - Parse once per request and pass the parsed payload through forwarding/local handling; do not re-parse in hot-path helpers unless the payload is synthesized internally.
-- Canonical cache invalidation
-  - Synchronous cache clear is allowed before async control-plane cleanup when stale fast paths would otherwise leak invalid state.
+- Resource lifecycle
+  - Public `close()`, `stop()`, and `shutdown()` methods are the graceful
+    completion contracts. They stop admission, cancel and await owned tasks,
+    close transport/channel resources, then publish terminal state.
+  - `deinit` is a synchronous cancellation backstop only. It must not create an
+    unowned cleanup task or promise graceful protocol shutdown.
+- Discovery
+  - A discovery record is a URL hint. Only a connection plus standard
+    initialize handshake establishes reachability; PID liveness is not truth.
 
 ## Local Verification
 

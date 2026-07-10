@@ -160,6 +160,17 @@ disabled = ["RunAllTests", "RunSomeTests"]
 
 ## Migration
 
+### 2026-07 breaking Swift API redesign
+
+The Swift client and embedded proxy APIs now use typed connection state,
+`Duration` deadlines, explicit async lifecycle completion, and a smaller
+server/adapter public surface. Deprecated wrappers are not retained. CLI users
+keep the normal server and adapter commands, but the adapter's old `--stdio`
+alias is removed in favor of `--url`.
+
+See the [2026-07 migration guide](Docs/migration-2026-07.md) for the complete
+old-to-new symbol and behavior mapping.
+
 ### v0.11.0
 
 If you use the proxy through Codex or Claude Code, no migration is required.
@@ -201,6 +212,7 @@ Edit the draft release notes, then publish the release manually.
 
 - [Swift client API](Sources/XcodeMCPKit/README.md)
 - [Embedded proxy API](Sources/XcodeMCPProxyKit/README.md)
+- [2026-07 breaking API migration](Docs/migration-2026-07.md)
 - [Architecture](Docs/architecture.md)
 - [Troubleshooting](Docs/troubleshooting.md)
 - [MCP / Xcode MCP Benchmark Notes](Docs/mcp-benchmark.md)
