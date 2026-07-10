@@ -2,11 +2,9 @@
 
 ## 1. Package.swift targets vs Sources/ directories
 
-**Confirmed:** 9 dirs under `Sources/`; 8 are referenced by targets (XcodeMCPKit Package.swift:53-63, XcodeMCPKitTesting :64-72, XcodeMCPProxyKit :73-89 default path, XcodeMCPProxyCLI :124-130, XcodeMCPProxyServer :131-135, XcodeMCPProxyInstall :136-140, XcodeMCPProxyToolVerifier :141-146, ProxyBuildInfoTool :147-150).
+**Confirmed at correction HEAD `eab7260d`:** 8 dirs under `Sources/`; all 8 are referenced by targets (XcodeMCPKit Package.swift:53-63, XcodeMCPKitTesting :64-72, XcodeMCPProxyKit :73-89 default path, XcodeMCPProxyCLI :124-130, XcodeMCPProxyServer :131-135, XcodeMCPProxyInstall :136-140, XcodeMCPProxyToolVerifier :141-146, ProxyBuildInfoTool :147-150).
 
-**Orphan confirmed:** `Sources/XcodeMCPProxyRuntime/` is referenced by NO target. It contains **zero files** — only an empty `Support/` subdir (`ls -laR`: both dirs empty; dir mtimes Jun 28-29). It is untracked residue, not dead code: it compiles nowhere because nothing is in it.
-- Origin: commit 6f5cfd7e (2026-06-28 08:55, "refactor(runtime): split internal runtime targets by ownership") created target `XcodeMCPProxyRuntime` with 14 files under this path (`git show --name-only 6f5cfd7e`: e.g. `Sources/XcodeMCPProxyRuntime/Bridge/ManagedUpstreamSlot.swift`).
-- Removal: commit dc5041e5 (2026-06-28 11:08, "refactor(proxy): absorb proxy runtime target") moved everything into `Sources/XcodeMCPProxyKit/Internal/RuntimeCore/` and deleted the target from Package.swift. git leaves empty dirs behind; nothing in `.gitignore` covers it (`git check-ignore` exit 1). No doc references remain (rg 'XcodeMCPProxyRuntime' over *.md: 0 hits).
+**Correction:** the initial collection reported an untracked empty `Sources/XcodeMCPProxyRuntime/` directory, but it is absent at the correction HEAD and an empty directory cannot be represented in Git. It is therefore neither a repository finding nor a cleanup task. The historical target itself is confirmed: commit 6f5cfd7e created `XcodeMCPProxyRuntime` with 14 files; dc5041e5 moved them into `Sources/XcodeMCPProxyKit/Internal/RuntimeCore/` and removed the target 2h13m later.
 
 **Target-structure churn timeline (all 2026-06-28, one day):**
 - 08:38 9f1d091e: split proxy test targets (ProxyContractTests/ProxySessionTests → RuntimeCoordinator/DocumentationProvider/ToolSurface/StartupLogging tests; +XcodeMCPProxyRuntimeTestSupport)
@@ -20,12 +18,12 @@
 ## 2. Access-level audit (`package` declarations)
 
 **Counts (rg over decl keywords):**
-- `package` decls: XcodeMCPKit **291**, XcodeMCPProxyKit **88**, XcodeMCPKitTesting 8, all executables 0.
-- `public` decls: XcodeMCPKit **70**, XcodeMCPProxyKit 212, XcodeMCPKitTesting 39.
+- raw keyword lines matching `^\s*package\b`: XcodeMCPKit **385**, XcodeMCPProxyKit **121**, XcodeMCPKitTesting **9**, all executables 0.
+- actual keyword lines matching `^\s*public\b`: XcodeMCPKit **70**, XcodeMCPProxyKit **191**, XcodeMCPKitTesting **39**. ProxyKit has 215 raw hits, of which 24 are string-literal false positives described below.
 - XcodeMCPKit's public **type** surface is only 10 names: Bridge, MCPContent, MCPJSONValue, MCPProgress, MCPTool, MCPToolResult, Transport, XcodeMCP, XcodeMCPConfiguration, XcodeMCPError.
-- XcodeMCPKit's `package` **type** surface is 86 names, all under `Sources/XcodeMCPKit/Internal/` (e.g. JSONValue.swift:3 `package enum JSONRPC {}`, :5 `package enum JSONValue`; ClockClient.swift:3; StdioFramer.swift:3; Deadline.swift:6).
+- XcodeMCPKit's `package` **type declaration** count is86 using `^\s*package\s+(?:(?:final\s+)?class|actor|enum|protocol|struct|typealias)\b`: 85 under `Sources/XcodeMCPKit/Internal/` plus nested `XcodeMCPConfiguration.Transport.Storage` at `Sources/XcodeMCPKit/XcodeMCP.swift:55`.
 
-**Cross-target consumption (confirmed):** 80 of 114 ProxyKit .swift files `import XcodeMCPKit`. Of the 86 package type names, ~60 appear in ProxyKit source. Verified concrete usages:
+**Cross-target consumption (confirmed):** 79 of 114 ProxyKit .swift files `import XcodeMCPKit`. Of the 86 package type names, ~60 appear in ProxyKit source. Verified concrete usages:
 - `ClockClient` — Sources/XcodeMCPProxyKit/Stdio/StdioAdapter.swift:9,15,39 (35 refs total)
 - `StdioFramer` — StdioAdapter.swift:59; Internal/Session/Runtime/RuntimeCoordinator+UpstreamRouting.swift:1049
 - `JSONRPC.*` — StdioAdapter.swift:221-222,376-380 (226 refs)
@@ -58,7 +56,7 @@
 
 **The split carries documented meaning** (not pure accretion): default fast suite vs env-gated process suite (`XCODE_MCP_RUN_PROCESS_TESTS`, maintainer-architecture.md:59-60), opt-in stress (`XCODE_MCP_RUN_STRESS_TESTS`, :87), live mcpbridge (`XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS`, :112), and product-boundary contract (PublicProductContractTests). But the per-owner proxy split (RuntimeCoordinator/DocumentationProvider/ToolSurface/HTTPGateway/CLI/Stdio/Integration) dates from the same one-day churn (9f1d091e, 28626543 "split proxy runtime tests by owner", 1e7edcda "align test targets with owners").
 
-**@testable pattern (confirmed counts, files per target):** `@testable import XcodeMCPProxyKit` appears in **33 files across 10 targets**: ProxyCLITests 9, ProxyHTTPGatewayTests 8, ProxyIntegrationTests 8, ProxyRuntimeCoordinatorTests 6, ProxyToolSurfaceTests 3, XcodeMCPProxyInternalTestSupport 2, and 1 each in DocumentationProvider/LiveMCPBridge/StdioAdapter/Stress. `@testable import XcodeMCPKit`: 5 files (ProcessRuntimeTests 3, KitTests 1, RuntimeCoordinatorTests 1). Essentially **every proxy test target reaches ProxyKit internals directly** — the tested contracts (RuntimeCoordinator, HTTPHandler, DocumentationProvider) have no owner-level `package` surface for tests.
+**@testable pattern (confirmed counts, files per target):** `@testable import XcodeMCPProxyKit` appears in **40 files across 10 targets**(9 test targets + 1 support target): ProxyCLITests 9, ProxyHTTPGatewayTests 8, ProxyIntegrationTests 8, ProxyRuntimeCoordinatorTests 6, ProxyToolSurfaceTests 3, XcodeMCPProxyInternalTestSupport 2, and 1 each in DocumentationProvider/LiveMCPBridge/StdioAdapter/Stress. `@testable import XcodeMCPKit`: 5 files (ProcessRuntimeTests 3, KitTests 1, RuntimeCoordinatorTests 1). Essentially **every proxy test target reaches ProxyKit internals directly** — the tested contracts (RuntimeCoordinator, HTTPHandler, DocumentationProvider) have no owner-level `package` surface for tests.
 
 **Support-target mechanism is inconsistent (confirmed):**
 - XcodeMCPProxyTestSupport (1 file, 646 lines) and XcodeMCPCoreTestSupport (1 file, 498 lines) expose helpers via `package` decls (45 and 25 respectively) — consumed without @testable.
@@ -74,27 +72,23 @@
 ## Speculation (explicitly not citation-backed)
 
 - The ~60/86 package-type consumption count is an upper bound; a compiler-verified number would require building with the decls demoted.
-- The one-day split-then-collapse churn (6f5cfd7e → cb33e4d0) suggests the internal-target experiment was abandoned for `package` access deliberately; the current shape appears stable since 2026-06-28, but the stale PublicProductContractTests entries and the orphan directory are unswept residue of that pivot.
+- The one-day split-then-collapse churn (6f5cfd7e → cb33e4d0) suggests the internal-target experiment was abandoned for `package` access deliberately; the current shape appears stable since 2026-06-28, while the stale PublicProductContractTests entries are unswept residue of that pivot.
 
 # CANDIDATE FINDINGS
-
-## [low] Orphaned empty directory Sources/XcodeMCPProxyRuntime (incl. Support/) left from absorbed target (module-boundary)
-EVIDENCE: No target path references it (Package.swift:52-316); dir contains zero files (ls -laR); created by 6f5cfd7e (14 files, 2026-06-28 08:55), emptied by dc5041e5 'refactor(proxy): absorb proxy runtime target' (2026-06-28 11:08); untracked, not gitignored
-DIRECTION: Hypothesis: delete the empty directory tree; pure residue cleanup, no compile impact
 
 ## [medium] PublicProductContractTests import checks reference modules that no longer exist (XcodeMCPCore, XcodeMCPProcessRuntime) — assertions are trivially green (module-boundary)
 EVIDENCE: Tests/PublicProductContractTests/PublicProductContractTests.swift:588-592 lowLevelImportChecks name 'XcodeMCPCore'/'XcodeMCPProcessRuntime'; those targets were removed in cb33e4d0 'fix(package): seal public product target boundaries'; only runtimeHelperLeakCheck (:594-600, package protection of 'MCP') still tests the live boundary
 DIRECTION: Hypothesis: rewrite the contract test to assert the actual invariant (package-level decls inaccessible from product clients) and drop the dead-module import checks
 
-## [medium] XcodeMCPProxyKit consumes XcodeMCPKit almost entirely via its package-level surface (~60 of 86 package types; 80/114 files import Kit) — library products are inseparable below product granularity (module-boundary)
-EVIDENCE: package decls: Kit 291 vs public 70 (10 public types); verified cross-target uses e.g. ClockClient (ProxyKit Stdio/StdioAdapter.swift:9), StdioFramer (:59), JSONRPC (:221), JSONValue (Internal/Session/Runtime/RuntimeCoordinator.swift:137), UpstreamSession (Internal/Session/DocumentationProvider.swift:485); documented as intended in Docs/maintainer-architecture.md:5-9
+## [medium] XcodeMCPProxyKit consumes XcodeMCPKit almost entirely via its package-level surface (~60 of 86 package types; 79/114 files import Kit) — library products are inseparable below product granularity (module-boundary)
+EVIDENCE: raw package keyword lines: Kit 385 vs public 70 (10 public types); verified cross-target uses e.g. ClockClient (ProxyKit Stdio/StdioAdapter.swift:9), StdioFramer (:59), JSONRPC (:221), JSONValue (Internal/Session/Runtime/RuntimeCoordinator.swift:137), UpstreamSession (Internal/Session/DocumentationProvider.swift:485); documented as intended in Docs/maintainer-architecture.md:5-9
 DIRECTION: Hypothesis: accept as the deliberate design (package = internal shared surface, sealed by contract tests) and document that the two library products cannot be split into separate packages without promoting ~40-60 types; only define an owner-level surface if a split is actually wanted
 
-## [medium] Proxy test contracts have no owner-level surface: @testable import XcodeMCPProxyKit from 33 files / 10 targets, plus a 2,584-line internal test-support file with a second-order @testable chain and inconsistent support mechanisms (test-topology)
+## [medium] Proxy test contracts have no owner-level surface: @testable import XcodeMCPProxyKit from 40 files / 10 targets, plus a 2,584-line internal test-support file with a second-order @testable chain and inconsistent support mechanisms (test-topology)
 EVIDENCE: @testable counts per target (rg): ProxyCLITests 9, ProxyHTTPGatewayTests 8, ProxyIntegrationTests 8, ProxyRuntimeCoordinatorTests 6, ProxyToolSurfaceTests 3, others 1 each; XcodeMCPProxyInternalTestSupport has zero package/public decls, does @testable import XcodeMCPProxyKit and extends internal RuntimeCoordinator (RuntimeCoordinatorTestSupport.swift:11), while sibling supports (Tests/XcodeMCPProxyTestSupport 45, Tests/XcodeMCPCoreTestSupport 25) use package decls instead
 DIRECTION: Hypothesis: give the heavily-tested ProxyKit contracts (RuntimeCoordinator, HTTPHandler, DocumentationProvider) a package-scoped seam consumed by test support without @testable, and unify the two support-target visibility mechanisms
 
-## [low] Doc claim 'Executable targets depend on XcodeMCPProxyKit only' is false for 2 of 6 executables (docs)
+## [low] Doc claim 'Executable targets depend on XcodeMCPProxyKit only' is false for 2 of 5 executable targets (docs)
 EVIDENCE: Docs/maintainer-architecture.md:37 vs Package.swift:141-146 (XcodeMCPProxyToolVerifier depends on XcodeMCPKit) and :147-150 (ProxyBuildInfoTool, no deps)
 DIRECTION: Hypothesis: correct the doc sentence to name the shipped proxy executables explicitly
 

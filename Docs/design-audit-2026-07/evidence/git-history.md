@@ -2,7 +2,7 @@
 
 ## 0. Method / caveats
 - Full history: **686 non-merge commits** (`git log --oneline --no-merges | wc -l`). Initial commit 0b13facb (2026-02-04).
-- Area classification is **subject-keyword + scope based** (script over `git log --pretty='%h|%ad|%s'`), not per-diff path analysis. Individual commits can be misbucketed by ±few; the distribution shape is robust. Per-file fix counts below (`git log --follow`) are exact and corroborate the shape.
+- Area classification is **subject-keyword + scope based**, not per-diff path analysis. The original classifier script and complete bucket rules were not stored in the repo, so the 269/33/302 area totals cannot be independently reproduced and the classification error is unquantified. Reproducible anchors are 686 non-merge commits at the audit baseline, 364 conventional `fix` prefixes, named-SHA diff inspection, and the per-file counts below. Per-file counts overlap on multi-file commits and therefore corroborate concentration without reproducing the 81% ratio.
 - All diff-level claims below are confirmed by `git show` of the named SHA; HEAD line numbers are from the working tree at a1c6218e (clean per session snapshot).
 
 ## 1. Distribution: fix-type commits per responsibility area
@@ -20,7 +20,7 @@ Type prefixes over all 686: fix 364, refactor 128, test 71, docs 36, feat 21, ci
 | (g) tests-only | 71 | 0 |
 | (h) docs / chore / ci / release | 74 | 8 |
 
-**Areas (a)+(b) absorb 302/374 = 81% of all fixes.** Exact per-file corroboration (fix commits touching file, `--follow`):
+**Audit-time subject-keyword classification estimated areas (a)+(b) at 302/374 = 81% of fix-type commits.** This is an estimate under the caveat above, not an independently reproducible diff-path census. Reproducible per-file concentration signals(`--follow`, with multi-file overlap) are:
 - `Sources/XcodeMCPProxyKit/Internal/Session/Runtime/RuntimeCoordinator.swift` — **73 fix commits** (1,679 lines at HEAD)
 - `.../RuntimeCoordinator+ControlPlane.swift` — **56 fix commits** (1,475 lines)
 - `.../RuntimeCoordinator+XcodeProcessRouting.swift` — **45 fix commits** (1,522 lines)
@@ -70,7 +70,7 @@ Also inspected (stat-level): 4abbc84e 07-08 14:25 `guard process catalog retries
 
 ## 4. 構造修正型 vs 局所guard型 ratio
 
-Of the 16 fix commits diff-inspected across both chains: **2 clear 構造修正 (2c677e05, e9b6eed5) : 11 局所guard/局所patch : 3 guard-corrections that undo or relocate a guard added the same day (81e361e1←b43b1ad6, 9f726a6b←2c677e05, 436d7f94←5ca620dd) ≈ 12.5% structural.** The three same-day reversals are the strongest signal: guards are being added faster than their invariants are understood.
+Across the 15 commits listed in the two inspected tables: **2 clear structural-intent changes (2c677e05, e9b6eed5) : 10 local guards/patches : 3 guard-corrections that undo or relocate a same-day guard (81e361e1←b43b1ad6, 9f726a6b←2c677e05, 436d7f94←5ca620dd) = 13.3% structural-intent.** These categories are mutually exclusive for the 15 listed rows. The three same-day reversals are the strongest signal: guards are being added faster than their invariants are understood.
 
 ### Where the guards live at HEAD (file:line)
 - **Quadruplicated stale-catalog guard**: `"Dropping stale process tools/list catalog"` at `RuntimeCoordinator+ControlPlane.swift:523, 627, 689, 711` — same invariant ("this catalog result is still current") enforced 4 times inside one file, from 4 different angles (route identity, readiness attempt, exposure policy, broker generation).
@@ -92,17 +92,17 @@ Of the 16 fix commits diff-inspected across both chains: **2 clear 構造修正 
 
 ## 6. Confirmed facts vs speculation
 
-**Confirmed** (all of the above tables, SHAs, line numbers, doc quotes). **Speculation, marked**: (i) area bucket counts have keyword-classifier noise, ±5% per bucket; (ii) that PR #172's fixes were reactive to live testing rather than review feedback is inferred from the 10-20 minute inter-commit cadence, not from PR metadata; (iii) whether `WindowOwnerIndex` state should live inside `ProcessRouteStore` exposure rather than a separate locked box is a design hypothesis, not a measured defect.
+**Confirmed and reproducible:** baseline commit count, conventional-prefix counts, named SHAs/diffs, per-file fix-touch counts, line numbers, and doc quotations. **Audit-time estimate:** the area table and 302/374(~81%) ratio; classifier script/rules are not stored. **Speculation, marked**: (i) that PR #172's fixes were reactive to live testing rather than review feedback is inferred from the 10-20 minute inter-commit cadence, not from PR metadata; (ii) whether `WindowOwnerIndex` state should live inside `ProcessRouteStore` exposure rather than a separate locked box is a design hypothesis, not a measured defect.
 
 # CANDIDATE FINDINGS
 
-## [high] 81% of all 374 fixes land in proxy runtime (process catalog + window-owner routing); RuntimeCoordinator files absorb 73/56/45 fix commits each (proxy-session)
-EVIDENCE: 686 non-merge commits, ~374 fix-type; area (a) 269 fixes + area (b) 33 fixes = 302/374. git log --follow fix counts: RuntimeCoordinator.swift 73, RuntimeCoordinator+ControlPlane.swift 56, RuntimeCoordinator+XcodeProcessRouting.swift 45. Files are 1,679/1,475/1,522 lines at HEAD. Deleted design doc (2c677e05:Docs/process-route-rearchitecture.md) itself calls the extension split 'a false decomposition ... one state space'.
+## [high・ESTIMATED] Audit-time subject-keyword classification places ~81% of fix-type commits in proxy runtime; RuntimeCoordinator files have reproducible 73/56/45 fix-touch counts (proxy-session)
+EVIDENCE: Baseline has 686 non-merge commits and 364 conventional `fix` prefixes; adding ~10 manually classified pre-conventional fixes gives ~374. The audit-time classifier estimated area (a) 269 + area (b) 33 = 302/374, but its script and complete rules are not stored. Reproducible `git log --follow` fix-touch counts are RuntimeCoordinator.swift 73, RuntimeCoordinator+ControlPlane.swift 56, RuntimeCoordinator+XcodeProcessRouting.swift 45; multi-file commits overlap. Files are 1,679/1,475/1,522 lines at HEAD. Deleted design doc (2c677e05:Docs/process-route-rearchitecture.md) itself calls the extension split 'a false decomposition ... one state space'.
 DIRECTION: Hypothesis: the fix distribution is a structure problem, not a bug-count problem — the shared RuntimeCoordinator state space is the recurrence engine; audit should target its owner map rather than any individual symptom.
 
-## [high] Catalog-staleness invariant has no single owner: identical 'Dropping stale process tools/list catalog' guard exists at 4 sites, enforced via 4 different mechanisms (proxy-session)
+## [high・WEAKENED] Three staleness clocks have partial owners, but their composed catalog-admission decision and atomic commit have no owner (proxy-session)
 EVIDENCE: RuntimeCoordinator+ControlPlane.swift:523, 627, 689, 711 (route-identity check, readiness-attempt check, exposure-policy check, broker-generation check). Mechanisms accreted per incident: broker generation (2de161d5), retry generation tag (4abbc84e, 51d0070b), surface onlyIfGeneration (51cfe2f9, 382bf4be), exposure filter (258ace47), lease recheck (9f726a6b). ProcessRouteStore.swift bumps state.generation at 10 separate sites (:127,:179,:220,:255,:316,:365,:393,:418,:439,:487).
-DIRECTION: Hypothesis: 'is this catalog result still admissible' should be one owner-managed admission decision (exactly what the deleted rearchitecture doc proposed as 'a single owner-managed transaction'); the 4 guards are the same invariant re-derived per call site.
+DIRECTION: Hypothesis: one catalog transaction owner should compose generation / route lease / activation attempt, then serialize validation, process-surface mutation, and canonical projection(or consume a proof with CAS semantics). The individual clocks remain distinct; the missing contract is their composition and atomicity.
 
 ## [high] Same-day guard oscillation: 3 of 16 inspected fixes reverse or relocate a guard added hours earlier in the same PR (proxy-session)
 EVIDENCE: b43b1ad6 (07-08 16:09, re-arm activation timeout) reverted by 81e361e1 (17:45); 2c677e05's exposureEpoch lease (19:56) deleted by 9f726a6b (20:42); 5ca620dd's activeAvailableOwnerProcessIDs (07-09 10:37) deleted by 436d7f94 (11:48). Plus explicit rollback commit f9cb2000 'roll back stale process catalog cleanup' and same-day opposite-direction pair d814a29a vs 7a8d3714 (07-03). 15 commits total carry 'stale' in the subject across 6+ call-site families.
@@ -112,13 +112,13 @@ DIRECTION: Hypothesis: guards are written before the terminality/ownership seman
 EVIDENCE: PR #172 chain e9b6eed5→436d7f94 all 2026-07-09 10:14-11:48. eligibleProcessIDs threading at RuntimeCoordinator+XcodeProcessRouting.swift:1276,1293,1321,1330,1370,1388,1397,1411 and WindowOwnerIndex.swift:80/85,104/108. 96d1378b shows the per-call-site 'rewrite results for clients' invariant missed the pinned-upstream path (RuntimeCoordinator.swift:1442-1449). WindowOwnerIndex state is a locked box inside RuntimeCoordinator, while eligibility truth lives in ProcessRouteStore exposure policy (436d7f94 repointed it there).
 DIRECTION: Hypothesis: owner resolution (identity index) and owner eligibility (exposure) are two halves of one routing decision currently split across RuntimeCoordinator, WindowOwnerIndex, and ProcessRouteStore; the June-24 wave (12 owner-batch fixes in one day) is the same absence recurring.
 
-## [medium] Feature-then-fix-wave pattern repeats on every routing feature: 3 features each followed by ~20 same/next-day fixes (proxy-session)
-EVIDENCE: 3a9f4ae5 (06-23 route tools by process catalog) → 74 commits on 06-24; 6e07823e (07-02 dynamic reconciliation) → 37 commits same day; PR #170 (07-07/08) 21 fixes+1 refactor in 26h; PR #172 (07-09) 7 fixes in 3.5h. Merge-commit titles confirm the branch-per-wave structure (PRs #159-#172 in 8 days).
+## [medium] Feature-then-fix waves recur across four routing changes, with 7 to ~21 same/next-day follow-up fixes (proxy-session)
+EVIDENCE: 3a9f4ae5 (06-23 route tools by process catalog) was followed by ~20 catalog fixes on 06-24; 6e07823e (07-02 dynamic reconciliation) by a same-day wave of ~20 fixes; PR #170 carried 21 fixes+1 refactor in 26h; PR #172 carried 7 fixes in 3.5h. Wave size is not uniform, so this is recurrence evidence rather than a claim that every feature receives ~20 fixes.
 DIRECTION: Hypothesis: the integration surface (RuntimeCoordinator) lacks a contract that new routing features can be validated against pre-merge; fix waves are the contract being discovered in production.
 
-## [medium] The consolidation refactor 2c677e05 was structurally correct in diagnosis but immediately incomplete: its own artifacts were patched within hours and its design doc deleted next morning (proxy-session)
-EVIDENCE: 2c677e05 (07-08 19:56) created ProcessRouteStore/ProcessToolSurfaceStore/ProcessRouteReadinessStore + 377-line Docs/process-route-rearchitecture.md; 9f726a6b (20:42) and 6b454a86 (20:58) patched them; 5397ebec (07-09 03:28) deleted the doc. Doc findings 3 and 5 ('mutation and generation checks at separate call sites ... creates rollback patches'; 'second source of truth') describe defects still present at HEAD (ControlPlane.swift 4x stale guard; retry state split across ControlPlane.swift:419/RuntimeCoordinator.swift:1040/ProcessRouteReadinessStore.swift:70-99).
-DIRECTION: Hypothesis: the rearchitecture stopped at store extraction without moving the decision logic; RuntimeCoordinator still composes admission/retry/surface decisions from store queries at each call site, so the stores are data holders, not owners.
+## [medium] The consolidation refactor 2c677e05 contains partially corroborated diagnosis but stopped before owner logic moved; its artifacts were patched within hours and its design doc deleted next morning (proxy-session)
+EVIDENCE: 2c677e05 (07-08 19:56) created ProcessRouteStore/ProcessToolSurfaceStore/ProcessRouteReadinessStore + 377-line Docs/process-route-rearchitecture.md; 9f726a6b (20:42) and 6b454a86 (20:58) patched them; 5397ebec (07-09 03:28) deleted the doc. Findings 1/3, including mutation and generation checks at separate call sites, remain corroborated by the TOCTOU and rollback evidence. Finding 5's broad 'canonical catalog is a second source of truth' diagnosis was weakened by verification/fallbacks.md: hint-less inference is a test-pinned policy and several alleged stale fallbacks are fresh/dead paths. Retry-state splitting is separate evidence that transition ownership remained distributed, not proof of Finding 5.
+DIRECTION: Hypothesis: the rearchitecture stopped at store extraction without moving enough decision logic; RuntimeCoordinator still composes admission/retry/surface decisions from store queries at each call site. This causal explanation for churn requires design-gate validation rather than being treated as established fact.
 
 ## [low] Non-proxy areas are comparatively healthy: HTTP gateway 25 fixes (mostly one 06-16 modernization wave), stdio 6, SDK 18, CLI 15 (http-gateway)
 EVIDENCE: Keyword-classified counts (method caveat noted in report). HTTP gateway fixes cluster around 20ea7ab3 'feat!: modernize streamable HTTP transport' (06-16, 8 same-day follow-ups: c00f1625, adeea3ad, 65bf4a48, 50f923dc, d5016b5b...) and the 06-25 client-transport wave in XcodeMCPKit (3a0828b1, 3bae88f3, 1a67984b, 520fa318, 39d2dcbb, de774378); both waves terminated rather than recurring.

@@ -6,14 +6,14 @@ Public declarations exist ONLY in the 7 top-level files of `Sources/XcodeMCPProx
 
 | File | public decls |
 |---|---|
-| XcodeMCPProxyServer.swift | 58 |
+| XcodeMCPProxyServer.swift | 57 |
 | XcodeMCPProxyStdioAdapter.swift | 55 |
 | XcodeMCPProxyInstaller.swift | 40 |
 | XcodeMCPProxyServer+Launch.swift | 29 |
 | XcodeMCPProxyServer+PortDiagnostics.swift | 6 |
 | XcodeMCPProxyRunners.swift | 3 |
 | XcodeMCPProxyServer+Startup.swift | 1 |
-| **Total** | **~192** (41 type decls + 147 member decls, per `rg 'public (struct|enum|final class|class|protocol|actor)'` = 41 and `rg 'public (func|var|let|init|static)'` = 147) |
+| **Total** | **191** (41 type decls + 147 ordinary member decls + 3 `convenience init` lines) |
 
 **Internal/ false positive**: the `public` hits in `Internal/Session/DocumentationProvider.swift:1540-1591` are inside multi-line string literals that generate `.swiftinterface` shim text for `DVTFoundation`/`IDEIntelligenceChat` (see `dvtInterface(target:)` / `chatInterface(target:)` builders at DocumentationProvider.swift:1534-1596). **No genuine public decls hide under Internal/.** `XcodeMCPProxyConsole.swift` and `XcodeMCPProxyLogging.swift` are `package`-level, not public (XcodeMCPProxyConsole.swift:3, XcodeMCPProxyLogging.swift:3).
 
@@ -27,10 +27,10 @@ The repo's own executables are genuinely thin shells that consume **only** the t
 - `Sources/XcodeMCPProxyInstall/main.swift` (12 lines): `XcodeMCPProxyInstaller.run`.
 - `Sources/XcodeMCPProxyToolVerifier/main.swift` imports only `XcodeMCPKit`, not the proxy kit (main.swift:1-2).
 
-Story mapping of the ~192 public decls:
-- **(a) embedder hosting the proxy**: XcodeMCPProxyServer.swift 58 decls + Startup 1 + adapter-embedding subset of StdioAdapter.swift (endpoint resolver/options/endpoint/config/lifecycle, ~33 decls) ≈ **48%**. Real story, documented in Sources/XcodeMCPProxyKit/README.md:29-118, and pinned by external-consumer compile tests (Tests/PublicProductContractTests/PublicProductContractTests.swift:872-975 build a scratch package importing only the products).
-- **(b) custom launcher CLI**: Launch.swift 29 + PortDiagnostics 6 + Runners 3 + adapter launch-plan subset ~22 + installer 40 ≈ **80 decls ≈ 42%** of the surface. In-repo, nothing consumes this except tests and the internal `Launcher`s that back `run()`.
-- **(c) only this repo's executables**: strictly, only the 3 `run()` facades (XcodeMCPProxyRunners.swift:20,52,82). But see finding below: the launch-plan surface (b) exists to justify a story that is not actually implementable externally, so in practice (b) collapses toward (c).
+Consumer stories overlap, so they are not treated as a percentage partition:
+- **embedder hosting the proxy**: documented in Sources/XcodeMCPProxyKit/README.md:29-118 and compile-checked from an external scratch package (Tests/PublicProductContractTests/PublicProductContractTests.swift:872-975).
+- **custom launcher CLI, narrow launch-plan surface**: 72 of 191 public keyword lines(Launch.swift 29 + PortDiagnostics 6 + adapter launch decls 23 + installer launch decls 14) = **~38%**. The three executable entrypoints call only `run()`, but the bundled production path then uses these plans through package-internal `Launcher`s.
+- **run facades**: the three direct executable-boundary calls are XcodeMCPProxyRunners.swift:20,52,82. This does not make the plan machinery dead; it means the complete in-repo consumer is package-internal rather than a public-surface-only consumer.
 
 ## 3. The custom-launcher story is public-but-incomplete (confirmed, key finding)
 
@@ -39,7 +39,7 @@ Sources/XcodeMCPProxyKit/README.md:24-27 sells "a custom launcher needs the same
 - `PortInUseError` is public (PortDiagnostics.swift:6) but the detection predicate `isAddressAlreadyInUse` is `package` (PortDiagnostics.swift:53) and `detectExistingServerProcessIDs` is package/internal — an external launcher can construct the diagnostic but can never detect the condition or fill `processIdentifiers`.
 - Logging parity is package-only: `XcodeMCPProxyServer.bootstrapLogging` (Launch.swift:267) and `XcodeMCPProxyLogging` (XcodeMCPProxyLogging.swift:3) are `package`; `ProxyLogging.bootstrap` (env `MCP_LOG_LEVEL`/`LOG_LEVEL` parsing, Internal/Session/Support/ProxyLogging.swift:11-28,38-46) is internal.
 
-So the ~80-decl launch-plan surface is simultaneously (i) unused by the repo's own executables (they call `run()`), and (ii) insufficient for the external story it documents. Either `run()` is the contract and the plan machinery should shrink, or the plan machinery is the contract and force-restart/port-detection/logging must be public. This is the quantified file-bucket/target-boundary smell: **~42% of the public surface is CLI-facade machinery whose only complete consumer is the package-internal Launcher**.
+Thus the 72-decl narrow launch-plan surface is used by the bundled production path through package-internal `Launcher`s, but is insufficient for the external story it documents. Either `run()` is the public launcher contract and the plan surface should shrink, or plans are the contract and force-restart/port-detection/logging must be public. The quantified boundary smell is: **~38% of public keyword lines describe launch plans whose only complete in-repo consumer has package/internal capabilities unavailable to the advertised external consumer**.
 
 ## 4. LaunchPlan modeling defect (confirmed)
 
@@ -52,9 +52,9 @@ Fix hypothesis (marked as hypothesis): `LaunchAction` with associated values (`c
 
 Three parallel `LaunchAction`/`LaunchOptions`/`LaunchPlan`/`LaunchResolutionError` families with near-identical shape (Launch.swift:34-131, StdioAdapter.swift:190-283, Installer.swift:29-83). Duplicated private helpers: `executableName(arguments:defaultExecutableName:)` exists 4x (Launch.swift:22-29 in ProductMetadata, Launch.swift:359-366, StdioAdapter.swift:659-666, Installer.swift:394-401); `nonEmpty` 2x (Launch.swift:347, StdioAdapter.swift:160). `LaunchResolutionError.Presentation` differs per family (`conciseUsageHint|fullUsage` vs `plain|fullUsage|serverOnlyFlagHint`) — same concept, incompatible types. Git history shows this surface accreted through repeated absorb/refactor commits (d820b13b, bbf04c69, d9cd50e5, ac68bb1f, 5ad600bd).
 
-## 6. Dead / contradictory public API (confirmed)
+## 6. Public API with no in-repo production caller / contradictory usage (confirmed)
 
-- `XcodeMCPProxyStdioAdapter.rewriteURLFlagToStdio` (StdioAdapter.swift:420-481): zero production call sites; only Tests/ProxyCLITests/StdioAdapterRunnerTests.swift:35 and Tests/PublicProductContractTests/PublicProductContractTests.swift:1007. Its doc calls `--url` "legacy" while `adapterUsage()` documents `--url` and never mentions `--stdio` (StdioAdapter.swift:385-409); `parseLaunchOptions` accepts both and `resolveLaunchPlan` errors when both are given (StdioAdapter.swift:537-541). The public helper converts a documented flag into an undocumented one.
+- `XcodeMCPProxyStdioAdapter.rewriteURLFlagToStdio` (StdioAdapter.swift:420-481): zero in-repo production call sites; only Tests/ProxyCLITests/StdioAdapterRunnerTests.swift:35 and Tests/PublicProductContractTests/PublicProductContractTests.swift:1007. External consumers are unverified. Its doc calls `--url` "legacy" while `adapterUsage()` documents `--url` and never mentions `--stdio` (StdioAdapter.swift:385-409); `parseLaunchOptions` accepts both and `resolveLaunchPlan` errors when both are given (StdioAdapter.swift:537-541). The public helper converts a documented flag into an undocumented one.
 - `--request-timeout` with a non-numeric value is silently ignored, keeping default 300 (StdioAdapter.swift:589-591) — fail-fast violation in public CLI parsing.
 - Adapter display plans hardcode `requestTimeout: 300` in `LaunchOptions` regardless of argv (StdioAdapter.swift:489-495) — cosmetic inconsistency.
 
@@ -75,7 +75,7 @@ Gaps (confirmed):
 
 ## 8. Installer as public library API (confirmed smell)
 
-`XcodeMCPProxyInstaller` (40 decls, ~21% of surface) is a source-install flow: it locates binaries next to the running executable, walks up to find `.build` to detect the repo root, and shells `swift build` via `ProxyProductBuilder` (Installer.swift:273-350,375-392). Its only production consumer is the 12-line `xcode-mcp-proxy-install` main. This is CLI plumbing living in the embeddable library product purely so the executable can be thin — the clearest target-boundary/file-bucket instance in the surface. Docs/maintainer-architecture.md:33 openly describes the target as owning "public proxy facades, CLI composition, installer helpers, and HTTP gateway internals" — i.e., the bucket is documented, not accidental.
+`XcodeMCPProxyInstaller` (40 decls, ~21% of surface) is a source-install flow: it locates binaries next to the running executable, walks up to find `.build` to detect the repo root, and shells `swift build` via `ProxyProductBuilder` (Installer.swift:273-350,375-392). The only in-repo production caller outside the module is the 12-line `xcode-mcp-proxy-install` main; an external embedder example does exist in the module README, while actual external usage is unverified. This is CLI-oriented logic living in the embeddable library product so the executable can stay thin. Docs/maintainer-architecture.md:33 openly describes the target as owning "public proxy facades, CLI composition, installer helpers, and HTTP gateway internals" — i.e., the bucket is documented, not accidental.
 
 ## Speculation (explicitly not confirmed)
 - Whether any external consumer of the launch-plan API exists outside this repo was not verifiable from the repo; the classification of (b) collapsing into (c) rests on the confirmed package-only gaps in section 3, not on observed consumers.
@@ -83,8 +83,8 @@ Gaps (confirmed):
 
 # CANDIDATE FINDINGS
 
-## [high] ~42% of public surface is CLI launch-plan machinery not usable end-to-end by external consumers and unused by the repo's own executables (module-boundary)
-EVIDENCE: Launch-plan families total ~80 of ~192 public decls (Launch.swift:34-131,148-262; StdioAdapter.swift:190-283,484-572; Installer.swift:29-228; PortDiagnostics.swift:6-51; Runners.swift:20-94). Repo executables consume only run() facades (Sources/XcodeMCPProxyCLI/XcodeMCPProxyCLI.swift:8, Sources/XcodeMCPProxyServer/XcodeMCPProxyServer.swift:10, Sources/XcodeMCPProxyInstall/main.swift:4). External launchers cannot implement forceRestart or port-in-use detection: Launcher is package (XcodeMCPProxyServer+Launcher.swift:7), ExistingServerController internal (XcodeMCPProxyServer+ExistingServerController.swift:9), isAddressAlreadyInUse package (XcodeMCPProxyServer+PortDiagnostics.swift:53), logging bootstrap package (XcodeMCPProxyServer+Launch.swift:267). README sells the story anyway (Sources/XcodeMCPProxyKit/README.md:24-27).
+## [high] ~38% of public keyword lines are launch-plan machinery whose advertised external story cannot be completed through public API alone (module-boundary)
+EVIDENCE: Narrow launch-plan families total 72 of 191 public keyword lines (Launch.swift 29, PortDiagnostics.swift 6, adapter launch declarations 23, installer launch declarations 14). Repo executable entrypoints call only `run()` facades, which then consume the plan machinery through package-internal launchers. External launchers cannot implement forceRestart or port-in-use detection: Launcher is package (XcodeMCPProxyServer+Launcher.swift:7), ExistingServerController internal (XcodeMCPProxyServer+ExistingServerController.swift:9), isAddressAlreadyInUse package (XcodeMCPProxyServer+PortDiagnostics.swift:53), logging bootstrap package (XcodeMCPProxyServer+Launch.swift:267). README sells the story anyway (Sources/XcodeMCPProxyKit/README.md:24-27).
 DIRECTION: Hypothesis: pick one contract — either run() is the launcher API (demote resolveLaunchPlan/LaunchPlan families to package) or launch plans are the API (make force-restart, port detection, and logging bootstrap public). Current split is two half-stories.
 
 ## [high] LaunchPlan optional-payload modeling forces force-unwraps and three synthetic can't-happen guards (kit-api)
@@ -92,8 +92,8 @@ EVIDENCE: configuration is Optional on all three LaunchPlans (Launch.swift:74, S
 DIRECTION: Hypothesis: move payload into LaunchAction associated values (case start(XcodeMCPProxyServerConfiguration)), deleting the optionals and all three guards.
 
 ## [medium] Installer facade (~21% of public surface) is CLI plumbing living in the embeddable library product (module-boundary)
-EVIDENCE: XcodeMCPProxyInstaller = 40 public decls (XcodeMCPProxyInstaller.swift); behavior includes .build-directory repo-root discovery and shelling swift build (Installer.swift:327-331,375-392). Sole production consumer is 12-line Sources/XcodeMCPProxyInstall/main.swift. Docs/maintainer-architecture.md:33 documents the target as a bucket ('public proxy facades, CLI composition, installer helpers, and HTTP gateway internals').
-DIRECTION: Hypothesis: installer has no embedder story; move it (or at least its public-ness) into the install executable target or a separate non-product target.
+EVIDENCE: XcodeMCPProxyInstaller = 40 public decls (XcodeMCPProxyInstaller.swift); behavior includes .build-directory repo-root discovery and shelling swift build (Installer.swift:327-331,375-392). The only in-repo production caller outside the module is the 12-line Sources/XcodeMCPProxyInstall/main.swift; Sources/XcodeMCPProxyKit/README.md:201+ documents an embedder example, but external usage is unverified. Docs/maintainer-architecture.md:33 documents the target as a bucket ('public proxy facades, CLI composition, installer helpers, and HTTP gateway internals').
+DIRECTION: Hypothesis: decide whether installer embedding is a supported consumer story; if not, move it(or at least its public surface) into the install executable target or a separate non-product target.
 
 ## [medium] Triplicated LaunchAction/LaunchOptions/LaunchPlan/LaunchResolutionError families with 4x-duplicated helpers (kit-api)
 EVIDENCE: Parallel families at Launch.swift:34-131, StdioAdapter.swift:190-283, Installer.swift:29-83; executableName helper duplicated 4x (Launch.swift:22-29, Launch.swift:359-366, StdioAdapter.swift:659-666, Installer.swift:394-401); incompatible Presentation enums (Launch.swift:109-115 vs StdioAdapter.swift:258-267). Accreted via absorb refactors (commits d820b13b, bbf04c69, d9cd50e5, ac68bb1f).
@@ -103,9 +103,9 @@ DIRECTION: Hypothesis: one generic launch-plan shape (or per-command enums shari
 EVIDENCE: Upstream.HealthState internal (Internal/RuntimeCore/Bridge/UpstreamHealthState.swift:5-10); rich per-upstream snapshot internal (Internal/Session/Session/ProxyDebugSnapshot.swift:38-60); only exposure is GET /health, GET /debug/upstreams, POST /debug/reset (Internal/HTTPGateway/HTTP/HTTPRoute.swift:14-18). Logger hardcoded, not injectable (XcodeMCPProxyServer.swift:475; ProxyLogging.swift:7). Discovery-file write failure only logged (XcodeMCPProxyServer.swift:658-666).
 DIRECTION: Hypothesis: if embedding is the primary story, expose a typed health/endpoint snapshot or event stream on XcodeMCPProxyServer; at minimum make discovery write failure observable.
 
-## [low] rewriteURLFlagToStdio is dead public API and contradicts documented CLI usage (kit-api)
-EVIDENCE: Only call sites are tests (Tests/ProxyCLITests/StdioAdapterRunnerTests.swift:35, Tests/PublicProductContractTests/PublicProductContractTests.swift:1007). Doc comment calls --url 'legacy' (XcodeMCPProxyStdioAdapter.swift:419) while adapterUsage documents --url and omits --stdio entirely (StdioAdapter.swift:385-409); resolveLaunchPlan rejects using both (StdioAdapter.swift:537-541).
-DIRECTION: Hypothesis: delete the helper (or document --stdio and the migration story); reconcile which flag is canonical.
+## [low] rewriteURLFlagToStdio has no in-repo production caller and contradicts documented CLI usage; external consumers are unknown (kit-api)
+EVIDENCE: In-repo call sites are tests only (Tests/ProxyCLITests/StdioAdapterRunnerTests.swift:35, Tests/PublicProductContractTests/PublicProductContractTests.swift:1007). Doc comment calls --url 'legacy' (XcodeMCPProxyStdioAdapter.swift:419) while adapterUsage documents --url and omits --stdio entirely (StdioAdapter.swift:385-409); resolveLaunchPlan rejects using both (StdioAdapter.swift:537-541). Repo search cannot establish external reachability.
+DIRECTION: Breaking changes are allowed by user decision. Delete the helper and choose one canonical flag directly; record the changed symbol/flag and update contract docs/tests. Keep this in Task C because it changes public surface, not because compatibility approval is still required.
 
 ## [low] XcodeMCPProxyServer acquires an EventLoopGroup in init with no deinit cleanup and only a blocking sync start (proxy-session)
 EVIDENCE: MultiThreadedEventLoopGroup created in init (XcodeMCPProxyServer.swift:500); no deinit; only shutdown() releases it (Server.swift:590-600). start()/startAndWriteDiscovery() block on NIO .wait() (Server.swift:613,619,626,634) with no async variant, while README quickstart is async code (Sources/XcodeMCPProxyKit/README.md:45-55).
@@ -113,4 +113,4 @@ DIRECTION: Hypothesis: lazy-create the ELG at start, or add deinit assertion/cle
 
 ## [low] Minor public-config inconsistencies: silent --request-timeout parse failure, String vs URL path typing, undocumented Upstream case parameters (kit-api)
 EVIDENCE: Non-numeric --request-timeout silently keeps default 300 (XcodeMCPProxyStdioAdapter.swift:589-591); configurationFilePath is String? while Discovery.fileURL is URL? in the same struct (XcodeMCPProxyServer.swift:228 vs 103); Upstream case params processesPerXcode/sessionID have no doc comments (Server.swift:38-46); adapter display LaunchOptions hardcodes requestTimeout 300 (StdioAdapter.swift:489-495).
-DIRECTION: Hypothesis: reject invalid timeout values; unify on URL; document sessionID semantics.
+DIRECTION: Breaking changes are allowed. Reject invalid timeout values, change String→URL directly, and document sessionID semantics; pin the new single standard in public contract tests/docs and list the changed API/CLI behavior.

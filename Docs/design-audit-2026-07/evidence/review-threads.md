@@ -2,6 +2,7 @@
 
 ## Data basis (confirmed)
 - Fetched via GraphQL `reviewThreads` for PRs 153–172; no PR had `hasNextPage=true`. Total: **28 review threads**.
+- Counts were re-queried live during the 2026-07-10 correction and still match, but the raw GraphQL response/export is not stored in the repo. This report is therefore not a self-contained reproducible dataset; future use should re-query the PRs or add a checked-in redacted artifact.
 - **Every one of the 28 threads was authored by `chatgpt-codex-connector` (Codex review bot)**; every reply is by `lynnswap`; all threads are resolved. There are zero human-originated review threads in this window.
 - Thread-bearing PRs: 156(1), 159(3), 160(5), 161(3), 162(1), 166(3), 167(3), 169(1), 170(8). Zero-thread PRs: 153, 154, 155, 157, 158, 163, 164, 165, 168, 171, 172.
 
@@ -26,7 +27,7 @@
 ## 2. Recurring invariant classes (confirmed, quoted)
 
 ### Class A — stale async completion mutates already-invalidated state (≥13 threads; dominant)
-Same invariant ("a completion may only write state if the attempt/generation that issued it is still current") re-flagged across four PRs:
+The same failure family reappears across four PRs. Later source verification showed that generation, route lease, and activation attempt are distinct clocks with partial owners; the shared missing boundary is their composed admission decision and atomic commit, not one interchangeable clock:
 - PR 161, `XcodeProcessRouteActivationTracker.swift`: "this line drops the saved `catalogRPCHandle` after canceling the catalog timeout but never cancels the RPC itself … that stale request/lease can remain in flight".
 - PR 161, `RuntimeCoordinator+ControlPlane.swift`: "the secondary `tools/list` RPC is not stored on the activation attempt. The catalog-phase timeout only cancels stored handles, so that fallback RPC can outlive the timed-out attempt". Fix reply: "the route loop now registers every catalog RPC handle (including secondary fallbacks) on the activation attempt" — i.e. the invariant is enforced by remembering to register at each issue site.
 - PR 166, `InitializeManager.swift:184`: "`initializeAttemptMatches` can still pass while `activePrimaryInitializeUpstreamIndex()` is already nil, so `handleInitializeResponse` can treat the removed session's response as the primary result".
@@ -76,9 +77,9 @@ DIRECTION: Hypothesis: move generation/epoch validation inside the store mutatio
 EVIDENCE: 7 initialize-lifecycle threads (PR 160 x3, 162, 166 x3) plus PR 161's two handle-registration threads share the pattern 'X scheduled by attempt N survives into attempt N+1'. PR 160 InitializeManager.swift:136: 'the timeout scheduled for that waiter remains stored in state.initTimeout... the stale timeout's failInitPending drain and fail the new waiter immediately.' PR 161 fix reply: 'the route loop now registers every catalog RPC handle (including secondary fallbacks) on the activation attempt' — registration remains a per-site obligation. PR 166 flagged that removeSession 'cancels whatever token is currently installed' (global) instead of the removed attempt's token.
 DIRECTION: Hypothesis: an attempt-owning type (attempt struct owning its timeout, RPC handles, readiness token, waiter set) whose deinit/transition cancels everything, replacing the parallel dictionaries in InitializeManager/RuntimeCoordinator state.
 
-## [medium] Review findings concentrate 89% in XcodeMCPProxyKit Internal/Session; zero in HTTP gateway, stdio, CLI, SDK core (module-boundary)
+## [medium] This review sample concentrates 89% in XcodeMCPProxyKit Internal/Session; zero sampled threads are in HTTP gateway, stdio, CLI, SDK core (module-boundary)
 EVIDENCE: GraphQL thread paths for PRs 153-172: 25/28 threads under Sources/XcodeMCPProxyKit/Internal/Session/**; 0 threads on HTTPGateway/stdio/CLI/XcodeMCPKit files. Process-route-catalog area required 7 follow-up PRs in 10 days (155, 160, 161, 165, 168, 169, 170 per merged-PR titles/bodies).
-DIRECTION: Hypothesis: module boundaries are sound; audit effort should target the RuntimeCoordinator control-plane cluster, not package layout.
+DIRECTION: The sample supports prioritizing the RuntimeCoordinator control-plane cluster. Zero review threads is not positive proof that package layout or unsampled public/lifecycle contracts are sound; use source/access/consumer evidence for those judgments.
 
 ## [medium] DocumentationProvider re-implements candidate ordering and deadline-budget splitting per provider path (proxy-session/documentation-provider)
 EVIDENCE: Same budget invariant flagged in opposite directions in consecutive docs PRs: PR 159 'gives the primary installed-asset search only a fair-share slice of the caller's timeout' vs PR 167 'passes the full request deadline to the first action target... no time left to... fall back. Use a per-candidate budget (as the mcpbridge path does).' DocumentationProvider.swift is 4247 lines (wc -l on main a1c6218e). PR 167 also flagged NoopDocumentationSearchServiceRepairer regressing mcpbridge repair.

@@ -30,7 +30,7 @@ churn の実測: `RuntimeCoordinator+ControlPlane.swift` 41 commits、`+XcodePro
 
 - **Route membership/order の truth**: `ProcessRouteStore`(ProcessRouteStore.swift:109-115): recordsByKey + order + **単一 generation カウンタ**。identity は `InstanceKey(pid, appPath, developerDir, mcpbridgePath, xcodeVersion)`(56-70)。route インスタンス identity は `ProcessRouteID(pid, instanceGeneration)`(store generation から採番、222-229)。
 - **Cooldown 状態も同居**: route/catalog 2スコープの unavailableUntil(72-107)。**読み取り操作(`exposure`, `unavailableProcessIDs`)が期限切れ prune で generation を進める副作用を持つ**(315-318, 486-489)。
-- **Activation 状態機械**: `ProcessRouteReadinessStore`(ProcessRouteReadinessStore.swift:69-72)は**3つの独立ロック**を持つ: records(phase: pending/attaching/initialized/cataloged/abandoned + attempt + retryTimeout + catalogTimeout + catalogRPCHandles)、pendingCatalogRefreshProcessIDs(Set)、scheduledCatalogRetries(generation タグ付き)。遷移の駆動は store ではなく coordinator extension(RouteActivation.swift 全体、445行)。
+- **Activation 状態機械**: `ProcessRouteReadinessStore`(ProcessRouteReadinessStore.swift:69-72)は**3つの独立ロック**を持つ: records(phase: pending/attaching/initialized/cataloged/abandoned + attempt + retryTimeout + catalogTimeout + catalogRPCHandles)、pendingCatalogRefreshProcessIDs(Set)、scheduledCatalogRetries(generation タグ付き)。遷移の駆動は store ではなく coordinator extension(RouteActivation.swift 全体、444行)。
 - **Per-process catalog**: `ProcessToolSurfaceStore`(ProcessToolSurfaceStore.swift:72-75): catalogsByProcessID + processIDByUpstreamIndex(**upstream→pid マッピングの複製**。truth は ProcessRouteStore の route.upstreamIndices)。
 - **Exposure は毎回再計算される派生値**: `exposure(policy:upstreamUsability:)`(ProcessRouteStore.swift:462-515)。4 policy(toolsCatalog/ownerRouting/windowDiscovery/initialization)で usability の解釈が分岐(469-477)。usability snapshot は呼び出し側が healthManager から都度合成(XcodeProcessRouting.swift:410-448)。
 - **External I/O**: `LiveXcodeTargetDiscovery`(NSWorkspace + プロセス列挙、LiveXcodeTargetDiscovery.swift:8-40)、`XcodeProcessEventMonitor`(NSWorkspace 通知 + DispatchSourceProcess exit、XcodeProcessEventMonitor.swift:18-93)。
@@ -42,7 +42,7 @@ churn の実測: `RuntimeCoordinator+ControlPlane.swift` 41 commits、`+XcodePro
 - **Source of truth**: `CanonicalBrokerState`(CanonicalBrokerState.swift:51-64): initializeResult/toolsCatalogRaw/sourceUpstream + **単一 generation**(clear/reset で bump、コメント 57-61)。InitializeManager は「in-flight/pending のみ保持、キャッシュは broker に一本化」と明記(InitializeManager.swift:124-127)— ここは owner 一本化が成功している箇所。
 - **Load dedup 層**: `ControlPlaneCoordinator`(actor)が toolsCatalogLoad/prewarm/windowLoads + waiters + startGeneration を保持(ControlPlaneCoordinator.swift:63-99)。完了時に `brokerState.generation() == load.startGeneration` でなければ waiter へ CancellationError(555-585, 587-610)。
 - **process-routing 時のバイパス**: `loadCanonicalToolsCatalog` は processRoutingEnabled なら ControlPlaneCoordinator の下で更に `loadAvailableToolsCatalogSurfaceAcrossProcessRoutes` に分岐し、ProcessToolSurfaceStore と brokerState を直接読み書き(RuntimeCoordinator+ControlPlane.swift:83-98, 100-195)。**カタログは3層キャッシュ**(per-process store → broker canonical → coordinator load dedup)+ 読み出し時 documentation overlay(RuntimeCoordinator.swift:1529-1566)。
-- **store↔broker の整合**: `processToolSurfaceMutationLock` + broker generation の**二重チェック**(mutation 前に2回 + 各 canonical action 内で onlyIfGeneration、RuntimeCoordinator.swift:952-974, 998-1038)。SurfaceUpdate(canonicalAction)は store のロック内で計算し、broker への適用は別ロック下 — 2ロックの順序依存。
+- **store↔broker の整合**: `processToolSurfaceMutationLock` + broker generation の**反復チェック**(mutation前に2回 + 各canonical action内でonlyIfGeneration、RuntimeCoordinator.swift:952-974, 998-1038)。2回目のreadはconcurrent mutationを観測し得るためproduction-deadではないが、`ControlPlaneCoordinator`がfunnel lock外からbrokerを変更でき、validation・surface mutation・canonical projectionは不可分でない。SurfaceUpdate(canonicalAction)はstoreのlock内で計算しbrokerへ別lock下で適用するため、atomicityを保証しない。
 
 ### (D) Window/owner routing(Session/Runtime + XcodeSupport)
 
@@ -55,7 +55,7 @@ churn の実測: `RuntimeCoordinator+ControlPlane.swift` 41 commits、`+XcodePro
 ## 2. Guard inventory(invariant 別、owner-absence の証拠)
 
 ### G1: 「非同期カタログロードの完了は、開始後に世界が変わっていたら書き戻してはならない」
-hand-rolled 実装 **12箇所以上**。これが最大の owner 不在:
+関連check/cleanupは**12箇所以上**に分散する。ただし全てが同一checkのcopyではない。generation / route lease / activation attemptの3 clockには部分ownerがあり、exposureはderived publish filter。欠けるのはcomposed admissionとatomic commitのowner:
 1. ControlPlaneCoordinator.completeToolsCatalogLoad: startGeneration 比較 + onlyIfGeneration 書込(ControlPlaneCoordinator.swift:560-584)
 2. completeWindowLoad: 同型(587-610)
 3. cancelInvalidatedLoads / cancelLoadsStartedBeforeGeneration(ControlPlaneCoordinator+Utilities.swift:8-40)
@@ -64,12 +64,12 @@ hand-rolled 実装 **12箇所以上**。これが最大の owner 不在:
 6. recordAvailableToolsCatalog: routeID+target 同一性(519-531)→ lease current(533-539)→ 空カタログ判定(546)→ activation attempt 一致 or isCataloged(608-637)→ onlyIfGeneration mutation(639-651)の**5段直列 staleness チェック**(506-671)
 7. syncCurrentProcessToolsCatalogSurfaceIfComplete: generation 比較 + onlyIfGeneration(818-835)
 8. scheduleAvailableToolsCatalogCompletion: task 開始時に brokerGeneration と routeID 露出を再フィルタ(768-776)
-9. scheduleMissingProcessToolsCatalogRetry の timer callback: **5条件 guard**(retry generation / broker generation / routingEnabled / route 存在 / pending & catalog nil、442-465)
+9. scheduleMissingProcessToolsCatalogRetryのtimer callback: **6条件guard**(scheduled entry generation / captured-vs-live broker generation / routingEnabled / route存在 / pending / catalog nil、442-465)
 10. ProcessRouteReadinessStore の generation タグ付き retry take/store 4メソッド(ProcessRouteReadinessStore.swift:102-173)
-11. markCataloged の expectedAttempt 検査(250-294)— attempt カウンタという**第4の ordering 機構**
+11. markCatalogedのexpectedAttempt検査(250-294)— activation attemptという**第3のclock**
 12. 空カタログ後の RPC handle 一括 cancel(finishCatalogRequestWithoutCatalog、428-452)
 
-fix commit 群(258ace47, 382bf4be, 4abbc84e, 51cfe2f9, 04ac3cea, 81e361e1, f9cb2000, eba14516 等)は全部このリストのどれかへのパッチ。**同一 invariant を generation / routeID / attempt / exposure 再計算の4機構で重ね掛け**しており、owner(単一の「catalog transaction」境界)が不在。
+fix commit群(258ace47,382bf4be,4abbc84e,51cfe2f9,04ac3cea,81e361e1,f9cb2000,eba14516等)はこのinventoryの各境界へ追加された。問題は3 clock自体の存在ではなく、それらを合成したadmissionとvalidation・surface mutation・canonical projectionのatomicityがcall site任せなこと。
 
 ### G2: 「init 試行の結果はその試行にのみ適用」(identity = upstreamIndex + upstreamID or attempt)
 - clearUpstreamState(expectedUpstreamID:)(Initialization.swift:717-754)/ markUpstreamInitialized(expectedUpstreamID:)(757-770)
@@ -90,22 +90,22 @@ fix commit 群(258ace47, 382bf4be, 4abbc84e, 51cfe2f9, 04ac3cea, 81e361e1, f9cb2
 ### G5: 「window owner は生きている exposed process のみ反映」
 削除5箇所(§1-D 参照)+ 記録時の remove-then-record(XcodeProcessRouting.swift:811-820, 841-848)。
 
-## 3. 欠損状態を推測/捏造する fallback 経路(第二の source of truth)
+## 3. fallback候補の検証後inventory
 
-1. **owner 推測**: `inferredUnambiguousOwnerProcessID`(XcodeProcessRouting.swift:652-684)— owner lookup 失敗時、(a) usable route が1本ならそれ、(b) tool 名→catalog 保有 pid の積集合が1つならそれ。**ownership の truth が window index からカタログ内容へすり替わる**。
+1. **hint-less owner inference(WEAKENED)**: `inferredUnambiguousOwnerProcessID`(XcodeProcessRouting.swift:652-684)はowner hintが無いrequestだけのtest-pinned policy。hint付きrequestは推測へ到達せずhard rejectするため、window indexを置換する第二truthではない。残余riskは2台目Xcodeのcatalog未ロード窓でfalse-unambiguousになり得る点。
 2. **catalog ベース routing**: `catalogToolRoutingDecision`(711-762)+ `preferredAvailableRoute` の version 降順ソート(771-783)。同じソートが ProcessToolSurfaceStore.catalogSort(514-526)にも**重複実装**。
-3. **エラー時の旧 surface 返却**: loadAvailableToolsCatalogSurfaceAcrossProcessRoutes の catch が currentSurface を返す(+ControlPlane.swift:183-194)。cancel 時は `waitForAvailableToolsCatalogSurface` が **25ms ポーリング**で他ロードの完了を待つ(168-182, 197-216)。
-4. **失敗タスク内で surface が再出現していたら success に偽装**(284-304)。
+3. **旧surface返却主張(REFUTED)**: generic catchのcurrentSurface返却(+ControlPlane.swift:183-194)は到達不能。cancel時の25ms poll(168-182,197-216)は並行winnerのfreshかつcompleteなsurfaceだけを待つcoalescingで、期限時はrethrowする。
+4. **失敗task中のsurface再出現(REFUTED as stale fallback)**: 284-304は同generation/current leaseの並行loaderが記録したfresh catalogを保持するtest-pinned semanticsで、stale dataをsuccessへ偽装しない。
 5. **空カタログ受信時**: 旧カタログを落として surface を返しつつ 250ms retry を予約(546-597)。
-6. **primary index fallback**: handleUpstreamExit の `globalInit.primaryInitUpstreamIndex ?? initializeSourceUpstream() ?? 0`(UpstreamRouting.swift:326-328)— 最後は**スロット0に捏造**。
-7. **proxyTabIdentifier の捏造**: index 未登録でもハッシュを合成して返す(WindowOwnerIndex.swift:121-136)。
+6. **primary index fallback(WEAKENED)**: handleUpstreamExitの`globalInit.primaryInitUpstreamIndex ?? initializeSourceUpstream() ?? 0`(UpstreamRouting.swift:326-328)。`?? 0`はcold状態でrestart strategy選択にだけ使われ、routing disabled時の規約default。ただしcurrent-primary選択が3箇所へ重複するsmellは残る。
+7. **proxyTabIdentifier合成(REFUTED)**: WindowOwnerIndex.swift:121-136の両branchは同じ純決定関数を返す。lookup armは冗長だが第二truthや捏造ではない。
 8. **weak box null 時の routable 全開放**: runtime が解放済みなら全 active route を routable とみなす closure fallback(RuntimeCoordinator.swift:623-628)。
 9. **cachedToolsListResult(forUpstreamIndex:) の canonical fallback**(RuntimeCoordinator.swift:924-927)。
-10. **legacy record() が ProcessRouteID(instanceGeneration: 0) を捏造**(ProcessToolSurfaceStore.swift:87-95)— 偽 identity での記録経路が現存。
+10. **legacy record()(production REFUTED / hygiene only)**: ProcessToolSurfaceStore.swift:87-95はinstanceGeneration:0を作るがproduction callerは0で、test seeding専用。production型にtest-support APIが残る衛生課題。
 
 ## 4. コピー/派生の数と整合手段
 
-**Tool surface**: (1) upstream 実体 → (2) ProcessToolSurfaceStore per-process raw+派生4マップ → (3) CanonicalBrokerState canonical union → (4) ControlPlaneCoordinator load/waiter 状態 → (5) 読み出し時 documentation overlay → (6) DebugMirror。整合は「2ロック + generation 二重チェック + 呼び出し順序」(explicit protocol なし)。
+**Tool surface**: (1) upstream 実体 → (2) ProcessToolSurfaceStore per-process raw+派生4マップ → (3) CanonicalBrokerState canonical union → (4) ControlPlaneCoordinator load/waiter 状態 → (5) 読み出し時 documentation overlay → (6) DebugMirror。整合は「2ロック + non-atomic generation re-check + 呼び出し順序」(explicit protocol なし)。
 **Process membership**: ProcessRouteStore(truth)に対し、ProcessToolSurfaceStore.processIDByUpstreamIndex、ProcessRouteReadinessStore 3マップ、XcodeProcessEventMonitor.exitSources、upstreamHealthManager/upstreamRouter/leaseManager/debugRecorder の per-index 配列が**同期対象8系統**。追加時は3連 appendUpstreams の手動呼び出し(Reconciliation.swift:224-226)。
 **Owner mapping**: WindowOwnerIndex 1系統(良)だが、eligibility は毎回外部合成、conflict 意味論は3関数に分散、さらに §3-1 の catalog 由来推測が並走。
 **Windows message 解析**: XcodeProcessRouting.xcodeListWindowsMessage(1488-1520)と XcodeSupport/XcodeWindowQueryService.extractToolMessage(23-50)が**同一ロジックの重複実装**。
@@ -121,44 +121,44 @@ fix commit 群(258ace47, 382bf4be, 4abbc84e, 51cfe2f9, 04ac3cea, 81e361e1, f9cb2
 | route membership/order | ProcessRouteStore | 読み取りに generation bump 副作用; cooldown が同居 | 同 store。ただし exposure 計算ごと移管し read を純粋化 |
 | cooldown/unavailable | ProcessRouteStore(2スコープ) | mark/prune が coordinator から都度駆動 | exposure owner に統合 |
 | exposure(4 policy) | なし(毎回派生: store+healthManager+coordinator 合成) | G3 の7消費点が各自合成; epoch 未消費 | 単一 ExposureAuthority(route×usability×cooldown を1箇所で結合し epoch 発行) |
-| per-process catalog | ProcessToolSurfaceStore | upstream→pid 複製; 偽 routeID 記録経路 | 同 store だが record は routeID 必須に |
+| per-process catalog | ProcessToolSurfaceStore | upstream→pid複製; production型にtest-only generation-0 seeding API | 同store。production recordはtransaction proof必須、test seedingはtest supportへ移す |
 | canonical catalog + initialize cache | CanonicalBrokerState | generation が3役兼務(init/catalog/owner変化) | 役割別 epoch or カタログ transaction 型 |
-| catalog ロード直列化/staleness | なし(G1 の12箇所) | fix 25連発の震源 | 単一「catalog transaction」owner(begin で lease、commit で1回だけ検証) |
+| catalog load admission/commit | 部分ownerのみ(G1の12箇所) | 3 clockの合成とatomicityがcall site依存 | 単一catalog transaction owner(beginでproofを封入し、validation・surface mutation・canonical projectionを同一isolation/CASで不可分化) |
 | activation 状態機械 | ProcessRouteReadinessStore(状態)+ coordinator ext(遷移) | (pid,upstream,attempt) 三つ組を呼び出し側が携行 | 状態機械に遷移も内蔵、timeout/RPC handle は phase の付随物として自動失効 |
-| window owner index | WindowOwnerIndex(値型) | eligibility 外部注入; 削除5箇所分散; catalog 由来 owner 推測が並走 | owner resolution service(index+eligibility+conflict 意味論+推測 policy を単一型に) |
+| window owner index | WindowOwnerIndex(値型) | eligibility外部注入; 削除5箇所分散; hint-less inference policyとconflict意味論が別関数 | owner resolution service(index+eligibility+conflict意味論+明示policyを単一型に) |
 | upstream slot pool | upstreamsBox + 手動3連 append | index 整合が暗黙 protocol | slot registry(append/replace/retire を単一 API に) |
-| init handshake | InitializeManager(キャッシュは broker へ一本化済み) | ここは比較的健全。ただし primary fallback `?? 0` あり | 現状維持 + fallback 除去 |
+| init handshake | InitializeManager(キャッシュは broker へ一本化済み) | 比較的健全。current-primary選択chainが3箇所重複 | 現状維持 + primary選択owner統合を必要性に応じ検討 |
 
 ## 6. 最重要仮説(推測、要 lead 検証)
 
-- **仮説1**: G1 の12ガードは「カタログ更新は単調で、古い世界の観測を書き戻さない」という単一 invariant の n 個目のコピー。owner を「catalog transaction」型(開始時に exposure snapshot + generation を封入し、commit 時に1箇所で検証)へ移せば、+ControlPlane.swift の staleness 分岐の大半(recordAvailableToolsCatalog の5段チェック含む)が消える。
+- **仮説1(verificationで弱化)**: generation / route lease / activation attemptは別clockで部分ownerもある。欠けているのは「完了が観測した世界はまだcurrentか」の合成判定とatomic commit owner。catalog transaction候補は3clockを封入し、validation・surface mutation・canonical projectionを同じisolation boundaryまたはCASで不可分にする必要がある。
 - **仮説2**: broker generation の3役兼務が「window 更新→カタログ無効化→空/stale カタログ→retry」の連鎖を生み、catalog 系 fix と owner 系 fix が相互に誘発し合っている(commit 列で catalog fix 群と owner fix 群が交互に出現することと整合)。
 - **仮説3**: exposure を authority 化して epoch を消費させれば、G3 の7消費点と G4/G5 の分散削除は「exposure 変化イベント購読」1系統に畳める。
 
 # CANDIDATE FINDINGS
 
-## [high] カタログ staleness invariant の owner 不在 — 同一 invariant を12箇所以上の hand-rolled generation/routeID/attempt/exposure チェックで重ね掛け (process-catalog)
-EVIDENCE: RuntimeCoordinator+ControlPlane.swift:506-671 (recordAvailableToolsCatalog の5段直列チェック), 702-728 (processToolsCatalogLoadLeaseIsCurrent, 失敗経路で2回呼び 265-283), 442-465 (retry timer の5条件guard); RuntimeCoordinator.swift:952-1038 (generation二重チェック付き mutation lock); ControlPlaneCoordinator.swift:560-610; ProcessRouteReadinessStore.swift:102-173 (generationタグ付きretry), 250-294 (attempt検査)。fix commits 258ace47/382bf4be/4abbc84e/51cfe2f9/04ac3cea/81e361e1/f9cb2000/eba14516 は全てこの集合へのパッチ。+ControlPlane.swift は41 commits。
-DIRECTION: (hypothesis) 単一の『catalog transaction』owner を導入: ロード開始時に exposure snapshot + broker generation を封入し、commit 点1箇所でのみ検証・書込。generation/attempt/routeID の4機構を1機構に統合。
+## [high・WEAKENED] 3 clock の個別 owner はあるが、カタログ完了時の合成判定とatomic commitのownerが不在 (process-catalog)
+EVIDENCE: RuntimeCoordinator+ControlPlane.swift:506-671 (recordAvailableToolsCatalogの5段直列check), 702-728 (processToolsCatalogLoadLeaseIsCurrent、失敗経路で2回呼ぶ265-283), 442-465 (retry timerの6条件guard); RuntimeCoordinator.swift:952-1038 (non-atomic generation re-check付きmutation lock); ControlPlaneCoordinator.swift:560-610; ProcessRouteReadinessStore.swift:102-173 (generation tag付きretry),250-294(attempt検査)。fix commits 258ace47/382bf4be/4abbc84e/51cfe2f9/04ac3cea/81e361e1/f9cb2000/eba14516はこの集合へのpatch。+ControlPlane.swiftは41 commits。
+DIRECTION: (hypothesis) 単一のcatalog transaction ownerを導入し、ロード開始時にgeneration / route lease / attemptを封入する。validation・surface mutation・canonical projectionを同一isolation boundaryで直列化するか、storeがproofをconsumeするCASにする。単にcommit関数を1箇所へ寄せるだけではatomicityを保証しない。
 
 ## [high] CanonicalBrokerState.generation が3役兼務(initializeキャッシュ有効性・カタログ有効性・window owner変化通知)で、owner更新のたびに in-flight カタログロードを全滅させる (control-plane)
 EVIDENCE: CanonicalBrokerState.swift:126-145 (clearInitialize/clearToolsCatalog が同一 generation を bump); RuntimeCoordinator+XcodeProcessRouting.swift:349-355, 366-372, 821-827, 849-855 (window owner 変化→ invalidateControlPlane(clearToolsCatalog: true)); ControlPlaneCoordinator.swift:576-584 (generation 不一致で waiter に CancellationError)。
 DIRECTION: (hypothesis) 役割別 epoch へ分離、または owner index 変化はカタログ無効化ではなく owner-resolution 層のみの再計算にする。catalog fix と owner fix が交互に出る churn パターンの根と推測。
 
 ## [high] RuntimeCoordinator が13以上のロック付きストアを非actorクラスで束ね、ストア間 invariant を呼び出し順序で維持する god object (module-boundary)
-EVIDENCE: RuntimeCoordinator.swift:361-437 (ストア列挙), 623-667 (WeakRuntimeCoordinatorBox 経由の循環依存 closure); RuntimeCoordinator+XcodeProcessReconciliation.swift:224-226 (upstreamRouter/healthManager/debugRecorder への手動3連 appendUpstreams = 暗黙同期プロトコル); UpstreamRouting.swift:261-351 (handleUpstreamExit が6ストアを順に変更)。RuntimeCoordinator 本体+extension 群で合計約6,700行。
+EVIDENCE: RuntimeCoordinator.swift:361-437 (ストア列挙), 623-667 (WeakRuntimeCoordinatorBox 経由の循環依存 closure); RuntimeCoordinator+XcodeProcessReconciliation.swift:224-226 (upstreamRouter/healthManager/debugRecorder への手動3連 appendUpstreams = 暗黙同期プロトコル); UpstreamRouting.swift:261-351 (handleUpstreamExit が6ストアを順に変更)。RuntimeCoordinatorは本体1ファイル+extension 8ファイル、合計8,002行。
 DIRECTION: (hypothesis) スロット pool の append/replace/retire を単一 registry API に、exposure を単一 authority に。coordinator は配線のみ残す。
 
 ## [medium] Exposure(usable route集合)が owner 不在の毎回再計算派生値で、7消費点が各自合成。照合用 epoch は production 未消費 (process-routing)
 EVIDENCE: ProcessRouteStore.swift:462-515 (exposure、読み取り中に prune で generation bump の副作用 315-318, 486-489); XcodeProcessRouting.swift:410-448 (usability snapshot を呼び出し側が合成); 消費点: RouteActivation.swift:8, Reconciliation.swift:385-401, XcodeProcessRouting.swift:233-251, 660-663, 764-785, RuntimeXcodeTargetDiscovery.swift:23-26。ExposureSnapshot.epoch/currentEpoch() の消費者は Tests のみ (RuntimeCoordinatorTests.swift:1933, 7107)。
 DIRECTION: (hypothesis) ExposureAuthority を単一 owner 化し、変化を epoch 付きイベントで配信。G4/G5 の分散削除(5箇所)も購読1系統に畳む。
 
-## [medium] Owner 解決に第二の source of truth: window index 失敗時にカタログ内容から owner を推測、エラー時に旧 surface 返却・25msポーリング等の捏造系 fallback が10経路 (window-owner-routing)
-EVIDENCE: XcodeProcessRouting.swift:652-684 (inferredUnambiguousOwnerProcessID), 711-785 (catalogToolRoutingDecision + version順ソートが ProcessToolSurfaceStore.swift:514-526 と重複); +ControlPlane.swift:183-216 (エラー時旧surface返却+25msポーリング), 284-304 (失敗をsuccessに偽装), 546-597 (空カタログで旧surface継続); UpstreamRouting.swift:326-328 (primary index を `?? 0` に捏造); WindowOwnerIndex.swift:121-136 (未登録 proxyTabIdentifier をハッシュ合成); ProcessToolSurfaceStore.swift:87-95 (instanceGeneration:0 の偽 routeID)。
-DIRECTION: (hypothesis) owner resolution を単一 service に(index + eligibility + conflict 意味論 + 推測 policy)。推測経路は明示的 policy として1箇所に。
+## [medium・WEAKENED] Window owner resolutionはindex / eligibility / conflict / hint-less inference policyに分散するが、catalog inferenceは第二truthではない (window-owner-routing)
+EVIDENCE: XcodeProcessRouting.swift:652-684のinferredUnambiguousOwnerProcessIDはhint-less requestだけのtest-pinned policyで、hint付きrequestはhard rejectする。owner lookup、eligibility注入、conflict messageはXcodeProcessRouting.swift:1272-1422とWindowOwnerIndex.swift:78-96へ分散。旧surface返却・25ms poll・proxyTabIdentifier捏造・production fake routeIDという元の複合主張はverification/fallbacks.mdで反証済み。
+DIRECTION: (hypothesis) owner resolutionを単一serviceにし、index + eligibility + conflict意味論 + hint-less inference policyを1境界へ集める。inferenceを残すなら適用条件をpublic/wire contractに明示する。
 
 ## [medium] Activation 状態機械が状態(store)と遷移(coordinator extension)に分割され、(pid, upstreamIndex, attempt) 三つ組を全呼び出し側が携行 (route-activation)
-EVIDENCE: ProcessRouteReadinessStore.swift:69-72 (3つの独立ロック), 308-426 (handleTimeout/handleCatalogTimeout/storeCatalogTimeout/storeCatalogRPCHandle が三つ組一致を個別検査、不一致で即cancel); RuntimeCoordinator+XcodeProcessRouteActivation.swift 全体445行が遷移駆動; +ControlPlane.swift:849-857 (fallback RPC を activation attempt に登録するコメント付き回避策)。
+EVIDENCE: ProcessRouteReadinessStore.swift:69-72 (3つの独立ロック), 308-426 (handleTimeout/handleCatalogTimeout/storeCatalogTimeout/storeCatalogRPCHandle が三つ組一致を個別検査、不一致で即cancel); RuntimeCoordinator+XcodeProcessRouteActivation.swift 全体444行が遷移駆動; +ControlPlane.swift:849-857 (fallback RPC を activation attempt に登録するコメント付き回避策)。
 DIRECTION: (hypothesis) 遷移を store 内の状態機械に内蔵し、timeout/RPC handle を phase の付随リソースとして phase 遷移時に自動失効させる。
 
 ## [medium] 識別子の型不在: 型付き UpstreamSlotID/XcodeProcessID が Session 層に届かず raw Int/pid_t が3種の identity 系統(index/upstreamID/ProcessRouteID)と混在 (identity)

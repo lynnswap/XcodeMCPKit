@@ -92,7 +92,7 @@ Sources/XcodeMCPKit/README.md の全コード例(Quickstart 33-61、streamableHT
 - **F5**: `isError` はプロパティで throw されない(文書化済み: MCPDomainTypes.swift:120-124)。忘れると「成功」として扱う footgun。opt-in の throwing 版が無い。
 - **F6**: `XcodeMCPError` が `LocalizedError` 非準拠 → `error.localizedDescription` は汎用文言。UI 提示には consumer が全 6 case を switch する必要。さらに **discovery file が stale/missing の場合 `invalidRequest` として届く**(StreamableHTTPXcodeMCPTransport.swift:64-67 → XcodeMCP.swift:404-405 でそのままマップ)— 「リクエストが不正」ではなく「proxy が起動していない」環境問題であり、カテゴリが誤誘導。`transportUnavailable(String)` も「mcpbridge 未導入(セットアップ問題)」と「セッション中の切断(リトライ問題)」を 1 つの文字列 case に混載。
 - **F7 (cancellation)**: 呼び出し側 Task の cancel はローカルで continuation を `CancellationError` で失敗させるだけ(InitializedMCPClientSession.swift:172-174)。**MCP `notifications/cancelled` は送信されない**(rg で全 Sources に不存在を確認)— サーバー側でツールは走り続ける。長時間ツール(ビルド等)を UI からキャンセルする手段が無い。
-- **F8 (timeout)**: `requestTimeout` は固定 60s デフォルトで、**progress 受信でリセットされない**(withRequestTimeout は固定 sleep、InitializedMCPClientSession.swift:263-284)。MCP spec 2025-06-18 lifecycle は progress 受信でのタイムアウトリセットを SHOULD としている(spec 記憶ベース、要一次確認)。per-call の timeout override も無い — 長短混在のツールでは client を分けるか全体無効化しかない。
+- **F8 (timeout)**: `requestTimeout`は固定60sデフォルトで、progress受信ではリセットされない(withRequestTimeoutは固定sleep、InitializedMCPClientSession.swift:263-284)。MCP spec 2025-06-18 lifecycleではprogressに伴うresetは**MAY**なので、非reset自体は違反でない。真の**SHOULD** gapはper-request timeout設定可能性で、`callTool`/`request`にoverrideが無い。長短混在のtoolではclientを分けるか全体無効化しかない。
 - **F9**: initialize result(serverInfo / server capabilities)は protocolVersion 検証後に破棄され(InitializedMCPClientSession.swift:224-253)、consumer から一切参照できない。
 
 ### Story (b): XcodeMCPTestRuntime を使うテスト
@@ -131,7 +131,7 @@ let args = try #require(call.params?.objectValue?["arguments"]?.objectValue)    
 ## 推測(未確認)と明示
 
 - 「mcpbridge は tools/list を paginate しない」は未確認の推測。paginate する場合 listTools は先頭ページのみ silent に返す。
-- MCP spec の「progress 受信で timeout リセット SHOULD」「progressToken は string|integer」「notifications/cancelled の存在」はモデル知識に基づく spec 参照であり、リポ内の spec コピーでは未照合。lead 側で spec 一次情報の確認を推奨。
+- MCP specのtimeout/cancellation規範は2025-06-18一次情報で再照合済み: progress受信時のtimeout resetはMAY、per-request timeout設定可能性はSHOULD、timeout時のcancellation通知送出はSHOULD。caller起点cancel時の通知送出はusability contractで、MUST/SHOULD違反とは扱わない。
 - F3/T4 の progress-after-completion race は静的読解による構造的確認であり、実行観測はしていない。
 - JSONDecoder が `1.0` を `Int64` として decode し `.integer(1)` になる可能性(MCPJSONValue.init(from:) の decode 順、MCPJSONValue.swift:41-58)は Foundation 実装依存で未検証。合成 Equatable(`.integer(1) != .double(1.0)`)と組み合わさると roundtrip 比較が不安定になり得る。
 
@@ -149,13 +149,13 @@ DIRECTION: 仮説: NWConnection.stateUpdateHandler 相当の最小観測点(stat
 EVIDENCE: InitializedMCPClientSession.swift:172-174 の onCancel は pendingRequests.fail(CancellationError()) のみ。'notifications/cancelled' は rg で Sources 全体に不存在。長時間ツール実行はサーバー側で継続する。
 DIRECTION: 仮説: request() の onCancel で MCP cancellation notification を best-effort 送信する(spec 2025-06-18 の cancellation utility を一次確認のうえ)。
 
-## [medium] requestTimeout が progress 受信でリセットされず per-call override も無い — 長時間ツール(60s 超)がデフォルトで必ず timeout (kit-api)
-EVIDENCE: withRequestTimeout は固定 duration の sleep レース(InitializedMCPClientSession.swift:263-284)。progress handler 経路(306-343)と timeout に接続なし。デフォルト .seconds(60)(XcodeMCP.swift:138)。callTool/request に timeout 引数なし(XcodeMCP.swift:289-342)。
-DIRECTION: 仮説: progress 受信で deadline を延長(spec の SHOULD を一次確認)し、callTool/request に per-call timeout override を追加。
+## [medium] requestTimeoutにper-request overrideがなく、長時間toolはclient-wide 60s defaultを共有する (kit-api)
+EVIDENCE: withRequestTimeoutは固定durationのsleep race(InitializedMCPClientSession.swift:263-284)。デフォルト.seconds(60)(XcodeMCP.swift:138)。callTool/requestにtimeout引数なし(XcodeMCP.swift:289-342)。progress handler経路はtimeoutと未接続だが、spec上resetはMAYであり、それ自体は違反でない。middlewareがper-request timeoutを設定可能にすることはSHOULD。
+DIRECTION: 仮説: `callTool`/`request`へper-request absolute deadlineまたはtimeout overrideを追加し、session recovery・retry・paginationを含む1 logical operationでremaining budgetを共有する。progress resetを採るかは別policyで、採る場合もmaximum deadlineを維持する。
 
 ## [medium] MCPJSONValue のエルゴノミクス不足: 変数からの変換 init 無し・subscript 無し・Decodable 復路無し・intValue/integerValue 重複 (kit-api)
 EVIDENCE: literal conformance のみで String/Int 変数は .string(x) 必須(MCPJSONValue.swift:129-169)。subscript 定義なし(全 321 行確認)。Encodable→MCPJSONValue は init(encoding:)(113)があるが逆方向 decode helper なし。intValue は integerValue の完全複製で両方 Int64(197-205)、README は intValue 非掲載(Sources/XcodeMCPKit/README.md:105-106)。
-DIRECTION: 仮説: subscript(String)/subscript(Int)、unlabeled 変換 init 群、decode<T: Decodable>() を追加し、intValue は deprecate。合成 Equatable の integer/double 非等価も要検討。
+DIRECTION: Breaking changes are allowed. Add subscript(String)/subscript(Int)、unlabeled conversion init群、decode<T: Decodable>() and delete the duplicate `intValue` directly; keep `integerValue` as the single spelling. 合成Equatableのinteger/double非等価もdesign gateで検討。
 
 ## [low] MCPContent 全 case で raw: 必須のためテキスト content 構築が二重記述になる(README 例自体が症状を露呈) (kit-api)
 EVIDENCE: MCPContent の case 定義(MCPDomainTypes.swift:68-81)に raw デフォルト不可。README が同一文字列を typed と raw に二重記述(Sources/XcodeMCPKit/README.md:170-174、Sources/XcodeMCPKitTesting/README.md:18-24)。MCPToolResult にテキスト連結 accessor も無し(111-174)。
