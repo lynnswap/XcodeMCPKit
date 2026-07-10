@@ -1635,12 +1635,11 @@ struct XcodeMCPTests {
             clock: clock
         )
         let sleepBaseline = await recoveryClock.requestedSleepCount()
-        let request = Task {
-            try await authority.send(try lifecycleOperation(
-                method: "tools/list",
-                deadline: Deadline.fromNow(.seconds(2), clock: clock)
-            ))
-        }
+        let operation = try lifecycleOperation(
+            method: "tools/list",
+            deadline: Deadline.fromNow(.seconds(2), clock: clock)
+        )
+        let request = Task { try await authority.send(operation) }
 
         _ = try await replacement.nextStarted(method: "notifications/initialized")
         _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline)
@@ -1658,9 +1657,22 @@ struct XcodeMCPTests {
             Issue.record("expected abandoned recovery to become unavailable")
             return
         }
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        try await waitWithTimeout("authority close did not reach its retired recovery join") {
+            try await waitUntilAuthorityCloseStarts(
+                authority,
+                expiredOperation: operation
+            )
+        }
+        #expect(await closeCompletions.count() == 0)
         await replacement.releaseInitializedSend()
-        await authority.close()
+        await close.value
 
+        #expect(await closeCompletions.count() == 1)
         #expect(await replacement.eventStreamStartCount() == 0)
         #expect(await replacement.closeCount() == 1)
     }
@@ -1705,8 +1717,145 @@ struct XcodeMCPTests {
         #expect(await replacement.closeCount() == 1)
     }
 
+    @Test func recoverySSEOperationMakesCloseWaitForItsTerminal() async throws {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let expired = LifecycleContractTransport(
+            name: "expired-gated-sse",
+            expirations: ["tools/list": 1]
+        )
+        let replacement = HangingSendXcodeMCPTransport(
+            stallsEventStreamUntilReleased: true
+        )
+        let factory = MixedRecoveryTransportFactory(first: expired, replacement: replacement)
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
+        let operation = try lifecycleOperation(
+            method: "tools/list",
+            deadline: Deadline.fromNow(.seconds(2), clock: clock)
+        )
+        let request = Task { try await authority.send(operation) }
+
+        _ = try await replacement.nextEventStreamStart()
+        _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline)
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await recoveryClock.resumeSleep(at: sleepBaseline)
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(
+            method: "session recovery"
+        )) {
+            try await request.value
+        }
+        _ = try await replacement.nextCloseCount()
+        guard case .unavailable(.sessionRecoveryFailed) = await authority.connectionState().phase
+        else {
+            Issue.record("expected abandoned SSE recovery to become unavailable")
+            return
+        }
+
+        let reconnect = Task {
+            try await authority.reconnect(
+                deadline: Deadline.fromNow(.seconds(1), clock: clock)
+            )
+        }
+        _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline + 1)
+        await recoveryClock.advanceUptime(by: .seconds(2))
+        await recoveryClock.resumeSleep(at: sleepBaseline + 1)
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(
+            method: "session recovery"
+        )) {
+            try await reconnect.value
+        }
+
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        try await waitWithTimeout("authority close did not reach its retired recovery join") {
+            try await waitUntilAuthorityCloseStarts(
+                authority,
+                expiredOperation: operation
+            )
+        }
+        #expect(await closeCompletions.count() == 0)
+        await replacement.releaseEventStreamStart()
+        await close.value
+
+        #expect(await closeCompletions.count() == 1)
+        #expect(await replacement.eventStreamStartCount() == 1)
+        #expect(await replacement.closeCount() == 1)
+    }
+
+    @Test func retiredNoncooperativeWorkerDoesNotBlockFreshReconnectButCloseJoinsIt()
+        async throws
+    {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let expired = LifecycleContractTransport(
+            name: "retired-worker-current",
+            expirations: ["tools/list": 1]
+        )
+        let abandonedCandidate = LifecycleContractTransport(name: "retired-worker-candidate")
+        let fresh = LifecycleContractTransport(name: "retired-worker-fresh")
+        let factory = RetiringRecoveryTransportFactory(
+            first: expired,
+            abandonedCandidate: abandonedCandidate,
+            fresh: fresh
+        )
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
+        let request = Task {
+            try await authority.send(try lifecycleOperation(
+                method: "tools/list",
+                deadline: Deadline.fromNow(.seconds(2), clock: clock)
+            ))
+        }
+
+        try await factory.waitUntilAbandonedWorkerStarts()
+        _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline)
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await recoveryClock.resumeSleep(at: sleepBaseline)
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(
+            method: "session recovery"
+        )) {
+            try await request.value
+        }
+
+        try await authority.reconnect(
+            deadline: Deadline.fromNow(.seconds(1), clock: clock)
+        )
+        #expect(await authority.connectionState().phase == .ready)
+        #expect(await factory.makeCount() == 3)
+        #expect(await abandonedCandidate.sentMessages().isEmpty)
+
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        _ = try await fresh.nextCloseCount()
+        #expect(await closeCompletions.count() == 0)
+
+        await factory.releaseAbandonedWorker()
+        await close.value
+        #expect(await closeCompletions.count() == 1)
+        #expect(await abandonedCandidate.sentMessages().isEmpty)
+        #expect(await abandonedCandidate.closeCount() == 1)
+    }
+
     @Test func backgroundRecoveryTimeoutClosesReplacementAndAllowsFreshReconnect() async throws {
-        let scheduler = ControlledRecoveryLeaseScheduler()
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
         let current = LifecycleContractTransport(name: "background-expired")
         let stalled = HangingSendXcodeMCPTransport(stallsInitialize: true)
         let fresh = LifecycleContractTransport(name: "fresh-after-background-timeout")
@@ -1715,16 +1864,17 @@ struct XcodeMCPTests {
             recipe: MCPTransportRecipe { try await factory.make() },
             initialize: lifecycleInitializeContext,
             defaultTimeout: .seconds(2),
-            recoveryLeaseScheduler: scheduler
+            clock: clock
         )
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
 
         await current.emitSessionExpired()
         _ = try await stalled.nextStarted(method: "initialize")
-        let lease = await scheduler.nextScheduledLease()
-        #expect(lease.duration == .seconds(2))
+        #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(2))
         #expect(await authority.connectionState().phase == .recovering)
 
-        await lease.fire()
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await recoveryClock.resumeSleep(at: sleepBaseline)
         _ = try await stalled.nextCancelled(method: "initialize")
         _ = try await stalled.nextCloseCount()
         guard case .unavailable(.sessionRecoveryFailed) = await authority.connectionState().phase
@@ -1743,7 +1893,6 @@ struct XcodeMCPTests {
     @Test func longExplicitWaiterOutlivesJoinedBackgroundRecoveryLease() async throws {
         let recoveryClock = ManualSessionTimeoutClock()
         let clock = await recoveryClock.client()
-        let scheduler = ControlledRecoveryLeaseScheduler()
         let current = LifecycleContractTransport(name: "background-with-explicit-waiter")
         let replacement = LifecycleContractTransport(name: "long-explicit-replacement")
         let factory = BlockingRecoveryTransportFactory(first: current, blocked: replacement)
@@ -1751,23 +1900,23 @@ struct XcodeMCPTests {
             recipe: MCPTransportRecipe { try await factory.make() },
             initialize: lifecycleInitializeContext,
             defaultTimeout: .seconds(2),
-            recoveryLeaseScheduler: scheduler,
             clock: clock
         )
 
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
         await current.emitSessionExpired()
         try await factory.waitUntilBlockedMakeStarts()
-        let lease = await scheduler.nextScheduledLease()
-        #expect(lease.duration == .seconds(2))
-        let sleepBaseline = await recoveryClock.requestedSleepCount()
+        #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(2))
         let reconnect = Task {
             try await authority.reconnect(
                 deadline: Deadline.fromNow(.seconds(10), clock: clock)
             )
         }
-        #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(10))
+        #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline + 1) == .seconds(10))
 
-        await lease.fire()
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await recoveryClock.resumeSleep(at: sleepBaseline)
+        for _ in 0..<100 { await Task.yield() }
         #expect(await authority.connectionState().phase == .recovering)
         await factory.releaseBlockedMake()
         try await reconnect.value
@@ -1778,7 +1927,8 @@ struct XcodeMCPTests {
     }
 
     @Test func disabledDefaultUsesBoundedBackgroundLeaseAndCloseAwaitsItsTerminal() async throws {
-        let scheduler = ControlledRecoveryLeaseScheduler()
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
         let current = LifecycleContractTransport(name: "disabled-background-cap")
         let stalled = HangingSendXcodeMCPTransport(stallsInitialize: true)
         let factory = MixedRecoveryTransportFactory(first: current, replacement: stalled)
@@ -1786,17 +1936,15 @@ struct XcodeMCPTests {
             recipe: MCPTransportRecipe { try await factory.make() },
             initialize: lifecycleInitializeContext,
             defaultTimeout: nil,
-            recoveryLeaseScheduler: scheduler
+            clock: clock
         )
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
 
         await current.emitSessionExpired()
         _ = try await stalled.nextStarted(method: "initialize")
-        let lease = await scheduler.nextScheduledLease()
-        #expect(lease.duration == .seconds(30))
+        #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(30))
 
         await authority.close()
-        #expect(lease.task.isCancelled)
-        await lease.fire()
         #expect(await authority.connectionState().phase == .closed(.requested))
         #expect(await stalled.closeCount() == 1)
     }
@@ -1993,6 +2141,25 @@ private func lifecycleOperation(
     )
 }
 
+private func waitUntilAuthorityCloseStarts(
+    _ authority: MCPClientSessionAuthority,
+    expiredOperation: MCPClientOperation
+) async throws {
+    while true {
+        try Task.checkCancellation()
+        do {
+            try await authority.send(expiredOperation)
+            throw XcodeMCPError.invalidResponse(
+                "expired close probe unexpectedly reached the transport"
+            )
+        } catch MCPBridgeRuntimeError.closed {
+            return
+        } catch MCPBridgeRuntimeError.requestTimedOut {
+            await Task.yield()
+        }
+    }
+}
+
 private actor RequestBarrier {
     private let target: Int
     private var arrivals = 0
@@ -2108,98 +2275,50 @@ private actor MixedRecoveryTransportFactory {
     }
 }
 
-private actor ControlledRecoveryLeaseGate {
-    private var result: Bool?
-    private var continuation: CheckedContinuation<Bool, Never>?
+private actor RetiringRecoveryTransportFactory {
+    private let first: any XcodeMCPTransport
+    private let abandonedCandidate: any XcodeMCPTransport
+    private let fresh: any XcodeMCPTransport
+    private let abandonedWorkerStarts = RecordedValues<Void>()
+    private let abandonedWorkerGate = NonCooperativeSendGate()
+    private var count = 0
 
-    func wait() async -> Bool {
-        if let result { return result }
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if let result {
-                    continuation.resume(returning: result)
-                } else {
-                    precondition(self.continuation == nil)
-                    self.continuation = continuation
-                }
-            }
-        } onCancel: {
-            Task { await self.resolve(false) }
+    init(
+        first: any XcodeMCPTransport,
+        abandonedCandidate: any XcodeMCPTransport,
+        fresh: any XcodeMCPTransport
+    ) {
+        self.first = first
+        self.abandonedCandidate = abandonedCandidate
+        self.fresh = fresh
+    }
+
+    func make() async throws -> any XcodeMCPTransport {
+        count += 1
+        switch count {
+        case 1:
+            return first
+        case 2:
+            await abandonedWorkerStarts.append(())
+            await abandonedWorkerGate.wait()
+            return abandonedCandidate
+        case 3:
+            return fresh
+        default:
+            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
         }
     }
 
-    func fire() {
-        resolve(true)
+    func waitUntilAbandonedWorkerStarts() async throws {
+        _ = try await abandonedWorkerStarts.nextValue()
     }
 
-    private func resolve(_ result: Bool) {
-        guard self.result == nil else { return }
-        self.result = result
-        continuation?.resume(returning: result)
-        continuation = nil
-    }
-}
-
-private final class ControlledRecoveryLease: Sendable {
-    let duration: Duration
-    let task: Task<Void, Never>
-    private let gate: ControlledRecoveryLeaseGate
-
-    init(duration: Duration, operation: @escaping @Sendable () async -> Void) {
-        let gate = ControlledRecoveryLeaseGate()
-        self.duration = duration
-        self.gate = gate
-        self.task = Task {
-            guard await gate.wait() else { return }
-            await operation()
-        }
+    func releaseAbandonedWorker() async {
+        await abandonedWorkerGate.release()
     }
 
-    func fire() async {
-        await gate.fire()
-        await task.value
-    }
-}
-
-private final class ControlledRecoveryLeaseScheduler:
-    MCPRecoveryLeaseScheduling,
-    @unchecked Sendable
-{
-    private struct State {
-        var scheduled: [ControlledRecoveryLease] = []
-        var waiters: [CheckedContinuation<ControlledRecoveryLease, Never>] = []
-    }
-
-    private let lock = NSLock()
-    private var state = State()
-
-    func schedule(
-        after duration: Duration,
-        operation: @escaping @Sendable () async -> Void
-    ) -> Task<Void, Never> {
-        let lease = ControlledRecoveryLease(duration: duration, operation: operation)
-        let waiter = lock.withLock { () -> CheckedContinuation<ControlledRecoveryLease, Never>? in
-            guard state.waiters.isEmpty == false else {
-                state.scheduled.append(lease)
-                return nil
-            }
-            return state.waiters.removeFirst()
-        }
-        waiter?.resume(returning: lease)
-        return lease.task
-    }
-
-    func nextScheduledLease() async -> ControlledRecoveryLease {
-        await withCheckedContinuation { continuation in
-            let lease = lock.withLock { () -> ControlledRecoveryLease? in
-                guard state.scheduled.isEmpty == false else {
-                    state.waiters.append(continuation)
-                    return nil
-                }
-                return state.scheduled.removeFirst()
-            }
-            if let lease { continuation.resume(returning: lease) }
-        }
+    func makeCount() -> Int {
+        count
     }
 }
 
@@ -2372,20 +2491,25 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     private let closeValues = RecordedValues<Int>()
     private let sendBlocker = NeverCompletingSendBlocker()
     private let initializedSendGate = NonCooperativeSendGate()
+    private let eventStreamGate = NonCooperativeSendGate()
     private let stallsInitialize: Bool
     private let stallsInitializedUntilReleased: Bool
+    private let stallsEventStreamUntilReleased: Bool
+    private let eventStreamStartValues = RecordedValues<Int>()
     private var closes = 0
     private var eventStreamStarts = 0
 
     init(
         stallsInitialize: Bool = false,
-        stallsInitializedUntilReleased: Bool = false
+        stallsInitializedUntilReleased: Bool = false,
+        stallsEventStreamUntilReleased: Bool = false
     ) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
         self.stallsInitialize = stallsInitialize
         self.stallsInitializedUntilReleased = stallsInitializedUntilReleased
+        self.stallsEventStreamUntilReleased = stallsEventStreamUntilReleased
     }
 
     func send(
@@ -2438,6 +2562,10 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     func startEventStream(headers: MCPConnectionHeaders) async {
         _ = headers
         eventStreamStarts += 1
+        await eventStreamStartValues.append(eventStreamStarts)
+        if stallsEventStreamUntilReleased {
+            await eventStreamGate.wait()
+        }
     }
 
     func close(headers: MCPConnectionHeaders) async {
@@ -2479,6 +2607,14 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
 
     func eventStreamStartCount() -> Int {
         eventStreamStarts
+    }
+
+    func nextEventStreamStart() async throws -> Int {
+        try await eventStreamStartValues.nextValue()
+    }
+
+    func releaseEventStreamStart() async {
+        await eventStreamGate.release()
     }
 
     private func yieldMessage(_ object: [String: MCPJSONValue]) throws {

@@ -118,32 +118,6 @@ package enum MCPClientSessionEvent: Sendable {
     case connectionState(XcodeMCPConnectionSnapshot)
 }
 
-package protocol MCPRecoveryLeaseScheduling: Sendable {
-    func schedule(
-        after duration: Duration,
-        operation: @escaping @Sendable () async -> Void
-    ) -> Task<Void, Never>
-}
-
-package struct ClockMCPRecoveryLeaseScheduler: MCPRecoveryLeaseScheduling {
-    private let clock: ClockClient
-
-    package init(clock: ClockClient) {
-        self.clock = clock
-    }
-
-    package func schedule(
-        after duration: Duration,
-        operation: @escaping @Sendable () async -> Void
-    ) -> Task<Void, Never> {
-        Task {
-            await clock.sleep(duration)
-            guard Task.isCancelled == false else { return }
-            await operation()
-        }
-    }
-}
-
 private final class MCPConnectionSubscriberRegistry: Sendable {
     private struct State {
         var continuations: [UUID: AsyncStream<XcodeMCPConnectionSnapshot>.Continuation] = [:]
@@ -193,29 +167,40 @@ private final class MCPConnectionSubscriberRegistry: Sendable {
     }
 }
 
-private final class MCPConnectionCloseAuthority: Sendable {
+private final class MCPConnectionOperationAdmission: Sendable {
     private struct State {
-        var isClosing = false
-        var isClosed = false
+        var cancel: (@Sendable () -> Void)?
+        var isCancellationRequested = false
+        var isTerminal = false
         var waiters: [CheckedContinuation<Void, Never>] = []
     }
 
     private let state = Mutex(State())
 
-    func close(_ operation: @escaping @Sendable () async -> Void) async {
-        let ownsClose = state.withLock { state in
-            guard state.isClosed == false, state.isClosing == false else { return false }
-            state.isClosing = true
-            return true
+    func installCancellation(_ cancel: @escaping @Sendable () -> Void) {
+        let shouldCancel = state.withLock { state in
+            // The closure captures the task, whose operation captures this admission.
+            // A terminal admission must never retain it and recreate that cycle.
+            guard state.isTerminal == false else { return false }
+            state.cancel = cancel
+            return state.isCancellationRequested
         }
-        guard ownsClose else {
-            await waitUntilClosed()
-            return
+        if shouldCancel { cancel() }
+    }
+
+    func cancel() {
+        let cancel = state.withLock { state -> (@Sendable () -> Void)? in
+            state.isCancellationRequested = true
+            return state.cancel
         }
-        await operation()
+        cancel?()
+    }
+
+    func finish() {
         let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>] in
-            state.isClosed = true
-            state.isClosing = false
+            guard state.isTerminal == false else { return [] }
+            state.isTerminal = true
+            state.cancel = nil
             let waiters = state.waiters
             state.waiters.removeAll()
             return waiters
@@ -225,23 +210,159 @@ private final class MCPConnectionCloseAuthority: Sendable {
 
     private func waitUntilClosed() async {
         await withCheckedContinuation { continuation in
-            let isClosed = state.withLock { state in
-                guard state.isClosed == false else { return true }
+            let isTerminal = state.withLock { state in
+                guard state.isTerminal == false else { return true }
                 state.waiters.append(continuation)
                 return false
             }
-            if isClosed { continuation.resume() }
+            if isTerminal { continuation.resume() }
         }
+    }
+
+    func waitUntilTerminal() async {
+        await waitUntilClosed()
+    }
+}
+
+private final class MCPConnectionCommandIngress: Sendable {
+    private struct State {
+        var isAccepting = true
+        var operations: [UUID: MCPConnectionOperationAdmission] = [:]
+        var closeTask: Task<Void, Never>?
+    }
+
+    private let state = Mutex(State())
+
+    func admit() throws -> (id: UUID, admission: MCPConnectionOperationAdmission) {
+        try state.withLock { state in
+            guard state.isAccepting else { throw MCPBridgeRuntimeError.closed }
+            let id = UUID()
+            let admission = MCPConnectionOperationAdmission()
+            state.operations[id] = admission
+            return (id, admission)
+        }
+    }
+
+    func operationFinished(id: UUID) {
+        _ = state.withLock { $0.operations.removeValue(forKey: id) }
+    }
+
+    func closeTask(
+        make: (_ operations: [MCPConnectionOperationAdmission]) -> Task<Void, Never>
+    ) -> Task<Void, Never> {
+        state.withLock { state in
+            if let closeTask = state.closeTask { return closeTask }
+            state.isAccepting = false
+            let task = make(Array(state.operations.values))
+            state.closeTask = task
+            return task
+        }
+    }
+
+    func cancel() {
+        let snapshot = state.withLock { state in
+            state.isAccepting = false
+            return (Array(state.operations.values), state.closeTask)
+        }
+        for operation in snapshot.0 { operation.cancel() }
+        snapshot.1?.cancel()
     }
 }
 
 package actor MCPClientSessionAuthority {
-    private struct Connection {
-        let id: MCPConnectionID
-        let generation: UInt64
-        let transport: any XcodeMCPTransport
-        let eventTask: Task<Void, Never>
-        let closeAuthority: MCPConnectionCloseAuthority
+    private actor Connection {
+        nonisolated let id: MCPConnectionID
+        nonisolated let generation: UInt64
+        nonisolated let eventTask: Task<Void, Never>
+
+        private let transport: any XcodeMCPTransport
+        private nonisolated let ingress = MCPConnectionCommandIngress()
+
+        init(
+            id: MCPConnectionID,
+            generation: UInt64,
+            transport: any XcodeMCPTransport,
+            onEvent: @escaping @Sendable (XcodeMCPTransportEvent) async -> Void
+        ) {
+            self.id = id
+            self.generation = generation
+            self.transport = transport
+            let events = transport.events
+            self.eventTask = Task {
+                for await event in events {
+                    guard Task.isCancelled == false else { return }
+                    await onEvent(event)
+                }
+            }
+        }
+
+        nonisolated func send(
+            _ data: Data,
+            headers: MCPConnectionHeaders,
+            deadline: Deadline?
+        ) throws -> Task<Void, Error> {
+            let admitted = try ingress.admit()
+            let task = Task<Void, Error> {
+                defer {
+                    admitted.admission.finish()
+                    ingress.operationFinished(id: admitted.id)
+                }
+                try Task.checkCancellation()
+                try await self.performSend(data, headers: headers, deadline: deadline)
+            }
+            admitted.admission.installCancellation { task.cancel() }
+            return task
+        }
+
+        nonisolated func startEventStream(
+            headers: MCPConnectionHeaders
+        ) throws -> Task<Void, Error> {
+            let admitted = try ingress.admit()
+            let task = Task<Void, Error> {
+                defer {
+                    admitted.admission.finish()
+                    ingress.operationFinished(id: admitted.id)
+                }
+                try Task.checkCancellation()
+                await self.performStartEventStream(headers: headers)
+            }
+            admitted.admission.installCancellation { task.cancel() }
+            return task
+        }
+
+        nonisolated func close(headers: MCPConnectionHeaders) -> Task<Void, Never> {
+            ingress.closeTask { operations in
+                Task {
+                    for operation in operations { operation.cancel() }
+                    let rawClose = Task { await self.performClose(headers: headers) }
+                    for operation in operations { await operation.waitUntilTerminal() }
+                    await rawClose.value
+                }
+            }
+        }
+
+        nonisolated func cancel() {
+            ingress.cancel()
+            eventTask.cancel()
+        }
+
+        private func performSend(
+            _ data: Data,
+            headers: MCPConnectionHeaders,
+            deadline: Deadline?
+        ) async throws {
+            try await transport.send(data, headers: headers, deadline: deadline)
+        }
+
+        private func performStartEventStream(headers: MCPConnectionHeaders) async {
+            await transport.startEventStream(headers: headers)
+        }
+
+        private func performClose(headers: MCPConnectionHeaders) async {
+            eventTask.cancel()
+            await transport.close(headers: headers)
+            await eventTask.value
+        }
     }
 
     private struct ForwardedInitializeRecipe: Sendable {
@@ -254,7 +375,6 @@ package actor MCPClientSessionAuthority {
     private enum RecoveryPhase {
         case active
         case finishing
-        case abandoned
     }
 
     private struct RecoveryBackgroundLease {
@@ -268,7 +388,6 @@ package actor MCPClientSessionAuthority {
         let task: Task<Void, Never>
         var phase: RecoveryPhase
         var backgroundLease: RecoveryBackgroundLease?
-        var cleanupTask: Task<Void, Never>?
         var ownedConnectionID: MCPConnectionID?
         var waiters: [UUID: AsyncThrowingStream<Void, Error>.Continuation]
 
@@ -282,12 +401,19 @@ package actor MCPClientSessionAuthority {
         }
     }
 
+    private struct RetiredRecovery {
+        let id: UUID
+        let workerTask: Task<Void, Never>
+        let leaseTask: Task<Void, Never>?
+        let cleanupTask: Task<Void, Never>?
+        var monitorTask: Task<Void, Never>?
+    }
+
     private struct RecoveryPlan: Sendable {
         let oldConnection: Connection?
         let oldHeaders: MCPConnectionHeaders
         let handshake: RecoveryHandshake
         let recipe: MCPTransportRecipe
-        let clock: ClockClient
     }
 
     private enum RecoveryHandshake: Sendable {
@@ -318,7 +444,6 @@ package actor MCPClientSessionAuthority {
     private let initializationMode: MCPClientInitializationMode
     private let clock: ClockClient
     private let backgroundRecoveryTimeout: Duration
-    private let recoveryLeaseScheduler: any MCPRecoveryLeaseScheduling
     private let subscribers = MCPConnectionSubscriberRegistry()
 
     private var current: Connection?
@@ -339,13 +464,13 @@ package actor MCPClientSessionAuthority {
     private var forwardedResponseWaiters: [UUID: AsyncThrowingStream<Void, Error>.Continuation] = [:]
     private var forwardedReadyWaiters: [UUID: AsyncThrowingStream<Void, Error>.Continuation] = [:]
     private var recovery: RecoveryState?
+    private var retiredRecoveries: [UUID: RetiredRecovery] = [:]
     private var cancellationNotificationTasks: [UUID: Task<Void, Never>] = [:]
 
     private init(
         recipe: MCPTransportRecipe,
         mode: MCPClientInitializationMode,
         defaultTimeout: Duration?,
-        recoveryLeaseScheduler: (any MCPRecoveryLeaseScheduling)?,
         clock: ClockClient
     ) {
         let pair = AsyncStream.makeStream(of: MCPClientSessionEvent.self)
@@ -355,22 +480,18 @@ package actor MCPClientSessionAuthority {
         self.initializationMode = mode
         self.clock = clock
         self.backgroundRecoveryTimeout = defaultTimeout ?? .seconds(30)
-        self.recoveryLeaseScheduler = recoveryLeaseScheduler
-            ?? ClockMCPRecoveryLeaseScheduler(clock: clock)
     }
 
     package static func startManaged(
         recipe: MCPTransportRecipe,
         initialize: MCPManagedInitializeContext,
         defaultTimeout: Duration?,
-        recoveryLeaseScheduler: (any MCPRecoveryLeaseScheduling)? = nil,
         clock: ClockClient = .liveValue
     ) async throws -> MCPClientSessionAuthority {
         let authority = MCPClientSessionAuthority(
             recipe: recipe,
             mode: .managed(initialize),
             defaultTimeout: defaultTimeout,
-            recoveryLeaseScheduler: recoveryLeaseScheduler,
             clock: clock
         )
         do {
@@ -387,14 +508,12 @@ package actor MCPClientSessionAuthority {
     package static func makeForwarded(
         recipe: MCPTransportRecipe,
         defaultTimeout: Duration? = nil,
-        recoveryLeaseScheduler: (any MCPRecoveryLeaseScheduling)? = nil,
         clock: ClockClient = .liveValue
     ) -> MCPClientSessionAuthority {
         MCPClientSessionAuthority(
             recipe: recipe,
             mode: .forwarded,
             defaultTimeout: defaultTimeout,
-            recoveryLeaseScheduler: recoveryLeaseScheduler,
             clock: clock
         )
     }
@@ -472,7 +591,8 @@ package actor MCPClientSessionAuthority {
            case .notification(let method) = operation.envelope.kind,
            method == "notifications/initialized"
         {
-            await current?.transport.startEventStream(headers: currentHeaders)
+            guard let current else { throw MCPBridgeRuntimeError.closed }
+            try await startEventStreamOnce(on: current, headers: currentHeaders)
             markForwardedInitialized()
         }
     }
@@ -502,16 +622,15 @@ package actor MCPClientSessionAuthority {
             return
         }
         let id = UUID()
-        let transport = connection.transport
         let headers = currentHeaders
         let deadline = Deadline.fromNow(.seconds(1), clock: clock)
+        guard let sendTask = try? connection.send(data, headers: headers, deadline: deadline) else {
+            return
+        }
         let notificationClock = clock
         cancellationNotificationTasks[id] = Task { [weak self] in
             await Self.performBestEffortSend(
-                transport: transport,
-                data: data,
-                headers: headers,
-                deadline: deadline,
+                sendTask: sendTask,
                 clock: notificationClock
             )
             await self?.cancellationNotificationFinished(id: id)
@@ -528,6 +647,12 @@ package actor MCPClientSessionAuthority {
         let recoveryState = recovery
         recoveryState?.task.cancel()
         recoveryState?.backgroundLease?.task.cancel()
+        let retired = Array(retiredRecoveries.values)
+        retiredRecoveries.removeAll()
+        for state in retired {
+            state.workerTask.cancel()
+            state.leaseTask?.cancel()
+        }
         let recoveryWaiters = recoveryState.map { Array($0.waiters.values) } ?? []
         recovery = nil
         for waiter in recoveryWaiters {
@@ -554,9 +679,17 @@ package actor MCPClientSessionAuthority {
         if let connection {
             await Self.closeConnection(connection, headers: headers)
         }
-        await recoveryState?.cleanupTask?.value
         await recoveryState?.backgroundLease?.task.value
         await recoveryState?.task.value
+        for state in retired {
+            if let monitorTask = state.monitorTask {
+                await monitorTask.value
+            } else {
+                await state.cleanupTask?.value
+                await state.leaseTask?.value
+                await state.workerTask.value
+            }
+        }
         for task in cancellationTasks { await task.value }
         publish(.closed(.requested))
         subscribers.finish()
@@ -570,7 +703,11 @@ package actor MCPClientSessionAuthority {
     isolated deinit {
         recovery?.task.cancel()
         recovery?.backgroundLease?.task.cancel()
-        current?.eventTask.cancel()
+        for state in retiredRecoveries.values {
+            state.workerTask.cancel()
+            state.leaseTask?.cancel()
+        }
+        current?.cancel()
         for task in cancellationNotificationTasks.values { task.cancel() }
         for continuation in hiddenResponses.values {
             continuation.finish(throwing: MCPBridgeRuntimeError.closed)
@@ -594,11 +731,7 @@ private extension MCPClientSessionAuthority {
         _ connection: Connection,
         headers: MCPConnectionHeaders
     ) async {
-        await connection.closeAuthority.close {
-            connection.eventTask.cancel()
-            await connection.transport.close(headers: headers)
-            await connection.eventTask.value
-        }
+        await connection.close(headers: headers).value
     }
 
     private nonisolated static func makeHiddenRecoveryHandshake(
@@ -636,60 +769,35 @@ private extension MCPClientSessionAuthority {
     }
 
     nonisolated static func performDetachedHiddenRequest(
-        _ request: MCPClientEnvelope,
         responseStream: AsyncThrowingStream<MCPClientEnvelope, Error>,
-        transport: any XcodeMCPTransport,
-        headers: MCPConnectionHeaders,
-        deadline: Deadline?,
-        clock: ClockClient
+        sendTask: Task<Void, Error>
     ) async throws -> MCPClientEnvelope {
-        let operation: @Sendable () async throws -> MCPClientEnvelope = {
-            try await withThrowingTaskGroup(of: HiddenRequestStep.self) { group in
-                group.addTask {
-                    try await transport.send(
-                        request.data,
-                        headers: headers,
-                        deadline: deadline
-                    )
-                    return .sendCompleted
+        try await withThrowingTaskGroup(of: HiddenRequestStep.self) { group in
+            group.addTask {
+                try await awaitConnectionCommand(sendTask)
+                return .sendCompleted
+            }
+            group.addTask {
+                for try await response in responseStream {
+                    return .response(response)
                 }
-                group.addTask {
-                    for try await response in responseStream {
-                        return .response(response)
-                    }
-                    try Task.checkCancellation()
-                    throw MCPBridgeRuntimeError.transportUnavailable(
-                        "connection closed during initialize"
-                    )
-                }
-                while let step = try await group.next() {
-                    switch step {
-                    case .sendCompleted:
-                        continue
-                    case .response(let response):
-                        group.cancelAll()
-                        return response
-                    }
-                }
+                try Task.checkCancellation()
                 throw MCPBridgeRuntimeError.transportUnavailable(
                     "connection closed during initialize"
                 )
             }
-        }
-        guard let deadline else { return try await operation() }
-        guard deadline.hasExpired == false else {
-            throw MCPBridgeRuntimeError.requestTimedOut(method: "initialize")
-        }
-        return try await withThrowingTaskGroup(of: MCPClientEnvelope.self) { group in
-            group.addTask { try await operation() }
-            group.addTask {
-                await clock.sleep(deadline.remainingDuration())
-                try Task.checkCancellation()
-                throw MCPBridgeRuntimeError.requestTimedOut(method: "initialize")
+            while let step = try await group.next() {
+                switch step {
+                case .sendCompleted:
+                    continue
+                case .response(let response):
+                    group.cancelAll()
+                    return response
+                }
             }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+            throw MCPBridgeRuntimeError.transportUnavailable(
+                "connection closed during initialize"
+            )
         }
     }
 
@@ -699,16 +807,23 @@ private extension MCPClientSessionAuthority {
         ))
     }
 
+    nonisolated static func awaitConnectionCommand(
+        _ task: Task<Void, Error>
+    ) async throws {
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     nonisolated static func performBestEffortSend(
-        transport: any XcodeMCPTransport,
-        data: Data,
-        headers: MCPConnectionHeaders,
-        deadline: Deadline?,
+        sendTask: Task<Void, Error>,
         clock: ClockClient
     ) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
-                _ = try? await transport.send(data, headers: headers, deadline: deadline)
+                _ = try? await awaitConnectionCommand(sendTask)
             }
             group.addTask {
                 await clock.sleep(.seconds(1))
@@ -771,20 +886,17 @@ private extension MCPClientSessionAuthority {
         generation &+= 1
         let connectionID = MCPConnectionID()
         let connectionGeneration = generation
-        let transportEvents = transport.events
-        let eventTask = Task { [weak self] in
-            for await event in transportEvents {
-                guard Task.isCancelled == false else { return }
-                await self?.handle(event, connectionID: connectionID, generation: connectionGeneration)
-            }
-        }
         let connection = Connection(
             id: connectionID,
             generation: connectionGeneration,
-            transport: transport,
-            eventTask: eventTask,
-            closeAuthority: MCPConnectionCloseAuthority()
-        )
+            transport: transport
+        ) { [weak self] event in
+            await self?.handle(
+                event,
+                connectionID: connectionID,
+                generation: connectionGeneration
+            )
+        }
         current = connection
         currentHeaders = MCPConnectionHeaders()
         publish(phase)
@@ -800,12 +912,13 @@ private extension MCPClientSessionAuthority {
             throw MCPTransportFailure.unavailable("connection was replaced before send")
         }
         try checkDeadline(deadline, method: envelope.method ?? "response")
+        let sendTask = try connection.send(
+            envelope.data,
+            headers: currentHeaders,
+            deadline: deadline
+        )
         do {
-            try await connection.transport.send(
-                envelope.data,
-                headers: currentHeaders,
-                deadline: deadline
-            )
+            try await Self.awaitConnectionCommand(sendTask)
         } catch let failure as MCPTransportFailure {
             throw failure
         } catch let error as MCPBridgeRuntimeError {
@@ -847,7 +960,7 @@ private extension MCPClientSessionAuthority {
             JSONRPC.Wire.notificationObject(method: "notifications/initialized")
         ))
         try await sendOnce(initialized, on: connection, deadline: deadline)
-        await connection.transport.startEventStream(headers: currentHeaders)
+        try await startEventStreamOnce(on: connection, headers: currentHeaders)
     }
 
     private func sendHiddenRequest(
@@ -866,19 +979,15 @@ private extension MCPClientSessionAuthority {
             hiddenResponses.removeValue(forKey: responseIDKey)
             pair.continuation.finish()
         }
-        let transport = connection.transport
         let data = envelope.data
         let headers = currentHeaders
+        let sendTask = try connection.send(data, headers: headers, deadline: deadline)
         let responseStream = pair.stream
         let operation: @Sendable () async throws -> MCPClientEnvelope = {
             try await withTaskCancellationHandler {
                 return try await withThrowingTaskGroup(of: HiddenRequestStep.self) { group in
                     group.addTask {
-                        try await transport.send(
-                            data,
-                            headers: headers,
-                            deadline: deadline
-                        )
+                        try await Self.awaitConnectionCommand(sendTask)
                         return .sendCompleted
                     }
                     group.addTask {
@@ -914,6 +1023,17 @@ private extension MCPClientSessionAuthority {
         )
     }
 
+    private func startEventStreamOnce(
+        on connection: Connection,
+        headers: MCPConnectionHeaders
+    ) async throws {
+        guard current?.id == connection.id else {
+            throw MCPTransportFailure.unavailable("connection was replaced before event stream start")
+        }
+        let task = try connection.startEventStream(headers: headers)
+        try await Self.awaitConnectionCommand(task)
+    }
+
     func joinRecovery(
         failedConnection: MCPConnectionID?,
         deadline: Deadline?,
@@ -925,8 +1045,16 @@ private extension MCPClientSessionAuthority {
             return
         }
         try checkDeadline(deadline, method: "session recovery")
+        if recovery == nil {
+            try await waitForRetiredRecoveryCleanup(deadline: deadline)
+            try checkDeadline(deadline, method: "session recovery")
+        }
         while let stale = recovery, stale.isActive == false {
-            await stale.task.value
+            try await waitForTaskTerminal(
+                stale.task,
+                deadline: deadline,
+                method: "session recovery"
+            )
             if isClosed { throw MCPBridgeRuntimeError.closed }
             if force == false { try ensureOpen() }
             try checkDeadline(deadline, method: "session recovery")
@@ -961,6 +1089,42 @@ private extension MCPClientSessionAuthority {
             throw CancellationError()
         } catch {
             throw MCPClientSessionFailure.sessionRecoveryFailed(error.localizedDescription)
+        }
+    }
+
+    private func waitForRetiredRecoveryCleanup(deadline: Deadline?) async throws {
+        let cleanupTasks = retiredRecoveries.values.compactMap(\.cleanupTask)
+        for task in cleanupTasks {
+            try await waitForTaskTerminal(
+                task,
+                deadline: deadline,
+                method: "session recovery"
+            )
+        }
+    }
+
+    private func waitForTaskTerminal(
+        _ task: Task<Void, Never>,
+        deadline: Deadline?,
+        method: String
+    ) async throws {
+        if deadline == nil {
+            await task.value
+            return
+        }
+        let pair = AsyncStream.makeStream(of: Void.self)
+        let observer = Task {
+            await task.value
+            pair.continuation.yield(())
+            pair.continuation.finish()
+        }
+        defer {
+            observer.cancel()
+            pair.continuation.finish()
+        }
+        try await raceDeadline(deadline, method: method) {
+            for await _ in pair.stream { return }
+            try Task.checkCancellation()
         }
     }
 
@@ -1035,8 +1199,9 @@ private extension MCPClientSessionAuthority {
                 }
                 let response: MCPClientEnvelope
                 do {
-                    guard let initializeHeaders = try await self?.authorizeRecoveryConnection(
-                        connection.id,
+                    guard let initialize = try await self?.admitRecoverySend(
+                        handshake.request,
+                        connectionID: connection.id,
                         recoveryID: id
                     ) else {
                         await Self.closeConnection(
@@ -1046,18 +1211,14 @@ private extension MCPClientSessionAuthority {
                         return
                     }
                     response = try await Self.performDetachedHiddenRequest(
-                        handshake.request,
                         responseStream: responseStream,
-                        transport: connection.transport,
-                        headers: initializeHeaders,
-                        deadline: nil,
-                        clock: plan.clock
+                        sendTask: initialize.task
                     )
                     guard try await self?.authorizeRecoveryConnection(
                         connection.id,
                         recoveryID: id
                     ) != nil else {
-                        await Self.closeConnection(connection, headers: initializeHeaders)
+                        await Self.closeConnection(connection, headers: initialize.headers)
                         return
                     }
                 } catch {
@@ -1088,31 +1249,35 @@ private extension MCPClientSessionAuthority {
                 }
                 if handshake.sendsInitialized {
                     let initialized = try Self.initializedNotificationEnvelope()
-                    guard let initializedHeaders = try await self?.authorizeRecoveryConnection(
-                        connection.id,
+                    guard let initializedSend = try await self?.admitRecoverySend(
+                        initialized,
+                        connectionID: connection.id,
                         recoveryID: id
                     ) else {
                         await Self.closeConnection(connection, headers: headers)
                         return
                     }
-                    try await connection.transport.send(
-                        initialized.data,
-                        headers: initializedHeaders,
-                        deadline: nil
-                    )
-                    guard let eventStreamHeaders = try await self?.authorizeRecoveryConnection(
-                        connection.id,
-                        recoveryID: id
-                    ) else {
-                        await Self.closeConnection(connection, headers: initializedHeaders)
-                        return
-                    }
-                    await connection.transport.startEventStream(headers: eventStreamHeaders)
+                    try await Self.awaitConnectionCommand(initializedSend.task)
                     guard try await self?.authorizeRecoveryConnection(
                         connection.id,
                         recoveryID: id
                     ) != nil else {
-                        await Self.closeConnection(connection, headers: eventStreamHeaders)
+                        await Self.closeConnection(connection, headers: initializedSend.headers)
+                        return
+                    }
+                    guard let eventStream = try await self?.admitRecoveryEventStreamStart(
+                        connectionID: connection.id,
+                        recoveryID: id
+                    ) else {
+                        await Self.closeConnection(connection, headers: initializedSend.headers)
+                        return
+                    }
+                    try await Self.awaitConnectionCommand(eventStream.task)
+                    guard try await self?.authorizeRecoveryConnection(
+                        connection.id,
+                        recoveryID: id
+                    ) != nil else {
+                        await Self.closeConnection(connection, headers: eventStream.headers)
                         return
                     }
                 }
@@ -1148,7 +1313,6 @@ private extension MCPClientSessionAuthority {
             task: task,
             phase: .active,
             backgroundLease: nil,
-            cleanupTask: nil,
             ownedConnectionID: failedConnection,
             waiters: waiters
         )
@@ -1160,30 +1324,24 @@ private extension MCPClientSessionAuthority {
 
     func finishRecovery(id: UUID, result: Result<Void, Error>) async {
         guard var state = recovery, state.id == id else { return }
-        let wasAbandoned: Bool
         switch state.phase {
         case .active:
             state.phase = .finishing
-            wasAbandoned = false
         case .finishing:
-            wasAbandoned = false
-        case .abandoned:
-            wasAbandoned = true
+            break
         }
         if var lease = state.backgroundLease {
             lease.isActive = false
             lease.task.cancel()
             state.backgroundLease = lease
         }
-        let cleanupTask = state.cleanupTask
         let backgroundTask = state.backgroundLease?.task
         recovery = state
-        await cleanupTask?.value
         await backgroundTask?.value
 
         guard let currentState = recovery, currentState.id == id else { return }
         recovery = nil
-        if case .failure(let error) = result, wasAbandoned == false, isClosed == false {
+        if case .failure(let error) = result, isClosed == false {
             publish(.unavailable(.sessionRecoveryFailed(error.localizedDescription)))
         }
         for waiter in currentState.waiters.values {
@@ -1254,6 +1412,40 @@ private extension MCPClientSessionAuthority {
         return currentHeaders
     }
 
+    private func admitRecoverySend(
+        _ envelope: MCPClientEnvelope,
+        connectionID: MCPConnectionID,
+        recoveryID: UUID
+    ) throws -> (task: Task<Void, Error>, headers: MCPConnectionHeaders) {
+        let headers = try authorizeRecoveryConnection(
+            connectionID,
+            recoveryID: recoveryID
+        )
+        guard let connection = current, connection.id == connectionID else {
+            throw CancellationError()
+        }
+        let task = try connection.send(
+            envelope.data,
+            headers: headers,
+            deadline: nil
+        )
+        return (task, headers)
+    }
+
+    private func admitRecoveryEventStreamStart(
+        connectionID: MCPConnectionID,
+        recoveryID: UUID
+    ) throws -> (task: Task<Void, Error>, headers: MCPConnectionHeaders) {
+        let headers = try authorizeRecoveryConnection(
+            connectionID,
+            recoveryID: recoveryID
+        )
+        guard let connection = current, connection.id == connectionID else {
+            throw CancellationError()
+        }
+        return (try connection.startEventStream(headers: headers), headers)
+    }
+
     private func attachBackgroundLeaseIfNeeded(recoveryID: UUID) {
         guard var state = recovery,
               state.id == recoveryID,
@@ -1261,7 +1453,10 @@ private extension MCPClientSessionAuthority {
               state.backgroundLease == nil else { return }
         let leaseID = UUID()
         let timeout = backgroundRecoveryTimeout
-        let task = recoveryLeaseScheduler.schedule(after: timeout) { [weak self] in
+        let clock = clock
+        let task = Task { [weak self] in
+            await clock.sleep(timeout)
+            guard Task.isCancelled == false else { return }
             await self?.backgroundRecoveryLeaseExpired(
                 recoveryID: recoveryID,
                 leaseID: leaseID
@@ -1296,12 +1491,12 @@ private extension MCPClientSessionAuthority {
         guard var state = recovery,
               state.id == recoveryID,
               state.isActive else { return }
-        state.phase = .abandoned
         if var lease = state.backgroundLease {
             lease.isActive = false
             lease.task.cancel()
             state.backgroundLease = lease
         }
+        let cleanupTask: Task<Void, Never>?
         if let connection = current,
            state.ownedConnectionID == connection.id
         {
@@ -1309,20 +1504,43 @@ private extension MCPClientSessionAuthority {
             current = nil
             currentHeaders = MCPConnectionHeaders()
             state.ownedConnectionID = nil
-            state.cleanupTask = Task.detached {
+            cleanupTask = Task.detached {
                 await Self.closeConnection(connection, headers: headers)
             }
+        } else {
+            cleanupTask = nil
         }
         for continuation in hiddenResponses.values {
             continuation.finish(throwing: CancellationError())
         }
         hiddenResponses.removeAll()
         let recoveryTask = state.task
-        recovery = state
+        let retired = RetiredRecovery(
+            id: recoveryID,
+            workerTask: recoveryTask,
+            leaseTask: state.backgroundLease?.task,
+            cleanupTask: cleanupTask,
+            monitorTask: nil
+        )
+        recovery = nil
+        retiredRecoveries[recoveryID] = retired
+        let retiredCleanupTask = retired.cleanupTask
+        let leaseTask = retired.leaseTask
+        let monitorTask = Task.detached { [weak self] in
+            await retiredCleanupTask?.value
+            await leaseTask?.value
+            await recoveryTask.value
+            await self?.retiredRecoveryDidFinish(id: recoveryID)
+        }
+        retiredRecoveries[recoveryID]?.monitorTask = monitorTask
         recoveryTask.cancel()
         if isClosed == false {
             publish(.unavailable(.sessionRecoveryFailed(reason)))
         }
+    }
+
+    private func retiredRecoveryDidFinish(id: UUID) {
+        retiredRecoveries.removeValue(forKey: id)
     }
 
     func leaveRecoveryWaiter(id: UUID, recoveryID: UUID) {
@@ -1371,8 +1589,7 @@ private extension MCPClientSessionAuthority {
             oldConnection: old,
             oldHeaders: oldHeaders,
             handshake: handshake,
-            recipe: recipe,
-            clock: clock
+            recipe: recipe
         )
     }
 
