@@ -359,6 +359,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     struct TestSnapshot: Sendable {
         struct Upstream: Sendable {
+            let id: Int
             let isInitialized: Bool
             let initInFlight: Bool
             let healthState: XcodeMCPKit.Upstream.HealthState
@@ -373,6 +374,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let didWarmSecondary: Bool
         let shouldRetryEagerInitializePrimaryAfterWarmInitFailure: Bool
         let upstreams: [Upstream]
+
+        func upstream(id: Int) -> Upstream? {
+            upstreams.first { $0.id == id }
+        }
     }
 
     let sessionRegistry: SessionRegistry

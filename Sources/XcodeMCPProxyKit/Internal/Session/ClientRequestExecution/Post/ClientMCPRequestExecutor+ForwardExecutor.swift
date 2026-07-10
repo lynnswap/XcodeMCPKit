@@ -90,6 +90,10 @@ extension ClientMCPRequestExecutor {
                 )
             }
             prepared = candidate
+        } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+            return eventLoop.makeFailedFuture(
+                ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology
+            )
         } catch {
             return makeImmediateLeaseResolution(
                 .mcpError(
@@ -161,6 +165,10 @@ extension ClientMCPRequestExecutor {
                         operationLease: prepared.operationLease
                     )
                 }
+            )
+        } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+            return eventLoop.makeFailedFuture(
+                ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology
             )
         } catch {
             return makeImmediateLeaseResolution(
@@ -244,6 +252,27 @@ extension ClientMCPRequestExecutor {
                         id: responseID,
                         code: -32000,
                         message: "upstream timeout",
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
+            case .upstreamUnavailable:
+                cancellationHandle?.markCompleted()
+                self.sessionManager.failRequestLease(
+                    leaseID,
+                    terminalState: .failed,
+                    reason: .upstreamUnavailable
+                )
+                self.logFinishedRequest(
+                    leaseID: leaseID,
+                    sessionID: sessionID,
+                    upstreamIndex: prepared.upstreamIndex,
+                    responseID: responseID,
+                    reason: "upstreamUnavailable"
+                )
+                promise.succeed(
+                    Self.makeUpstreamUnavailableResolution(
+                        responseID: responseID,
                         sessionID: sessionID,
                         prefersEventStream: prefersEventStream
                     )

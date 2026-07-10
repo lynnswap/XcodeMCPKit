@@ -258,6 +258,9 @@ extension RuntimeCoordinator {
         } else if globalInit.hadGlobalInit {
             if shouldResetGlobalInit {
                 let primaryInitInFlight = initializeManager.snapshot().initInFlight
+                    || upstreamHealthManager.state(
+                        for: UpstreamSlotID(rawValue: primaryUpstreamIndex)
+                    )?.initInFlight == true
                 if primaryInitInFlight {
                     initializeManager
                         .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
@@ -269,6 +272,16 @@ extension RuntimeCoordinator {
             }
             if suppressProcessRouteWarmRestart == false {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
+            }
+        }
+
+        if canonicalHandshakeState.initializeResult() == nil,
+           anyActiveInitializedUpstream() == false {
+            if anyActiveRecoveryInFlight() {
+                initializeManager
+                    .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
+            } else {
+                startEagerInitializePrimary(applyBackoff: true)
             }
         }
     }
@@ -653,12 +666,13 @@ extension RuntimeCoordinator {
 
     func testStateSnapshot() -> TestSnapshot {
         let initSnapshot = initializeManager.snapshot()
-        let upstreams = upstreamHealthManager.activeStatesSnapshot().map { _, upstream in
-                TestSnapshot.Upstream(
-                    isInitialized: upstream.isInitialized,
-                    initInFlight: upstream.initInFlight,
-                    healthState: upstream.healthState
-                )
+        let upstreams = upstreamHealthManager.activeStatesSnapshot().map { id, upstream in
+            TestSnapshot.Upstream(
+                id: id.rawValue,
+                isInitialized: upstream.isInitialized,
+                initInFlight: upstream.initInFlight,
+                healthState: upstream.healthState
+            )
         }
         return TestSnapshot(
             hasInitResult: initSnapshot.hasInitResult,

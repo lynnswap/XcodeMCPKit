@@ -2250,6 +2250,57 @@ extension HTTPHandlerTests {
         _ = await activeTask.value
     }
 
+    @Test func refreshForwarderClassifiesStaleSendAsUpstreamUnavailable() async throws {
+        let config = makeConfig(requestTimeout: 1)
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        sessionManager.rejectNextUpstreamSend()
+        let executor = ClientMCPRequestExecutor(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let responseID = try #require(JSONRPC.ID(any: NSNumber(value: 4201)))
+        let bodyData = try JSONSerialization.data(
+            withJSONObject: toolsCallPayload(
+                id: 4201,
+                name: "XcodeRefreshCodeIssuesInFile",
+                arguments: ["tabIdentifier": "tab-stale", "filePath": "File.swift"]
+            ),
+            options: []
+        )
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "session-refresh-stale",
+            label: "tools/call:XcodeRefreshCodeIssuesInFile",
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
+        let eventLoop = EmbeddedEventLoop()
+
+        let result = await executor.forwardOnce(
+            bodyData: bodyData,
+            sessionID: descriptor.sessionID,
+            responseID: responseID,
+            shouldRequeueLeaseOnRetryableFailure: { false },
+            eventLoop: eventLoop,
+            leaseID: leaseID,
+            cancellationHandle: nil
+        )
+
+        guard case .upstreamUnavailable(let returnedID) = result else {
+            Issue.record("expected stale admission to be upstream unavailable")
+            return
+        }
+        #expect(returnedID.key == responseID.key)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+        executor.finishRefreshLease(leaseID, result: result)
+    }
+
     @Test func httpRefreshProxyInternalToolCallsUpdateUpstreamHealthState() async throws {
         var config = makeConfig(requestTimeout: 0.2)
         config.refreshCodeIssuesMode = .proxy

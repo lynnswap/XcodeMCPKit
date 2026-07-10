@@ -98,6 +98,10 @@ extension ClientMCPRequestExecutor {
                         )
                     }
                     prepared = candidate
+                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+                    return eventLoop.makeSucceededFuture(
+                        MCPForwardingService.ResponseResolution.upstreamUnavailable
+                    )
                 } catch {
                     return eventLoop.makeSucceededFuture(
                         MCPForwardingService.ResponseResolution.invalidUpstreamResponse
@@ -122,6 +126,8 @@ extension ClientMCPRequestExecutor {
                             )
                         }
                     )
+                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {
                     return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                 }
@@ -153,6 +159,8 @@ extension ClientMCPRequestExecutor {
                 return .success(responseData)
             case .timeout:
                 return .timeout(responseID: responseID)
+            case .upstreamUnavailable:
+                return .upstreamUnavailable(responseID: responseID)
             case .invalidUpstreamResponse:
                 return .invalidUpstreamResponse
             }

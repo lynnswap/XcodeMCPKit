@@ -110,6 +110,11 @@ final class JSONRPCResponseRouter: Sendable {
 
     @discardableResult
     func cancelPending(token: UUID) -> Bool {
+        failPending(token: token, error: CancellationError())
+    }
+
+    @discardableResult
+    func failPending(token: UUID, error: Error) -> Bool {
         let pending = state.withLockedValue { state -> Pending? in
             if let idKey = state.pendingByID.first(where: { $0.value.token == token })?.key {
                 return state.pendingByID.removeValue(forKey: idKey)
@@ -117,7 +122,7 @@ final class JSONRPCResponseRouter: Sendable {
             return nil
         }
         if let pending {
-            failOnEventLoop(pending, error: CancellationError())
+            failOnEventLoop(pending, error: error)
         }
         return pending != nil
     }

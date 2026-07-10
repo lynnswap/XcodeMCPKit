@@ -76,6 +76,7 @@ extension ProxyUpstreamRequestRuntimePort {
 struct ProxyUpstreamRequestRuntime: Sendable {
     struct PreparedRequest: Sendable {
         let transform: RequestTransform
+        let sessionID: String
         let operationLease: UpstreamOperationLease
         let admission: RouteForwardingAdmission?
 
@@ -83,10 +84,12 @@ struct ProxyUpstreamRequestRuntime: Sendable {
 
         init(
             transform: RequestTransform,
+            sessionID: String,
             operationLease: UpstreamOperationLease,
             admission: RouteForwardingAdmission? = nil
         ) {
             self.transform = transform
+            self.sessionID = sessionID
             self.operationLease = operationLease
             self.admission = admission
         }
@@ -179,6 +182,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         )
         return PreparedRequest(
             transform: transform,
+            sessionID: sessionID,
             operationLease: operationLease,
             admission: admission
         )
@@ -217,17 +221,30 @@ struct ProxyUpstreamRequestRuntime: Sendable {
                 routerPendingToken: registration.token
             )
         )
+        let reject: @Sendable () -> Void = {
+            guard router.failPending(
+                token: registration.token,
+                error: Error.staleUpstreamTopology
+            ) else {
+                return
+            }
+            if let responseID = prepared.transform.responseID {
+                port.removeUpstreamIDMapping(
+                    sessionID: prepared.sessionID,
+                    requestIDKey: responseID.key,
+                    operationLease: prepared.operationLease
+                )
+            }
+        }
         let sent = port.sendUpstream(
             prepared.transform.upstreamData,
             operationLease: prepared.operationLease,
             ensureRunning: false,
             admission: prepared.admission,
-            onRejected: {
-                _ = router.cancelPending(token: registration.token)
-            }
+            onRejected: reject
         )
         guard sent else {
-            _ = router.cancelPending(token: registration.token)
+            reject()
             throw Error.staleUpstreamTopology
         }
         return StartedRequest(

@@ -1348,6 +1348,48 @@ struct HTTPHandlerTests {
         try await shutdown(group)
     }
 
+    @Test func staleSendAdmissionReturnsUpstreamUnavailableAndRollsBackMapping() async throws {
+        let config = makeConfig(requestTimeout: 1)
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        sessionManager.setInitialized(true)
+        sessionManager.rejectNextUpstreamSend()
+        let service = ClientMCPRequestExecutor(
+            config: config,
+            sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let payload = toolsCallPayload(
+            id: 2003,
+            name: "BuildProject",
+            arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+        )
+        let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        let operation = service.handle(
+            bodyData: bodyData,
+            headerSessionID: "session-stale-send",
+            headerSessionExists: true,
+            prefersEventStream: false,
+            eventLoop: group.next()
+        )
+        switch try await operation.future.get() {
+        case .mcpError(let id, let code, let message, _, _):
+            #expect(id?.key == "2003")
+            #expect(code == -32001)
+            #expect(message == "upstream unavailable")
+        default:
+            Issue.record("expected upstream unavailable MCP error")
+        }
+        #expect(sessionManager.assignedUpstreamIDCount() == 1)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+    }
+
     @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
         let config = makeConfig(requestTimeout: 0.1)
         let channel = EmbeddedChannel()

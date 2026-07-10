@@ -892,9 +892,18 @@ extension RuntimeCoordinator {
         }
         debugRecorder.resetUpstream(upstreamIndex)
         if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-           let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
+           let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route),
+           let replacementProof = upstreamHealthManager.topologyProof(
+               for: replacementUpstreamIndex
+           )
         {
-            _ = replacementUpstreamIndex
+            applyProcessControlPlaneTransition(
+                processControlPlane.rebindCatalogSource(
+                    processID: route.target.processID,
+                    from: proof,
+                    to: replacementProof
+                )
+            )
         } else {
             removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         }

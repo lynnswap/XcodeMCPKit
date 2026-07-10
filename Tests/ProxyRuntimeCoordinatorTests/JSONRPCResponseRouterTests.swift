@@ -102,6 +102,34 @@ struct JSONRPCResponseRouterTests {
         }
     }
 
+    @Test func responseRouterTokenFailureCannotFailReplacementRegistration() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = JSONRPCResponseRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+
+        let displaced = router.registerRequestPending(idKey: "1", on: eventLoop)
+        let replacement = router.registerRequestPending(idKey: "1", on: eventLoop)
+
+        #expect(
+            router.failPending(
+                token: displaced.token,
+                error: ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology
+            ) == false
+        )
+        let response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
+        router.handleIncoming(Data(response.utf8))
+        eventLoop.run()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await displaced.future.get()
+        }
+        let buffer = try await replacement.future.get()
+        #expect(bufferString(buffer) == response)
+    }
+
     @Test func responseRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {
         let eventLoop = EmbeddedEventLoop()
         let router = JSONRPCResponseRouter(

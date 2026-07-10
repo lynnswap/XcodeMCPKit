@@ -177,6 +177,101 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(alreadyAccountedPort.timeouts().isEmpty)
         #expect(alreadyAccountedPort.removals().map(\.requestIDKey) == ["1"])
     }
+
+    @Test func rejectedSendRollsBackMappingWithPreparedOperationLease() throws {
+        let port = RecordingUpstreamRuntimePort(
+            chosenUpstreamIndex: 1,
+            acceptsSend: false
+        )
+        let runtime = ProxyUpstreamRequestRuntime(port: port)
+        let requestData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": "client-stale",
+                "method": "tools/list",
+            ],
+            options: []
+        )
+        let parsed = try JSONSerialization.jsonObject(with: requestData, options: [])
+        let prepared = try #require(
+            try runtime.prepareRequest(
+                bodyData: requestData,
+                parsedRequestJSON: parsed,
+                sessionID: "session-stale"
+            )
+        )
+        let router = JSONRPCResponseRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+
+        #expect(throws: ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology) {
+            _ = try runtime.startRequest(
+                prepared,
+                router: router,
+                on: EmbeddedEventLoop(),
+                requestTimeout: nil
+            )
+        }
+
+        let removals = port.removals()
+        #expect(removals.count == 1)
+        let removal = try #require(removals.first)
+        #expect(removal.sessionID == "session-stale")
+        #expect(removal.requestIDKey == "client-stale")
+        #expect(removal.upstreamIndex == prepared.upstreamIndex)
+        #expect(removal.proof == prepared.operationLease.proof)
+    }
+
+    @Test func asynchronouslyRejectedSendFailsExactRegistrationAndRollsBackMapping()
+        async throws
+    {
+        let port = RecordingUpstreamRuntimePort(
+            chosenUpstreamIndex: 1,
+            defersRejection: true
+        )
+        let runtime = ProxyUpstreamRequestRuntime(port: port)
+        let requestData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": "client-async-stale",
+                "method": "tools/list",
+            ],
+            options: []
+        )
+        let parsed = try JSONSerialization.jsonObject(with: requestData, options: [])
+        let prepared = try #require(
+            try runtime.prepareRequest(
+                bodyData: requestData,
+                parsedRequestJSON: parsed,
+                sessionID: "session-async-stale"
+            )
+        )
+        let eventLoop = EmbeddedEventLoop()
+        let router = JSONRPCResponseRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+        let started = try runtime.startRequest(
+            prepared,
+            router: router,
+            on: eventLoop,
+            requestTimeout: nil
+        )
+
+        port.rejectDeferredSend()
+        eventLoop.run()
+
+        await #expect(throws: ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology) {
+            _ = try await started.future.get()
+        }
+        let removal = try #require(port.removals().first)
+        #expect(removal.sessionID == "session-async-stale")
+        #expect(removal.requestIDKey == "client-async-stale")
+        #expect(removal.proof == prepared.operationLease.proof)
+    }
 }
 
 private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePort {
@@ -203,10 +298,14 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
         let sessionID: String
         let requestIDKey: String
         let upstreamIndex: Int
+        let proof: UpstreamTopologyProof
     }
 
     private struct State: Sendable {
         var chosenUpstreamIndex: Int?
+        var acceptsSend: Bool
+        var defersRejection: Bool
+        var deferredRejection: (@Sendable () -> Void)?
         var nextID: Int64 = 100
         var assignments: [Assignment] = []
         var activations: [Activation] = []
@@ -219,8 +318,16 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
     private let state: NIOLockedValueBox<State>
     private let topology: UpstreamTopologyAuthority
 
-    init(chosenUpstreamIndex: Int?) {
-        self.state = NIOLockedValueBox(State(chosenUpstreamIndex: chosenUpstreamIndex))
+    init(
+        chosenUpstreamIndex: Int?,
+        acceptsSend: Bool = true,
+        defersRejection: Bool = false
+    ) {
+        self.state = NIOLockedValueBox(State(
+            chosenUpstreamIndex: chosenUpstreamIndex,
+            acceptsSend: acceptsSend,
+            defersRejection: defersRejection
+        ))
         let count = chosenUpstreamIndex.map { max(1, $0 + 1) } ?? 0
         self.topology = UpstreamTopologyAuthority(
             (0..<count).map { _ in TestOperationSlot() as any UpstreamSlotControlling }
@@ -264,7 +371,8 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
                 RequestEvent(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: operationLease.upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex,
+                    proof: operationLease.proof
                 )
             )
         }
@@ -280,7 +388,8 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
                 RequestEvent(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: operationLease.upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex,
+                    proof: operationLease.proof
                 )
             )
         }
@@ -296,7 +405,8 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
                 RequestEvent(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: operationLease.upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex,
+                    proof: operationLease.proof
                 )
             )
         }
@@ -307,9 +417,9 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission _: RouteForwardingAdmission?,
-        onRejected _: @escaping @Sendable () -> Void
+        onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
-        state.withLockedValue { state in
+        let acceptsSend = state.withLockedValue { state in
             state.sentRequests.append(
                 SentRequest(
                     data: data,
@@ -317,8 +427,24 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
                     ensureRunning: ensureRunning
                 )
             )
+            if state.acceptsSend, state.defersRejection {
+                state.deferredRejection = onRejected
+            }
+            return state.acceptsSend
         }
-        return true
+        if acceptsSend == false {
+            onRejected()
+        }
+        return acceptsSend
+    }
+
+    func rejectDeferredSend() {
+        let rejection = state.withLockedValue { state in
+            let rejection = state.deferredRejection
+            state.deferredRejection = nil
+            return rejection
+        }
+        rejection?()
     }
 
     func activateRequestLease(

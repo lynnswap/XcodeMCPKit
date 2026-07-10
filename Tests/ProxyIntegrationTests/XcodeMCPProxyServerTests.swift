@@ -350,6 +350,7 @@ struct XcodeMCPProxyServerTests {
 
     @Test func startedServerDeinitSynchronouslyCancelsRuntimeRetainTasks() async throws {
         let runtimeReference = WeakRuntimeReference()
+        let eventLoopGroup = NIOLockedValueBox<MultiThreadedEventLoopGroup?>(nil)
         let upstream = RecordingUpstreamSlot()
         var server: XcodeMCPProxyServer? = XcodeMCPProxyServer(
             configuration: .init(
@@ -358,6 +359,11 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
+                makeEventLoopGroup: {
+                    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+                    eventLoopGroup.withLockedValue { $0 = group }
+                    return group
+                },
                 makeAutoApprover: { _ in RecordingAutoApprover() },
                 makeRuntimeCoordinator: { config, eventLoop in
                     let runtime = RuntimeCoordinator(
@@ -380,6 +386,10 @@ struct XcodeMCPProxyServerTests {
             await Task.yield()
         }
         #expect(runtimeReference.value == nil)
+
+        // This test deliberately omits the server's explicit shutdown contract.
+        // The injected event-loop group therefore remains a test-owned resource.
+        try await shutdown(try #require(eventLoopGroup.withLockedValue { $0 }))
     }
 
     @Test func explicitConfigurationReadFailurePrecedesResourceAcquisition() async throws {

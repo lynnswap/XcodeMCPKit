@@ -365,12 +365,18 @@ final class ClientMCPRequestExecutor: Sendable {
                         return eventLoop.makeFailedFuture(error)
                     }
                     cancellationHandle.markCompleted()
+                    let releaseReason: LeaseManager.ReleaseReason
+                    if error is UpstreamSlotScheduler.AcquisitionError {
+                        releaseReason = .upstreamUnavailable
+                    } else if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
+                        releaseReason = .upstreamUnavailable
+                    } else {
+                        releaseReason = .upstreamOverloaded
+                    }
                     self.sessionManager.failRequestLease(
                         leaseID,
                         terminalState: .failed,
-                        reason: error is UpstreamSlotScheduler.AcquisitionError
-                            ? .upstreamUnavailable
-                            : .upstreamOverloaded
+                        reason: releaseReason
                     )
                     return eventLoop.makeSucceededFuture(
                         Self.makeUpstreamUnavailableResolution(

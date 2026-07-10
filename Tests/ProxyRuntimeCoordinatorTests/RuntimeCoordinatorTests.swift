@@ -1661,7 +1661,10 @@ struct RuntimeCoordinatorTests {
         let relaunchedUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
         let initialize = try await relaunchedUpstream.nextSent(at: 0)
         await relaunchedUpstream.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+            .message(try makeInitializeResponse(
+                id: try extractUpstreamID(from: initialize),
+                serverName: "cached-source"
+            ))
         )
         _ = try await relaunchedUpstream.nextSent(at: 1)
         let emptyCatalogRequest = try await relaunchedUpstream.nextSent(
@@ -1781,7 +1784,7 @@ struct RuntimeCoordinatorTests {
                 "capabilities": [String: Any](),
                 "serverInfo": ["name": "cached-source"],
             ]),
-            sourceUpstream: 0
+            sourceUpstream: 1
         )
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
@@ -1817,7 +1820,10 @@ struct RuntimeCoordinatorTests {
             try await firstAttempt.nextSent(at: 0)
         }
         await firstAttempt.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+            .message(try makeInitializeResponse(
+                id: try extractUpstreamID(from: initialize),
+                serverName: "cached-source"
+            ))
         )
         _ = try await waitWithTimeout(
             "waiting for relaunched 26 initialized notification",
@@ -1880,7 +1886,10 @@ struct RuntimeCoordinatorTests {
             try await retryAttempt.nextSent(at: 0)
         }
         await retryAttempt.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
+            .message(try makeInitializeResponse(
+                id: try extractUpstreamID(from: retryInitialize),
+                serverName: "cached-source"
+            ))
         )
         _ = try await waitWithTimeout(
             "waiting for relaunched 26 retry initialized notification",
@@ -2059,7 +2068,8 @@ struct RuntimeCoordinatorTests {
         await manager.drainRuntimeTasksForTesting()
 
         #expect(manager.testStateSnapshot().hasInitResult)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized)
+        #expect(manager.testStateSnapshot().upstreams.count == 1)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
     }
 
@@ -2094,7 +2104,7 @@ struct RuntimeCoordinatorTests {
         manager.startUpstreamWarmInitialize(upstreamIndex: 1)
         let warmInitialize = try await activeUpstream.nextSent(at: 0)
         let warmUpstreamID = try extractUpstreamID(from: warmInitialize)
-        #expect(manager.testStateSnapshot().upstreams[1].initInFlight)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.initInFlight == true)
 
         manager.reconcileXcodeProcessTargets(
             [activeTarget],
@@ -2125,7 +2135,8 @@ struct RuntimeCoordinatorTests {
         await manager.drainRuntimeTasksForTesting()
 
         #expect(manager.testStateSnapshot().hasInitResult)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized)
+        #expect(manager.testStateSnapshot().upstreams.count == 1)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
     }
 
@@ -2223,6 +2234,7 @@ struct RuntimeCoordinatorTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let initializedUpstreams = LockedRecordedValues<Int>()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
         let fixture = RuntimeCoordinatorFixture(
@@ -2231,6 +2243,11 @@ struct RuntimeCoordinatorTests {
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
             ],
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamInitialized: { upstreamIndex in
                     initializedUpstreams.append(upstreamIndex)
@@ -2252,13 +2269,18 @@ struct RuntimeCoordinatorTests {
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil)
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized != true)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
 
-        let recoveryInitialize = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
+        let recoveryUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let recoveryInitialize = try await sentValue(
+            from: recoveryUpstream,
+            at: 0,
+            timeout: .seconds(2)
+        )
         let recoveryUpstreamID = try extractUpstreamID(from: recoveryInitialize)
-        await upstream0.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
-        _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        await recoveryUpstream.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
+        _ = try await sentValue(from: recoveryUpstream, at: 1, timeout: .seconds(2))
         let expectedCandidateProcessIDs = Set([
             newerTarget.processID,
             olderTarget.processID,
@@ -2269,7 +2291,7 @@ struct RuntimeCoordinatorTests {
             try await initializedUpstreams.nextValue(at: 1)
         }
         #expect(recoveredUpstreamIndex == 0)
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == true)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == true)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
         #expect(manager.documentationCandidateProcessIDs() == expectedCandidateProcessIDs)
     }
@@ -2288,6 +2310,7 @@ struct RuntimeCoordinatorTests {
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
             ],
+            dynamicUpstreamFactory: { _ in [TestUpstreamClient()] },
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) }
             ),
@@ -2341,6 +2364,7 @@ struct RuntimeCoordinatorTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
             ],
+            dynamicUpstreamFactory: { _ in [TestUpstreamClient()] },
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2357,8 +2381,8 @@ struct RuntimeCoordinatorTests {
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil)
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized != true)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
         #expect(manager.documentationCandidateProcessIDs() == Set([target.processID]))
     }
 
@@ -2400,7 +2424,7 @@ struct RuntimeCoordinatorTests {
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
     }
 
     @Test func sessionManagerRetriesProcessPrimaryInitializeWhenSendIsUnavailable()
@@ -2430,8 +2454,8 @@ struct RuntimeCoordinatorTests {
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil)
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == true)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized != true)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
     }
 
     @Test func sessionManagerMarksPrimaryUsableBeforeInitializeReturns() async throws {
@@ -2814,8 +2838,20 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
+        let replacementUpstreams = NIOLockedValueBox<[ToggleableOverloadUpstreamClient]>([])
+        let target = xcodeProcessTarget(processID: 27130, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [0])],
+            dynamicUpstreamFactory: { _ in
+                let replacement = ToggleableOverloadUpstreamClient()
+                replacementUpstreams.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            }
+        )
         defer { manager.shutdownAndWait() }
 
         let future = manager.registerInitialize(
@@ -2829,11 +2865,23 @@ struct RuntimeCoordinatorTests {
         await upstream.overloadNextInitializedNotificationSend()
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let retriedInitialize = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        let replacement = try await waitWithTimeout("waiting for initialize replacement") {
+            while true {
+                if let replacement = replacementUpstreams.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let retriedInitialize = try await sentValue(
+            from: replacement,
+            at: 0,
+            timeout: .seconds(2)
+        )
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
-        await upstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+        await replacement.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
 
         _ = try await future.get()
     }
@@ -2845,13 +2893,21 @@ struct RuntimeCoordinatorTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
+        let replacementUpstreams = NIOLockedValueBox<[ToggleableOverloadUpstreamClient]>([])
+        let target = xcodeProcessTarget(processID: 27131, xcodeVersion: "27.0")
         let timeoutClock = TestClock()
         let config = makeConfig(requestTimeout: 0.3)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock)
+            scheduleRuntimeTimeout: makeDeterministicRuntimeTimeoutScheduler(clock: timeoutClock),
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [0])],
+            dynamicUpstreamFactory: { _ in
+                let replacement = ToggleableOverloadUpstreamClient()
+                replacementUpstreams.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            }
         )
         defer { manager.shutdownAndWait() }
 
@@ -2871,14 +2927,25 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let retriedInitialize = try #require(await upstream.sentValue(at: 2))
+        let replacement = try await waitWithTimeout("waiting for timed initialize replacement") {
+            while true {
+                if let replacement = replacementUpstreams.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let retriedInitialize = try await sentValue(
+            from: replacement,
+            at: 0,
+            timeout: .seconds(2)
+        )
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
         try await waitForSuspendedSleepers(on: timeoutClock)
         timeoutClock.advance(by: .milliseconds(180))
-        await upstream.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
-        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
+        await replacement.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+        try await waitForSentCount(replacement, count: 2, timeoutSeconds: 2)
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil, "initializeResponse=\(response)")
@@ -3084,11 +3151,23 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let replacementUpstreams = NIOLockedValueBox<[ToggleableOverloadUpstreamClient]>([])
+        let primaryTarget = xcodeProcessTarget(processID: 27132, xcodeVersion: "27.0")
+        let secondaryTarget = xcodeProcessTarget(processID: 26632, xcodeVersion: "26.6")
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: primaryTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: secondaryTarget, upstreamIndices: [1]),
+            ],
+            dynamicUpstreamFactory: { _ in
+                let replacement = ToggleableOverloadUpstreamClient()
+                replacementUpstreams.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            }
         )
         defer { manager.shutdownAndWait() }
 
@@ -3103,11 +3182,23 @@ struct RuntimeCoordinatorTests {
         await upstream0.overloadNextInitializedNotificationSend()
         await upstream0.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
-        let retriedInitialize = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+        let replacement = try await waitWithTimeout("waiting for primary warmup replacement") {
+            while true {
+                if let replacement = replacementUpstreams.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let retriedInitialize = try await sentValue(
+            from: replacement,
+            at: 0,
+            timeout: .seconds(2)
+        )
         let retriedUpstreamID = try extractUpstreamID(from: retriedInitialize)
 
-        await upstream0.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
+        await replacement.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
 
         let response = try decodeJSON(from: try await future.get())
         #expect(response["result"] != nil, "initializeResponse=\(response)")
@@ -3124,11 +3215,19 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = ToggleableOverloadUpstreamClient()
+        let replacementUpstreams = NIOLockedValueBox<[ToggleableOverloadUpstreamClient]>([])
+        let target = xcodeProcessTarget(processID: 27133, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [0, 1])],
+            dynamicUpstreamFactory: { _ in
+                let replacement = ToggleableOverloadUpstreamClient()
+                replacementUpstreams.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            }
         )
         defer { manager.shutdownAndWait() }
 
@@ -3147,10 +3246,22 @@ struct RuntimeCoordinatorTests {
         await upstream1.overloadNextInitializedNotificationSend()
         await upstream1.yield(.message(try makeInitializeResponse(id: firstWarmUpstreamID)))
 
-        try await waitForSentCount(upstream1, count: 3, timeoutSeconds: 2)
+        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
         let rejectedInitialized = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
         #expect(methodName(from: rejectedInitialized) == "notifications/initialized")
-        let retriedWarmInitialize = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        let replacement = try await waitWithTimeout("waiting for secondary warm replacement") {
+            while true {
+                if let replacement = replacementUpstreams.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let retriedWarmInitialize = try await sentValue(
+            from: replacement,
+            at: 0,
+            timeout: .seconds(2)
+        )
         #expect(methodName(from: retriedWarmInitialize) == "initialize")
     }
 
@@ -3370,7 +3481,7 @@ struct RuntimeCoordinatorTests {
         let snapshot = manager.testStateSnapshot()
         #expect(snapshot.hasInitResult == false)
         #expect(snapshot.initInFlight == false)
-        #expect(snapshot.upstreams[0].isInitialized == false)
+        #expect(snapshot.upstream(id: 0)?.isInitialized == false)
     }
 
     @Test func sessionManagerDoesNotApplyRemovedInitializeStateToRecreatedSession() async throws {
@@ -3427,7 +3538,7 @@ struct RuntimeCoordinatorTests {
         let snapshot = manager.testStateSnapshot()
         #expect(snapshot.hasInitResult == false)
         #expect(snapshot.initInFlight == false)
-        #expect(snapshot.upstreams[0].isInitialized == false)
+        #expect(snapshot.upstream(id: 0)?.isInitialized == false)
     }
 
     @Test func sessionManagerIgnoresRemovedInitializeResponseBeforeUpstreamStateClears() async throws {
@@ -3483,7 +3594,7 @@ struct RuntimeCoordinatorTests {
         let snapshot = manager.testStateSnapshot()
         #expect(snapshot.hasInitResult == false)
         #expect(snapshot.initInFlight == false)
-        #expect(snapshot.upstreams[0].isInitialized == false)
+        #expect(snapshot.upstream(id: 0)?.isInitialized == false)
     }
 
     @Test func sessionManagerCancelsWaiterOwnedPrimaryRetryWhenSessionIsRemoved()
@@ -3540,7 +3651,7 @@ struct RuntimeCoordinatorTests {
         let snapshot = manager.testStateSnapshot()
         #expect(snapshot.hasInitResult == false)
         #expect(snapshot.initInFlight == false)
-        #expect(snapshot.upstreams[0].isInitialized == false)
+        #expect(snapshot.upstream(id: 0)?.isInitialized == false)
     }
 
     @Test func sessionManagerCancelsOnlyRemovedInitializeReadinessWaiter() async throws {
@@ -3859,7 +3970,6 @@ struct RuntimeCoordinatorTests {
             )
         )
         _ = try await nextRecordedValue(upstreamEvents, at: errorEventIndex)
-
         await #expect(throws: CancellationError.self) {
             try await future.get()
         }
@@ -4505,7 +4615,7 @@ struct RuntimeCoordinatorTests {
         }
     }
 
-    @Test func sessionManagerToolsListReturnsAvailableOwnerCatalogWithoutWaitingForFallback()
+    @Test func sessionManagerToolsListWaitsForCompleteCatalogDespiteKnownOwner()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -4561,14 +4671,28 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
+        #expect(manager.cachedToolsListResult() == nil)
+        await olderUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: olderRequest),
+                    tools: [
+                        toolDescriptor(name: "Only26", description: "old-only"),
+                    ]
+                )
+            )
+        )
 
         let result = try await waitWithTimeout("waiting for process-routed tools/list") {
             try await task.value
         }
-        #expect(toolNames(in: result) == ["Only27", "SharedTool"])
+        #expect(Set(toolNames(in: result)) == Set(["Only26", "Only27", "SharedTool"]))
         #expect(toolDescription(in: result, name: "SharedTool") == "from-27")
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
+        #expect(
+            Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
+                == Set(["Only26", "Only27", "SharedTool"])
+        )
         #expect(Set(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 1) ?? .null)) == Set([
             "Only27",
             "SharedTool",
@@ -4577,14 +4701,14 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let catalogs = manager.debugSnapshot().processToolCatalogs
-        #expect(catalogs.count == 1)
+        #expect(catalogs.count == 2)
         let latestCatalog = try #require(catalogs.first { $0.processID == latestTarget.processID })
         #expect(latestCatalog.toolCount == 2)
         #expect(latestCatalog.tabOwnerCount == 1)
         #expect(latestCatalog.workspaceOwnerCount == 1)
-        #expect(latestCatalog.isCanonicalSource == false)
+        #expect(latestCatalog.isCanonicalSource)
         #expect(latestCatalog.exposurePolicy == "available_route_catalog_surface")
-        #expect(latestCatalog.extraBeyondExposedCatalog == [])
+        #expect(latestCatalog.extraBeyondExposedCatalog == ["Only26"])
         #expect(latestCatalog.schemaConflicts == [])
     }
 
@@ -4646,8 +4770,9 @@ struct RuntimeCoordinatorTests {
                 upstreamIndex: 1
             )
         )
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["FallbackOnly"])
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        #expect(manager.cachedToolsListResult() == nil)
 
         let ownerTask = Task {
             try await manager.sharedToolsList(
@@ -4670,12 +4795,7 @@ struct RuntimeCoordinatorTests {
         let ownerResult = try await waitWithTimeout("waiting for owner tools/list") {
             try await ownerTask.value
         }
-        #expect(toolNames(in: ownerResult) == ["FallbackOnly"])
-        _ = try await waitWithTimeout("waiting for owner catalog completion") {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
-            }
-        }
+        #expect(Set(toolNames(in: ownerResult)) == Set(["FallbackOnly", "OwnerOnly"]))
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
             "FallbackOnly",
             "OwnerOnly",
@@ -4684,7 +4804,7 @@ struct RuntimeCoordinatorTests {
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
-    @Test func sessionManagerToolsListReturnsNewerProcessCatalogBeforeStalledOlderRoute()
+    @Test func sessionManagerToolsListWaitsForStalledRouteBeforePublishingCompleteCatalog()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -4729,58 +4849,27 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-
-        let result = try await waitWithTimeout(
-            "waiting for newer route tools/list before older route completes",
-            timeout: .seconds(1)
-        ) {
-            try await task.value
-        }
-        #expect(toolNames(in: result) == ["NewerRouteOnly"])
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 1) ?? .null) == ["NewerRouteOnly"])
         #expect(await olderUpstream.sentCount() == 1)
         #expect(await newerUpstream.sentCount() == 1)
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
-        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
-        #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
-            newerTarget.processID,
-        ])
 
-        let secondResult = try await waitWithTimeout(
-            "waiting for cached partial tools/list while older route refreshes",
-            timeout: .seconds(1)
-        ) {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-refresh-missing-route",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
-        #expect(toolNames(in: secondResult) == ["NewerRouteOnly"])
-
-        let olderRefreshRequest = try await sentValue(from: olderUpstream, at: 1, timeout: .seconds(2))
-        #expect(methodName(from: olderRefreshRequest) == "tools/list")
         await olderUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: olderRefreshRequest),
+                    id: try extractUpstreamID(from: olderRequest),
                     tools: [
                         toolDescriptor(name: "OlderRouteOnly"),
                     ]
                 )
             )
         )
-        _ = try await waitWithTimeout("waiting for completed process catalog cache") {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
-            }
+        let result = try await waitWithTimeout("waiting for complete process catalog") {
+            try await task.value
         }
-        let fullResult = try await manager.sharedToolsList(
-            sessionID: "session-process-catalog-after-missing-route-refresh",
-            requestTimeoutOverride: .seconds(5)
-        )
-        #expect(Set(toolNames(in: fullResult)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
+        #expect(Set(toolNames(in: result)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
 
@@ -4852,16 +4941,15 @@ struct RuntimeCoordinatorTests {
             try await task.value
         }
 
-        #expect(toolNames(in: result) == ["OlderRouteOnly"])
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(Set(toolNames(in: result)) == Set([
+            "LatestRouteOnly",
+            "MiddleRouteOnly",
+            "OlderRouteOnly",
+        ]))
+        #expect(manager.cachedToolsListResult() != nil)
         #expect(await olderUpstream.sentCount() == 0)
         #expect(await middleUpstream.sentCount() == 1)
         #expect(await latestUpstream.sentCount() == 1)
-        _ = try await waitWithTimeout("waiting for completed process catalog cache") {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 2
-            }
-        }
         #expect(Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set([
             "LatestRouteOnly",
             "MiddleRouteOnly",
@@ -4903,11 +4991,6 @@ struct RuntimeCoordinatorTests {
             entries: [
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")]),
             ]
-        )
-        manager.invalidateControlPlane(
-            reason: "test_cached_process_catalog_fresh_route_fails",
-            clearInitialize: false,
-            clearToolsCatalog: true
         )
 
         let task = Task {
@@ -4989,6 +5072,11 @@ struct RuntimeCoordinatorTests {
             nowUptimeNs: uptimeClock.now(),
             reason: "test_catalog_failure"
         )
+        _ = manager.beginProcessRouteAttachingForTesting(
+            processID: target.processID,
+            upstreamIndex: 0,
+            nowUptimeNs: uptimeClock.now()
+        )
         manager.refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "test_before_quarantine_expired",
             processIDs: [target.processID]
@@ -5043,7 +5131,7 @@ struct RuntimeCoordinatorTests {
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RecoveredRouteOnly"])
     }
 
-    @Test func sessionManagerToolsListReturnsCachedProcessCatalogWhileFreshRouteRefreshIsPending()
+    @Test func sessionManagerToolsListWaitsWhileCachedProcessCatalogIsIncomplete()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -5080,11 +5168,6 @@ struct RuntimeCoordinatorTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")]),
             ]
         )
-        manager.invalidateControlPlane(
-            reason: "test_cached_process_catalog_fresh_route_cancelled",
-            clearInitialize: false,
-            clearToolsCatalog: true
-        )
 
         let task = Task {
             try await manager.sharedToolsList(
@@ -5095,11 +5178,6 @@ struct RuntimeCoordinatorTests {
 
         let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
-
-        let result = try await waitWithTimeout("waiting for cached process catalog fallback") {
-            try await task.value
-        }
-        #expect(toolNames(in: result) == ["OlderRouteOnly"])
         #expect(await olderUpstream.sentCount() == 0)
         #expect(await latestUpstream.sentCount() == 1)
         #expect(manager.cachedToolsListResult() == nil)
@@ -5117,11 +5195,18 @@ struct RuntimeCoordinatorTests {
                 )
             )
         )
-        await manager.drainRuntimeTasksForTesting()
+        let result = try await waitWithTimeout("waiting for complete process catalog") {
+            try await task.value
+        }
+        #expect(Set(toolNames(in: result)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
+        #expect(
+            Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
+                == Set(["LatestRouteOnly", "OlderRouteOnly"])
+        )
         #expect(toolsListRefreshes.withLockedValue { $0 } == ["1:true"])
     }
 
-    @Test func sessionManagerIgnoresEmptyProcessToolsCatalogWhenExistingSurfaceIsNonEmpty()
+    @Test func sessionManagerEmptyProcessCatalogPreservesExistingCatalogButInvalidatesIncompleteSurface()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -5183,9 +5268,7 @@ struct RuntimeCoordinatorTests {
         )
         await manager.drainRuntimeTasksForTesting()
 
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
-            "ExistingOnlyTool",
-        ])
+        #expect(manager.cachedToolsListResult() == nil)
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
                 == [existingTarget.processID]
@@ -5197,7 +5280,8 @@ struct RuntimeCoordinatorTests {
                 nowUptimeNs: manager.nowUptimeNanoseconds()
             ).contains(emptyTarget.processID)
         )
-        guard case .healthy = manager.testStateSnapshot().upstreams[1].healthState else {
+        guard let upstream = manager.testStateSnapshot().upstream(id: 1),
+              case .healthy = upstream.healthState else {
             Issue.record("empty process catalog should leave upstream health usable")
             return
         }
@@ -5334,13 +5418,14 @@ struct RuntimeCoordinatorTests {
             timeoutScheduler.delay(at: 0)?.nanoseconds
                 == TimeAmount.milliseconds(250).nanoseconds
         )
-        guard case .healthy = manager.testStateSnapshot().upstreams[0].healthState else {
+        guard let upstream = manager.testStateSnapshot().upstream(id: 0),
+              case .healthy = upstream.healthState else {
             Issue.record("empty process catalog should not quarantine the upstream")
             return
         }
     }
 
-    @Test func sessionManagerCancelsMissingProcessCatalogRetryOnDebugReset()
+    @Test func sessionManagerCancelsCatalogRetryButPreservesMissingRouteOnDebugReset()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -5401,12 +5486,12 @@ struct RuntimeCoordinatorTests {
         #expect(
             manager.processControlPlane.pendingCatalogProcessIDs(
                 nowUptimeNs: manager.nowUptimeNanoseconds()
-            ).isEmpty
+            ) == [target.processID]
         )
         #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
     }
 
-    @Test func sessionManagerReplacesStaleMissingProcessCatalogRetryAfterGenerationChange()
+    @Test func sessionManagerCancelsStaleCatalogRetryAndKeepsMonotonicAttemptBackoff()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -5483,7 +5568,7 @@ struct RuntimeCoordinatorTests {
         #expect(timeoutScheduler.isCancelled(at: 1) == false)
         #expect(
             timeoutScheduler.delay(at: 1)?.nanoseconds
-                == TimeAmount.milliseconds(250).nanoseconds
+                == TimeAmount.milliseconds(500).nanoseconds
         )
         #expect(timeoutScheduler.fire(at: 1))
 
@@ -6081,7 +6166,8 @@ struct RuntimeCoordinatorTests {
             [remainingTarget],
             reason: "test_process_route_retired"
         )
-        _ = try await retiredUpstream.nextStopCount()
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await retiredUpstream.stopCount() == 1)
 
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
             "RemainingOnlyTool",
@@ -6132,19 +6218,23 @@ struct RuntimeCoordinatorTests {
                 (target, 0, [toolDescriptor(name: "RetiredOnlyTool")]),
             ]
         )
-        let generationBeforeRetire = manager.processControlPlane.currentCatalogEpoch()
+        _ = session.router.drainBufferedNotifications()
+        let exposureBeforeRetire = manager.processControlPlane.currentExposureEpoch()
+        let catalogEpochBeforeRetire = manager.processControlPlane.currentCatalogEpoch()
 
         manager.reconcileXcodeProcessTargets(
             [],
             reason: "test_cataloged_process_route_retired_once"
         )
-        _ = try await upstream.nextStopCount()
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream.stopCount() == 1)
 
         let notificationMethods = session.router.drainBufferedNotifications().compactMap {
             methodName(from: $0)
         }
         #expect(notificationMethods == ["notifications/tools/list_changed"])
-        #expect(manager.processControlPlane.currentCatalogEpoch() != generationBeforeRetire)
+        #expect(manager.processControlPlane.currentExposureEpoch() != exposureBeforeRetire)
+        #expect(manager.processControlPlane.currentCatalogEpoch() == catalogEpochBeforeRetire)
         #expect(manager.cachedToolsListResult() == nil)
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
     }
@@ -6181,15 +6271,18 @@ struct RuntimeCoordinatorTests {
                 (target, 0, [toolDescriptor(name: "ClearedOnlyTool")]),
             ]
         )
-        let generationBeforeClear = manager.processControlPlane.currentCatalogEpoch()
+        _ = session.router.drainBufferedNotifications()
+        let exposureBeforeClear = manager.processControlPlane.currentExposureEpoch()
+        let catalogEpochBeforeClear = manager.processControlPlane.currentCatalogEpoch()
 
         #expect(manager.clearUpstreamState(upstreamIndex: 0))
-        let generationAfterClear = manager.processControlPlane.currentCatalogEpoch()
+        let exposureAfterClear = manager.processControlPlane.currentExposureEpoch()
         let notificationsAfterClear = session.router.drainBufferedNotifications().compactMap {
             methodName(from: $0)
         }
         #expect(notificationsAfterClear == ["notifications/tools/list_changed"])
-        #expect(generationAfterClear != generationBeforeClear)
+        #expect(exposureAfterClear != exposureBeforeClear)
+        #expect(manager.processControlPlane.currentCatalogEpoch() == catalogEpochBeforeClear)
         #expect(manager.cachedToolsListResult() == nil)
 
         manager.markXcodeProcessRouteUnavailable(
@@ -6198,7 +6291,6 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(session.router.drainBufferedNotifications().isEmpty)
-        #expect(manager.processControlPlane.currentCatalogEpoch() == generationAfterClear)
         #expect(manager.cachedToolsListResult() == nil)
     }
 
@@ -6234,19 +6326,22 @@ struct RuntimeCoordinatorTests {
                 (target, 0, [toolDescriptor(name: "UnavailableOnlyTool")]),
             ]
         )
-        let generationBeforeUnavailable = manager.processControlPlane.currentCatalogEpoch()
+        _ = session.router.drainBufferedNotifications()
+        let exposureBeforeUnavailable = manager.processControlPlane.currentExposureEpoch()
+        let catalogEpochBeforeUnavailable = manager.processControlPlane.currentCatalogEpoch()
 
         manager.markXcodeProcessRouteUnavailable(
             upstreamIndex: 0,
             reason: "test_first_unavailable"
         )
-        let generationAfterUnavailable = manager.processControlPlane.currentCatalogEpoch()
+        let exposureAfterUnavailable = manager.processControlPlane.currentExposureEpoch()
         let notificationsAfterUnavailable =
             session.router.drainBufferedNotifications().compactMap {
                 methodName(from: $0)
-            }
+        }
         #expect(notificationsAfterUnavailable == ["notifications/tools/list_changed"])
-        #expect(generationAfterUnavailable != generationBeforeUnavailable)
+        #expect(exposureAfterUnavailable != exposureBeforeUnavailable)
+        #expect(manager.processControlPlane.currentCatalogEpoch() == catalogEpochBeforeUnavailable)
         #expect(manager.cachedToolsListResult() == nil)
 
         manager.markXcodeProcessRouteUnavailable(
@@ -6255,7 +6350,6 @@ struct RuntimeCoordinatorTests {
         )
 
         #expect(session.router.drainBufferedNotifications().isEmpty)
-        #expect(manager.processControlPlane.currentCatalogEpoch() == generationAfterUnavailable)
         #expect(manager.cachedToolsListResult() == nil)
     }
 
@@ -6294,7 +6388,8 @@ struct RuntimeCoordinatorTests {
             [remainingTarget],
             reason: "test_uncataloged_process_route_retired"
         )
-        _ = try await uncatalogedUpstream.nextStopCount()
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await uncatalogedUpstream.stopCount() == 1)
 
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == [
             "RemainingOnlyTool",
@@ -6307,7 +6402,7 @@ struct RuntimeCoordinatorTests {
     }
 
 
-    @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUpstreamStateClears()
+    @Test func sessionManagerToolsListResyncsSurfaceAndRetainsCatalogWhenUpstreamStateClears()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -6344,7 +6439,7 @@ struct RuntimeCoordinatorTests {
         ])
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
-                == [remainingTarget.processID]
+                == [clearedTarget.processID, remainingTarget.processID]
         )
         #expect(manager.processControlPlane.canonicalSourceUpstream() == 1)
     }
@@ -6444,12 +6539,27 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().processToolCatalogs.map(\.processID) == [warmTarget.processID])
 
         manager.markUpstreamInitialized(upstreamIndex: 0)
-        let cached = try await manager.sharedToolsList(
-            sessionID: "session-process-catalog-after-cold-warms",
-            requestTimeoutOverride: .seconds(5)
+        #expect(manager.cachedToolsListResult() == nil)
+        let completeTask = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-after-cold-warms",
+                requestTimeoutOverride: .seconds(5)
+            )
+        }
+        let coldRequest = try await sentValue(from: coldUpstream, at: 0, timeout: .seconds(2))
+        await coldUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: coldRequest),
+                    tools: [toolDescriptor(name: "ColdOnlyTool")]
+                )
+            )
         )
-        #expect(toolNames(in: cached) == ["WarmOnlyTool"])
-        #expect(await coldUpstream.sentCount() == 0)
+        let complete = try await waitWithTimeout("waiting for newly warm process catalog") {
+            try await completeTask.value
+        }
+        #expect(Set(toolNames(in: complete)) == Set(["ColdOnlyTool", "WarmOnlyTool"]))
+        #expect(await coldUpstream.sentCount() == 1)
         #expect(await warmUpstream.sentCount() == 1)
     }
 
@@ -6713,27 +6823,37 @@ struct RuntimeCoordinatorTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target0, upstreamIndices: [0]),
                 XcodeProcessRoute(target: target1, upstreamIndices: [1]),
-            ]
+            ],
+            startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
 
-        let initFuture = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
-        )
-        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
-        await upstream0.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init0)))
-        )
-        _ = try await initFuture.get()
-        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
-
-        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
-        await upstream1.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init1)))
-        )
-        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        func nextWindowsRequest(
+            from upstream: TestUpstreamClient,
+            startingAt startIndex: Int
+        ) async throws -> Data {
+            for index in startIndex..<(startIndex + 3) {
+                let request = try await sentValue(
+                    from: upstream,
+                    at: index,
+                    timeout: .seconds(2)
+                )
+                if methodName(from: request) == "tools/list" {
+                    await upstream.yield(
+                        .message(
+                            try makeDocumentationToolsListResponse(
+                                id: try extractUpstreamID(from: request),
+                                tools: [toolDescriptor(name: "XcodeRead")]
+                            )
+                        )
+                    )
+                    continue
+                }
+                return request
+            }
+            throw TimeoutError()
+        }
 
         let task = Task {
             try await manager.liveXcodeListWindowsResult(
@@ -6742,12 +6862,12 @@ struct RuntimeCoordinatorTests {
             )
         }
 
-        let request0 = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        let request0 = try await nextWindowsRequest(from: upstream0, startingAt: 0)
         #expect(methodName(from: request0) == "tools/call")
         #expect(toolCallName(from: request0) == "XcodeListWindows")
         let message0 = "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace"
 
-        let request1 = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        let request1 = try await nextWindowsRequest(from: upstream1, startingAt: 0)
         #expect(methodName(from: request1) == "tools/call")
         #expect(toolCallName(from: request1) == "XcodeListWindows")
         let message1 = "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace"
@@ -6853,6 +6973,7 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: workspaceBRequest) == 1)
         #expect(manager.preferredUpstreamIndex(for: genericTabARequest) == nil)
         #expect(manager.preferredUpstreamIndex(for: genericWorkspaceBRequest) == nil)
+        await manager.shutdown()
     }
 
     @Test func sessionManagerXcodeListWindowsRetriesSiblingBeforeDroppingProcessRoute()
@@ -8394,7 +8515,7 @@ struct RuntimeCoordinatorTests {
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
             eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            upstreams: [TestUpstreamClient(), TestUpstreamClient(), TestUpstreamClient()],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target0, upstreamIndices: [0]),
                 XcodeProcessRoute(target: target1, upstreamIndices: [1]),
@@ -8410,7 +8531,7 @@ struct RuntimeCoordinatorTests {
                     ownerBoundToolDescriptor(name: "BuildProject"),
                 ],
             ]),
-            sourceUpstream: 0
+            sourceUpstream: 2
         )
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
         #expect(
@@ -8622,7 +8743,7 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
-    @Test func sessionManagerProcessCatalogRepointsCanonicalSourceWhenSourceSlotExits()
+    @Test func sessionManagerProcessCatalogRebindsSourceAndSurvivesLastSlotExit()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -8660,7 +8781,9 @@ struct RuntimeCoordinatorTests {
 
         snapshot = manager.debugSnapshot()
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(snapshot.processToolCatalogs.isEmpty)
+        let retainedCatalog = try #require(snapshot.processToolCatalogs.first)
+        #expect(retainedCatalog.upstreamIndex == 1)
+        #expect(retainedCatalog.isCanonicalSource == false)
     }
 
     @Test func nonOwnerUnionToolRoutesToCatalogOwnerProcess() async throws {
@@ -10319,7 +10442,7 @@ struct RuntimeCoordinatorTests {
         await upstream.yield(.exit(1))
 
         let reinitRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
-        #expect(manager.testStateSnapshot().upstreams[0].initInFlight)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.initInFlight == true)
         #expect(manager.debugSnapshot().queuedRequestCount == 1)
         let reinitUpstreamID = try extractUpstreamID(from: reinitRequest)
         await upstream.yield(.message(try makeInitializeResponse(id: reinitUpstreamID)))
@@ -10382,7 +10505,12 @@ struct RuntimeCoordinatorTests {
             at: primaryExitEventIndex,
             description: "waiting for primary upstream exit"
         )
-        #expect(manager.testStateSnapshot().upstreams[0].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == false)
+        let primaryRecoveryInitialize = try await sentValue(
+            from: upstream0,
+            at: 2,
+            timeout: .seconds(2)
+        )
 
         // Now simulate the last initialized upstream dying too.
         let secondaryExitEventIndex = upstreamEvents.count()
@@ -10392,23 +10520,21 @@ struct RuntimeCoordinatorTests {
             at: secondaryExitEventIndex,
             description: "waiting for secondary upstream exit"
         )
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == false)
 
         // Ensure the cached init result is cleared before asserting that a new downstream initialize
         // triggers a fresh upstream initialize. This avoids race/flakiness where the exit event hasn't
         // been processed yet on the event loop.
         #expect(manager.testStateSnapshot().hasInitResult == false)
 
-        // A new downstream initialize must trigger a new upstream initialize (no cached response).
+        // A new downstream initialize joins the already in-flight primary recovery initialize.
         let init2 = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 2))!,
             requestObject: makeInitializeRequest(id: 2),
             on: eventLoop
         )
-        try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
-        let secondInitialize = (await upstream0.sent())[3]
-        #expect(methodName(from: secondInitialize) == "initialize")
-        let upstreamID2 = try extractUpstreamID(from: secondInitialize)
+        #expect(await upstream0.sentCount() == 3)
+        let upstreamID2 = try extractUpstreamID(from: primaryRecoveryInitialize)
         await upstream0.yield(.message(try makeInitializeResponse(id: upstreamID2)))
         _ = try await init2.get()
     }
@@ -10452,7 +10578,7 @@ struct RuntimeCoordinatorTests {
         let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
         let init1ID = try extractUpstreamID(from: init1)
         await upstream1.yield(
-            .message(try makeInitializeResponse(id: init1ID, serverName: "secondary-ready"))
+            .message(try makeInitializeResponse(id: init1ID, serverName: "cached-handshake"))
         )
 
         // Wait for per-upstream notifications/initialized.
@@ -10468,26 +10594,9 @@ struct RuntimeCoordinatorTests {
         // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
         await upstream0.yield(.exit(1))
 
-        // Primary warm init should be attempted, but we simulate it failing.
-        let retry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        let retryID = try extractUpstreamID(from: retry)
-        let errorResponse: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": retryID,
-            "error": [
-                "code": -1,
-                "message": "warm init failed",
-            ],
-        ]
-        let errorEventIndex = upstreamEvents.count()
-        await upstream0.yield(
-            .message(try JSONSerialization.data(withJSONObject: errorResponse, options: [])))
-        _ = try await waitForRecordedValue(
-            upstreamEvents,
-            at: errorEventIndex,
-            description: "waiting for primary warm init failure"
-        )
-        #expect(manager.testStateSnapshot().upstreams[0].initInFlight == false)
+        // Primary warm init remains in flight while the last initialized secondary exits.
+        _ = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.initInFlight == true)
 
         // Now simulate the last initialized upstream dying too. Eager init should kick the global init path again.
         let secondaryExitEventIndex = upstreamEvents.count()
@@ -10497,13 +10606,19 @@ struct RuntimeCoordinatorTests {
             at: secondaryExitEventIndex,
             description: "waiting for secondary upstream exit"
         )
+        #expect(
+            manager.testStateSnapshot()
+                .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+        )
+        // Its bounded timeout consumes the recovery intent and restarts eager initialize.
+        manager.failInitPending(error: TimeoutError())
         _ = try await sentValue(from: upstream0, at: 3, timeout: .seconds(2))
         _ = manager
     }
 
     @Test
     func
-        sessionManagerRetriesEagerInitializeAfterPrimaryWarmInitErrorWhenLastInitializedUpstreamExited()
+        sessionManagerRetiresStaticUpstreamAfterPrimaryWarmInitErrorWhenLastInitializedUpstreamExited()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -10564,7 +10679,7 @@ struct RuntimeCoordinatorTests {
             at: secondaryExitEventIndex,
             description: "waiting for secondary upstream exit"
         )
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == false)
 
         // Warm init fails with JSON-RPC error.
         let errorResponse: [String: Any] = [
@@ -10575,12 +10690,19 @@ struct RuntimeCoordinatorTests {
                 "message": "warm init failed",
             ],
         ]
+        let errorEventIndex = upstreamEvents.count()
         await upstream0.yield(
             .message(try JSONSerialization.data(withJSONObject: errorResponse, options: [])))
+        _ = try await waitForRecordedValue(
+            upstreamEvents,
+            at: errorEventIndex,
+            description: "waiting for primary warm init failure"
+        )
 
-        // Proxy should restart eager/global init automatically.
-        _ = try await sentValue(from: upstream0, at: 3, timeout: .seconds(2))
-        _ = manager
+        // A static slot has no factory for a fresh channel generation, so recovery is terminal.
+        #expect(await upstream0.sentCount() == 3)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
+        #expect(manager.testStateSnapshot().hasInitResult == false)
     }
 
     @Test func sessionManagerPinsSessionsRoundRobinAcrossUpstreams() async throws {
@@ -10954,7 +11076,10 @@ struct RuntimeCoordinatorTests {
             at: warmup0RefreshIndex,
             description: "waiting for first tools/list warmup failure"
         )
-        switch manager.testStateSnapshot().upstreams[0].healthState {
+        let upstream0Health = try #require(
+            manager.testStateSnapshot().upstream(id: 0)?.healthState
+        )
+        switch upstream0Health {
         case .healthy:
             Issue.record("upstream0 should be degraded after invalid tools/list warmup")
         case .degraded, .quarantined:
@@ -11099,7 +11224,8 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
-        guard case .quarantined = manager.testStateSnapshot().upstreams[1].healthState else {
+        guard let upstream = manager.testStateSnapshot().upstream(id: 1),
+              case .quarantined = upstream.healthState else {
             Issue.record("expected upstream1 to be quarantined before queueing request")
             return
         }
@@ -11385,7 +11511,7 @@ struct RuntimeCoordinatorTests {
             at: exitEventIndex,
             description: "waiting for secondary upstream exit"
         )
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == false)
 
         let repinned = try #require(
             manager.chooseUpstreamIndex())
@@ -11483,7 +11609,7 @@ struct RuntimeCoordinatorTests {
             at: exitEventIndex,
             description: "waiting for secondary upstream exit"
         )
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == false)
 
         // The proxy should continue serving on upstream0.
         let originalB = JSONRPC.ID(any: NSNumber(value: 201))!
@@ -11528,7 +11654,12 @@ struct RuntimeCoordinatorTests {
         let eventLoop = group.next()
         let upstream = AlwaysOverloadedUpstreamClient()
         let config = makeConfig(requestTimeout: 2)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            startImmediately: false
+        )
         defer { manager.shutdownAndWait() }
 
         let sessionID = "session-overloaded"
@@ -11657,7 +11788,7 @@ struct RuntimeCoordinatorTests {
         }
     }
 
-    @Test func sessionManagerRetriesPrimaryInitializeWhenInitializedNotificationSendOverloads()
+    @Test func sessionManagerRetiresStaticUpstreamWhenInitializedNotificationSendOverloads()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -11673,9 +11804,10 @@ struct RuntimeCoordinatorTests {
         await upstream.overloadNextInitializedNotificationSend()
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let retriedInitialize = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
-        #expect(methodName(from: retriedInitialize) == "initialize")
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream.sentCount() == 2)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
         #expect(manager.testStateSnapshot().hasInitResult == false)
     }
 
@@ -11703,9 +11835,11 @@ struct RuntimeCoordinatorTests {
         await upstream0.overloadNextInitializedNotificationSend()
         await upstream0.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await waitForSentCount(upstream0, count: 3, timeoutSeconds: 2)
+        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
+        await manager.drainRuntimeTasksForTesting()
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == false)
         #expect(await upstream1.sentCount() == 0)
     }
 
@@ -11748,12 +11882,12 @@ struct RuntimeCoordinatorTests {
         let overloadedInitialized = try await sentValue(from: upstream0, at: 3, timeout: .seconds(2))
         #expect(methodName(from: overloadedInitialized) == "notifications/initialized")
         #expect(manager.cachedToolsListResult() != nil)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
         let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == 1)
     }
 
-    @Test func sessionManagerPrimaryWarmReinitOverloadReturnsPendingInitializeUsingHealthySecondary()
+    @Test func sessionManagerPrimaryWarmReinitOverloadReturnsPendingInitializeAndRetiresStaticPrimary()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -11787,6 +11921,7 @@ struct RuntimeCoordinatorTests {
         manager.canonicalHandshakeState.clearInitialize()
         manager.initializeManager.resetWarmSecondaryForRetry()
         let cachedHandshake = try #require(JSONValue(any: [
+            "protocolVersion": MCP.ProtocolVersion.current,
             "capabilities": [String: Any](),
             "serverInfo": ["name": "cached-handshake"],
         ]))
@@ -11799,7 +11934,10 @@ struct RuntimeCoordinatorTests {
 
         await upstream0.overloadNextInitializedNotificationSend()
         await upstream0.yield(
-            .message(try makeInitializeResponse(id: warmRetryID, serverName: "primary-retry"))
+            .message(try makeInitializeResponse(
+                id: warmRetryID,
+                serverName: "cached-handshake"
+            ))
         )
 
         let response = try decodeJSON(
@@ -11815,17 +11953,14 @@ struct RuntimeCoordinatorTests {
         let serverInfo = try #require(result["serverInfo"] as? [String: Any])
         #expect(serverInfo["name"] as? String == "cached-handshake")
 
-        let secondWarmRetry = try await sentValue(
-            from: upstream0,
-            startingAt: 3,
-            matching: { methodName(from: $0) == "initialize" },
-            timeout: .seconds(2),
-            description: "primary should start another warm initialize after overload"
-        )
-        #expect(methodName(from: secondWarmRetry) == "initialize")
+        try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream0.sentCount() == 4)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
     }
 
-    @Test func sessionManagerPrimaryWarmReinitOverloadResetsCacheWhenSecondaryIsQuarantined()
+    @Test func sessionManagerPrimaryWarmReinitOverloadRetiresStaticPrimaryWhenSecondaryIsQuarantined()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -11859,7 +11994,8 @@ struct RuntimeCoordinatorTests {
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
 
-        guard case .quarantined = manager.testStateSnapshot().upstreams[1].healthState else {
+        guard let upstream = manager.testStateSnapshot().upstream(id: 1),
+              case .quarantined = upstream.healthState else {
             Issue.record("expected upstream1 to be quarantined")
             return
         }
@@ -11871,11 +12007,12 @@ struct RuntimeCoordinatorTests {
         await upstream0.overloadNextInitializedNotificationSend()
         await upstream0.yield(.message(try makeInitializeResponse(id: warmRetryID)))
 
-        try await waitForSentCount(upstream0, count: 5, timeoutSeconds: 2)
-        let eagerRetry = try await sentValue(from: upstream0, at: 4, timeout: .seconds(2))
-        #expect(methodName(from: eagerRetry) == "initialize")
+        try await waitForSentCount(upstream0, count: 4, timeoutSeconds: 2)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream0.sentCount() == 4)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(manager.testStateSnapshot().upstreams[1].isInitialized == false)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == false)
     }
 
     @Test func sessionManagerIgnoresStaleSecondaryInitializedNotificationAfterReset()
@@ -11904,7 +12041,7 @@ struct RuntimeCoordinatorTests {
         await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
         try await upstream1.waitForBlockedInitializedNotification()
 
-        #expect(manager.testStateSnapshot().upstreams[1].initInFlight)
+        #expect(manager.testStateSnapshot().upstream(id: 1)?.initInFlight == true)
         manager.clearUpstreamState(upstreamIndex: 1)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
@@ -11913,7 +12050,7 @@ struct RuntimeCoordinatorTests {
         await upstream1.releaseBlockedInitializedNotification(.accepted)
         await manager.drainRuntimeTasksForTesting()
 
-        let snapshot = manager.testStateSnapshot().upstreams[1]
+        let snapshot = try #require(manager.testStateSnapshot().upstream(id: 1))
         #expect(snapshot.isInitialized == false)
         guard case .quarantined = snapshot.healthState else {
             Issue.record("expected upstream to remain quarantined")
@@ -12005,36 +12142,78 @@ struct RuntimeCoordinatorTests {
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let replacementUpstreams = NIOLockedValueBox<[ToggleableOverloadUpstreamClient]>([])
+        let primaryTarget = xcodeProcessTarget(processID: 27120, xcodeVersion: "27.0")
+        let secondaryTarget = xcodeProcessTarget(processID: 26620, xcodeVersion: "26.6")
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: primaryTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: secondaryTarget, upstreamIndices: [1]),
+            ],
+            dynamicUpstreamFactory: { target in
+                guard target.processID == primaryTarget.processID else {
+                    return [TestUpstreamClient()]
+                }
+                let upstream = ToggleableOverloadUpstreamClient()
+                replacementUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
 
-        let init0 = try await upstream0.nextSent(at: 0)
+        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
         let init0ID = try extractUpstreamID(from: init0)
         await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
-        let init1 = try await upstream1.nextSent(at: 0)
+        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
         let init1ID = try extractUpstreamID(from: init1)
         await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
 
-        _ = try await upstream0.nextSent(at: 1)
-        _ = try await upstream1.nextSent(at: 1)
+        _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
+        _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
 
-        await upstream0.yield(.exit(1))
-        let firstWarmRetry = try await upstream0.nextSent(at: 2)
+        let cachedInitialize = try #require(manager.canonicalHandshakeState.initializeResult())
+        let primaryProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        #expect(manager.clearUpstreamState(proof: primaryProof))
+        manager.canonicalHandshakeState.syncCanonicalInitialize(
+            cachedInitialize,
+            sourceUpstream: 0
+        )
+        manager.startUpstreamWarmInitialize(upstreamIndex: 0)
+        let firstWarmRetry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
         let firstWarmRetryID = try extractUpstreamID(from: firstWarmRetry)
 
         await upstream0.overloadNextInitializedNotificationSend()
         await upstream0.yield(.message(try makeInitializeResponse(id: firstWarmRetryID)))
 
-        let secondWarmRetry = try await upstream0.nextSent(at: 4)
+        let firstReplacement = try await waitWithTimeout(
+            "waiting for primary replacement after initialized notification overload"
+        ) {
+            while true {
+                if let upstream = replacementUpstreams.withLockedValue({ $0.first }) {
+                    return upstream
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        #expect(
+            manager.testStateSnapshot()
+                .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+        )
+        let secondWarmRetry = try await sentValue(
+            from: firstReplacement,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            timeout: .seconds(2),
+            description: "waiting for warm initialize on first replacement"
+        )
         let secondWarmRetryID = try extractUpstreamID(from: secondWarmRetry)
 
         let errorResponse: [String: Any] = [
@@ -12046,14 +12225,20 @@ struct RuntimeCoordinatorTests {
             ],
         ]
         let errorEventIndex = upstreamEvents.count()
-        await upstream0.yield(
+        await firstReplacement.yield(
             .message(try JSONSerialization.data(withJSONObject: errorResponse, options: []))
         )
         _ = try await nextRecordedValue(upstreamEvents, at: errorEventIndex)
+        #expect(
+            manager.testStateSnapshot()
+                .shouldRetryEagerInitializePrimaryAfterWarmInitFailure
+        )
 
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
+        manager.failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        #expect(manager.testStateSnapshot().initInFlight)
 
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-recovery-trigger",
@@ -12079,7 +12264,23 @@ struct RuntimeCoordinatorTests {
         }
         _ = future
 
-        let eagerRetry = try await upstream0.nextSent(at: 5)
+        let secondReplacement = try await waitWithTimeout(
+            "waiting for primary replacement after warm initialize failure"
+        ) {
+            while true {
+                if let upstream = replacementUpstreams.withLockedValue({ $0.dropFirst().first }) {
+                    return upstream
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let eagerRetry = try await sentValue(
+            from: secondReplacement,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            timeout: .seconds(2),
+            description: "waiting for eager initialize on second replacement"
+        )
         #expect(methodName(from: eagerRetry) == "initialize")
 
         manager.abandonRequestLease(
@@ -13155,8 +13356,10 @@ struct RuntimeCoordinatorTests {
             leaseID: firstLeaseID,
             descriptor: firstDescriptor,
             on: eventLoop,
-            starter: { upstreamIndex in
-                started.withLockedValue { $0.append("first@\(upstreamIndex)") }
+            starter: { operationLease in
+                started.withLockedValue {
+                    $0.append("first@\(operationLease.upstreamIndex)")
+                }
             },
             failUnavailable: {
                 Issue.record("first request should start")
@@ -13178,8 +13381,10 @@ struct RuntimeCoordinatorTests {
             leaseID: secondLeaseID,
             descriptor: secondDescriptor,
             on: eventLoop,
-            starter: { upstreamIndex in
-                started.withLockedValue { $0.append("second@\(upstreamIndex)") }
+            starter: { operationLease in
+                started.withLockedValue {
+                    $0.append("second@\(operationLease.upstreamIndex)")
+                }
             },
             failUnavailable: {
                 Issue.record("second request should wait for the session slot, not fail unavailable")
@@ -13200,8 +13405,10 @@ struct RuntimeCoordinatorTests {
             leaseID: thirdLeaseID,
             descriptor: thirdDescriptor,
             on: eventLoop,
-            starter: { upstreamIndex in
-                started.withLockedValue { $0.append("third@\(upstreamIndex)") }
+            starter: { operationLease in
+                started.withLockedValue {
+                    $0.append("third@\(operationLease.upstreamIndex)")
+                }
             },
             failUnavailable: {
                 Issue.record("third request should use the other upstream")

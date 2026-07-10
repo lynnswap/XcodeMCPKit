@@ -311,6 +311,7 @@ extension RuntimeCoordinator {
             scope: .route,
             nowUptimeNs: nowUptimeNanoseconds()
         ))
+        _ = processRouteExposure(policy: .toolsCatalog)
     }
 
     func markXcodeProcessRouteCatalogAvailable(upstreamIndex: Int) {

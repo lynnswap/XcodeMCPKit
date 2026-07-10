@@ -222,6 +222,60 @@ struct ControlPlaneAuthorityTests {
         #expect(actualProof != preferredProof)
     }
 
+    @Test func catalogSourceRebindRequiresCurrentRouteMembershipAndExactOldProof() throws {
+        let target = xcodeProcessTarget(processID: 41018, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let oldProof = testTopologyProof(0)
+        let replacementProof = testTopologyProof(1)
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: oldProof,
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("SharedTool"), source: oldProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected catalog commit to be accepted")
+            return
+        }
+
+        let staleTransition = authority.rebindCatalogSource(
+            processID: target.processID,
+            from: testTopologyProof(0, generation: 2),
+            to: replacementProof
+        )
+        #expect(staleTransition.didChangeRoutes == false)
+        #expect(staleTransition.effects.isEmpty)
+        #expect(staleTransition.publishesToolsListChanged == false)
+        #expect(authority.canonicalSourceProof() == oldProof)
+
+        let rebindTransition = authority.rebindCatalogSource(
+            processID: target.processID,
+            from: oldProof,
+            to: replacementProof
+        )
+        #expect(rebindTransition.publishesToolsListChanged == false)
+        #expect(
+            authority.catalog(forProcessID: target.processID)?.upstreamProof
+                == replacementProof
+        )
+        #expect(authority.canonicalSourceProof() == replacementProof)
+
+        let foreignProof = testTopologyProof(2)
+        let foreignTransition = authority.rebindCatalogSource(
+            processID: target.processID,
+            from: replacementProof,
+            to: foreignProof
+        )
+        #expect(foreignTransition.didChangeRoutes == false)
+        #expect(foreignTransition.effects.isEmpty)
+        #expect(foreignTransition.publishesToolsListChanged == false)
+        #expect(authority.canonicalSourceProof() == replacementProof)
+    }
+
     @Test func catalogCommitRejectsActualResponseFromReplacedGeneration() throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }

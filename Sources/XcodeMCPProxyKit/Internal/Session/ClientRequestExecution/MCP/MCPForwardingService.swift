@@ -9,6 +9,7 @@ struct MCPForwardingService: Sendable {
     enum ResponseResolution: Sendable {
         case success(Data)
         case timeout
+        case upstreamUnavailable
         case invalidUpstreamResponse
     }
 
@@ -99,12 +100,21 @@ struct MCPForwardingService: Sendable {
             }
             return .success(responseData)
 
-        case .failure:
+        case .failure(let error):
+            let staleUpstreamTopology: Bool
+            if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
+                staleUpstreamTopology = true
+            } else {
+                staleUpstreamTopology = false
+            }
             upstreamRuntime.recordRequestTimedOut(
                 sessionID: sessionID,
                 started: started,
-                accountTimeout: accountTimeout
+                accountTimeout: accountTimeout && staleUpstreamTopology == false
             )
+            if staleUpstreamTopology {
+                return .upstreamUnavailable
+            }
             return .timeout
         }
     }
@@ -233,6 +243,8 @@ struct MCPForwardingService: Sendable {
                         internalCancellationHandle.cancel(using: sessionManager)
                         return eventLoop.makeFailedFuture(CancellationError())
                     }
+                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {
                     return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                 }
@@ -255,6 +267,8 @@ struct MCPForwardingService: Sendable {
                             )
                         }
                     )
+                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {
                     return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                 }
@@ -280,6 +294,7 @@ struct MCPForwardingService: Sendable {
             internalCancellationHandle.cancel(using: sessionManager)
             return .cancelled
         } catch {
+            internalCancellationHandle.markCompleted()
             sessionManager.failRequestLease(
                 leaseID,
                 terminalState: .failed,
@@ -312,6 +327,14 @@ struct MCPForwardingService: Sendable {
                 reason: .timedOut
             )
             return .timeout
+        case .upstreamUnavailable:
+            internalCancellationHandle.markCompleted()
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .upstreamUnavailable
+            )
+            return .unavailable
         case .invalidUpstreamResponse:
             internalCancellationHandle.markCompleted()
             sessionManager.failRequestLease(

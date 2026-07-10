@@ -429,7 +429,7 @@ extension RuntimeCoordinatorTests {
         await sleepRecorder.resumeNext()
         try await waitForSentCount(upstream, count: 1, timeoutSeconds: 2)
         #expect(await upstream.sentCount() == 1)
-        #expect(await upstream.startCount() == 2)
+        #expect(await upstream.startCount() == 1)
         let initializeRequests = await upstream.sent().filter { methodName(from: $0) == "initialize" }
         #expect(initializeRequests.count == 1)
     }

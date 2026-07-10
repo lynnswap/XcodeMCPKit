@@ -1286,6 +1286,39 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue { $0.catalogsByProcessID[processID] }
     }
 
+    func rebindCatalogSource(
+        processID: pid_t,
+        from oldProof: UpstreamTopologyProof,
+        to newProof: UpstreamTopologyProof
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard oldProof != newProof,
+                  let catalog = state.catalogsByProcessID[processID],
+                  catalog.upstreamProof == oldProof,
+                  let record = Self.record(routeID: catalog.routeID, in: state),
+                  record.route.target.processID == processID,
+                  record.route.upstreamIndices.contains(newProof.slotID.rawValue)
+            else {
+                return .none
+            }
+
+            let previousCanonicalRaw = state.canonicalToolsCatalogRaw
+            state.catalogsByProcessID[processID] = Self.makeCatalog(
+                route: record.route,
+                upstreamProof: newProof,
+                rawResult: catalog.rawResult
+            )
+            _ = Self.recomputeCanonicalProjection(in: &state)
+            return ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: [],
+                publishesToolsListChanged:
+                    previousCanonicalRaw != state.canonicalToolsCatalogRaw
+            )
+        }
+    }
+
     func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
         state.withLockedValue { Self.availableToolCatalogSurface(in: $0, processIDs: processIDs) }
     }

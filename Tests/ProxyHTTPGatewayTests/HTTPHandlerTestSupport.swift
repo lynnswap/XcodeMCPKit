@@ -159,6 +159,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var toolRoutingStarted: TestSignal?
         var toolRoutingGate: AsyncGate?
         var requeuedLeaseCount = 0
+        var rejectNextUpstreamSend = false
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
 
@@ -577,16 +578,24 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission _: RouteForwardingAdmission?,
-        onRejected _: @escaping @Sendable () -> Void
+        onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         let upstreamIndex = operationLease.upstreamIndex
         _ = ensureRunning
-        let sentCount = state.withLockedValue { state in
+        let sendUpdate = state.withLockedValue { state -> (accepted: Bool, count: Int) in
+            if state.rejectNextUpstreamSend {
+                state.rejectNextUpstreamSend = false
+                return (false, state.upstreamSendCount)
+            }
             state.upstreamSendCount += 1
             state.sentUpstreamPayloads.append(data)
-            return state.upstreamSendCount
+            return (true, state.upstreamSendCount)
         }
-        sentUpstreamCountRecords.append(sentCount)
+        guard sendUpdate.accepted else {
+            onRejected()
+            return false
+        }
+        sentUpstreamCountRecords.append(sendUpdate.count)
 
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return true
@@ -947,6 +956,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func mappedUpstreamRequestCount() -> Int {
         state.withLockedValue { $0.upstreamIDMapping.count }
+    }
+
+    func rejectNextUpstreamSend() {
+        state.withLockedValue { $0.rejectNextUpstreamSend = true }
     }
 
     func setAvailableUpstreamIndex(_ value: Int?) {
