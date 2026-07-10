@@ -178,11 +178,11 @@ actor StdioAdapter {
     }
 
     func waitUntilStopped() async {
-        if lifecycle == .closed { return }
         if let closeTask {
             await closeTask.value
             return
         }
+        if lifecycle == .closed { return }
         await withCheckedContinuation { closeWaiters.append($0) }
     }
 
@@ -231,7 +231,7 @@ private extension StdioAdapter {
             }
             let deadline = Deadline.fromNow(requestTimeout, clock: shutdownPolicy.clock)
             let replayPolicy = replayPolicy(for: envelope)
-            let previous = requiresOrderedHandshake(envelope) ? orderedHandshakeTail : nil
+            let previous = orderedHandshakeTail
             let authority = authority
             let task = Task { [weak self] in
                 if let previous { await previous.value }
@@ -379,7 +379,6 @@ private extension StdioAdapter {
         readTask = nil
         orderedHandshakeTail = nil
         lifecycle = .closed
-        closeTask = nil
         let waiters = closeWaiters
         closeWaiters.removeAll()
         for waiter in waiters { waiter.resume() }

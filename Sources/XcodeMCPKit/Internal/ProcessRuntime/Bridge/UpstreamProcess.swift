@@ -1,19 +1,17 @@
 import Foundation
 import Darwin
+import Dispatch
 import Logging
+import Synchronization
 
 private final class StdinWriter: @unchecked Sendable {
-    private struct State: Sendable {
-        var queuedBytes = 0
-        var isClosed = false
-    }
-
     private let fileHandle: FileHandle
     private let maxQueuedWriteBytes: Int
     private let queue: DispatchQueue
     private let state = NSLock()
     private var queuedBytes = 0
     private var isClosed = false
+    private let terminal = AsyncTerminalSignal()
     private let onComplete: @Sendable (_ bytes: Int, _ error: Error?) -> Void
 
     init(
@@ -68,9 +66,15 @@ private final class StdinWriter: @unchecked Sendable {
             return
         }
 
+        let terminal = terminal
         queue.async { [fileHandle] in
             try? fileHandle.close()
+            terminal.signal()
         }
+    }
+
+    func waitUntilClosed() async {
+        await terminal.wait()
     }
 }
 
@@ -93,13 +97,15 @@ package protocol UpstreamProcessDriving: AnyObject, Sendable {
         args: [String],
         environment: [String: String],
         maxQueuedWriteBytes: Int,
-        onTermination: @escaping @Sendable (Int32) -> Void,
-        onStdinWriteComplete: @escaping @Sendable (Int, Error?) -> Void
+        onTermination: @escaping @Sendable (Int32) -> Void
     ) throws -> UpstreamProcessStartedIO
     func sendStdin(_ payload: Data) -> Upstream.SendResult
     func closeStdin()
     func terminate() -> Bool
+    func forceTerminate() -> Bool
     func stopOutput()
+    func waitForStdinClosed() async
+    func waitForOutputStopped() async
 }
 
 package protocol UpstreamProcessDriverMaking: Sendable {
@@ -134,8 +140,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         args: [String],
         environment: [String: String],
         maxQueuedWriteBytes: Int,
-        onTermination: @escaping @Sendable (Int32) -> Void,
-        onStdinWriteComplete: @escaping @Sendable (Int, Error?) -> Void
+        onTermination: @escaping @Sendable (Int32) -> Void
     ) throws -> UpstreamProcessStartedIO {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -180,8 +185,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
             maxQueuedWriteBytes: maxQueuedWriteBytes,
             label: "XcodeMCPProxy.UpstreamSession.stdin",
             onComplete: { [weak self] bytes, error in
-                self?.completeQueuedWrite(bytes: bytes)
-                onStdinWriteComplete(bytes, error)
+                self?.completeStdinWrite(bytes: bytes, error: error)
             }
         )
 
@@ -229,6 +233,26 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         return true
     }
 
+    func forceTerminate() -> Bool {
+        guard let process = lock.withLock({ state.process }) else {
+            return false
+        }
+        guard process.isRunning else {
+            return false
+        }
+        let result = kill(process.processIdentifier, SIGKILL)
+        if result != 0, errno != ESRCH {
+            logger.error(
+                "Failed to force-terminate upstream process",
+                metadata: [
+                    "pid": "\(process.processIdentifier)",
+                    "errno": "\(errno)",
+                ]
+            )
+        }
+        return result == 0
+    }
+
     func stopOutput() {
         let snapshot = lock.withLock {
             (
@@ -244,9 +268,23 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         try? snapshot.stderrPipe?.fileHandleForWriting.close()
     }
 
-    private func completeQueuedWrite(bytes: Int) {
+    func waitForStdinClosed() async {
+        let writer = lock.withLock { state.stdinWriter }
+        await writer?.waitUntilClosed()
+    }
+
+    func waitForOutputStopped() async {
+        let readers = lock.withLock { (state.stdoutReader, state.stderrReader) }
+        await readers.0?.waitUntilStopped()
+        await readers.1?.waitUntilStopped()
+    }
+
+    private func completeStdinWrite(bytes: Int, error: Error?) {
         let stdinWriter = lock.withLock { state.stdinWriter }
         stdinWriter?.completeWrite(bytes: bytes)
+        if let error {
+            logger.warning("Upstream async write failed", metadata: ["error": "\(error)"])
+        }
     }
 
     private func clearProcess() {
@@ -305,8 +343,103 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
 
     private func cancelDriver(_ driver: any UpstreamProcessDriving) {
         driver.closeStdin()
-        driver.stopOutput()
         _ = driver.terminate()
+        driver.stopOutput()
+    }
+}
+
+package final class UpstreamTerminationDelay: Sendable {
+    private let cancelImpl: @Sendable () -> Void
+    private let terminal: AsyncTerminalSignal
+
+    package init(
+        terminal: AsyncTerminalSignal,
+        cancel: @escaping @Sendable () -> Void
+    ) {
+        self.terminal = terminal
+        self.cancelImpl = cancel
+    }
+
+    package func cancel() {
+        cancelImpl()
+    }
+
+    package func waitUntilTerminal() async {
+        await terminal.wait()
+    }
+}
+
+package protocol UpstreamTerminationDelayScheduling: Sendable {
+    func schedule(
+        after delay: Duration,
+        operation: @escaping @Sendable () -> Void
+    ) -> UpstreamTerminationDelay
+}
+
+package struct LiveUpstreamTerminationDelayScheduler: UpstreamTerminationDelayScheduling {
+    package init() {}
+
+    package func schedule(
+        after delay: Duration,
+        operation: @escaping @Sendable () -> Void
+    ) -> UpstreamTerminationDelay {
+        let terminal = AsyncTerminalSignal()
+        let source = DispatchSource.makeTimerSource(
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        source.setEventHandler(handler: operation)
+        source.setCancelHandler(handler: terminal.signal)
+        source.schedule(deadline: .now() + Self.dispatchInterval(delay))
+        source.resume()
+        return UpstreamTerminationDelay(terminal: terminal) {
+            source.cancel()
+        }
+    }
+
+    private static func dispatchInterval(_ duration: Duration) -> DispatchTimeInterval {
+        let components = duration.components
+        let seconds = UInt64(max(0, components.seconds))
+        let nanos = UInt64(max(0, components.attoseconds) / 1_000_000_000)
+        let product = seconds.multipliedReportingOverflow(by: 1_000_000_000)
+        let total: UInt64
+        if product.overflow {
+            total = UInt64(Int.max)
+        } else {
+            let sum = product.partialValue.addingReportingOverflow(nanos)
+            total = sum.overflow ? UInt64(Int.max) : min(sum.partialValue, UInt64(Int.max))
+        }
+        return .nanoseconds(Int(total))
+    }
+}
+
+private final class UpstreamTerminationRace: Sendable {
+    private struct State {
+        var result: Bool?
+        var waiters: [CheckedContinuation<Bool, Never>] = []
+    }
+
+    private let state = Mutex(State())
+
+    func complete(_ result: Bool) {
+        let waiters: [CheckedContinuation<Bool, Never>] = state.withLock { state in
+            guard state.result == nil else { return [] }
+            state.result = result
+            let waiters = state.waiters
+            state.waiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters { waiter.resume(returning: result) }
+    }
+
+    func value() async -> Bool {
+        await withCheckedContinuation { continuation in
+            let result = state.withLock { state -> Bool? in
+                if let result = state.result { return result }
+                state.waiters.append(continuation)
+                return nil
+            }
+            if let result { continuation.resume(returning: result) }
+        }
     }
 }
 
@@ -317,6 +450,8 @@ package struct UpstreamProcess: UpstreamSessionFactory {
         package var environment: [String: String]
         package var maxQueuedWriteBytes: Int
         package var terminationDrainGrace: Duration
+        package var terminationSignalGrace: Duration
+        package var terminationDelayScheduler: any UpstreamTerminationDelayScheduling
         package var clock: ClockClient
         package var driverFactory: any UpstreamProcessDriverMaking
 
@@ -326,6 +461,9 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             environment: [String: String],
             maxQueuedWriteBytes: Int,
             terminationDrainGrace: Duration = .milliseconds(250),
+            terminationSignalGrace: Duration = .seconds(1),
+            terminationDelayScheduler: any UpstreamTerminationDelayScheduling =
+                LiveUpstreamTerminationDelayScheduler(),
             clock: ClockClient = .liveValue,
             driverFactory: any UpstreamProcessDriverMaking = LiveUpstreamProcessDriverFactory()
         ) {
@@ -334,6 +472,8 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             self.environment = environment
             self.maxQueuedWriteBytes = maxQueuedWriteBytes
             self.terminationDrainGrace = terminationDrainGrace
+            self.terminationSignalGrace = terminationSignalGrace
+            self.terminationDelayScheduler = terminationDelayScheduler
             self.clock = clock
             self.driverFactory = driverFactory
         }
@@ -371,9 +511,11 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private var suppressExitEvent = false
     private var pendingExitStatus: Int32?
     private var terminationDrainTimeoutTask: Task<Void, Never>?
+    private var terminationRaces: [UUID: UpstreamTerminationRace] = [:]
     private var didFinishEvents = false
     private var isStopping = false
     private var stopCompleted = false
+    private var stopTask: Task<Void, Never>?
 
     package static func start(
         configuration: UpstreamProcess.Config
@@ -430,23 +572,8 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     }
 
     package func stop() async {
-        guard stopCompleted == false else { return }
-        if isStopping == false {
-            isStopping = true
-            suppressExitEvent = true
-            terminationDrainTimeoutTask?.cancel()
-            terminationDrainTimeoutTask = nil
-            cancellation.cancel()
-            terminationObserved = true
-        }
-
-        let stdoutTask = stdoutTask
-        let stderrTask = stderrTask
-        await stdoutTask?.value
-        await stderrTask?.value
-        finishEventsIfNeeded(force: true)
-        guard stopCompleted == false else { return }
-        stopCompleted = true
+        let task = beginStop(suppressExitEvent: true)
+        await task.value
     }
 
     isolated deinit {
@@ -454,6 +581,8 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
         stdoutTask?.cancel()
         stderrTask?.cancel()
         terminationDrainTimeoutTask?.cancel()
+        stopTask?.cancel()
+        for race in terminationRaces.values { race.complete(false) }
         continuation.finish()
     }
 }
@@ -470,9 +599,12 @@ private extension ProcessBackedUpstreamSession {
         pendingExitStatus = nil
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
+        for race in terminationRaces.values { race.complete(false) }
+        terminationRaces.removeAll()
         didFinishEvents = false
         isStopping = false
         stopCompleted = false
+        stopTask = nil
 
         let driver = config.driverFactory.makeDriver()
         self.driver = driver
@@ -487,10 +619,6 @@ private extension ProcessBackedUpstreamSession {
             ) { [weak self] status in
                 Task {
                     await self?.handleTermination(status: status)
-                }
-            } onStdinWriteComplete: { [weak self] bytes, error in
-                Task {
-                    await self?.completeQueuedWrite(bytes: bytes, error: error)
                 }
             }
         } catch {
@@ -558,7 +686,7 @@ private extension ProcessBackedUpstreamSession {
         continuation.yield(.stdoutProtocolViolation(protocolViolation))
         framer = StdioFramer()
         resetBufferedStdoutBytesIfNeeded()
-        await terminateSession(suppressExitEvent: true)
+        _ = beginStop(suppressExitEvent: true)
     }
 
     func handleStdoutEOF() {
@@ -598,6 +726,8 @@ private extension ProcessBackedUpstreamSession {
         }
 
         terminationObserved = true
+        let races = Array(terminationRaces.values)
+        for race in races { race.complete(true) }
         if !suppressExitEvent {
             pendingExitStatus = status
             scheduleTerminationDrainTimeoutIfNeeded()
@@ -606,27 +736,75 @@ private extension ProcessBackedUpstreamSession {
         finishEventsIfNeeded()
     }
 
-    func terminateSession(suppressExitEvent: Bool) async {
-        guard !isStopping else {
-            return
-        }
+    func beginStop(suppressExitEvent: Bool) -> Task<Void, Never> {
+        if let stopTask { return stopTask }
+        if stopCompleted { return Task {} }
 
         isStopping = true
         if suppressExitEvent {
             self.suppressExitEvent = true
+            pendingExitStatus = nil
         }
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
         cancellation.cancel()
-        terminationObserved = true
-        finishEventsIfNeeded()
+
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performStop()
+        }
+        stopTask = task
+        return task
     }
 
-    func completeQueuedWrite(bytes: Int, error: Error?) {
-        guard let error else {
-            return
+    func performStop() async {
+        let currentDriver = driver
+        if terminationObserved == false {
+            let exited = await waitForTerminationWithinSignalGrace()
+            if exited == false {
+                _ = currentDriver?.forceTerminate()
+                await waitUntilTerminationObserved()
+            }
         }
-        logger.warning("Upstream async write failed", metadata: ["error": "\(error)"])
+
+        await currentDriver?.waitForStdinClosed()
+        await currentDriver?.waitForOutputStopped()
+        let stdoutTask = stdoutTask
+        let stderrTask = stderrTask
+        await stdoutTask?.value
+        await stderrTask?.value
+        finishEventsIfNeeded(force: true)
+
+        driver = nil
+        stopCompleted = true
+    }
+
+    func waitForTerminationWithinSignalGrace() async -> Bool {
+        if terminationObserved { return true }
+        let grace = config.terminationSignalGrace
+        guard grace > .zero else { return false }
+        let id = UUID()
+        let race = UpstreamTerminationRace()
+        terminationRaces[id] = race
+        if terminationObserved { race.complete(true) }
+        let delay = config.terminationDelayScheduler.schedule(after: grace) {
+            race.complete(false)
+        }
+        let result = await race.value()
+        delay.cancel()
+        await delay.waitUntilTerminal()
+        terminationRaces.removeValue(forKey: id)
+        return result
+    }
+
+    func waitUntilTerminationObserved() async {
+        if terminationObserved { return }
+        let id = UUID()
+        let race = UpstreamTerminationRace()
+        terminationRaces[id] = race
+        if terminationObserved { race.complete(true) }
+        _ = await race.value()
+        terminationRaces.removeValue(forKey: id)
     }
 
     func finishEventsIfNeeded(force: Bool = false) {
@@ -638,7 +816,6 @@ private extension ProcessBackedUpstreamSession {
         }
 
         didFinishEvents = true
-        driver = nil
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
         resetBufferedStdoutBytesIfNeeded()

@@ -325,7 +325,7 @@ package actor MCPClientSessionAuthority {
             case .notification(let method) where method == "notifications/initialized":
                 try await waitForForwardedResponse(deadline: operation.deadline)
             case .response:
-                break
+                try await waitForForwardedResponse(deadline: operation.deadline)
             case .request, .notification:
                 try await waitForForwardedReady(deadline: operation.deadline)
             }
@@ -929,6 +929,11 @@ private extension MCPClientSessionAuthority {
                 }
                 result = .success(())
             } catch {
+                if let failed = await self?.detachFailedRecoveryConnection(recoveryID: id) {
+                    failed.connection.eventTask.cancel()
+                    await failed.connection.transport.close(headers: failed.headers)
+                    await failed.connection.eventTask.value
+                }
                 result = .failure(error)
             }
             await self?.finishRecovery(id: id, result: result)
@@ -959,6 +964,16 @@ private extension MCPClientSessionAuthority {
                 ))
             }
         }
+    }
+
+    private func detachFailedRecoveryConnection(
+        recoveryID: UUID
+    ) -> (connection: Connection, headers: MCPConnectionHeaders)? {
+        guard recovery?.id == recoveryID, let connection = current else { return nil }
+        let headers = currentHeaders
+        current = nil
+        currentHeaders = MCPConnectionHeaders()
+        return (connection, headers)
     }
 
     func leaveRecoveryWaiter(id: UUID, recoveryID: UUID) {

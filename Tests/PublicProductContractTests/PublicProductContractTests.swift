@@ -216,6 +216,26 @@ struct PublicProductContractTests {
                         .defaultIsolation(nil),
                     ]
                 ),
+                .target(
+                    name: "XcodeMCPProxyKitClientUsesRemovedAdapterEndpointFamily",
+                    dependencies: [
+                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                    ],
+                    swiftSettings: [
+                        .swiftLanguageMode(.v6),
+                        .defaultIsolation(nil),
+                    ]
+                ),
+                .target(
+                    name: "XcodeMCPProxyKitClientUsesRemovedAdapterLaunchPlanFamily",
+                    dependencies: [
+                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                    ],
+                    swiftSettings: [
+                        .swiftLanguageMode(.v6),
+                        .defaultIsolation(nil),
+                    ]
+                ),
             ]
         )
         """
@@ -627,6 +647,53 @@ private let removedSDKSurfaceChecks: [(
         [
             "initializer is inaccessible",
             "'XcodeMCPConnectionSnapshot' initializer is inaccessible",
+        ]
+    ),
+    (
+        "XcodeMCPProxyKitClientUsesRemovedAdapterEndpointFamily",
+        """
+        import Foundation
+        import XcodeMCPProxyKit
+
+        func compileOnlyRemovedAdapterEndpointFamily() throws {
+            let options = XcodeMCPProxyAdapterEndpointResolutionOptions()
+            let resolver = XcodeMCPProxyAdapterEndpointResolver()
+            let endpoint = XcodeMCPProxyAdapterEndpoint(
+                url: URL(string: "http://localhost:8765/mcp")!,
+                source: .explicit
+            )
+            let source: XcodeMCPProxyAdapterEndpoint.Source = .fallback
+            _ = (options, resolver, endpoint, source)
+        }
+        """,
+        [
+            "cannot find 'XcodeMCPProxyAdapterEndpointResolutionOptions' in scope",
+            "cannot find 'XcodeMCPProxyAdapterEndpointResolver' in scope",
+            "cannot find 'XcodeMCPProxyAdapterEndpoint' in scope",
+        ]
+    ),
+    (
+        "XcodeMCPProxyKitClientUsesRemovedAdapterLaunchPlanFamily",
+        """
+        import XcodeMCPProxyKit
+
+        func compileOnlyRemovedAdapterLaunchPlanFamily() throws {
+            _ = XcodeMCPProxyStdioAdapter.LaunchAction.start
+            _ = XcodeMCPProxyStdioAdapter.LaunchOptions(
+                executableName: "xcode-mcp-proxy",
+                requestTimeout: 300
+            )
+            _ = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
+                arguments: ["xcode-mcp-proxy"],
+                environment: [:]
+            )
+        }
+        """,
+        [
+            "has no member 'LaunchAction'",
+            "has no member 'LaunchOptions'",
+            "has no member 'resolveLaunchPlan'",
+            "type 'XcodeMCPProxyStdioAdapter' has no member",
         ]
     ),
 ]

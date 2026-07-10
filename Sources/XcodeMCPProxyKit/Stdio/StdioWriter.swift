@@ -50,6 +50,7 @@ private final class StdioOutputChannel: @unchecked Sendable {
             fileDescriptor: descriptor,
             queue: callbackQueue
         ) { _ in
+            _ = Darwin.close(descriptor)
             terminal.finish()
         }
     }
@@ -79,6 +80,18 @@ private final class StdioOutputChannel: @unchecked Sendable {
     }
 }
 
+private final class StdioWriterAdmission: Sendable {
+    private let isAccepting = Mutex(true)
+
+    func close() {
+        isAccepting.withLock { $0 = false }
+    }
+
+    func acceptsWrites() -> Bool {
+        isAccepting.withLock { $0 }
+    }
+}
+
 actor StdioWriter {
     private enum Lifecycle {
         case running
@@ -87,6 +100,7 @@ actor StdioWriter {
     }
 
     private let channel: StdioOutputChannel
+    private nonisolated let admission = StdioWriterAdmission()
     private let logger: Logger
     private let maxQueuedBytes = 4 * 1024 * 1024
     private var lifecycle: Lifecycle = .running
@@ -101,7 +115,7 @@ actor StdioWriter {
     }
 
     func send(_ data: Data) async -> Bool {
-        guard lifecycle == .running else { return false }
+        guard lifecycle == .running, admission.acceptsWrites() else { return false }
         var payload = data
         if payload.last != 0x0A {
             payload.append(0x0A)
@@ -153,6 +167,7 @@ actor StdioWriter {
             lifecycle = .closing
         }
 
+        admission.close()
         channel.cancel()
         let tasks = Array(writes.values)
         for task in tasks { task.cancel() }
@@ -169,6 +184,7 @@ actor StdioWriter {
     }
 
     nonisolated func cancel() {
+        admission.close()
         channel.cancel()
     }
 
@@ -177,6 +193,7 @@ actor StdioWriter {
     }
 
     isolated deinit {
+        admission.close()
         channel.cancel()
         for task in writes.values { task.cancel() }
         for waiter in closeWaiters { waiter.resume() }

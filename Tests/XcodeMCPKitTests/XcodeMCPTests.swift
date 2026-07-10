@@ -1578,6 +1578,45 @@ struct XcodeMCPTests {
         await authority.close()
     }
 
+    @Test func lastRecoveryWaiterDeadlineClosesReplacementAfterSendCancellation() async throws {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let expired = LifecycleContractTransport(
+            name: "expired-last-waiter",
+            expirations: ["tools/list": 1]
+        )
+        let replacement = HangingSendXcodeMCPTransport(stallsInitialize: true)
+        let factory = MixedRecoveryTransportFactory(first: expired, replacement: replacement)
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
+        let request = Task {
+            try await authority.send(try lifecycleOperation(
+                method: "tools/list",
+                deadline: Deadline.fromNow(.seconds(2), clock: clock)
+            ))
+        }
+
+        _ = try await replacement.nextStarted(method: "initialize")
+        _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline)
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await recoveryClock.resumeSleep(at: sleepBaseline)
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(
+            method: "session recovery"
+        )) {
+            try await request.value
+        }
+
+        _ = try await replacement.nextCancelled(method: "initialize")
+        _ = try await replacement.nextCloseCount()
+        await authority.close()
+        #expect(await replacement.closeCount() == 1)
+    }
+
     @Test func secondSessionExpiryIsTypedAndRequiresExplicitReconnect() async throws {
         let first = LifecycleContractTransport(
             name: "first",
@@ -1860,6 +1899,29 @@ private actor BlockingRecoveryTransportFactory {
     }
 }
 
+private actor MixedRecoveryTransportFactory {
+    private let first: any XcodeMCPTransport
+    private let replacement: any XcodeMCPTransport
+    private var count = 0
+
+    init(first: any XcodeMCPTransport, replacement: any XcodeMCPTransport) {
+        self.first = first
+        self.replacement = replacement
+    }
+
+    func make() throws -> any XcodeMCPTransport {
+        defer { count += 1 }
+        switch count {
+        case 0:
+            return first
+        case 1:
+            return replacement
+        default:
+            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
+        }
+    }
+}
+
 private actor LifecycleContractTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
 
@@ -2018,12 +2080,16 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     private let startedValues = RecordedValues<String>()
     private let cancelledValues = RecordedValues<String>()
     private let cancellationRequestIDs = RecordedValues<MCPJSONValue>()
+    private let closeValues = RecordedValues<Int>()
     private let sendBlocker = NeverCompletingSendBlocker()
+    private let stallsInitialize: Bool
+    private var closes = 0
 
-    init() {
+    init(stallsInitialize: Bool = false) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
+        self.stallsInitialize = stallsInitialize
     }
 
     func send(
@@ -2035,7 +2101,7 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
         _ = deadline
         let object = try parse(data)
         let method = object["method"]?.stringValue ?? ""
-        if method == "initialize" {
+        if method == "initialize", stallsInitialize == false {
             try yieldMessage([
                 "jsonrpc": .string("2.0"),
                 "id": object["id"] ?? .integer(1),
@@ -2075,6 +2141,8 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
 
     func close(headers: MCPConnectionHeaders) async {
         _ = headers
+        closes += 1
+        await closeValues.append(closes)
         await sendBlocker.cancelAll()
         continuation.yield(.closed(nil))
         continuation.finish()
@@ -2094,6 +2162,14 @@ private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
 
     func startedCount() async -> Int {
         await startedValues.count()
+    }
+
+    func nextCloseCount() async throws -> Int {
+        try await closeValues.nextValue()
+    }
+
+    func closeCount() -> Int {
+        closes
     }
 
     private func yieldMessage(_ object: [String: MCPJSONValue]) throws {
