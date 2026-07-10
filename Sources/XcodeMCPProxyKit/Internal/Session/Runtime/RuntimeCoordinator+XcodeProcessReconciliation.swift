@@ -218,8 +218,8 @@ extension RuntimeCoordinator {
         publishUpstreamTopology(transition.snapshot)
         let upstreamIndices = transition.addedIDs.map(\.rawValue)
         for id in transition.addedIDs {
-            guard let upstream = transition.snapshot.slot(id) else { continue }
-            observeUpstreamEvents(upstream, upstreamIndex: id.rawValue)
+            guard let operationLease = transition.snapshot.operationLease(id) else { continue }
+            observeUpstreamEvents(operationLease)
         }
         logger.info(
             "Added Xcode process route",
@@ -242,8 +242,11 @@ extension RuntimeCoordinator {
 
         var resetInitialize = false
         for upstreamIndex in route.upstreamIndices {
+            guard let operationLease = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            ) else { continue }
             retireProcessBoundUpstream(
-                upstreamIndex: upstreamIndex,
+                operationLease: operationLease,
                 reason: reason,
                 resetInitialize: &resetInitialize
             )
@@ -274,29 +277,27 @@ extension RuntimeCoordinator {
     }
 
     private func retireProcessBoundUpstream(
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         reason: String,
         resetInitialize: inout Bool
     ) {
+        let upstreamIndex = operationLease.upstreamIndex
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         if globalInit?.primaryInitUpstreamIndex == upstreamIndex,
            let upstreamID = globalInit?.primaryInitUpstreamID {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            upstreamRouter.remove(proof: operationLease.proof, upstreamID: upstreamID)
         }
 
-        clearUpstreamState(upstreamIndex: upstreamIndex)
-        upstreamRouter.reset(upstreamIndex: upstreamIndex)
+        clearUpstreamState(proof: operationLease.proof)
+        upstreamRouter.reset(proof: operationLease.proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
                 reason: .upstreamExit
             )
         )
-        let upstreamToStop = upstreamTopology.slot(UpstreamSlotID(rawValue: upstreamIndex))
-        if let upstreamToStop {
-            addRuntimeTask {
-                await upstreamToStop.stop()
-            }
+        addRuntimeTask {
+            await operationLease.slot.stop()
         }
 
         if globalInit?.hadGlobalInit == true, anyActiveInitializedUpstream() == false {
@@ -341,7 +342,10 @@ extension RuntimeCoordinator {
             guard state.initInFlight, state.isInitialized == false else {
                 continue
             }
-            clearUpstreamState(upstreamIndex: upstreamIndex)
+            guard let proof = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            )?.proof else { continue }
+            clearUpstreamState(proof: proof)
         }
     }
 

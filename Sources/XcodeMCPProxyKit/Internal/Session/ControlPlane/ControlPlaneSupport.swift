@@ -22,16 +22,18 @@ extension ControlPlane {
 
 struct CanonicalToolsCatalogLoadResult: Sendable {
     let rawResult: JSONValue
-    let sourceUpstream: Int?
+    let sourceProof: UpstreamTopologyProof?
     let durationMilliseconds: Int
+
+    var sourceUpstream: Int? { sourceProof?.slotID.rawValue }
 
     init(
         rawResult: JSONValue,
-        sourceUpstream: Int?,
+        sourceProof: UpstreamTopologyProof?,
         durationMilliseconds: Int
     ) {
         self.rawResult = rawResult
-        self.sourceUpstream = sourceUpstream
+        self.sourceProof = sourceProof
         self.durationMilliseconds = durationMilliseconds
     }
 }
@@ -152,16 +154,18 @@ extension ControlPlane {
 extension ControlPlane {
     struct RPCCancelSnapshot: Sendable {
         let registrationToken: UUID?
-        let upstreamIndex: Int?
+        let operationLease: UpstreamOperationLease?
         let requestIDKey: String?
+
+        var upstreamIndex: Int? { operationLease?.upstreamIndex }
 
         init(
             registrationToken: UUID?,
-            upstreamIndex: Int?,
+            operationLease: UpstreamOperationLease?,
             requestIDKey: String?
         ) {
             self.registrationToken = registrationToken
-            self.upstreamIndex = upstreamIndex
+            self.operationLease = operationLease
             self.requestIDKey = requestIDKey
         }
     }
@@ -171,8 +175,12 @@ extension ControlPlane {
     final class RPCHandle: Sendable {
         enum State: Sendable {
             case queued
-            case registered(registrationToken: UUID, upstreamIndex: Int)
-            case assigned(registrationToken: UUID, upstreamIndex: Int, requestIDKey: String)
+            case registered(registrationToken: UUID, operationLease: UpstreamOperationLease)
+            case assigned(
+                registrationToken: UUID,
+                operationLease: UpstreamOperationLease,
+                requestIDKey: String
+            )
             case finished
             case cancelled(ControlPlane.RPCCancelSnapshot)
         }
@@ -203,14 +211,14 @@ extension ControlPlane {
 
         func markRegistered(
             registrationToken: UUID,
-            upstreamIndex: Int
+            operationLease: UpstreamOperationLease
         ) -> Bool {
             state.withLockedValue { state in
                 switch state.state {
                 case .queued:
                     state.state = .registered(
                         registrationToken: registrationToken,
-                        upstreamIndex: upstreamIndex
+                        operationLease: operationLease
                     )
                     return true
                 case .cancelled, .finished, .registered, .assigned:
@@ -221,19 +229,20 @@ extension ControlPlane {
 
         func markAssigned(
             registrationToken: UUID,
-            upstreamIndex: Int,
+            operationLease: UpstreamOperationLease,
             requestIDKey: String
         ) -> Bool {
             state.withLockedValue { state in
                 switch state.state {
-                case .registered(let token, let registeredUpstreamIndex):
-                    guard token == registrationToken, registeredUpstreamIndex == upstreamIndex
+                case .registered(let token, let registeredOperationLease):
+                    guard token == registrationToken,
+                          registeredOperationLease.proof == operationLease.proof
                     else {
                         return false
                     }
                     state.state = .assigned(
                         registrationToken: registrationToken,
-                        upstreamIndex: upstreamIndex,
+                        operationLease: operationLease,
                         requestIDKey: requestIDKey
                     )
                     return true
@@ -267,19 +276,19 @@ extension ControlPlane {
                 case .queued:
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: nil,
-                        upstreamIndex: nil,
+                        operationLease: nil,
                         requestIDKey: nil
                     )
-                case .registered(let registrationToken, let upstreamIndex):
+                case .registered(let registrationToken, let operationLease):
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: registrationToken,
-                        upstreamIndex: upstreamIndex,
+                        operationLease: operationLease,
                         requestIDKey: nil
                     )
-                case .assigned(let registrationToken, let upstreamIndex, let requestIDKey):
+                case .assigned(let registrationToken, let operationLease, let requestIDKey):
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: registrationToken,
-                        upstreamIndex: upstreamIndex,
+                        operationLease: operationLease,
                         requestIDKey: requestIDKey
                     )
                 }

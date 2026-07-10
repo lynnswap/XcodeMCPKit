@@ -31,7 +31,7 @@ extension RuntimeCoordinator {
 
         func routedData(
             for session: SessionContext,
-            upstreamIndex: Int
+            operationLease: UpstreamOperationLease
         ) -> Data? {
             guard case .request(_, let upstreamID) =
                 JSONRPC.Message.Inspector.kind(of: object)
@@ -40,7 +40,7 @@ extension RuntimeCoordinator {
             }
             let clientID = session.serverRequestTracker.record(
                 upstreamID: upstreamID,
-                upstreamIndex: upstreamIndex
+                operationLease: operationLease
             )
             return try? JSONRPC.Wire.dataByReplacingID(in: object, with: clientID)
         }
@@ -49,15 +49,14 @@ extension RuntimeCoordinator {
     func routeUpstreamMessage(
         _ data: Data,
         upstreamIndex: Int,
-        proof suppliedProof: UpstreamTopologyProof? = nil
+        proof: UpstreamTopologyProof
     ) {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
-        guard let proof = suppliedProof ?? upstreamTopology.snapshot().proof(slotID),
-              proof.slotID == slotID,
-              upstreamTopology.validate(proof) else { return }
+        guard proof.slotID == slotID,
+              let operationLease = upstreamTopology.operationLease(for: proof) else { return }
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             guard upstreamTopology.validate(proof) else { return }
-            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+            routeUnmappedUpstreamMessage(data, operationLease: operationLease)
             return
         }
 
@@ -77,7 +76,7 @@ extension RuntimeCoordinator {
                 break
             }
             guard upstreamTopology.validate(proof) else { return }
-            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+            routeUnmappedUpstreamMessage(data, operationLease: operationLease)
             return
         }
 
@@ -86,19 +85,19 @@ extension RuntimeCoordinator {
                 array,
                 originalData: data,
                 upstreamIndex: upstreamIndex,
-                proof: proof
+                operationLease: operationLease
             )
             return
         }
 
-        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+        routeUnmappedUpstreamMessage(data, operationLease: operationLease)
     }
 
     private func routeUpstreamBatch(
         _ array: [Any],
         originalData: Data,
         upstreamIndex: Int,
-        proof: UpstreamTopologyProof
+        operationLease: UpstreamOperationLease
     ) {
         var responseObjectsBySessionID: [String: [Any]] = [:]
         var mappedSessionIDs = Set<String>()
@@ -115,7 +114,7 @@ extension RuntimeCoordinator {
             switch mappedResponseRoutingOutcome(
                 object,
                 upstreamIndex: upstreamIndex,
-                proof: proof
+                proof: operationLease.proof
             ) {
             case .routed(let sessionID, let object):
                 responseObjectsBySessionID[sessionID, default: []].append(object)
@@ -145,7 +144,7 @@ extension RuntimeCoordinator {
         }()
         let routedServerInitiated = routeServerInitiatedPayloads(
             serverInitiatedPayloads,
-            upstreamIndex: upstreamIndex,
+            operationLease: operationLease,
             sourceByteCount: originalData.count,
             owningTargetOverride: owningTargetOverride
         )
@@ -167,11 +166,11 @@ extension RuntimeCoordinator {
         }
 
         if routedClientResponses || routedServerInitiated || droppedLateResponse {
-            routeUnmappedBatchItems(unmappedItems, upstreamIndex: upstreamIndex)
+            routeUnmappedBatchItems(unmappedItems, operationLease: operationLease)
             return
         }
 
-        routeUnmappedUpstreamMessage(originalData, upstreamIndex: upstreamIndex)
+        routeUnmappedUpstreamMessage(originalData, operationLease: operationLease)
     }
 
     private func mappedResponseRoutingOutcome(
@@ -287,11 +286,10 @@ extension RuntimeCoordinator {
     func handleUpstreamExit(
         _ status: Int32,
         upstreamIndex: Int,
-        proof suppliedProof: UpstreamTopologyProof? = nil
+        proof: UpstreamTopologyProof
     ) {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
-        guard let proof = suppliedProof ?? upstreamTopology.snapshot().proof(slotID),
-              proof.slotID == slotID,
+        guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
         guard clearUpstreamState(proof: proof) else { return }
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
@@ -303,7 +301,7 @@ extension RuntimeCoordinator {
             globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
         if exitedActivePrimaryInitialize {
             if let upstreamID = globalInit.primaryInitUpstreamID {
-                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                upstreamRouter.remove(proof: proof, upstreamID: upstreamID)
             }
         }
         if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
@@ -383,106 +381,96 @@ extension RuntimeCoordinator {
         }
     }
 
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease: UpstreamOperationLease
+    ) -> Int64? {
         upstreamRouter.assign(
-            upstreamIndex: upstreamIndex, sessionID: sessionID, originalID: originalID,
-            isInitialize: false)
+            proof: operationLease.proof,
+            sessionID: sessionID,
+            originalID: originalID,
+            isInitialize: false
+        )
     }
 
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         _ = upstreamRouter.remove(
-            upstreamIndex: upstreamIndex,
+            proof: operationLease.proof,
             sessionID: sessionID,
             requestIDKey: requestIDKey
         )
     }
 
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         removeUpstreamIDMapping(
-            sessionID: sessionID, requestIDKey: requestIDKey, upstreamIndex: upstreamIndex)
-        markRequestTimedOut(upstreamIndex: upstreamIndex)
+            sessionID: sessionID,
+            requestIDKey: requestIDKey,
+            operationLease: operationLease
+        )
+        markRequestTimedOut(operationLease)
     }
 
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestSucceeded(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         _ = sessionID
         _ = requestIDKey
-        markRequestSucceeded(upstreamIndex: upstreamIndex)
+        markRequestSucceeded(operationLease)
     }
 
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
-        sendUpstream(
-            data,
-            upstreamIndex: upstreamIndex,
-            ensureRunning: ensureRunning,
-            admission: nil
-        )
-    }
-
+    @discardableResult
     func sendUpstream(
         _ data: Data,
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission: RouteForwardingAdmission?,
-        initializeClaim: UpstreamHealthManager.InitializeClaim? = nil
-    ) {
-        guard let context = upstreamSlotContext(upstreamIndex) else {
-            return
-        }
-        if let initializeClaim {
-            guard upstreamHealthManager.validate(initializeClaim),
-                  initializeClaim.topologyProof == context.proof,
-                  upstreamTopology.validate(context.proof) else {
-                return
-            }
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool {
+        let upstreamIndex = operationLease.upstreamIndex
+        guard upstreamTopology.validate(operationLease) else {
+            onRejected()
+            return false
         }
         if let admission {
             guard processControlPlane.validate(admission.route),
-                  let expectedProof = admission.proof(for: upstreamIndex),
-                  expectedProof == context.proof,
-                  upstreamTopology.validate(expectedProof) else {
-                failPendingSend(
-                    originalRequestData: data,
-                    upstreamIndex: upstreamIndex,
-                    code: -32001,
-                    message: "Xcode process route changed before forwarding"
-                )
-                return
+                  admission.proof(for: upstreamIndex) == operationLease.proof else {
+                onRejected()
+                return false
             }
         }
-        addRuntimeTask { [weak self, context, admission, initializeClaim] in
+        addRuntimeTask { [weak self, operationLease, admission, onRejected] in
             guard let self else { return }
             if ensureRunning {
-                if let initializeClaim {
-                    guard self.upstreamHealthManager.validate(
-                              initializeClaim
-                          ) else {
-                        return
-                    }
-                }
-                await context.slot.start()
+                await operationLease.slot.start()
             }
-            if let initializeClaim {
-                guard self.upstreamHealthManager.validate(initializeClaim),
-                      self.upstreamTopology.validate(context.proof) else {
-                    return
-                }
-            } else if let admission {
+            guard self.upstreamTopology.validate(operationLease) else {
+                onRejected()
+                return
+            }
+            if let admission {
                 guard self.processControlPlane.validate(admission.route),
-                      let expectedProof = admission.proof(for: upstreamIndex),
-                      expectedProof == context.proof,
-                      self.upstreamTopology.validate(expectedProof) else {
-                    self.failPendingSend(
-                        originalRequestData: data,
-                        upstreamIndex: upstreamIndex,
-                        code: -32001,
-                        message: "Xcode process route changed before forwarding"
-                    )
+                      admission.proof(for: upstreamIndex) == operationLease.proof else {
+                    onRejected()
                     return
                 }
-            } else {
-                guard self.upstreamTopology.validate(context.proof) else { return }
             }
-            switch await context.slot.send(data) {
+            let result = await operationLease.slot.send(data)
+            guard self.upstreamTopology.validate(operationLease) else {
+                onRejected()
+                return
+            }
+            switch result {
             case .accepted:
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
@@ -490,42 +478,45 @@ extension RuntimeCoordinator {
                     data: data
                 )
             case .backpressure:
-                self.markUpstreamOverloaded(context.proof)
+                self.markUpstreamOverloaded(operationLease.proof)
                 self.failPendingSend(
                     originalRequestData: data,
-                    upstreamIndex: upstreamIndex,
+                    proof: operationLease.proof,
                     code: -32002,
                     message: "upstream overloaded"
                 )
             case .unavailable(let reason):
-                // The exit/quarantine machinery owns health for a dead slot;
-                // a send into it must not be misdiagnosed as overload.
                 self.failPendingSend(
                     originalRequestData: data,
-                    upstreamIndex: upstreamIndex,
+                    proof: operationLease.proof,
                     code: -32001,
                     message: "upstream unavailable"
                 )
                 self.handleUnavailableUpstreamSend(
-                    upstreamIndex: upstreamIndex,
+                    operationLease: operationLease,
                     reason: reason
                 )
             }
         }
+        return true
     }
 
     private func handleUnavailableUpstreamSend(
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         reason: Upstream.UnavailableReason
     ) {
+        let upstreamIndex = operationLease.upstreamIndex
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            clearUpstreamState(upstreamIndex: upstreamIndex)
-            if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
-                markXcodeProcessRouteUnavailable(
-                    upstreamIndex: upstreamIndex,
-                    reason: "upstream_\(reason)"
-                )
+            _ = upstreamTopology.withValidated(operationLease.proof) {
+                clearUpstreamState(proof: operationLease.proof)
+                if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex)
+                    == false {
+                    markXcodeProcessRouteUnavailable(
+                        upstreamIndex: upstreamIndex,
+                        reason: "upstream_\(reason)"
+                    )
+                }
             }
         case .shuttingDown:
             break
@@ -590,7 +581,7 @@ extension RuntimeCoordinator {
 
         switch await sendServerRequestResponseUpstream(
             upstreamData,
-            upstreamIndex: route.upstreamIndex
+            operationLease: route.operationLease
         ) {
         case .accepted:
             _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
@@ -602,22 +593,25 @@ extension RuntimeCoordinator {
 
     private func sendServerRequestResponseUpstream(
         _ data: Data,
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) async -> Upstream.SendResult {
-        guard let context = upstreamSlotContext(upstreamIndex),
-              upstreamTopology.validate(context.proof) else {
+        guard upstreamTopology.validate(operationLease) else {
             return .unavailable(.notStarted)
         }
-        switch await context.slot.send(data) {
+        let result = await operationLease.slot.send(data)
+        guard upstreamTopology.validate(operationLease) else {
+            return .unavailable(.notStarted)
+        }
+        switch result {
         case .accepted:
             recordTraffic(
-                upstreamIndex: upstreamIndex,
+                upstreamIndex: operationLease.upstreamIndex,
                 direction: "outbound",
                 data: data
             )
             return .accepted
         case .backpressure:
-            markUpstreamOverloaded(context.proof)
+            markUpstreamOverloaded(operationLease.proof)
             return .backpressure
         case .unavailable(let reason):
             return .unavailable(reason)
@@ -721,19 +715,19 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) {
         if let first = requestIDKeys.first {
             onRequestTimeout(
                 sessionID: sessionID,
                 requestIDKey: first,
-                upstreamIndex: upstreamIndex
+                operationLease: operationLease
             )
             for requestIDKey in requestIDKeys.dropFirst() {
                 removeUpstreamIDMapping(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 )
             }
         }
@@ -744,14 +738,14 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int?
+        operationLease: UpstreamOperationLease?
     ) {
-        if let upstreamIndex {
+        if let operationLease {
             for requestIDKey in requestIDKeys {
                 removeUpstreamIDMapping(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 )
             }
         }
@@ -792,10 +786,11 @@ extension RuntimeCoordinator {
     /// the matching JSON-RPC error responses back through the router.
     func failPendingSend(
         originalRequestData: Data,
-        upstreamIndex: Int,
+        proof: UpstreamTopologyProof,
         code: Int,
         message: String
     ) {
+        let upstreamIndex = proof.slotID.rawValue
         guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: [])
         else {
             return
@@ -831,7 +826,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+        routeUpstreamMessage(data, upstreamIndex: upstreamIndex, proof: proof)
     }
 
     func upstreamID(from value: Any?) -> Int64? {
@@ -871,7 +866,11 @@ extension RuntimeCoordinator {
         return false
     }
 
-    func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+    func routeUnmappedUpstreamMessage(
+        _ data: Data,
+        operationLease: UpstreamOperationLease
+    ) {
+        let upstreamIndex = operationLease.upstreamIndex
         recordTraffic(
             upstreamIndex: upstreamIndex,
             direction: "inbound_unmapped",
@@ -903,7 +902,7 @@ extension RuntimeCoordinator {
 
         if routeServerInitiatedPayloads(
             serverInitiatedPayloads,
-            upstreamIndex: upstreamIndex,
+            operationLease: operationLease,
             sourceByteCount: data.count,
             owningTargetOverride: nil
         ) {
@@ -957,7 +956,10 @@ extension RuntimeCoordinator {
         return []
     }
 
-    private func routeUnmappedBatchItems(_ items: [Any], upstreamIndex: Int) {
+    private func routeUnmappedBatchItems(
+        _ items: [Any],
+        operationLease: UpstreamOperationLease
+    ) {
         guard !items.isEmpty else {
             return
         }
@@ -965,19 +967,20 @@ extension RuntimeCoordinator {
         guard let data = try? JSONRPC.Wire.data(from: payload) else {
             return
         }
-        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+        routeUnmappedUpstreamMessage(data, operationLease: operationLease)
     }
 
     @discardableResult
     private func routeServerInitiatedPayloads(
         _ serverInitiatedPayloads: [ServerInitiatedPayload],
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         sourceByteCount: Int,
         owningTargetOverride: SessionContext?
     ) -> Bool {
         guard !serverInitiatedPayloads.isEmpty else {
             return false
         }
+        let upstreamIndex = operationLease.upstreamIndex
 
         var routedTargets: [SessionContext] = []
         var routedSessionIDs = Set<String>()
@@ -1037,7 +1040,7 @@ extension RuntimeCoordinator {
             for session in payloadTargets {
                 guard let routedData = payload.routedData(
                     for: session,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 ) else {
                     continue
                 }
@@ -1125,11 +1128,10 @@ extension RuntimeCoordinator {
     func handleUpstreamProtocolViolation(
         _ protocolViolation: StdioFramer.ProtocolViolation,
         upstreamIndex: Int,
-        proof suppliedProof: UpstreamTopologyProof? = nil
+        proof: UpstreamTopologyProof
     ) {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
-        guard let proof = suppliedProof ?? upstreamTopology.snapshot().proof(slotID),
-              proof.slotID == slotID,
+        guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = nowUptimeNanoseconds()

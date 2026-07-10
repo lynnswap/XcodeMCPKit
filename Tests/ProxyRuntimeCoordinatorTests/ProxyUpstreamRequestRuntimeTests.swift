@@ -143,7 +143,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         let eventLoop = EmbeddedEventLoop()
         let started = ProxyUpstreamRequestRuntime.StartedRequest(
             transform: prepared.transform,
-            upstreamIndex: prepared.upstreamIndex,
+            operationLease: prepared.operationLease,
             requestTimeout: nil,
             routerPendingToken: UUID(),
             future: eventLoop.makeSucceededFuture(ByteBuffer())
@@ -171,7 +171,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         )
         let alreadyAccountedStarted = ProxyUpstreamRequestRuntime.StartedRequest(
             transform: alreadyAccountedPrepared.transform,
-            upstreamIndex: alreadyAccountedPrepared.upstreamIndex,
+            operationLease: alreadyAccountedPrepared.operationLease,
             requestTimeout: nil,
             routerPendingToken: UUID(),
             future: eventLoop.makeSucceededFuture(ByteBuffer())
@@ -224,16 +224,29 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
     }
 
     private let state: NIOLockedValueBox<State>
+    private let topology: UpstreamTopologyAuthority
 
     init(chosenUpstreamIndex: Int?) {
         self.state = NIOLockedValueBox(State(chosenUpstreamIndex: chosenUpstreamIndex))
+        let count = chosenUpstreamIndex.map { max(1, $0 + 1) } ?? 0
+        self.topology = UpstreamTopologyAuthority(
+            (0..<count).map { _ in TestOperationSlot() as any UpstreamSlotControlling }
+        )
     }
 
-    func chooseUpstreamIndex() -> Int? {
-        state.withLockedValue { $0.chosenUpstreamIndex }
+    func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
+        state.withLockedValue { state in
+            state.chosenUpstreamIndex.flatMap {
+                topology.operationLease(for: UpstreamSlotID(rawValue: $0))
+            }
+        }
     }
 
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease: UpstreamOperationLease
+    ) -> Int64? {
         state.withLockedValue { state in
             let id = state.nextID
             state.nextID += 1
@@ -241,59 +254,78 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
                 Assignment(
                     sessionID: sessionID,
                     requestIDKey: originalID.key,
-                    upstreamIndex: upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex
                 )
             )
             return id
         }
     }
 
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         state.withLockedValue { state in
             state.removals.append(
                 RequestEvent(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex
                 )
             )
         }
     }
 
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         state.withLockedValue { state in
             state.timeouts.append(
                 RequestEvent(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex
                 )
             )
         }
     }
 
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestSucceeded(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         state.withLockedValue { state in
             state.successes.append(
                 RequestEvent(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    upstreamIndex: operationLease.upstreamIndex
                 )
             )
         }
     }
 
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission _: RouteForwardingAdmission?,
+        onRejected _: @escaping @Sendable () -> Void
+    ) -> Bool {
         state.withLockedValue { state in
             state.sentRequests.append(
                 SentRequest(
                     data: data,
-                    upstreamIndex: upstreamIndex,
+                    upstreamIndex: operationLease.upstreamIndex,
                     ensureRunning: ensureRunning
                 )
             )
         }
+        return true
     }
 
     func activateRequestLease(
@@ -337,4 +369,12 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
     func successes() -> [RequestEvent] {
         state.withLockedValue { $0.successes }
     }
+}
+
+private actor TestOperationSlot: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event> = AsyncStream { _ in }
+
+    func start() async {}
+    func stop() async {}
+    func send(_ data: Data) async -> Upstream.SendResult { .accepted }
 }

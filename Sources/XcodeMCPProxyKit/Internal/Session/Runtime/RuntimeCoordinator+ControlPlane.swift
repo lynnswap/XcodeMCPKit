@@ -14,15 +14,42 @@ extension ControlPlane {
 extension ControlPlane {
     struct RequestError: Swift.Error, Sendable {
         let route: ControlPlane.Route
-        let upstreamIndex: Int?
+        let operationLease: UpstreamOperationLease?
+        private let requestedUpstreamIndex: Int?
         let underlying: any Swift.Error
+
+        var upstreamIndex: Int? { operationLease?.upstreamIndex ?? requestedUpstreamIndex }
+
+        init(
+            route: ControlPlane.Route,
+            operationLease: UpstreamOperationLease?,
+            underlying: any Swift.Error
+        ) {
+            self.route = route
+            self.operationLease = operationLease
+            self.requestedUpstreamIndex = nil
+            self.underlying = underlying
+        }
+
+        init(
+            route: ControlPlane.Route,
+            upstreamIndex: Int?,
+            underlying: any Swift.Error
+        ) {
+            self.route = route
+            self.operationLease = nil
+            self.requestedUpstreamIndex = upstreamIndex
+            self.underlying = underlying
+        }
     }
 }
 
 extension ControlPlane {
     struct RPCResponse: Sendable {
         let responseData: Data
-        let upstreamIndex: Int
+        let operationLease: UpstreamOperationLease
+
+        var upstreamIndex: Int { operationLease.upstreamIndex }
     }
 }
 
@@ -88,8 +115,13 @@ extension RuntimeCoordinator {
         guard let preferredUpstream = upstreamSlotIDs.first else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+        guard let preferredProof = upstreamTopology.operationLease(
+            for: preferredUpstream
+        )?.proof else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
         let (lease, transition) = processControlPlane.beginUnboundCatalogAttempt(
-            preferredUpstream: preferredUpstream,
+            preferredUpstreamProof: preferredProof,
             nowUptimeNanoseconds: startedAt
         )
         applyProcessControlPlaneTransition(transition)
@@ -105,7 +137,7 @@ extension RuntimeCoordinator {
                 purpose: "tools",
                 failureRouteMetadata: nil
             )
-            guard let sourceUpstream = result.sourceUpstream else {
+            guard let sourceProof = result.sourceProof else {
                 applyCatalogCommit(commitProcessCatalog(
                     .failed,
                     lease: lease,
@@ -114,7 +146,7 @@ extension RuntimeCoordinator {
                 throw ControlPlane.Error.invalidResponse("tools/list source upstream missing")
             }
             let commit = commitProcessCatalog(
-                .usable(result.rawResult, source: UpstreamSlotID(rawValue: sourceUpstream)),
+                .usable(result.rawResult, source: sourceProof),
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             )
@@ -126,7 +158,7 @@ extension RuntimeCoordinator {
                 }
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
-                    sourceUpstream: snapshot.canonicalSourceUpstream,
+                    sourceProof: snapshot.canonicalSourceProof,
                     durationMilliseconds: elapsedMilliseconds(
                         sinceUptimeNanoseconds: startedAt
                     )
@@ -138,7 +170,7 @@ extension RuntimeCoordinator {
                 }
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
-                    sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                    sourceProof: processControlPlane.canonicalSourceProof(),
                     durationMilliseconds: elapsedMilliseconds(
                         sinceUptimeNanoseconds: startedAt
                     )
@@ -155,7 +187,7 @@ extension RuntimeCoordinator {
                let rawResult = processControlPlane.canonicalToolsCatalogRaw() {
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
-                    sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                    sourceProof: processControlPlane.canonicalSourceProof(),
                     durationMilliseconds: elapsedMilliseconds(
                         sinceUptimeNanoseconds: startedAt
                     )
@@ -180,11 +212,11 @@ extension RuntimeCoordinator {
             processIDs: exposedProcessIDs
         )
         if let surface = currentSurface,
-           let sourceUpstream = surface.sourceUpstream,
+           let sourceProof = surface.sourceProof,
            surface.processIDs == exposedProcessIDs {
             return CanonicalToolsCatalogLoadResult(
                 rawResult: surface.rawResult,
-                sourceUpstream: sourceUpstream,
+                sourceProof: sourceProof,
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
             )
         }
@@ -198,9 +230,10 @@ extension RuntimeCoordinator {
         }
         let routes = uncachedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
+                  let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
                   let (lease, transition) = processControlPlane.beginCatalogAttempt(
                       routeID: exposure.route.id,
-                      preferredUpstream: preferred,
+                      preferredUpstreamProof: preferredProof,
                       nowUptimeNanoseconds: nowUptimeNanoseconds()
                   ) else { return nil }
             applyProcessControlPlaneTransition(transition)
@@ -215,7 +248,7 @@ extension RuntimeCoordinator {
             if let current = processControlPlane.canonicalToolsCatalogRaw() {
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: current,
-                    sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                    sourceProof: processControlPlane.canonicalSourceProof(),
                     durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
                 )
             }
@@ -307,12 +340,12 @@ extension RuntimeCoordinator {
                         self.applyCatalogCommit(commit)
                         if let surface = self.processControlPlane.availableToolCatalogSurface(
                             processIDs: exposedProcessIDs
-                        ), let surfaceSourceUpstream = surface.sourceUpstream {
+                        ), let surfaceSourceProof = surface.sourceProof {
                             return .success(
                                 route: route,
                                 result: CanonicalToolsCatalogLoadResult(
                                     rawResult: surface.rawResult,
-                                    sourceUpstream: surfaceSourceUpstream,
+                                    sourceProof: surfaceSourceProof,
                                     durationMilliseconds: self.elapsedMilliseconds(
                                         sinceUptimeNanoseconds: startedAt
                                     )
@@ -385,9 +418,10 @@ extension RuntimeCoordinator {
         }
         let missingRoutes = missingExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
+                  let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
                   let (lease, transition) = processControlPlane.beginCatalogAttempt(
                       routeID: exposure.route.id,
-                      preferredUpstream: preferred,
+                      preferredUpstreamProof: preferredProof,
                       nowUptimeNanoseconds: nowUptimeNanoseconds()
                   ) else { return nil }
             applyProcessControlPlaneTransition(transition)
@@ -487,7 +521,7 @@ extension RuntimeCoordinator {
         }
         return CanonicalToolsCatalogLoadResult(
             rawResult: surface.rawResult,
-            sourceUpstream: surface.sourceUpstream ?? fallback.sourceUpstream,
+            sourceProof: surface.sourceProof ?? fallback.sourceProof,
             durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
         )
     }
@@ -498,7 +532,7 @@ extension RuntimeCoordinator {
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>
     ) -> CanonicalToolsCatalogLoadResult? {
-        guard let sourceUpstream = result.sourceUpstream else {
+        guard let sourceProof = result.sourceProof else {
             applyCatalogCommit(
                 commitProcessCatalog(
                     .failed,
@@ -511,6 +545,7 @@ extension RuntimeCoordinator {
                 exposedProcessIDs: exposedProcessIDs
             )
         }
+        let sourceUpstream = sourceProof.slotID.rawValue
 
         guard ProcessToolCatalogCodec.hasUsableUpstreamToolsCatalog(in: result.rawResult) else {
             logger.debug(
@@ -541,7 +576,7 @@ extension RuntimeCoordinator {
         }
 
         let commit = commitProcessCatalog(
-            .usable(result.rawResult, source: UpstreamSlotID(rawValue: sourceUpstream)),
+            .usable(result.rawResult, source: sourceProof),
             lease: route.lease,
             nowUptimeNanoseconds: nowUptimeNanoseconds()
         )
@@ -562,7 +597,7 @@ extension RuntimeCoordinator {
             if let raw = snapshot.canonicalToolsCatalogRaw {
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: raw,
-                    sourceUpstream: snapshot.canonicalSourceUpstream,
+                    sourceProof: snapshot.canonicalSourceProof,
                     durationMilliseconds: elapsedMilliseconds(
                         sinceUptimeNanoseconds: startedAt
                     )
@@ -596,18 +631,18 @@ extension RuntimeCoordinator {
         if let raw = processControlPlane.canonicalToolsCatalogRaw() {
             return CanonicalToolsCatalogLoadResult(
                 rawResult: raw,
-                sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                sourceProof: processControlPlane.canonicalSourceProof(),
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
             )
         }
         guard let surface = processControlPlane.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
-        ), let source = surface.sourceUpstream else {
+        ), let source = surface.sourceProof else {
             return nil
         }
         return CanonicalToolsCatalogLoadResult(
             rawResult: surface.rawResult,
-            sourceUpstream: source,
+            sourceProof: source,
             durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
         )
     }
@@ -689,28 +724,28 @@ extension RuntimeCoordinator {
             let result = try extractJSONRPCResult(from: response.responseData)
             guard isValidToolsListResult(result) else {
                 markToolsListRefreshFailed(
-                    upstreamIndex: response.upstreamIndex,
+                    response.operationLease.proof,
                     nowUptimeNs: nowUptimeNs,
                     reason: "invalid_response"
                 )
                 throw ControlPlane.Error.invalidResponse("invalid tools/list result")
             }
             markToolsListRefreshSucceeded(
-                upstreamIndex: response.upstreamIndex,
+                response.operationLease.proof,
                 nowUptimeNs: nowUptimeNs
             )
             return CanonicalToolsCatalogLoadResult(
                 rawResult: result,
-                sourceUpstream: response.upstreamIndex,
+                sourceProof: response.operationLease.proof,
                 durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
             )
         } catch let error as ControlPlane.RequestError {
             if error.underlying is CancellationError {
                 throw error.underlying
             }
-            if let upstreamIndex = error.upstreamIndex {
+            if let proof = error.operationLease?.proof {
                 markToolsListRefreshFailed(
-                    upstreamIndex: upstreamIndex,
+                    proof,
                     nowUptimeNs: nowUptimeNs,
                     reason: controlPlaneFailureReason(for: error.underlying)
                 )
@@ -814,21 +849,22 @@ extension RuntimeCoordinator {
             if let registrationToken = snapshot.registrationToken {
                 _ = router.cancelPending(token: registrationToken)
             }
-            if let upstreamIndex = snapshot.upstreamIndex,
-                let requestIDKey = snapshot.requestIDKey
-            {
-                removeUpstreamIDMapping(
+            let requestIDKeys = snapshot.requestIDKey.map { [$0] } ?? [originalID.key]
+            if let operationLease = snapshot.operationLease {
+                self.abandonRequestLease(
+                    leaseID,
                     sessionID: internalSessionID,
-                    requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    requestIDKeys: requestIDKeys,
+                    operationLease: operationLease
+                )
+            } else {
+                self.abandonRequestLease(
+                    leaseID,
+                    sessionID: internalSessionID,
+                    requestIDKeys: requestIDKeys,
+                    operationLease: nil
                 )
             }
-            self.abandonRequestLease(
-                leaseID,
-                sessionID: internalSessionID,
-                requestIDKeys: snapshot.requestIDKey.map { [$0] } ?? [originalID.key],
-                upstreamIndex: snapshot.upstreamIndex
-            )
         }
         if rpcHandle?.isCancelled() == true {
             throw CancellationError()
@@ -840,7 +876,8 @@ extension RuntimeCoordinator {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndex: preferredUpstreamIndex
-            ) { [self, requestTemplate, originalID] selectedUpstreamIndex in
+            ) { [self, requestTemplate, originalID] selectedOperationLease in
+                let selectedUpstreamIndex = selectedOperationLease.upstreamIndex
                 if rpcHandle?.isCancelled() == true {
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
@@ -868,20 +905,20 @@ extension RuntimeCoordinator {
                             leaseID,
                             sessionID: internalSessionID,
                             requestIDKeys: [originalID.key],
-                            upstreamIndex: selectedUpstreamIndex
+                            operationLease: selectedOperationLease
                         )
                     }
                 )
                 if rpcHandle?.markRegistered(
                     registrationToken: registration.token,
-                    upstreamIndex: selectedUpstreamIndex
+                    operationLease: selectedOperationLease
                 ) == false {
                     _ = session.router.cancelPending(token: registration.token)
                     self.abandonRequestLease(
                         leaseID,
                         sessionID: internalSessionID,
                         requestIDKeys: [originalID.key],
-                        upstreamIndex: selectedUpstreamIndex
+                        operationLease: selectedOperationLease
                     )
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
@@ -891,27 +928,38 @@ extension RuntimeCoordinator {
                     upstreamIndex: selectedUpstreamIndex,
                     timeout: upstreamRequestTimeout
                 )
-                let upstreamID = self.assignUpstreamID(
+                guard let upstreamID = self.assignUpstreamID(
                     sessionID: internalSessionID,
                     originalID: originalID,
-                    upstreamIndex: selectedUpstreamIndex
-                )
+                    operationLease: selectedOperationLease
+                ) else {
+                    _ = session.router.cancelPending(token: registration.token)
+                    self.abandonRequestLease(
+                        leaseID,
+                        sessionID: internalSessionID,
+                        requestIDKeys: [originalID.key],
+                        operationLease: selectedOperationLease
+                    )
+                    return self.eventLoop.makeFailedFuture(
+                        UpstreamSlotScheduler.AcquisitionError.unavailable
+                    )
+                }
                 if rpcHandle?.markAssigned(
                     registrationToken: registration.token,
-                    upstreamIndex: selectedUpstreamIndex,
+                    operationLease: selectedOperationLease,
                     requestIDKey: originalID.key
                 ) == false {
                     _ = session.router.cancelPending(token: registration.token)
                     self.removeUpstreamIDMapping(
                         sessionID: internalSessionID,
                         requestIDKey: originalID.key,
-                        upstreamIndex: selectedUpstreamIndex
+                        operationLease: selectedOperationLease
                     )
                     self.abandonRequestLease(
                         leaseID,
                         sessionID: internalSessionID,
                         requestIDKeys: [originalID.key],
-                        upstreamIndex: selectedUpstreamIndex
+                        operationLease: selectedOperationLease
                     )
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
@@ -927,7 +975,7 @@ extension RuntimeCoordinator {
                     return self.eventLoop.makeFailedFuture(
                         ControlPlane.RequestError(
                             route: route,
-                            upstreamIndex: selectedUpstreamIndex,
+                            operationLease: selectedOperationLease,
                             underlying: ControlPlane.Error.invalidResponse(
                                 "invalid control-plane request"
                             )
@@ -939,22 +987,38 @@ extension RuntimeCoordinator {
                     self.removeUpstreamIDMapping(
                         sessionID: internalSessionID,
                         requestIDKey: originalID.key,
-                        upstreamIndex: selectedUpstreamIndex
+                        operationLease: selectedOperationLease
                     )
                     self.abandonRequestLease(
                         leaseID,
                         sessionID: internalSessionID,
                         requestIDKeys: [originalID.key],
-                        upstreamIndex: selectedUpstreamIndex
+                        operationLease: selectedOperationLease
                     )
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
 
-                self.sendUpstream(
+                let sent = self.sendUpstream(
                     requestData,
-                    upstreamIndex: selectedUpstreamIndex,
-                    ensureRunning: false
+                    operationLease: selectedOperationLease,
+                    ensureRunning: false,
+                    admission: nil,
+                    onRejected: {
+                        _ = session.router.cancelPending(token: registration.token)
+                    }
                 )
+                guard sent else {
+                    _ = session.router.cancelPending(token: registration.token)
+                    self.abandonRequestLease(
+                        leaseID,
+                        sessionID: internalSessionID,
+                        requestIDKeys: [originalID.key],
+                        operationLease: selectedOperationLease
+                    )
+                    return self.eventLoop.makeFailedFuture(
+                        UpstreamSlotScheduler.AcquisitionError.unavailable
+                    )
+                }
                 return registration.future.flatMapThrowing { buffer in
                     var buffer = buffer
                     guard let responseData = buffer.readData(length: buffer.readableBytes) else {
@@ -962,12 +1026,12 @@ extension RuntimeCoordinator {
                     }
                     return ControlPlane.RPCResponse(
                         responseData: responseData,
-                        upstreamIndex: selectedUpstreamIndex
+                        operationLease: selectedOperationLease
                     )
                 }.flatMapErrorThrowing { error in
                     throw ControlPlane.RequestError(
                         route: route,
-                        upstreamIndex: selectedUpstreamIndex,
+                        operationLease: selectedOperationLease,
                         underlying: error
                     )
                 }
@@ -993,7 +1057,7 @@ extension RuntimeCoordinator {
                 )
                 throw ControlPlane.RequestError(
                     route: route,
-                    upstreamIndex: response.upstreamIndex,
+                    operationLease: response.operationLease,
                     underlying: ControlPlane.Error.upstreamRPC(
                         code: extractJSONRPCErrorCode(from: responseObject) ?? -32000,
                         message: extractJSONRPCErrorMessage(from: responseObject)
@@ -1012,12 +1076,12 @@ extension RuntimeCoordinator {
             }
             rpcHandle?.markFinished()
             if !isProxyUpstreamFailure {
-                markRequestSucceeded(upstreamIndex: response.upstreamIndex)
+                markRequestSucceeded(response.operationLease)
             }
             completeRequestLease(leaseID)
             return ControlPlane.RPCResponse(
                 responseData: responseData,
-                upstreamIndex: response.upstreamIndex
+                operationLease: response.operationLease
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -1185,10 +1249,12 @@ extension RuntimeCoordinator {
     }
 
     func noteIncompatibleUpstream(
-        upstreamIndex: Int,
+        initializeClaim: UpstreamHealthManager.InitializeClaim,
         kind: String,
         reason: String
     ) {
+        guard let proof = initializeClaim.topologyProof else { return }
+        let upstreamIndex = proof.slotID.rawValue
         canonicalHandshakeState.recordIncompatibility(
             upstreamIndex: upstreamIndex,
             kind: kind,
@@ -1196,12 +1262,12 @@ extension RuntimeCoordinator {
         )
         let nowUptimeNs = nowUptimeNanoseconds()
         let transition = upstreamHealthManager.quarantineIncompatibleUpstream(
-            upstreamIndex: upstreamIndex,
+            proof,
             nowUptimeNs: nowUptimeNs
         )
         transition?.cancelledInitTimeout?.cancel()
         if let initUpstreamID = transition?.initUpstreamID {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: initUpstreamID)
+            upstreamRouter.remove(proof: proof, upstreamID: initUpstreamID)
         }
         debugRecorder.resetUpstream(upstreamIndex)
         if let quarantineUntil = transition?.quarantineUntil {

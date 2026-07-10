@@ -16,20 +16,23 @@ extension RuntimeCoordinator {
         lease: CatalogLease,
         nowUptimeNanoseconds: UInt64
     ) -> CatalogCommit {
+        let completionProof = outcome.sourceProof ?? lease.topologyProof
         guard let initializeClaim = upstreamHealthManager.currentCatalogActivationClaim(
             upstreamIndex: lease.upstreamIndex
-        ), let proof = initializeClaim.topologyProof else {
-            return processControlPlane.completeCatalog(
-                outcome,
-                lease: lease,
-                nowUptimeNanoseconds: nowUptimeNanoseconds
-            )
+        ), let activationProof = initializeClaim.topologyProof else {
+            return upstreamTopology.withValidated(completionProof) {
+                processControlPlane.completeCatalog(
+                    outcome,
+                    lease: lease,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds
+                )
+            } ?? .discarded(.upstreamReplaced, .none)
         }
         var catalogCommit: CatalogCommit?
         var activationCommit: UpstreamHealthManager.CatalogActivationCommit?
-        guard upstreamTopology.withValidated(proof, {
+        guard upstreamTopology.withValidated([completionProof, activationProof], {
             activationCommit = upstreamHealthManager.commitCatalogActivation(
-                upstreamIndex: lease.upstreamIndex
+                initializeClaim
             ) { _ in
                 let result = processControlPlane.completeCatalog(
                     outcome,
@@ -46,11 +49,13 @@ extension RuntimeCoordinator {
         }
         switch activationCommit {
         case .notOwned:
-            return processControlPlane.completeCatalog(
-                outcome,
-                lease: lease,
-                nowUptimeNanoseconds: nowUptimeNanoseconds
-            )
+            return upstreamTopology.withValidated(completionProof) {
+                processControlPlane.completeCatalog(
+                    outcome,
+                    lease: lease,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds
+                )
+            } ?? .discarded(.upstreamReplaced, .none)
         case .kept:
             return preconditionedCatalogCommit(catalogCommit)
         case .completed(let timeout):
@@ -80,10 +85,13 @@ extension RuntimeCoordinator {
             return
         }
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
+        guard let upstreamProof = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        )?.proof else { return }
         let readinessToken = UpstreamReadinessWaiterToken()
         guard let (reservation, transition) = processControlPlane.reserveActivation(
             routeID: route.id,
-            upstreamIndex: upstreamIndex,
+            upstreamProof: upstreamProof,
             nowUptimeNs: nowUptimeNanoseconds(),
             readinessToken: readinessToken
         ) else {
@@ -148,14 +156,15 @@ extension RuntimeCoordinator {
         return start
     }
 
-    func markProcessRouteActivationInitialized(upstreamIndex: Int) {
+    func markProcessRouteActivationInitialized(proof: UpstreamTopologyProof) {
+        let upstreamIndex = proof.slotID.rawValue
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
         let processID = route.target.processID
         guard let initialized = processControlPlane.markInitialized(
             routeID: route.id,
-            upstreamIndex: upstreamIndex
+            upstreamProof: proof
         ) else {
             return
         }
@@ -181,7 +190,7 @@ extension RuntimeCoordinator {
         )
         if let existingCatalog = processControlPlane.catalog(forProcessID: processID) {
             let commit = commitProcessCatalog(
-                .usable(existingCatalog.rawResult, source: existingCatalog.upstreamID),
+                .usable(existingCatalog.rawResult, source: existingCatalog.upstreamProof),
                 lease: initialized.lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             )
@@ -197,10 +206,12 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+        guard let upstreamProof = initializeClaim.topologyProof,
+              upstreamProof.slotID.rawValue == upstreamIndex,
+              let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
               let attempt = processControlPlane.markChannelInitialized(
                   routeID: route.id,
-                  upstreamIndex: upstreamIndex
+                  upstreamProof: upstreamProof
               ) else { return }
         logger.info(
             "route_activation_initialized",
@@ -214,12 +225,12 @@ extension RuntimeCoordinator {
         ) {
             guard let (lease, transition) = processControlPlane.beginCatalogAttempt(
                 routeID: route.id,
-                preferredUpstream: UpstreamSlotID(rawValue: upstreamIndex),
+                preferredUpstreamProof: upstreamProof,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             ) else { return }
             applyProcessControlPlaneTransition(transition)
             let commit = commitProcessCatalog(
-                .usable(existingCatalog.rawResult, source: existingCatalog.upstreamID),
+                .usable(existingCatalog.rawResult, source: existingCatalog.upstreamProof),
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             )
@@ -393,7 +404,7 @@ extension RuntimeCoordinator {
                 initializeClaim,
                 commit: { _ in
                     timeout = processControlPlane.handleCatalogChannelTimeout(
-                        upstreamIndex: upstreamIndex,
+                        upstreamProof: proof,
                         nowUptimeNs: nowUptimeNanoseconds()
                     )
                     return true
@@ -401,7 +412,7 @@ extension RuntimeCoordinator {
             )
         }) != nil, let cleared else { return }
         finishClearingUpstreamState(
-            upstreamIndex: upstreamIndex,
+            proof: proof,
             cleared: cleared,
             resetsProcessRouteActivation: false
         )
@@ -458,9 +469,12 @@ extension RuntimeCoordinator {
             applyProcessControlPlaneTransition(timeout.transition)
         }
         guard let route = xcodeProcessRoute(forUpstreamIndex: initializeClaim.upstreamIndex),
+              let replacementProof = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: initializeClaim.upstreamIndex)
+              )?.proof,
               let fresh = processControlPlane.prepareFreshActivationRetry(
                   routeID: route.id,
-                  upstreamIndex: initializeClaim.upstreamIndex,
+                  upstreamProof: replacementProof,
                   nowUptimeNs: nowUptimeNanoseconds()
               ) else { return }
         applyProcessControlPlaneTransition(fresh.2)
@@ -483,9 +497,10 @@ extension RuntimeCoordinator {
             let replacements = dynamicUpstreamFactory?(route.target) ?? []
             if let replacement = replacements.first,
                let transition = upstreamTopology.replace(proof, with: replacement),
-               let previous = transition.replaced?.slot {
+               let previous = transition.replaced?.slot,
+               let replacementLease = transition.snapshot.operationLease(proof.slotID) {
                 publishUpstreamTopology(transition.snapshot)
-                observeUpstreamEvents(replacement, upstreamIndex: upstreamIndex)
+                observeUpstreamEvents(replacementLease)
                 addRuntimeTask { await previous.stop() }
                 for unused in replacements.dropFirst() {
                     addRuntimeTask { await unused.stop() }

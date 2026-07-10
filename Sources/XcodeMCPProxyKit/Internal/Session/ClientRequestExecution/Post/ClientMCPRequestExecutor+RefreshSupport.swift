@@ -94,8 +94,8 @@ extension ClientMCPRequestExecutor {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedUpstreamIndex in
-                cancellationHandle?.activate(upstreamIndex: selectedUpstreamIndex)
+            ) { selectedOperationLease in
+                cancellationHandle?.activate(operationLease: selectedOperationLease)
 
                 let parsedAttemptRequestJSON: Any
                 do {
@@ -115,7 +115,7 @@ extension ClientMCPRequestExecutor {
                         bodyData: bodyData,
                         parsedRequestJSON: parsedAttemptRequestJSON,
                         sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex,
+                        operationLeaseOverride: selectedOperationLease,
                         admission: admission
                     ) else {
                         return eventLoop.makeSucceededFuture(
@@ -143,7 +143,7 @@ extension ClientMCPRequestExecutor {
                                 leaseID,
                                 sessionID: sessionID,
                                 requestIDKeys: prepared.transform.responseIDs.map(\.key),
-                                upstreamIndex: prepared.upstreamIndex
+                                operationLease: prepared.operationLease
                             )
                         }
                     )
@@ -312,7 +312,7 @@ extension ClientMCPRequestExecutor {
                 )
             },
             internalUpstreamChooser: { _ in
-                self.sessionManager.chooseUpstreamIndex()
+                self.sessionManager.chooseUpstreamOperationLease()?.upstreamIndex
             },
             internalToolCaller: {
                 name, arguments, sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in

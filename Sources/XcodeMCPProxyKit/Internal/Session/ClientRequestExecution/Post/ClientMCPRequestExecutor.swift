@@ -498,7 +498,7 @@ final class ClientMCPRequestExecutor: Sendable {
                     eventLoop: eventLoop,
                     session: session,
                     leaseID: leaseID,
-                    upstreamIndex: -1,
+                    operationLease: nil,
                     cancellationHandle: cancellationHandle,
                     requestTimeoutOverride: requestTimeoutOverride
                 ),
@@ -548,12 +548,12 @@ final class ClientMCPRequestExecutor: Sendable {
                     descriptor: descriptor,
                     on: eventLoop,
                     preferredUpstreamIndices: preferredUpstreamIndices
-                ) { upstreamIndex in
-                    cancellationHandle.activate(upstreamIndex: upstreamIndex)
+                ) { operationLease in
+                    cancellationHandle.activate(operationLease: operationLease)
                     self.sessionManager.activateRequestLease(
                         leaseID,
                         requestIDKey: nil,
-                        upstreamIndex: upstreamIndex,
+                        upstreamIndex: operationLease.upstreamIndex,
                         timeout: nil
                     )
                     return self.makeTopLevelRequestFuture(
@@ -565,7 +565,7 @@ final class ClientMCPRequestExecutor: Sendable {
                         eventLoop: eventLoop,
                         session: session,
                         leaseID: leaseID,
-                        upstreamIndex: upstreamIndex,
+                        operationLease: operationLease,
                         cancellationHandle: cancellationHandle,
                         requestTimeoutOverride: forwardingTimeout,
                         admission: admission

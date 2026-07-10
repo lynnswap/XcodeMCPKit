@@ -772,11 +772,11 @@ struct HTTPHandlerTests {
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let sessionID = try await initializeHTTPChannel(channel)
-        let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
         let clientID = sessionManager.session(id: sessionID).serverRequestTracker.record(
             upstreamID: JSONRPC.ID(any: NSNumber(value: 99))!,
-            upstreamIndex: 0
+            operationLease: try #require(sessionManager.chooseUpstreamOperationLease())
         )
+        let chooseCountBeforeResponse = sessionManager.chooseUpstreamIndexCallCount()
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -809,7 +809,7 @@ struct HTTPHandlerTests {
         let session = sessionManager.session(id: sessionID)
         let clientID = session.serverRequestTracker.record(
             upstreamID: JSONRPC.ID(any: NSNumber(value: 99))!,
-            upstreamIndex: 0
+            operationLease: try #require(sessionManager.chooseUpstreamOperationLease())
         )
         sessionManager.setServerRequestResponseSendResults([.backpressure, .accepted])
 
@@ -2556,7 +2556,9 @@ struct HTTPHandlerTests {
         let eventLoop = EmbeddedEventLoop()
         let started = MCPForwardingService.StartedRequest(
             transform: transform,
-            upstreamIndex: 0,
+            operationLease: try #require(
+                sessionManager.chooseUpstreamOperationLease()
+            ),
             requestTimeout: nil,
             routerPendingToken: UUID(),
             future: eventLoop.makeSucceededFuture(buffer)

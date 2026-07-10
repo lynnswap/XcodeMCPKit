@@ -7,6 +7,20 @@ import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 @testable import XcodeMCPProxyKit
 
+func testTopologyProof(_ upstreamIndex: Int, generation: UInt64 = 1) -> UpstreamTopologyProof {
+    UpstreamTopologyProof(
+        slotID: UpstreamSlotID(rawValue: upstreamIndex),
+        slotGeneration: generation
+    )
+}
+
+func testOperationLease(_ upstreamIndex: Int, generation: UInt64 = 1) -> UpstreamOperationLease {
+    UpstreamOperationLease(
+        proof: testTopologyProof(upstreamIndex, generation: generation),
+        slot: TestUpstreamClient()
+    )
+}
+
 @Suite(.serialized)
 struct ControlPlaneAuthorityTests {
     @Test func catalogCommitPublishesProcessAndCanonicalStateAtomically() throws {
@@ -15,12 +29,12 @@ struct ControlPlaneAuthorityTests {
         let route = try #require(authority.route(forProcessID: target.processID))
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 1
         ))
 
         let commit = authority.completeCatalog(
-            .usable(catalog("BuildProject"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("BuildProject"), source: testTopologyProof(0)),
             lease: lease,
             nowUptimeNanoseconds: 2
         )
@@ -41,7 +55,7 @@ struct ControlPlaneAuthorityTests {
         let initialEpoch = authority.currentCatalogEpoch()
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 1
         ))
 
@@ -56,7 +70,7 @@ struct ControlPlaneAuthorityTests {
         #expect(replacement.id != route.id)
         #expect(authority.currentCatalogEpoch() == initialEpoch)
         guard case .discarded(let reason, _) = authority.completeCatalog(
-            .usable(catalog("StaleTool"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("StaleTool"), source: testTopologyProof(0)),
             lease: lease,
             nowUptimeNanoseconds: 3
         ) else {
@@ -74,18 +88,18 @@ struct ControlPlaneAuthorityTests {
         let route = try #require(authority.route(forProcessID: target.processID))
         let (oldLease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 1
         ))
         _ = authority.resetAttempt(processID: target.processID)
         let (newLease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 2
         ))
 
         guard case .discarded(let reason, _) = authority.completeCatalog(
-            .usable(catalog("OldTool"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("OldTool"), source: testTopologyProof(0)),
             lease: oldLease,
             nowUptimeNanoseconds: 3
         ) else {
@@ -94,7 +108,7 @@ struct ControlPlaneAuthorityTests {
         }
         #expect(reason == .attemptSuperseded)
         guard case .accepted = authority.completeCatalog(
-            .usable(catalog("NewTool"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("NewTool"), source: testTopologyProof(0)),
             lease: newLease,
             nowUptimeNanoseconds: 4
         ) else {
@@ -110,12 +124,12 @@ struct ControlPlaneAuthorityTests {
         let route = try #require(authority.route(forProcessID: target.processID))
         let (foreground, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 1
         ))
         let (background, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 2
         ))
         #expect(foreground.attempt == background.attempt)
@@ -125,18 +139,25 @@ struct ControlPlaneAuthorityTests {
         let backgroundRPC = ControlPlane.RPCHandle()
         _ = authority.attach(.rpc(foregroundRPC), to: foreground)
         _ = authority.attach(.rpc(backgroundRPC), to: background)
-        guard case .accepted = authority.completeCatalog(
-            .usable(catalog("Foreground"), source: UpstreamSlotID(rawValue: 0)),
+        foregroundRPC.markFinished()
+        guard case .accepted(_, let transition) = authority.completeCatalog(
+            .usable(catalog("Foreground"), source: testTopologyProof(0)),
             lease: foreground,
             nowUptimeNanoseconds: 3
         ) else {
             Issue.record("first logical load should commit")
             return
         }
-        #expect(backgroundRPC.isCancelled() == false)
+        for effect in transition.effects {
+            if case .cancelRPC(let handle) = effect {
+                handle.cancel()
+            }
+        }
+        #expect(foregroundRPC.isCancelled() == false)
+        #expect(backgroundRPC.isCancelled())
         #expect(authority.validateCatalogLoad(background) == false)
         guard case .discarded(let reason, _) = authority.completeCatalog(
-            .usable(catalog("Background"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("Background"), source: testTopologyProof(0)),
             lease: background,
             nowUptimeNanoseconds: 4
         ) else {
@@ -147,6 +168,106 @@ struct ControlPlaneAuthorityTests {
         #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["Foreground"])
     }
 
+    @Test func catalogCommitUsesActualFallbackResponseProof() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 41016, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let preferredProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 0)
+            )?.proof
+        )
+        let actualProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 1)
+            )?.proof
+        )
+        manager.applyProcessControlPlaneTransition(
+            manager.processControlPlane.updateUsability(
+                usability([0, 1]),
+                nowUptimeNs: 0
+            )
+        )
+        let route = try #require(manager.processControlPlane.route(forProcessID: target.processID))
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: preferredProof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+
+        guard case .accepted = manager.commitProcessCatalog(
+            .usable(catalog("FallbackTool"), source: actualProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected fallback response to commit")
+            return
+        }
+
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID)?.upstreamProof == actualProof)
+        #expect(manager.processControlPlane.canonicalSourceProof() == actualProof)
+        #expect(actualProof != preferredProof)
+    }
+
+    @Test func catalogCommitRejectsActualResponseFromReplacedGeneration() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 41017, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let oldProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 0)
+            )?.proof
+        )
+        let route = try #require(manager.processControlPlane.route(forProcessID: target.processID))
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: oldProof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        _ = try #require(
+            manager.upstreamTopology.replace(oldProof, with: TestUpstreamClient())
+        )
+
+        guard case .discarded(let reason, _) = manager.commitProcessCatalog(
+            .usable(catalog("StaleTool"), source: oldProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected replaced response generation to be rejected")
+            return
+        }
+
+        #expect(reason == .upstreamReplaced)
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalToolsCatalogRaw() == nil)
+    }
+
     @Test func unrelatedRouteAdditionDoesNotInvalidateInFlightCatalogLoad() throws {
         let first = xcodeProcessTarget(processID: 41014, xcodeVersion: "27.0")
         let second = xcodeProcessTarget(processID: 41015, xcodeVersion: "26.4")
@@ -155,7 +276,7 @@ struct ControlPlaneAuthorityTests {
         let epoch = authority.currentCatalogEpoch()
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 1
         ))
         let rpc = ControlPlane.RPCHandle()
@@ -175,7 +296,7 @@ struct ControlPlaneAuthorityTests {
         #expect(authority.validateCatalogLoad(lease))
         #expect(rpc.isCancelled() == false)
         guard case .accepted = authority.completeCatalog(
-            .usable(catalog("StillCurrent"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("StillCurrent"), source: testTopologyProof(0)),
             lease: lease,
             nowUptimeNanoseconds: 3
         ) else {
@@ -191,13 +312,13 @@ struct ControlPlaneAuthorityTests {
         let oldToken = UpstreamReadinessWaiterToken()
         let oldReservation = try #require(authority.reserveActivation(
             routeID: route.id,
-            upstreamIndex: 0,
+            upstreamProof: testTopologyProof(0),
             nowUptimeNs: 1,
             readinessToken: oldToken
         )).0
         #expect(authority.reserveActivation(
             routeID: route.id,
-            upstreamIndex: 0,
+            upstreamProof: testTopologyProof(0),
             nowUptimeNs: 2,
             readinessToken: UpstreamReadinessWaiterToken()
         ) == nil)
@@ -215,7 +336,7 @@ struct ControlPlaneAuthorityTests {
 
         let newReservation = try #require(authority.reserveActivation(
             routeID: route.id,
-            upstreamIndex: 0,
+            upstreamProof: testTopologyProof(0),
             nowUptimeNs: 3,
             readinessToken: UpstreamReadinessWaiterToken()
         )).0
@@ -238,7 +359,7 @@ struct ControlPlaneAuthorityTests {
         let route = try #require(authority.route(forProcessID: target.processID))
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            preferredUpstreamProof: testTopologyProof(0),
             nowUptimeNanoseconds: 1
         ))
         let catalogEpoch = authority.currentCatalogEpoch()
@@ -251,7 +372,7 @@ struct ControlPlaneAuthorityTests {
 
         #expect(authority.currentCatalogEpoch() == catalogEpoch)
         guard case .accepted = authority.completeCatalog(
-            .usable(catalog("WindowTool"), source: UpstreamSlotID(rawValue: 0)),
+            .usable(catalog("WindowTool"), source: testTopologyProof(0)),
             lease: lease,
             nowUptimeNanoseconds: 2
         ) else {
@@ -313,14 +434,14 @@ struct ControlPlaneAuthorityTests {
         let health = UpstreamHealthManager()
         router.applyTopology(initial)
         health.applyTopology(initial)
-        let requestID = router.assign(
-            upstreamIndex: 0,
+        let requestID = try #require(router.assign(
+            proof: oldProof,
             sessionID: "session",
             originalID: JSONRPC.ID(any: 1)!,
             isInitialize: false
-        )
+        ))
         #expect(requestID != 0)
-        #expect(health.beginWarmInitialize(upstreamIndex: 0))
+        #expect(health.claimWarmInitialize(upstreamIndex: 0) != nil)
 
         let replacement = try #require(topology.replace(
             oldProof,
@@ -339,12 +460,14 @@ struct ControlPlaneAuthorityTests {
             replacementEventCount += 1
         }
         #expect(replacementEventCount == 0)
-        #expect(router.consume(upstreamIndex: 0, upstreamID: requestID) == nil)
+        #expect(router.consume(proof: oldProof, upstreamID: requestID) == nil)
         #expect(
             health.activeStatesSnapshot().first { $0.id == UpstreamSlotID(rawValue: 0) }?
                 .state.initInFlight == false
         )
-        let replacementInitializeID = router.assignInitialize(upstreamIndex: 0)
+        let replacementInitializeID = try #require(
+            router.assignInitialize(proof: replacementProof)
+        )
         let replacementClaim = try #require(health.claimWarmInitialize(upstreamIndex: 0))
         #expect(router.consume(proof: oldProof, upstreamID: replacementInitializeID) == nil)
         #expect(health.markProtocolViolation(oldProof, nowUptimeNs: 1) == nil)
@@ -360,7 +483,7 @@ struct ControlPlaneAuthorityTests {
         router.applyTopology(retired.snapshot)
         health.applyTopology(retired.snapshot)
         #expect(health.activeStatesSnapshot().map(\.id) == [UpstreamSlotID(rawValue: 0)])
-        #expect(router.assignInitialize(upstreamIndex: 1) == 0)
+        #expect(retired.snapshot.proof(UpstreamSlotID(rawValue: 1)) == nil)
 
         let appended = topology.append([TestUpstreamClient()])
         health.applyTopology(appended.snapshot)
@@ -378,6 +501,136 @@ struct ControlPlaneAuthorityTests {
             Issue.record("stale topology proof must not mutate the replacement health state")
             return
         }
+    }
+
+    @Test func schedulerRejectsReservedLeaseAfterSameSlotGenerationReplacement() async throws {
+        let oldSlot = TestUpstreamClient()
+        let replacementSlot = TestUpstreamClient()
+        let topology = UpstreamTopologyAuthority([oldSlot])
+        let oldProof = try #require(
+            topology.snapshot().proof(UpstreamSlotID(rawValue: 0))
+        )
+        let eventLoop = EmbeddedEventLoop()
+        let started = NIOLockedValueBox<[UpstreamTopologyProof]>([])
+        let failedUnavailable = NIOLockedValueBox(0)
+        let scheduler = UpstreamSlotScheduler(
+            canUseUpstream: { _ in .init(proof: oldProof, effects: []) },
+            selectUpstream: { _ in .init(proof: oldProof, effects: []) },
+            operationLease: { topology.operationLease(for: $0) },
+            validateOperationLease: { topology.validate($0) }
+        )
+        scheduler.enqueueRequest(
+            leaseID: UUID(),
+            descriptor: .init(
+                sessionID: "generation-race",
+                label: "tools/list",
+                isBatch: false,
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            ),
+            on: eventLoop,
+            starter: { lease in
+                started.withLockedValue { $0.append(lease.proof) }
+            },
+            failUnavailable: {
+                failedUnavailable.withLockedValue { $0 += 1 }
+            },
+            failCancelled: {
+                Issue.record("generation replacement is unavailable, not cancellation")
+            }
+        )
+
+        _ = try #require(topology.replace(oldProof, with: replacementSlot))
+        eventLoop.run()
+
+        #expect(started.withLockedValue { $0 }.isEmpty)
+        #expect(failedUnavailable.withLockedValue { $0 } == 1)
+        #expect(await oldSlot.sentCount() == 0)
+        #expect(await replacementSlot.sentCount() == 0)
+        #expect(scheduler.debugSnapshot().activeLeaseCountByUpstream.isEmpty)
+    }
+
+    @Test func observerCannotBindRetiredSlotEventsToCurrentGeneration() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        let retiredSlot = TestUpstreamClient()
+        let currentSlot = TestUpstreamClient()
+        let appended = manager.upstreamTopology.append([retiredSlot])
+        manager.publishUpstreamTopology(appended.snapshot)
+        let retiredLease = try #require(
+            appended.snapshot.operationLease(UpstreamSlotID(rawValue: 0))
+        )
+        let replacement = try #require(
+            manager.upstreamTopology.replace(retiredLease.proof, with: currentSlot)
+        )
+        manager.publishUpstreamTopology(replacement.snapshot)
+        manager.observeUpstreamEvents(retiredLease)
+
+        await retiredSlot.yield(.stdoutProtocolViolation(.init(
+            reason: .invalidJSON,
+            bufferedByteCount: 7,
+            preview: "{stale"
+        )))
+        await retiredSlot.stop()
+        await manager.shutdown()
+
+        guard case .healthy = manager.upstreamHealthManager.state(
+            for: UpstreamSlotID(rawValue: 0)
+        )?.healthState else {
+            Issue.record("retired slot event must not quarantine the replacement generation")
+            return
+        }
+    }
+
+    @Test func serverResponseFromOldGenerationCannotSendThroughReplacementSlot() async throws {
+        let oldSlot = TestUpstreamClient()
+        let replacementSlot = TestUpstreamClient()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: eventLoop,
+            upstreams: [oldSlot],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let operationLease = try #require(
+            manager.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: 0))
+        )
+        let sessionID = "old-generation-server-response"
+        let session = manager.session(id: sessionID)
+        let clientID = session.serverRequestTracker.record(
+            upstreamID: JSONRPC.ID(any: 91)!,
+            operationLease: operationLease
+        )
+        _ = try #require(
+            manager.upstreamTopology.replace(operationLease.proof, with: replacementSlot)
+        )
+        let response = try JSONRPC.Wire.data(from: [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["ok": true],
+        ])
+
+        let result = try await manager.forwardServerRequestResponse(
+            responseData: response,
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+
+        #expect(result == .upstreamUnavailable)
+        #expect(await oldSlot.sentCount() == 0)
+        #expect(await replacementSlot.sentCount() == 0)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
     }
 
     @Test func catalogActivationSuccessAndTimeoutHaveSingleTerminalWinner() throws {
@@ -404,7 +657,7 @@ struct ControlPlaneAuthorityTests {
         DispatchQueue.concurrentPerform(iterations: 2) { contender in
             _ = topology.withValidated(proof) {
                 if contender == 0 {
-                    switch health.commitCatalogActivation(upstreamIndex: 0, commit: { _ in
+                    switch health.commitCatalogActivation(claim, commit: { _ in
                         .complete
                     }) {
                     case .completed:
@@ -584,6 +837,7 @@ struct ControlPlaneAuthorityTests {
             repository.appendingPathComponent("Sources/XcodeMCPProxyKit"),
             repository.appendingPathComponent("Tests/ProxyRuntimeCoordinatorTests"),
         ]
+        let productionRoot = roots[0]
         let forbidden = [
             "ProcessRouteStore",
             "ProcessRouteReadinessStore",
@@ -609,15 +863,46 @@ struct ControlPlaneAuthorityTests {
         ]
         let manager = FileManager.default
         var source = ""
+        var productionSource = ""
         for root in roots {
             let enumerator = try #require(manager.enumerator(at: root, includingPropertiesForKeys: nil))
             for case let url as URL in enumerator where url.pathExtension == "swift" {
                 guard url.path != #filePath else { continue }
-                source += try String(contentsOf: url, encoding: .utf8)
+                let fileSource = try String(contentsOf: url, encoding: .utf8)
+                source += fileSource
+                if url.path.hasPrefix(productionRoot.path) {
+                    productionSource += fileSource
+                }
             }
         }
         for symbol in forbidden {
             #expect(source.contains(symbol) == false, "legacy Task A symbol remains: \(symbol)")
+        }
+        let prooflessProductionFragments = [
+            "proof suppliedProof: UpstreamTopologyProof?",
+            "upstreamTopology.snapshot().proof",
+        ]
+        for fragment in prooflessProductionFragments {
+            #expect(
+                productionSource.contains(fragment) == false,
+                "production remints current topology proof: \(fragment)"
+            )
+        }
+        let indexOnlyMutationPatterns = [
+            #"func\s+(?:markRequestSucceeded|markUpstreamOverloaded|markRequestTimedOut|markProtocolViolation|quarantineIncompatibleUpstream|markToolsListRefreshSucceeded|markToolsListRefreshFailed|clearUpstreamState|markInitialized)\s*\(\s*upstreamIndex\s*:"#,
+            #"func\s+(?:assign|assignInitialize|consume|remove|reset)\s*\(\s*upstreamIndex\s*:"#,
+            #"func\s+sendUpstream\s*\([^)]*upstreamIndex\s*:"#,
+        ]
+        for pattern in indexOnlyMutationPatterns {
+            let expression = try NSRegularExpression(
+                pattern: pattern,
+                options: [.dotMatchesLineSeparators]
+            )
+            let range = NSRange(productionSource.startIndex..., in: productionSource)
+            #expect(
+                expression.firstMatch(in: productionSource, range: range) == nil,
+                "production index-only topology mutation remains: \(pattern)"
+            )
         }
     }
 
@@ -668,11 +953,11 @@ struct ControlPlaneAuthorityTests {
         let route = try #require(authority.route(forProcessID: processID))
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstream: UpstreamSlotID(rawValue: upstream),
+            preferredUpstreamProof: testTopologyProof(upstream),
             nowUptimeNanoseconds: 1
         ))
         guard case .accepted = authority.completeCatalog(
-            .usable(catalog, source: UpstreamSlotID(rawValue: upstream)),
+            .usable(catalog, source: testTopologyProof(upstream)),
             lease: lease,
             nowUptimeNanoseconds: 2
         ) else {

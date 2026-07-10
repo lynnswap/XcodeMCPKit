@@ -106,22 +106,19 @@ extension RuntimeCoordinator {
             )
             return
         }
-        let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
+        guard let initializeClaim = upstreamHealthManager.claimWarmInitialize(
+            upstreamIndex: upstreamIndex
+        ), let proof = initializeClaim.topologyProof,
+           let operationLease = upstreamTopology.operationLease(for: proof),
+           let upstreamID = upstreamRouter.assignInitialize(proof: proof) else {
+            return
+        }
         guard initializeManager.beginPrimaryInitializeSend(
             upstreamIndex: upstreamIndex,
             upstreamID: upstreamID
         ) else {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-            return
-        }
-        guard let initializeClaim = upstreamHealthManager.claimWarmInitialize(
-            upstreamIndex: upstreamIndex
-        ) else {
-            _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
-                upstreamIndex: upstreamIndex,
-                upstreamID: upstreamID
-            )
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            upstreamRouter.remove(proof: proof, upstreamID: upstreamID)
+            clearUpstreamState(initializeClaim: initializeClaim)
             return
         }
         guard upstreamHealthManager.setWarmInitializeUpstreamID(
@@ -132,19 +129,21 @@ extension RuntimeCoordinator {
                 upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID
             )
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            upstreamRouter.remove(proof: proof, upstreamID: upstreamID)
             return
         }
 
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONRPC.Wire.data(from: request) {
             guard upstreamHealthManager.beginInitializeSend(initializeClaim) else { return }
-            sendUpstream(
+            _ = sendUpstream(
                 data,
-                upstreamIndex: upstreamIndex,
+                operationLease: operationLease,
                 ensureRunning: true,
                 admission: nil,
-                initializeClaim: initializeClaim
+                onRejected: { [weak self] in
+                    self?.clearUpstreamState(initializeClaim: initializeClaim)
+                }
             )
         } else {
             failInitPending(error: TimeoutError())
@@ -247,11 +246,6 @@ extension RuntimeCoordinator {
                     initializeClaim: claim,
                     resetsProcessRouteActivation: false
                 )
-            } else {
-                upstreamRouter.remove(
-                    upstreamIndex: failedUpstreamIndex,
-                    upstreamID: failedUpstreamID
-                )
             }
         }
         initializeManager.reopenPrimaryInitializeForRetry()
@@ -264,10 +258,10 @@ extension RuntimeCoordinator {
     }
 
     func handleInitializeResponse(_ object: [String: Any], upstreamIndex: Int, upstreamID: Int64) {
-        guard upstreamHealthManager.initializeAttemptMatches(
+        guard upstreamHealthManager.currentInitializeClaim(
             upstreamIndex: upstreamIndex,
             expectedUpstreamID: upstreamID
-        ) else {
+        ) != nil else {
             return
         }
         if initializeManager.consumeCancelledPrimaryInitializeAttempt(
@@ -358,7 +352,7 @@ extension RuntimeCoordinator {
                         resetsProcessRouteActivation: false
                     )
                     noteIncompatibleUpstream(
-                        upstreamIndex: upstreamIndex,
+                        initializeClaim: ownership.initializeClaim,
                         kind: "initialize",
                         reason: "initialize.result mismatch"
                     )
@@ -593,7 +587,7 @@ extension RuntimeCoordinator {
             completeInitPendingWithError(errorObject)
         } else {
             noteIncompatibleUpstream(
-                upstreamIndex: upstreamIndex,
+                initializeClaim: ownership.initializeClaim,
                 kind: "initialize",
                 reason: "unsupported protocol version"
             )
@@ -657,7 +651,7 @@ extension RuntimeCoordinator {
         onRejected: @escaping @Sendable () -> Void = {}
     ) {
         let shouldSend = upstreamHealthManager.shouldSendInitializedNotification(
-            upstreamIndex: upstreamIndex
+            initializeClaim
         )
         guard shouldSend else {
             guard upstreamHealthManager.validate(initializeClaim) else {
@@ -674,21 +668,21 @@ extension RuntimeCoordinator {
             return
         }
 
-        guard let context = upstreamSlotContext(upstreamIndex),
-              context.proof == initializeClaim.topologyProof else {
+        guard let proof = initializeClaim.topologyProof,
+              let operationLease = upstreamTopology.operationLease(for: proof) else {
             onRejected()
             return
         }
-        addRuntimeTask { [weak self, context] in
+        addRuntimeTask { [weak self, operationLease] in
             guard let self,
                   self.upstreamHealthManager.validate(initializeClaim),
-                  self.upstreamTopology.validate(context.proof) else {
+                  self.upstreamTopology.validate(operationLease) else {
                 onRejected()
                 return
             }
-            let result = await context.slot.send(data)
+            let result = await operationLease.slot.send(data)
             if result == .accepted {
-                guard self.upstreamTopology.withValidated(context.proof, {
+                guard self.upstreamTopology.withValidated(operationLease.proof, {
                     self.upstreamHealthManager.markInitializedNotificationSent(
                         initializeClaim,
                         expectedUpstreamID: expectedUpstreamID
@@ -709,23 +703,6 @@ extension RuntimeCoordinator {
         }
     }
 
-    func handleInitializedNotificationSendOverload(
-        upstreamIndex: Int,
-        expectedUpstreamID: Int64,
-        treatsAsPrimary: Bool = false
-    ) {
-        guard clearUpstreamState(
-            upstreamIndex: upstreamIndex,
-            expectedUpstreamID: expectedUpstreamID
-        ) else {
-            return
-        }
-        recoverFromInitializedNotificationFailure(
-            upstreamIndex: upstreamIndex,
-            treatsAsPrimary: treatsAsPrimary
-        )
-    }
-
     func rejectInitializeResponseOwnership(
         _ ownership: InitializeResponseOwnership,
         upstreamIndex: Int,
@@ -743,7 +720,7 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func recoverFromInitializedNotificationFailure(
+    func recoverFromInitializedNotificationFailure(
         upstreamIndex: Int,
         treatsAsPrimary: Bool
     ) {
@@ -831,8 +808,6 @@ extension RuntimeCoordinator {
                 initializeClaim: claim,
                 resetsProcessRouteActivation: false
             )
-        } else {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
         }
     }
 
@@ -849,26 +824,6 @@ extension RuntimeCoordinator {
         context?.notificationHub.closeAll()
     }
 
-    func markUpstreamInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
-        upstreamHealthManager.markInitInFlight(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-    }
-
-    @discardableResult
-    func clearUpstreamState(upstreamIndex: Int, expectedUpstreamID: Int64? = nil) -> Bool {
-        guard let cleared = upstreamHealthManager.clearUpstreamState(
-            upstreamIndex: upstreamIndex,
-            expectedUpstreamID: expectedUpstreamID
-        ) else {
-            return false
-        }
-        finishClearingUpstreamState(
-            upstreamIndex: upstreamIndex,
-            cleared: cleared,
-            resetsProcessRouteActivation: true
-        )
-        return true
-    }
-
     @discardableResult
     func clearUpstreamState(
         proof: UpstreamTopologyProof,
@@ -880,7 +835,7 @@ extension RuntimeCoordinator {
             expectedUpstreamID: expectedUpstreamID
         ) else { return false }
         finishClearingUpstreamState(
-            upstreamIndex: proof.slotID.rawValue,
+            proof: proof,
             cleared: cleared,
             resetsProcessRouteActivation: resetsProcessRouteActivation
         )
@@ -893,11 +848,12 @@ extension RuntimeCoordinator {
         resetsProcessRouteActivation: Bool = true,
         replacesInitializedChannel: Bool = true
     ) -> Bool {
-        guard let cleared = upstreamHealthManager.clearInitializeClaim(initializeClaim) else {
+        guard let proof = initializeClaim.topologyProof,
+              let cleared = upstreamHealthManager.clearInitializeClaim(initializeClaim) else {
             return false
         }
         finishClearingUpstreamState(
-            upstreamIndex: initializeClaim.upstreamIndex,
+            proof: proof,
             cleared: cleared,
             resetsProcessRouteActivation: resetsProcessRouteActivation
         )
@@ -909,7 +865,7 @@ extension RuntimeCoordinator {
     }
 
     func finishClearingUpstreamState(
-        upstreamIndex: Int,
+        proof: UpstreamTopologyProof,
         cleared: (
             timeout: RuntimeScheduledTimeout?,
             initUpstreamID: Int64?,
@@ -918,13 +874,14 @@ extension RuntimeCoordinator {
         ),
         resetsProcessRouteActivation: Bool
     ) {
+        let upstreamIndex = proof.slotID.rawValue
         canonicalHandshakeState.invalidateInitializePublication(
             sourceUpstream: upstreamIndex
         )
         cleared.timeout?.cancel()
         if let initUpstreamID = cleared.initUpstreamID {
             upstreamRouter.remove(
-                upstreamIndex: upstreamIndex,
+                proof: proof,
                 upstreamID: initUpstreamID
             )
         }
@@ -993,17 +950,6 @@ extension RuntimeCoordinator {
         return true
     }
 
-    func markUpstreamInitialized(upstreamIndex: Int) {
-        guard let result = upstreamHealthManager.markInitialized(upstreamIndex: upstreamIndex) else {
-            return
-        }
-        result.timeout?.cancel()
-        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
-        markProcessRouteActivationInitialized(upstreamIndex: upstreamIndex)
-        testHooks.upstreamInitialized?(upstreamIndex)
-        noteUpstreamInitializationSucceeded()
-    }
-
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
         for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
@@ -1014,14 +960,20 @@ extension RuntimeCoordinator {
     func resetSecondaryUpstreamsForPrimaryRetry(excluding primaryUpstreamIndex: Int? = nil) {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
         for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
-            clearUpstreamState(upstreamIndex: upstreamIndex)
+            guard let proof = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            )?.proof else { continue }
+            clearUpstreamState(proof: proof)
         }
     }
 
     func startPrimaryEagerRetry(failedPrimaryUpstreamIndex: Int? = nil) {
-        clearUpstreamState(
-            upstreamIndex: failedPrimaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        )
+        let upstreamIndex = failedPrimaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
+        if let proof = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        )?.proof {
+            clearUpstreamState(proof: proof)
+        }
         initializeManager.resetWarmSecondaryForRetry()
         invalidateControlPlane(
             reason: "primary_eager_retry",

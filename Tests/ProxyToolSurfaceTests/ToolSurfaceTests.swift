@@ -491,26 +491,48 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
 
     func hasDocumentationSearchService() -> Bool { false }
 
-    func chooseUpstreamIndex() -> Int? { nil }
+    func chooseUpstreamOperationLease() -> UpstreamOperationLease? { nil }
 
     func enqueueOnUpstreamSlot<Output>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int]?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> where Output : Sendable {
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease: UpstreamOperationLease
+    ) -> Int64? {
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {}
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {}
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {}
+    func onRequestSucceeded(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {}
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool { false }
     func debugSnapshot() -> ProxyDebug.Snapshot { fatalError("unused in ToolSurfaceTests") }
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         fatalError("unused in ToolSurfaceTests")
@@ -540,13 +562,13 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) {}
 
     func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int?
+        operationLease: UpstreamOperationLease?
     ) {}
 }

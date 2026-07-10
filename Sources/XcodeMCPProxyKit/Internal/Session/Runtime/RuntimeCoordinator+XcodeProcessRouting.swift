@@ -543,6 +543,7 @@ extension RuntimeCoordinator {
             )
         }
 
+        testHooks.ownerRouteProofsResolved?()
         var proofsRemainCurrent = ownerResolution.resolved.allSatisfy { resolved in
             windowOwnershipAuthority.validate(resolved.proof.windowEpoch)
                 && processControlPlane.admit(resolved.proof.route) != nil
@@ -614,9 +615,7 @@ extension RuntimeCoordinator {
         guard let ownerProcessID = distinctOwners.first else {
             return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
         }
-        guard let ownerRoute = processControlPlane.route(forProcessID: ownerProcessID),
-              let routeProof = processControlPlane.routeProof(routeID: ownerRoute.id),
-              let routeAdmission = processControlPlane.admit(routeProof) else {
+        guard let ownerRoute = processControlPlane.route(forProcessID: ownerProcessID) else {
             return .reject(
                 errors: toolRoutingErrors(
                     for: requests,
@@ -625,6 +624,51 @@ extension RuntimeCoordinator {
                 forceBatchArray: requestJSON is [Any]
             )
         }
+        let owners = windowOwnershipAuthority.snapshot()
+        let resolvedProofs = ownerResolution.resolved
+            .filter { $0.processID == ownerProcessID }
+            .map(\.proof)
+        let windowProof: WindowRouteProof
+        if let resolvedProof = resolvedProofs.first {
+            guard resolvedProofs.allSatisfy({ $0 == resolvedProof }),
+                  resolvedProof.route.routeID == ownerRoute.id,
+                  resolvedProof.windowEpoch == owners.epoch else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: requests,
+                        message: "Xcode window ownership changed while routing the request"
+                    ),
+                    forceBatchArray: requestJSON is [Any]
+                )
+            }
+            windowProof = resolvedProof
+        } else {
+            guard let routeProof = processControlPlane.routeProof(routeID: ownerRoute.id) else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: requests,
+                        message: "Xcode process route changed while routing the request"
+                    ),
+                    forceBatchArray: requestJSON is [Any]
+                )
+            }
+            windowProof = WindowRouteProof(windowEpoch: owners.epoch, route: routeProof)
+        }
+        guard windowOwnershipAuthority.validate(windowProof.windowEpoch),
+              let routeAdmission = processControlPlane.admit(windowProof.route) else {
+            return .reject(
+                errors: toolRoutingErrors(
+                    for: requests,
+                    message: "Xcode window ownership changed while routing the request"
+                ),
+                forceBatchArray: requestJSON is [Any]
+            )
+        }
+        let rewritePlan = ownerBoundRequestRewritePlan(
+            processID: ownerProcessID,
+            requests: ownerBoundRequests,
+            owners: owners
+        )
         let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
 
         let hasMissingTools = requests.contains { request in
@@ -674,8 +718,43 @@ extension RuntimeCoordinator {
             preferredUpstreamIndices: ownerUpstreamIndices,
             admission: RouteForwardingAdmission(
                 route: routeAdmission,
-                upstreamProofs: upstreamProofs
+                upstreamProofs: upstreamProofs,
+                window: WindowRouteAdmission(
+                    proof: windowProof,
+                    route: routeAdmission,
+                    rewritePlan: rewritePlan
+                )
             )
+        )
+    }
+
+    private func ownerBoundRequestRewritePlan(
+        processID: pid_t,
+        requests: [ToolRoutingRequest],
+        owners: WindowOwnershipSnapshot
+    ) -> OwnerBoundRequestRewritePlan {
+        let identities = owners.identities.filter { $0.processID == processID }
+        let rawByProxy = Dictionary(uniqueKeysWithValues: identities.map {
+            ($0.proxyTabIdentifier, $0.rawTabIdentifier)
+        })
+        let byWorkspace = Dictionary(grouping: identities, by: \.workspacePath)
+        let singleRawByWorkspace: [String: String] = byWorkspace.compactMapValues {
+            identities -> String? in
+            guard identities.count == 1 else { return nil }
+            return identities[0].rawTabIdentifier
+        }
+        let requiringTabIdentifier = Set(requests.compactMap { request in
+            processControlPlane.tool(
+                request.toolName,
+                processID: processID,
+                requiresArgument: "tabIdentifier"
+            ) ? request.toolName : nil
+        })
+        return OwnerBoundRequestRewritePlan(
+            processID: processID,
+            rawTabIdentifierByProxyIdentifier: rawByProxy,
+            singleRawTabIdentifierByWorkspacePath: singleRawByWorkspace,
+            toolsRequiringTabIdentifier: requiringTabIdentifier
         )
     }
 
@@ -1117,6 +1196,80 @@ extension RuntimeCoordinator {
             return (bodyData, parsedRequestJSON)
         }
         return (data, rewritten.value)
+    }
+
+    func rewriteOwnerBoundRequest(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        operationLease: UpstreamOperationLease,
+        admission: RouteForwardingAdmission?
+    ) -> (bodyData: Data, parsedRequestJSON: Any) {
+        guard upstreamTopology.validate(operationLease),
+              let rewritePlan = admission?.window?.rewritePlan else {
+            return (bodyData, parsedRequestJSON)
+        }
+        let rewritten = rewriteOwnerBoundRequestJSON(
+            parsedRequestJSON,
+            plan: rewritePlan
+        )
+        guard rewritten.changed,
+              JSONSerialization.isValidJSONObject(rewritten.value),
+              let data = try? JSONSerialization.data(
+                withJSONObject: rewritten.value,
+                options: []
+              ) else {
+            return (bodyData, parsedRequestJSON)
+        }
+        return (data, rewritten.value)
+    }
+
+    private func rewriteOwnerBoundRequestJSON(
+        _ value: Any,
+        plan: OwnerBoundRequestRewritePlan
+    ) -> (value: Any, changed: Bool) {
+        if let object = value as? [String: Any] {
+            return rewriteOwnerBoundRequestObject(object, plan: plan)
+        }
+        guard let array = value as? [Any] else { return (value, false) }
+        var changed = false
+        let rewritten = array.map { item -> Any in
+            guard let object = item as? [String: Any] else { return item }
+            let result = rewriteOwnerBoundRequestObject(object, plan: plan)
+            changed = changed || result.changed
+            return result.value
+        }
+        return (rewritten, changed)
+    }
+
+    private func rewriteOwnerBoundRequestObject(
+        _ object: [String: Any],
+        plan: OwnerBoundRequestRewritePlan
+    ) -> (value: [String: Any], changed: Bool) {
+        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
+              var params = object["params"] as? [String: Any],
+              let toolName = params["name"] as? String,
+              var arguments = params["arguments"] as? [String: Any] else {
+            return (object, false)
+        }
+
+        var rawTabIdentifier: String?
+        if let proxyIdentifier = arguments["tabIdentifier"] as? String,
+           proxyIdentifier.isEmpty == false {
+            rawTabIdentifier = plan.rawTabIdentifierByProxyIdentifier[proxyIdentifier]
+        } else if let workspacePath = arguments["workspacePath"] as? String,
+                  workspacePath.isEmpty == false,
+                  plan.toolsRequiringTabIdentifier.contains(toolName) {
+            rawTabIdentifier = plan.singleRawTabIdentifierByWorkspacePath[workspacePath]
+        }
+        guard let rawTabIdentifier,
+              arguments["tabIdentifier"] as? String != rawTabIdentifier else {
+            return (object, false)
+        }
+        arguments["tabIdentifier"] = rawTabIdentifier
+        params["arguments"] = arguments
+        var rewritten = object
+        rewritten["params"] = params
+        return (rewritten, true)
     }
 
     private func rewriteOwnerBoundRequestJSON(

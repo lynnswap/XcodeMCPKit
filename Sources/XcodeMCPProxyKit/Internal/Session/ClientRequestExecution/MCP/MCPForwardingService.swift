@@ -28,14 +28,14 @@ struct MCPForwardingService: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        upstreamIndexOverride: Int? = nil,
+        operationLeaseOverride: UpstreamOperationLease? = nil,
         admission: RouteForwardingAdmission? = nil
     ) throws -> PreparedRequest? {
         try upstreamRuntime.prepareRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
-            upstreamIndexOverride: upstreamIndexOverride,
+            operationLeaseOverride: operationLeaseOverride,
             admission: admission
         )
     }
@@ -62,7 +62,7 @@ struct MCPForwardingService: Sendable {
             requestTimeout: requestTimeout,
             leaseID: leaseID,
             onRegistered: { registration in
-                cancellationHandle?.activate(upstreamIndex: registration.upstreamIndex)
+                cancellationHandle?.activate(operationLease: registration.operationLease)
                 cancellationHandle?.bindRouterPendingToken(registration.routerPendingToken)
             },
             onTimeout: onTimeout
@@ -213,8 +213,8 @@ struct MCPForwardingService: Sendable {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedUpstreamIndex in
-                internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
+            ) { selectedOperationLease in
+                internalCancellationHandle.activate(operationLease: selectedOperationLease)
                 let parsedRequestJSON = parsedRequestJSONValue.foundationObject
                 let prepared: PreparedRequest
                 do {
@@ -222,7 +222,7 @@ struct MCPForwardingService: Sendable {
                         bodyData: bodyData,
                         parsedRequestJSON: parsedRequestJSON,
                         sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex,
+                        operationLeaseOverride: selectedOperationLease,
                         admission: admission
                     ) else {
                         return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
@@ -255,7 +255,7 @@ struct MCPForwardingService: Sendable {
                                 leaseID,
                                 sessionID: sessionID,
                                 requestIDKeys: prepared.transform.responseIDs.map(\.key),
-                                upstreamIndex: prepared.upstreamIndex
+                                operationLease: prepared.operationLease
                             )
                         }
                     )

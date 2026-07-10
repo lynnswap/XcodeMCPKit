@@ -2208,8 +2208,8 @@ struct RuntimeCoordinatorTests {
             leaseID: leaseID,
             descriptor: descriptor,
             on: fixture.eventLoop
-        ) { upstreamIndex in
-            selectedUpstream.withLockedValue { $0 = upstreamIndex }
+        ) { operationLease in
+            selectedUpstream.withLockedValue { $0 = operationLease.upstreamIndex }
             return fixture.eventLoop.makeSucceededFuture(())
         }
 
@@ -2524,7 +2524,12 @@ struct RuntimeCoordinatorTests {
             withJSONObject: serverRequest,
             options: []
         )
-        manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
+        manager.routeUnmappedUpstreamMessage(
+            serverRequestData,
+            operationLease: try #require(
+                manager.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: 0))
+            )
+        )
 
         let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
@@ -2711,7 +2716,9 @@ struct RuntimeCoordinatorTests {
         ]
         manager.routeUnmappedUpstreamMessage(
             try JSONSerialization.data(withJSONObject: serverRequest, options: []),
-            upstreamIndex: 0
+            operationLease: try #require(
+                manager.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: 0))
+            )
         )
 
         let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
@@ -2759,8 +2766,14 @@ struct RuntimeCoordinatorTests {
         let tracker = ServerRequestTracker()
         let upstreamID = JSONRPC.ID(any: "duplicate")!
 
-        let firstClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 0)
-        let secondClientID = tracker.record(upstreamID: upstreamID, upstreamIndex: 1)
+        let firstClientID = tracker.record(
+            upstreamID: upstreamID,
+            operationLease: testOperationLease(0)
+        )
+        let secondClientID = tracker.record(
+            upstreamID: upstreamID,
+            operationLease: testOperationLease(1)
+        )
 
         #expect(firstClientID.key != secondClientID.key)
         let firstRoute = try #require(tracker.consume(clientID: firstClientID))
@@ -2778,7 +2791,7 @@ struct RuntimeCoordinatorTests {
 
         let clientID = tracker.record(
             upstreamID: upstreamID,
-            upstreamIndex: 0,
+            operationLease: testOperationLease(0),
             now: now
         )
 
@@ -2794,17 +2807,17 @@ struct RuntimeCoordinatorTests {
         let now = Date()
         let first = tracker.record(
             upstreamID: JSONRPC.ID(any: "first")!,
-            upstreamIndex: 0,
+            operationLease: testOperationLease(0),
             now: now
         )
         let second = tracker.record(
             upstreamID: JSONRPC.ID(any: "second")!,
-            upstreamIndex: 0,
+            operationLease: testOperationLease(0),
             now: now
         )
         let third = tracker.record(
             upstreamID: JSONRPC.ID(any: "third")!,
-            upstreamIndex: 0,
+            operationLease: testOperationLease(0),
             now: now
         )
 
@@ -2855,7 +2868,12 @@ struct RuntimeCoordinatorTests {
             withJSONObject: serverRequest,
             options: []
         )
-        manager.routeUnmappedUpstreamMessage(serverRequestData, upstreamIndex: 0)
+        manager.routeUnmappedUpstreamMessage(
+            serverRequestData,
+            operationLease: try #require(
+                manager.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: 0))
+            )
+        )
 
         let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         #expect(firstSession.serverRequestTracker.consume(clientID: clientID) == nil)
@@ -5500,7 +5518,7 @@ struct RuntimeCoordinatorTests {
             let (lease, transition) = try #require(
                 manager.processControlPlane.beginCatalogAttempt(
                     routeID: route.id,
-                    preferredUpstream: UpstreamSlotID(rawValue: 0),
+                    preferredUpstreamProof: testTopologyProof(0),
                     nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
                 )
             )
@@ -5701,8 +5719,10 @@ struct RuntimeCoordinatorTests {
             descriptor: preferredDescriptor,
             on: eventLoop,
             preferredUpstreamIndices: [1]
-        ) { selectedUpstreamIndex in
-            preferredStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+        ) { selectedOperationLease in
+            preferredStartedUpstream.withLockedValue {
+                $0 = selectedOperationLease.upstreamIndex
+            }
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -5725,7 +5745,7 @@ struct RuntimeCoordinatorTests {
             descriptor: genericDescriptor,
             on: eventLoop
         ) { selectedUpstreamIndex in
-            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex.upstreamIndex }
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -5964,7 +5984,7 @@ struct RuntimeCoordinatorTests {
         let route = try #require(manager.processControlPlane.route(forProcessID: target.processID))
         _ = manager.processControlPlane.markInitialized(
             routeID: route.id,
-            upstreamIndex: 0
+            upstreamProof: manager.operationLeaseForTest(upstreamIndex: 0).proof
         )
 
         manager.refreshMissingProcessToolsCatalogsIfNeeded(
@@ -8346,6 +8366,101 @@ struct RuntimeCoordinatorTests {
             upstreamIndex: 0
         )
         #expect(tabIdentifier(in: rewrittenEmptyTabWorkspace.bodyData) == "tab-a")
+
+        let decision = await manager.toolRoutingDecision(
+            for: proxyTabRequest,
+            requestTimeoutOverride: .seconds(2)
+        )
+        guard case .forwardAdmitted(_, let admission) = decision else {
+            Issue.record("expected exact window-route admission")
+            return
+        }
+        _ = manager.windowOwnershipAuthority.record(
+            processID: target.processID,
+            entries: [
+                XcodeListWindowsEntry(
+                    tabIdentifier: "tab-after-admission",
+                    workspacePath: "/Work/A.xcworkspace"
+                )
+            ]
+        )
+        let admittedRewrite = manager.rewriteOwnerBoundRequest(
+            bodyData: proxyTabData,
+            parsedRequestJSON: proxyTabRequest,
+            operationLease: try #require(
+                manager.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: 0))
+            ),
+            admission: admission
+        )
+        #expect(tabIdentifier(in: admittedRewrite.bodyData) == "tab-a")
+    }
+
+    @Test func ownerRoutingReResolvesWindowAndRouteSnapshotsWhenProofRouteChanges() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
+        let managerBox = WeakRuntimeCoordinatorBox()
+        let hookCount = NIOLockedValueBox(0)
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            testHooks: RuntimeCoordinatorTestHooks(ownerRouteProofsResolved: {
+                let shouldReplace = hookCount.withLockedValue { count in
+                    defer { count += 1 }
+                    return count == 0
+                }
+                guard shouldReplace, let manager = managerBox.value else { return }
+                _ = manager.processControlPlane.reconcileRoutes(
+                    [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+                    reason: "route_change_after_window_proof",
+                    nowUptimeNs: manager.nowUptimeNanoseconds(),
+                    usability: .init(
+                        snapshotUsableUpstreamIDs: [UpstreamSlotID(rawValue: 1)],
+                        recoveryAwareUsableUpstreamIDs: [UpstreamSlotID(rawValue: 1)]
+                    )
+                )
+            }),
+            startImmediately: false
+        )
+        managerBox.value = manager
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [(target, 0, [ownerBoundToolDescriptor(name: "BuildProject")])]
+        )
+        #expect(
+            manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: route-race-tab, workspacePath: /Work/Race.xcworkspace",
+                    ],
+                ]),
+                upstreamIndex: 0
+            )
+        )
+
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 9306,
+                name: "BuildProject",
+                arguments: ["tabIdentifier": "route-race-tab"]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+
+        guard case .forwardAdmitted(let preferred, let admission) = decision else {
+            Issue.record("expected routing to re-resolve against the replacement route")
+            return
+        }
+        #expect(preferred == [1])
+        #expect(manager.processControlPlane.validate(admission.route))
+        #expect(admission.window?.proof.route.routeID == admission.route.routeID)
     }
 
     @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {
@@ -8507,7 +8622,7 @@ struct RuntimeCoordinatorTests {
             on: eventLoop,
             preferredUpstreamIndex: 0
         ) { selectedUpstreamIndex in
-            #expect(selectedUpstreamIndex == 0)
+            #expect(selectedUpstreamIndex.upstreamIndex == 0)
             return activePromise.futureResult
         }
 
@@ -8526,7 +8641,7 @@ struct RuntimeCoordinatorTests {
             on: eventLoop,
             preferredUpstreamIndices: preferredUpstreamIndices
         ) { selectedUpstreamIndex in
-            selectedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            selectedUpstream.withLockedValue { $0 = selectedUpstreamIndex.upstreamIndex }
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -9940,7 +10055,7 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot?.registrationToken == nil)
         #expect(snapshot?.upstreamIndex == nil)
         #expect(snapshot?.requestIDKey == nil)
-        #expect(handle.markRegistered(registrationToken: UUID(), upstreamIndex: 0) == false)
+        #expect(handle.markRegistered(registrationToken: UUID(), operationLease: testOperationLease(0)) == false)
     }
 
     @Test func controlPlaneRPCHandleCancelAfterRegisterCapturesRegistrationState() {
@@ -9951,7 +10066,7 @@ struct RuntimeCoordinatorTests {
         handle.installCancel { snapshot in
             cancellation.withLockedValue { $0 = snapshot }
         }
-        #expect(handle.markRegistered(registrationToken: token, upstreamIndex: 2))
+        #expect(handle.markRegistered(registrationToken: token, operationLease: testOperationLease(2)))
 
         handle.cancel()
 
@@ -9959,7 +10074,7 @@ struct RuntimeCoordinatorTests {
         #expect(snapshot?.registrationToken == token)
         #expect(snapshot?.upstreamIndex == 2)
         #expect(snapshot?.requestIDKey == nil)
-        #expect(handle.markAssigned(registrationToken: token, upstreamIndex: 2, requestIDKey: "req") == false)
+        #expect(handle.markAssigned(registrationToken: token, operationLease: testOperationLease(2), requestIDKey: "req") == false)
     }
 
     @Test func controlPlaneRPCHandleCancelAfterAssignCapturesRequestMappingState() {
@@ -9970,8 +10085,8 @@ struct RuntimeCoordinatorTests {
         handle.installCancel { snapshot in
             cancellation.withLockedValue { $0 = snapshot }
         }
-        #expect(handle.markRegistered(registrationToken: token, upstreamIndex: 1))
-        #expect(handle.markAssigned(registrationToken: token, upstreamIndex: 1, requestIDKey: "req-1"))
+        #expect(handle.markRegistered(registrationToken: token, operationLease: testOperationLease(1)))
+        #expect(handle.markAssigned(registrationToken: token, operationLease: testOperationLease(1), requestIDKey: "req-1"))
 
         handle.cancel()
 
@@ -9989,8 +10104,8 @@ struct RuntimeCoordinatorTests {
         handle.installCancel { snapshot in
             cancellation.withLockedValue { $0 = snapshot }
         }
-        #expect(handle.markRegistered(registrationToken: token, upstreamIndex: 0))
-        #expect(handle.markAssigned(registrationToken: token, upstreamIndex: 0, requestIDKey: "req-after-send"))
+        #expect(handle.markRegistered(registrationToken: token, operationLease: testOperationLease(0)))
+        #expect(handle.markAssigned(registrationToken: token, operationLease: testOperationLease(0), requestIDKey: "req-after-send"))
 
         handle.cancel()
 
@@ -10379,7 +10494,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -10410,10 +10525,16 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 queuedLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
-            manager.sendUpstream(queuedRequestData, upstreamIndex: selectedUpstreamIndex)
+            manager.sendUpstream(
+                queuedRequestData,
+                operationLease: selectedUpstreamIndex,
+                ensureRunning: false,
+                admission: nil,
+                onRejected: {}
+            )
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -10548,7 +10669,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -10579,10 +10700,16 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 queuedLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
-            manager.sendUpstream(queuedRequestData, upstreamIndex: selectedUpstreamIndex)
+            manager.sendUpstream(
+                queuedRequestData,
+                operationLease: selectedUpstreamIndex,
+                ensureRunning: false,
+                admission: nil,
+                onRejected: {}
+            )
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -11363,7 +11490,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -11402,10 +11529,16 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 queuedLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
-            manager.sendUpstream(queuedRequestData, upstreamIndex: selectedUpstreamIndex)
+            manager.sendUpstream(
+                queuedRequestData,
+                operationLease: selectedUpstreamIndex,
+                ensureRunning: false,
+                admission: nil,
+                onRejected: {}
+            )
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -11493,10 +11626,10 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
-            #expect(selectedUpstreamIndex == 0)
+            #expect(selectedUpstreamIndex.upstreamIndex == 0)
             return activePromise.futureResult
         }
         _ = activeFuture
@@ -11516,7 +11649,7 @@ struct RuntimeCoordinatorTests {
             on: eventLoop,
             preferredUpstreamIndex: 0
         ) { selectedUpstreamIndex in
-            preferredStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            preferredStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex.upstreamIndex }
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -11536,7 +11669,7 @@ struct RuntimeCoordinatorTests {
             descriptor: genericDescriptor,
             on: eventLoop
         ) { selectedUpstreamIndex in
-            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            genericStartedUpstream.withLockedValue { $0 = selectedUpstreamIndex.upstreamIndex }
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -11596,7 +11729,7 @@ struct RuntimeCoordinatorTests {
             on: eventLoop,
             preferredUpstreamIndices: [0]
         ) { selectedUpstreamIndex in
-            startedUpstream.withLockedValue { $0 = selectedUpstreamIndex }
+            startedUpstream.withLockedValue { $0 = selectedUpstreamIndex.upstreamIndex }
             return eventLoop.makeSucceededFuture(())
         }
 
@@ -12404,7 +12537,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -12813,7 +12946,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -12836,7 +12969,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 queuedLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return eventLoop.makeSucceededFuture(())
@@ -12958,7 +13091,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: "active-request",
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -13153,7 +13286,7 @@ struct RuntimeCoordinatorTests {
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult

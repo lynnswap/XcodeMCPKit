@@ -1700,11 +1700,11 @@ struct DocumentationProviderTests {
             descriptor: activeDescriptor,
             on: eventLoop,
             preferredUpstreamIndex: 0
-        ) { selectedUpstreamIndex in
+        ) { selectedOperationLease in
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedOperationLease.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult

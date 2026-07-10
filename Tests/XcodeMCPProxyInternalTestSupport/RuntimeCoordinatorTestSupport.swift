@@ -8,7 +8,211 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import XcodeMCPProxyTestSupport
 
+extension UpstreamHealthManager {
+    func markRequestTimedOut(
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64
+    ) -> (shouldClearPins: Bool, timeoutCount: Int) {
+        guard let proof = topologyProof(for: upstreamIndex) else { return (false, 0) }
+        return markRequestTimedOut(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func beginWarmInitialize(upstreamIndex: Int) -> Bool {
+        claimWarmInitialize(upstreamIndex: upstreamIndex) != nil
+    }
+
+    func markInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
+        guard let claim = claimWarmInitialize(upstreamIndex: upstreamIndex) else { return }
+        guard beginInitializeSend(claim) else { return }
+        _ = setWarmInitializeUpstreamID(upstreamID, for: claim)
+    }
+
+    func clearUpstreamState(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64? = nil
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
+    )? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return clearUpstreamState(proof, expectedUpstreamID: expectedUpstreamID)
+    }
+
+    func markInitialized(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64? = nil
+    ) -> UpstreamHealthManager.MarkInitializedTransition? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return markInitialized(proof, expectedUpstreamID: expectedUpstreamID)
+    }
+}
+
 extension RuntimeCoordinator {
+    func operationLeaseForTest(upstreamIndex: Int) -> UpstreamOperationLease {
+        guard let lease = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        ) else {
+            preconditionFailure("missing test upstream lease \(upstreamIndex)")
+        }
+        return lease
+    }
+
+    func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+        routeUpstreamMessage(
+            data,
+            upstreamIndex: upstreamIndex,
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof
+        )
+    }
+
+    func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
+        handleUpstreamExit(
+            status,
+            upstreamIndex: upstreamIndex,
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof
+        )
+    }
+
+    func handleUpstreamProtocolViolation(
+        _ protocolViolation: StdioFramer.ProtocolViolation,
+        upstreamIndex: Int
+    ) {
+        handleUpstreamProtocolViolation(
+            protocolViolation,
+            upstreamIndex: upstreamIndex,
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof
+        )
+    }
+
+    @discardableResult
+    func clearUpstreamState(upstreamIndex: Int, expectedUpstreamID: Int64? = nil) -> Bool {
+        clearUpstreamState(
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof,
+            expectedUpstreamID: expectedUpstreamID
+        )
+    }
+
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        upstreamIndex: Int
+    ) -> Int64 {
+        guard let id = assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex)
+        ) else {
+            preconditionFailure("failed to assign test upstream id")
+        }
+        return id
+    }
+
+    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
+        _ = sendUpstream(
+            data,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex),
+            ensureRunning: ensureRunning,
+            admission: nil,
+            onRejected: {}
+        )
+    }
+
+    func sendUpstream(
+        _ data: Data,
+        upstreamIndex: Int,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission
+    ) {
+        _ = sendUpstream(
+            data,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex),
+            ensureRunning: ensureRunning,
+            admission: admission,
+            onRejected: {}
+        )
+    }
+
+    func markToolsListRefreshFailed(
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64,
+        reason: String
+    ) {
+        markToolsListRefreshFailed(
+            operationLeaseForTest(upstreamIndex: upstreamIndex).proof,
+            nowUptimeNs: nowUptimeNs,
+            reason: reason
+        )
+    }
+
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        upstreamIndex: Int
+    ) {
+        onRequestTimeout(
+            sessionID: sessionID,
+            requestIDKey: requestIDKey,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex)
+        )
+    }
+
+    func handleRequestLeaseTimeout(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    ) {
+        handleRequestLeaseTimeout(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex)
+        )
+    }
+
+    func abandonRequestLease(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    ) {
+        abandonRequestLease(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: upstreamIndex.map(operationLeaseForTest(upstreamIndex:))
+        )
+    }
+
+    func handleInitializedNotificationSendOverload(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64,
+        treatsAsPrimary: Bool = false
+    ) {
+        guard clearUpstreamState(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: expectedUpstreamID
+        ) else { return }
+        recoverFromInitializedNotificationFailure(
+            upstreamIndex: upstreamIndex,
+            treatsAsPrimary: treatsAsPrimary
+        )
+    }
+
+    func markUpstreamInitialized(upstreamIndex: Int) {
+        guard let proof = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        )?.proof,
+              let result = upstreamHealthManager.markInitialized(proof) else { return }
+        result.timeout?.cancel()
+        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+        markProcessRouteActivationInitialized(proof: proof)
+        testHooks.upstreamInitialized?(upstreamIndex)
+        noteUpstreamInitializationSucceeded()
+    }
+
     /// Test-only synchronous teardown for defer blocks; production code
     /// awaits shutdown() directly.
     func shutdownAndWait() {
@@ -55,23 +259,31 @@ extension RuntimeCoordinator {
                     ),
                     nowUptimeNs: nowUptimeNanoseconds()
                 ))
+                let preferredProof = try #require(
+                    upstreamTopology.operationLease(for: source)?.proof
+                )
                 let started = try #require(processControlPlane.beginCatalogAttempt(
                     routeID: route.id,
-                    preferredUpstream: source,
+                    preferredUpstreamProof: preferredProof,
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
                 ))
                 lease = started.0
                 applyProcessControlPlaneTransition(started.1)
             } else {
                 let started = processControlPlane.beginUnboundCatalogAttempt(
-                    preferredUpstream: source,
+                    preferredUpstreamProof: try #require(
+                        upstreamTopology.operationLease(for: source)?.proof
+                    ),
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
                 )
                 lease = started.0
                 applyProcessControlPlaneTransition(started.1)
             }
+            let sourceProof = try #require(
+                upstreamTopology.operationLease(for: source)?.proof
+            )
             applyCatalogCommit(processControlPlane.completeCatalog(
-                .usable(result, source: source),
+                .usable(result, source: sourceProof),
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             ))
@@ -92,9 +304,12 @@ extension RuntimeCoordinator {
     ) -> ProcessControlPlaneAuthority.ActivationStart? {
         let readinessToken = UpstreamReadinessWaiterToken()
         guard let route = processControlPlane.route(forProcessID: processID),
+              let upstreamProof = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+              )?.proof,
               let reserved = processControlPlane.reserveActivation(
                   routeID: route.id,
-                  upstreamIndex: upstreamIndex,
+                  upstreamProof: upstreamProof,
                   nowUptimeNs: nowUptimeNs,
                   readinessToken: readinessToken
               ) else {
@@ -115,14 +330,27 @@ extension RuntimeCoordinator {
 }
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
-    UpstreamSlotScheduler(
-        canUseUpstream: { _ in UpstreamHealthManager.UseEvaluation(isUsable: true, effects: []) },
-        selectUpstream: { occupied in
-            UpstreamHealthManager.SelectionResult(
-                upstreamIndex: (0..<upstreamCount).first { occupied.contains($0) == false },
+    let topology = UpstreamTopologyAuthority(
+        (0..<upstreamCount).map { _ in TestUpstreamClient() as any UpstreamSlotControlling }
+    )
+    return UpstreamSlotScheduler(
+        canUseUpstream: { upstreamIndex in
+            UpstreamHealthManager.UseEvaluation(
+                proof: topology.snapshot().proof(UpstreamSlotID(rawValue: upstreamIndex)),
                 effects: []
             )
-        }
+        },
+        selectUpstream: { occupied in
+            let selectedID = topology.snapshot().slotIDs.first {
+                occupied.contains($0.rawValue) == false
+            }
+            return UpstreamHealthManager.SelectionResult(
+                proof: selectedID.flatMap { topology.snapshot().proof($0) },
+                effects: []
+            )
+        },
+        operationLease: { topology.operationLease(for: $0) },
+        validateOperationLease: { topology.validate($0) }
     )
 }
 
@@ -357,17 +585,27 @@ func seedProcessToolCatalogs(
             "tools": entry.tools,
         ])
         let route = try #require(manager.processControlPlane.route(forProcessID: entry.target.processID))
+        let preferredProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: entry.upstreamIndex)
+            )?.proof
+        )
         let (lease, transition) = try #require(
             manager.processControlPlane.beginCatalogAttempt(
                 routeID: route.id,
-                preferredUpstream: UpstreamSlotID(rawValue: entry.upstreamIndex),
+                preferredUpstreamProof: preferredProof,
                 nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
             )
         )
         manager.applyProcessControlPlaneTransition(transition)
+        let sourceProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: entry.upstreamIndex)
+            )?.proof
+        )
         manager.applyCatalogCommit(
             manager.processControlPlane.completeCatalog(
-                .usable(result, source: UpstreamSlotID(rawValue: entry.upstreamIndex)),
+                .usable(result, source: sourceProof),
                 lease: lease,
                 nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
             )

@@ -60,13 +60,15 @@ final class UpstreamRouter: Sendable {
         }
     }
 
-    func assign(upstreamIndex: Int, sessionID: String, originalID: JSONRPC.ID, isInitialize: Bool)
-        -> Int64
-    {
+    func assign(
+        proof: UpstreamTopologyProof,
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        isInitialize: Bool
+    ) -> Int64? {
         state.withLockedValue { state in
-            guard state.mappingsByUpstream[upstreamIndex] != nil else {
-                return 0
-            }
+            guard Self.matches(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
             let id = state.nextID
             state.nextID += 1
             state.mappingsByUpstream[upstreamIndex]?[id] = UpstreamRouter.Mapping(
@@ -76,18 +78,19 @@ final class UpstreamRouter: Sendable {
             )
             if isInitialize == false {
                 let requestKey = Self.requestLookupKey(
-                    sessionID: sessionID, requestIDKey: originalID.key)
+                    sessionID: sessionID,
+                    requestIDKey: originalID.key
+                )
                 state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?[requestKey] = id
             }
             return id
         }
     }
 
-    func assignInitialize(upstreamIndex: Int) -> Int64 {
+    func assignInitialize(proof: UpstreamTopologyProof) -> Int64? {
         state.withLockedValue { state in
-            guard state.mappingsByUpstream[upstreamIndex] != nil else {
-                return 0
-            }
+            guard Self.matches(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
             let id = state.nextID
             state.nextID += 1
             state.mappingsByUpstream[upstreamIndex]?[id] = UpstreamRouter.Mapping(
@@ -96,28 +99,6 @@ final class UpstreamRouter: Sendable {
                 isInitialize: true
             )
             return id
-        }
-    }
-
-    func consume(upstreamIndex: Int, upstreamID: Int64) -> UpstreamRouter.Mapping? {
-        state.withLockedValue { state in
-            guard state.mappingsByUpstream[upstreamIndex] != nil else {
-                return nil
-            }
-            let mapping = state.mappingsByUpstream[upstreamIndex]?.removeValue(forKey: upstreamID)
-            if let mapping,
-                let sessionID = mapping.sessionID,
-                let originalID = mapping.originalID
-            {
-                let requestKey = Self.requestLookupKey(
-                    sessionID: sessionID, requestIDKey: originalID.key)
-                state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeValue(
-                    forKey: requestKey)
-            }
-            state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.removeAll {
-                $0 == upstreamID
-            }
-            return mapping
         }
     }
 
@@ -147,18 +128,21 @@ final class UpstreamRouter: Sendable {
         }
     }
 
-    func remove(upstreamIndex: Int, upstreamID: Int64) {
+    func remove(proof: UpstreamTopologyProof, upstreamID: Int64) {
         state.withLockedValue { state in
-            guard state.mappingsByUpstream[upstreamIndex] != nil else { return }
+            guard Self.matches(proof, state: state) else { return }
+            let upstreamIndex = proof.slotID.rawValue
             let mapping = state.mappingsByUpstream[upstreamIndex]?.removeValue(forKey: upstreamID)
             if let mapping,
-                let sessionID = mapping.sessionID,
-                let originalID = mapping.originalID
-            {
+               let sessionID = mapping.sessionID,
+               let originalID = mapping.originalID {
                 let requestKey = Self.requestLookupKey(
-                    sessionID: sessionID, requestIDKey: originalID.key)
+                    sessionID: sessionID,
+                    requestIDKey: originalID.key
+                )
                 state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeValue(
-                    forKey: requestKey)
+                    forKey: requestKey
+                )
             }
             if mapping?.isInitialize == false {
                 Self.recordReleasedResponseID(
@@ -172,21 +156,19 @@ final class UpstreamRouter: Sendable {
     }
 
     func remove(
-        upstreamIndex: Int,
+        proof: UpstreamTopologyProof,
         sessionID: String,
         requestIDKey: String
     ) -> Int64? {
         state.withLockedValue { state in
-            guard state.mappingsByUpstream[upstreamIndex] != nil else {
-                return nil
-            }
-            let requestKey = Self.requestLookupKey(sessionID: sessionID, requestIDKey: requestIDKey)
-            guard
-                let upstreamID = state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeValue(
-                    forKey: requestKey)
-            else {
-                return nil
-            }
+            guard Self.matches(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
+            let requestKey = Self.requestLookupKey(
+                sessionID: sessionID,
+                requestIDKey: requestIDKey
+            )
+            guard let upstreamID = state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?
+                .removeValue(forKey: requestKey) else { return nil }
             state.mappingsByUpstream[upstreamIndex]?.removeValue(forKey: upstreamID)
             Self.recordReleasedResponseID(
                 upstreamID,
@@ -195,15 +177,6 @@ final class UpstreamRouter: Sendable {
                 limit: lateResponseMarkerLimit
             )
             return upstreamID
-        }
-    }
-
-    func reset(upstreamIndex: Int) {
-        state.withLockedValue { state in
-            guard state.mappingsByUpstream[upstreamIndex] != nil else { return }
-            state.mappingsByUpstream[upstreamIndex]?.removeAll()
-            state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeAll()
-            state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.removeAll()
         }
     }
 
@@ -224,21 +197,6 @@ final class UpstreamRouter: Sendable {
                 state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeAll()
                 state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.removeAll()
             }
-        }
-    }
-
-    func consumeReleasedResponseMarker(upstreamIndex: Int, upstreamID: Int64) -> Bool {
-        state.withLockedValue { state in
-            guard state.recentlyReleasedResponseIDsByUpstream[upstreamIndex] != nil else {
-                return false
-            }
-            guard let index = state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?
-                .firstIndex(of: upstreamID)
-            else {
-                return false
-            }
-            state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.remove(at: index)
-            return true
         }
     }
 

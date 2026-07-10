@@ -2324,7 +2324,7 @@ extension HTTPHandlerTests {
                 bodyData: bodyData,
                 parsedRequestJSON: parsed,
                 sessionID: "session-internal-window-lookup",
-                upstreamIndexOverride: 0
+                operationLeaseOverride: sessionManager.chooseUpstreamOperationLease()
             )
             let prepared = try #require(preparedRequest)
             return try forwardingService.startRequest(

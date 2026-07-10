@@ -46,6 +46,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
             _ queuedRequestCount: Int
         ) -> Void)?
     var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
+    var ownerRouteProofsResolved: (@Sendable () -> Void)?
 
     init(
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
@@ -58,12 +59,14 @@ struct RuntimeCoordinatorTestHooks: Sendable {
                 _ queuedRequestCount: Int
             ) -> Void)? = nil,
         primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil,
+        ownerRouteProofsResolved: (@Sendable () -> Void)? = nil,
     ) {
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
+        self.ownerRouteProofsResolved = ownerRouteProofsResolved
     }
 }
 
@@ -160,7 +163,7 @@ protocol RuntimeUpstreamForwardingPort: Sendable {
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int]?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output>
     func forwardServerRequestResponse(
         responseData: Data,
@@ -194,13 +197,13 @@ protocol RuntimeRequestLeasePort: Sendable {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     )
     func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int?
+        operationLease: UpstreamOperationLease?
     )
 }
 
@@ -300,7 +303,7 @@ extension RuntimeUpstreamForwardingPort {
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         enqueueOnUpstreamSlot(
             leaseID: leaseID,
@@ -316,7 +319,7 @@ extension RuntimeUpstreamForwardingPort {
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         enqueueOnUpstreamSlot(
             leaseID: leaseID,
@@ -619,11 +622,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 [weak upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
                 guard let upstreamHealthManager else {
-                    return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
+                    return UpstreamHealthManager.UseEvaluation(proof: nil, effects: [])
                 }
                 if resolvedProcessRoutingEnabled,
                    routableProcessBoundUpstreamIndices().contains(upstreamIndex) == false {
-                    return UpstreamHealthManager.UseEvaluation(isUsable: false, effects: [])
+                    return UpstreamHealthManager.UseEvaluation(proof: nil, effects: [])
                 }
                 return upstreamHealthManager.evaluateUsableInitialized(
                     index: upstreamIndex,
@@ -635,7 +638,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 return upstreamHealthManager?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
                     occupiedUpstreams: occupied.union(inactiveProcessBoundUpstreamIndices())
-                ) ?? UpstreamHealthManager.SelectionResult(upstreamIndex: nil, effects: [])
+                ) ?? UpstreamHealthManager.SelectionResult(proof: nil, effects: [])
+            },
+            operationLease: { [upstreamTopology] proof in
+                upstreamTopology.operationLease(for: proof)
+            },
+            validateOperationLease: { [upstreamTopology] lease in
+                upstreamTopology.validate(lease)
             },
             applyHealthEffects: { [runtimeBox] effects in
                 runtimeBox.value?.applyHealthEffects(effects)
@@ -700,7 +709,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         runtimeBox.value = self
 
         for entry in upstreamTopology.snapshot().entries {
-            observeUpstreamEvents(entry.slot, upstreamIndex: entry.id.rawValue)
+            observeUpstreamEvents(entry.operationLease)
         }
 
         if startImmediately {
@@ -734,23 +743,18 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    func observeUpstreamEvents(
-        _ upstream: any UpstreamSlotControlling,
-        upstreamIndex: Int
-    ) {
-        guard let proof = upstreamTopology.snapshot().proof(
-            UpstreamSlotID(rawValue: upstreamIndex)
-        ) else { return }
-        upstreamEventTasks.run { [weak self, upstream, proof] in
+    func observeUpstreamEvents(_ operationLease: UpstreamOperationLease) {
+        let upstreamIndex = operationLease.upstreamIndex
+        upstreamEventTasks.run { [weak self, operationLease] in
             guard let self else { return }
-            for await event in upstream.events {
-                guard self.upstreamTopology.validate(proof) else { return }
+            for await event in operationLease.slot.events {
+                guard self.upstreamTopology.validate(operationLease) else { return }
                 switch event {
                 case .message(let data):
                     self.routeUpstreamMessage(
                         data,
                         upstreamIndex: upstreamIndex,
-                        proof: proof
+                        proof: operationLease.proof
                     )
                 case .stderr(let message):
                     self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
@@ -758,7 +762,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     self.handleUpstreamProtocolViolation(
                         protocolViolation,
                         upstreamIndex: upstreamIndex,
-                        proof: proof
+                        proof: operationLease.proof
                     )
                 case .stdoutBufferSize(let size):
                     self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
@@ -766,7 +770,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     self.handleUpstreamExit(
                         status,
                         upstreamIndex: upstreamIndex,
-                        proof: proof
+                        proof: operationLease.proof
                     )
                     if self.processRoutingEnabled {
                         self.triggerXcodeProcessReconcile(reason: "upstream_exit_\(status)")
@@ -808,11 +812,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     expectedUpstreamID: upstreamID
                 ) {
                     clearUpstreamState(initializeClaim: claim)
-                } else {
-                    upstreamRouter.remove(
-                        upstreamIndex: upstreamIndex,
-                        upstreamID: upstreamID
-                    )
                 }
             }
             if let readinessToken = pendingInitializes.cancelledPrimaryReadinessToken {
@@ -1037,7 +1036,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    func chooseUpstreamIndex() -> Int? {
+    func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
         let nowUptimeNs = nowUptimeNanoseconds()
         let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
             .union(inactiveProcessBoundUpstreamIndices())
@@ -1047,13 +1046,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             occupiedUpstreams: occupiedUpstreams
         )
         applyHealthEffects(chooseResult.effects)
-        let chosen = chooseResult.upstreamIndex
+        guard let proof = chooseResult.proof else { return nil }
+        return upstreamTopology.operationLease(for: proof)
+    }
 
-        guard let chosen else {
-            return nil
-        }
-
-        return chosen
+    func chooseUpstreamIndex() -> Int? {
+        chooseUpstreamOperationLease()?.upstreamIndex
     }
 
     func applyHealthEffects(_ effects: [UpstreamHealthManager.Effect]) {
@@ -1082,7 +1080,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int? = nil,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         enqueueOnUpstreamSlot(
             leaseID: leaseID,
@@ -1098,7 +1096,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int]?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         let hasHealthyUpstream = activeInitializedHealthyishCount() > 0
         var recoveryInFlight = anyActiveRecoveryInFlight()
@@ -1118,8 +1116,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             descriptor: descriptor,
             on: eventLoop,
             preferredUpstreamIndices: preferredUpstreamIndices ?? [],
-            starter: { upstreamIndex in
-                starter(upstreamIndex).cascade(to: promise)
+            starter: { operationLease in
+                starter(operationLease).cascade(to: promise)
             },
             failUnavailable: {
                 promise.fail(UpstreamSlotScheduler.AcquisitionError.unavailable)

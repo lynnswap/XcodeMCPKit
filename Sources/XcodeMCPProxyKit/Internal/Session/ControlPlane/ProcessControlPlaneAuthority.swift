@@ -20,22 +20,25 @@ struct CatalogLease: Sendable, Hashable {
     fileprivate let routeID: ProcessRouteID
     fileprivate let attemptID: CatalogAttemptID
     fileprivate let loadID: CatalogLoadID
-    fileprivate let upstreamID: UpstreamSlotID
+    fileprivate let upstreamProof: UpstreamTopologyProof
 
     var processID: pid_t { routeID.processID }
     var routeIdentity: ProcessRouteID { routeID }
     var attempt: Int { attemptID.rawValue }
+    var upstreamID: UpstreamSlotID { upstreamProof.slotID }
     var upstreamIndex: Int { upstreamID.rawValue }
+    var topologyProof: UpstreamTopologyProof { upstreamProof }
     var activationLease: ActivationLease {
-        ActivationLease(routeID: routeID, attemptID: attemptID, upstreamID: upstreamID)
+        ActivationLease(routeID: routeID, attemptID: attemptID, upstreamProof: upstreamProof)
     }
 }
 
 struct ActivationLease: Sendable, Hashable {
     let routeID: ProcessRouteID
     let attemptID: CatalogAttemptID
-    let upstreamID: UpstreamSlotID
+    let upstreamProof: UpstreamTopologyProof
 
+    var upstreamID: UpstreamSlotID { upstreamProof.slotID }
     var processID: pid_t { routeID.processID }
     var upstreamIndex: Int { upstreamID.rawValue }
     var attempt: Int { attemptID.rawValue }
@@ -48,9 +51,14 @@ enum CatalogInvalidationReason: Sendable {
 }
 
 enum CatalogOutcome: Sendable {
-    case usable(JSONValue, source: UpstreamSlotID)
+    case usable(JSONValue, source: UpstreamTopologyProof)
     case unusable
     case failed
+
+    var sourceProof: UpstreamTopologyProof? {
+        guard case .usable(_, let source) = self else { return nil }
+        return source
+    }
 }
 
 enum StaleCatalogReason: Sendable, Equatable {
@@ -159,21 +167,23 @@ final class ProcessControlPlaneAuthority: Sendable {
     struct Catalog: Sendable {
         let routeID: ProcessRouteID
         let target: XcodeProcessTarget
-        let upstreamID: UpstreamSlotID
+        let upstreamProof: UpstreamTopologyProof
         let rawResult: JSONValue
         let toolsByName: [String: JSONValue]
         let fingerprintsByName: [String: String]
         let ownerBoundToolNames: Set<String>
 
+        var upstreamID: UpstreamSlotID { upstreamProof.slotID }
         var upstreamIndex: Int { upstreamID.rawValue }
         var toolNames: Set<String> { Set(toolsByName.keys) }
     }
 
     struct AvailableToolCatalog: Sendable {
         let rawResult: JSONValue
-        let sourceUpstreamID: UpstreamSlotID?
+        let sourceProof: UpstreamTopologyProof?
         let processIDs: Set<pid_t>
 
+        var sourceUpstreamID: UpstreamSlotID? { sourceProof?.slotID }
         var sourceUpstream: Int? { sourceUpstreamID?.rawValue }
         var isEmpty: Bool { processIDs.isEmpty }
     }
@@ -197,7 +207,8 @@ final class ProcessControlPlaneAuthority: Sendable {
     struct AttemptSnapshot: Sendable, Equatable {
         let routeID: ProcessRouteID
         let attemptID: CatalogAttemptID
-        let upstreamID: UpstreamSlotID
+        let upstreamProof: UpstreamTopologyProof
+        var upstreamID: UpstreamSlotID { upstreamProof.slotID }
         let phase: AttemptPhase
         let timeoutCount: Int
         let rpcCount: Int
@@ -210,9 +221,10 @@ final class ProcessControlPlaneAuthority: Sendable {
         let activeRoutes: [XcodeProcessRoute]
         let catalogProcessIDs: Set<pid_t>
         let canonicalToolsCatalogRaw: JSONValue?
-        let canonicalSourceUpstreamID: UpstreamSlotID?
+        let canonicalSourceProof: UpstreamTopologyProof?
         let attempts: [AttemptSnapshot]
 
+        var canonicalSourceUpstreamID: UpstreamSlotID? { canonicalSourceProof?.slotID }
         var canonicalSourceUpstream: Int? { canonicalSourceUpstreamID?.rawValue }
     }
 
@@ -296,7 +308,8 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
 
         let id: CatalogAttemptID
-        let upstreamID: UpstreamSlotID
+        let upstreamProof: UpstreamTopologyProof
+        var upstreamID: UpstreamSlotID { upstreamProof.slotID }
         let startedAtUptimeNs: UInt64
         var phase: AttemptPhase
         var readinessToken: UpstreamReadinessWaiterToken?
@@ -372,11 +385,11 @@ final class ProcessControlPlaneAuthority: Sendable {
         var catalogsByProcessID: [pid_t: Catalog] = [:]
         var processIDByUpstreamID: [UpstreamSlotID: pid_t] = [:]
         var canonicalToolsCatalogRaw: JSONValue?
-        var canonicalSourceUpstreamID: UpstreamSlotID?
+        var canonicalSourceProof: UpstreamTopologyProof?
         var nextUnboundAttemptID: Int = 0
         var unboundAttempt: Attempt?
         var unboundCatalogRaw: JSONValue?
-        var unboundCatalogSource: UpstreamSlotID?
+        var unboundCatalogSource: UpstreamTopologyProof?
         var nowUptimeNs: UInt64 = 0
     }
 
@@ -715,7 +728,7 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func reserveActivation(
         routeID: ProcessRouteID,
-        upstreamIndex: Int,
+        upstreamProof: UpstreamTopologyProof,
         nowUptimeNs: UInt64,
         readinessToken: UpstreamReadinessWaiterToken
     ) -> (ActivationReservation, ProcessControlPlaneTransition)? {
@@ -723,7 +736,9 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
             guard let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
-                  record.route.upstreamIndices.contains(upstreamIndex) else { return nil }
+                  record.route.upstreamIndices.contains(upstreamProof.slotID.rawValue) else {
+                return nil
+            }
             if let attempt = record.attempt,
                [.pending, .attaching, .initialized, .loadingCatalog, .backoff]
                 .contains(attempt.phase) {
@@ -733,7 +748,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             record.nextAttemptID &+= 1
             let attempt = Attempt(
                 id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                upstreamID: UpstreamSlotID(rawValue: upstreamIndex),
+                upstreamProof: upstreamProof,
                 startedAtUptimeNs: nowUptimeNs,
                 phase: .pending,
                 readinessToken: readinessToken,
@@ -748,7 +763,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 lease: ActivationLease(
                     routeID: routeID,
                     attemptID: attempt.id,
-                    upstreamID: attempt.upstreamID
+                    upstreamProof: attempt.upstreamProof
                 ),
                 readinessToken: readinessToken
             )
@@ -786,7 +801,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     lease: ActivationLease(
                         routeID: lease.routeID,
                         attemptID: attempt.id,
-                        upstreamID: attempt.upstreamID
+                        upstreamProof: attempt.upstreamProof
                     ),
                     startedAtUptimeNs: attempt.startedAtUptimeNs
                 ),
@@ -866,13 +881,13 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func markInitialized(
         routeID: ProcessRouteID,
-        upstreamIndex: Int
+        upstreamProof: UpstreamTopologyProof
     ) -> InitializedAttempt? {
         state.withLockedValue { state in
             guard let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
-                  attempt.upstreamID.rawValue == upstreamIndex,
+                  attempt.upstreamProof == upstreamProof,
                   [.attaching, .loadingCatalog].contains(attempt.phase) else { return nil }
             attempt.retryKind = nil
             attempt.phase = .initialized
@@ -899,13 +914,13 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func markChannelInitialized(
         routeID: ProcessRouteID,
-        upstreamIndex: Int
+        upstreamProof: UpstreamTopologyProof
     ) -> Int? {
         state.withLockedValue { state in
             guard let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
-                  attempt.upstreamID.rawValue == upstreamIndex,
+                  attempt.upstreamProof == upstreamProof,
                   attempt.phase == .attaching else { return nil }
             attempt.retryKind = nil
             attempt.phase = .initialized
@@ -917,14 +932,16 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func beginCatalogAttempt(
         routeID: ProcessRouteID,
-        preferredUpstream: UpstreamSlotID,
+        preferredUpstreamProof: UpstreamTopologyProof,
         nowUptimeNanoseconds: UInt64
     ) -> (CatalogLease, ProcessControlPlaneTransition)? {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNanoseconds)
             guard let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
-                  record.route.upstreamIndices.contains(preferredUpstream.rawValue) else { return nil }
+                  record.route.upstreamIndices.contains(
+                    preferredUpstreamProof.slotID.rawValue
+                  ) else { return nil }
             if var attempt = record.attempt,
                [.pending, .attaching, .initialized, .loadingCatalog].contains(attempt.phase) {
                 let effects = attempt.readinessToken.map {
@@ -955,7 +972,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             record.nextAttemptID &+= 1
             var attempt = Attempt(
                 id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                upstreamID: preferredUpstream,
+                upstreamProof: preferredUpstreamProof,
                 startedAtUptimeNs: nowUptimeNanoseconds,
                 phase: .loadingCatalog,
                 readinessToken: nil,
@@ -983,14 +1000,14 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func beginUnboundCatalogAttempt(
-        preferredUpstream: UpstreamSlotID,
+        preferredUpstreamProof: UpstreamTopologyProof,
         nowUptimeNanoseconds: UInt64
     ) -> (CatalogLease, ProcessControlPlaneTransition) {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNanoseconds)
             if var attempt = state.unboundAttempt,
                attempt.phase == .loadingCatalog,
-               attempt.upstreamID == preferredUpstream {
+               attempt.upstreamProof == preferredUpstreamProof {
                 let loadID = attempt.beginLoad()
                 state.unboundAttempt = attempt
                 return (
@@ -1007,7 +1024,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.nextUnboundAttemptID &+= 1
             var attempt = Attempt(
                 id: CatalogAttemptID(rawValue: state.nextUnboundAttemptID),
-                upstreamID: preferredUpstream,
+                upstreamProof: preferredUpstreamProof,
                 startedAtUptimeNs: nowUptimeNanoseconds,
                 phase: .loadingCatalog,
                 readinessToken: nil,
@@ -1141,22 +1158,17 @@ final class ProcessControlPlaneAuthority: Sendable {
             let hadCatalog = state.catalogsByProcessID[record.route.target.processID] != nil
             switch outcome {
             case .usable(let rawResult, let source):
-                if let readinessToken = attempt.readinessToken {
-                    effects.append(.cancelReadinessWaiter(readinessToken))
-                }
-                if let retryTimeout = attempt.retryTimeout {
-                    effects.append(.cancelTimeout(retryTimeout))
-                }
+                effects.append(contentsOf: attempt.detachedEffects())
                 attempt.readinessToken = nil
                 attempt.retryTimeout = nil
                 attempt.retryKind = nil
                 attempt.loads.removeAll()
-                guard record.route.upstreamIndices.contains(source.rawValue) else {
+                guard record.route.upstreamIndices.contains(source.slotID.rawValue) else {
                     return .discarded(.upstreamReplaced, .none)
                 }
                 let catalog = Self.makeCatalog(
                     route: record.route,
-                    upstreamID: source,
+                    upstreamProof: source,
                     rawResult: rawResult
                 )
                 state.catalogsByProcessID[record.route.target.processID] = catalog
@@ -1244,7 +1256,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.catalogsByProcessID.removeAll()
             state.processIDByUpstreamID.removeAll()
             state.canonicalToolsCatalogRaw = nil
-            state.canonicalSourceUpstreamID = nil
+            state.canonicalSourceProof = nil
             state.unboundCatalogRaw = nil
             state.unboundCatalogSource = nil
             for key in state.order {
@@ -1283,7 +1295,11 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func canonicalSourceUpstream() -> Int? {
-        state.withLockedValue { $0.canonicalSourceUpstreamID?.rawValue }
+        state.withLockedValue { $0.canonicalSourceProof?.slotID.rawValue }
+    }
+
+    func canonicalSourceProof() -> UpstreamTopologyProof? {
+        state.withLockedValue(\.canonicalSourceProof)
     }
 
     func processIDsWithCatalog() -> Set<pid_t> {
@@ -1484,11 +1500,12 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func handleCatalogChannelTimeout(
-        upstreamIndex: Int,
+        upstreamProof: UpstreamTopologyProof,
         nowUptimeNs: UInt64
     ) -> AttemptTimeout? {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+            let upstreamIndex = upstreamProof.slotID.rawValue
             guard let key = Self.activeKey(upstreamIndex: upstreamIndex, in: state),
                   var record = state.recordsByKey[key] else { return nil }
 
@@ -1496,6 +1513,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             let retryOrdinal: Int
             let attempt: Attempt
             if var current = record.attempt,
+               current.upstreamProof == upstreamProof,
                [.pending, .attaching, .initialized, .loadingCatalog, .backoff]
                 .contains(current.phase) {
                 effects = current.detachedEffects()
@@ -1512,7 +1530,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 record.nextAttemptID &+= 1
                 attempt = Attempt(
                     id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                    upstreamID: UpstreamSlotID(rawValue: upstreamIndex),
+                    upstreamProof: upstreamProof,
                     startedAtUptimeNs: nowUptimeNs,
                     phase: .backoff,
                     readinessToken: nil,
@@ -1527,7 +1545,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             let lease = ActivationLease(
                 routeID: record.route.id,
                 attemptID: attempt.id,
-                upstreamID: attempt.upstreamID
+                upstreamProof: attempt.upstreamProof
             )
             return AttemptTimeout(
                 transition: ProcessControlPlaneTransition(
@@ -1575,20 +1593,22 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func prepareFreshActivationRetry(
         routeID: ProcessRouteID,
-        upstreamIndex: Int,
+        upstreamProof: UpstreamTopologyProof,
         nowUptimeNs: UInt64
     ) -> (ActivationLease, Retry, ProcessControlPlaneTransition)? {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
             guard let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
-                  record.route.upstreamIndices.contains(upstreamIndex) else { return nil }
+                  record.route.upstreamIndices.contains(upstreamProof.slotID.rawValue) else {
+                return nil
+            }
             let effects = record.attempt?.detachedEffects() ?? []
             let retryOrdinal = max(1, record.nextAttemptID)
             record.nextAttemptID &+= 1
             let attempt = Attempt(
                 id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                upstreamID: UpstreamSlotID(rawValue: upstreamIndex),
+                upstreamProof: upstreamProof,
                 startedAtUptimeNs: nowUptimeNs,
                 phase: .backoff,
                 readinessToken: nil,
@@ -1603,7 +1623,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 ActivationLease(
                     routeID: routeID,
                     attemptID: attempt.id,
-                    upstreamID: attempt.upstreamID
+                    upstreamProof: attempt.upstreamProof
                 ),
                 Self.retry(forAttempt: retryOrdinal),
                 ProcessControlPlaneTransition(
@@ -1678,7 +1698,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     ownerBoundToolCount: catalog.ownerBoundToolNames.count,
                     tabOwnerCount: tabOwnerCountsByProcessID[catalog.target.processID, default: 0],
                     workspaceOwnerCount: workspaceOwnerCountsByProcessID[catalog.target.processID, default: 0],
-                    isCanonicalSource: catalog.upstreamID == state.canonicalSourceUpstreamID,
+                    isCanonicalSource: catalog.upstreamProof == state.canonicalSourceProof,
                     exposurePolicy: "available_route_catalog_surface",
                     missingFromExposedCatalog: Array(toolNames.subtracting(exposedNames)).sorted(),
                     extraBeyondExposedCatalog: Array(exposedNames.subtracting(toolNames)).sorted(),
@@ -1856,7 +1876,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             routeID: routeID,
             attemptID: attempt.id,
             loadID: loadID,
-            upstreamID: attempt.upstreamID
+            upstreamProof: attempt.upstreamProof
         )
     }
 
@@ -1891,13 +1911,13 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     private static func makeCatalog(
         route: XcodeProcessRoute,
-        upstreamID: UpstreamSlotID,
+        upstreamProof: UpstreamTopologyProof,
         rawResult: JSONValue
     ) -> Catalog {
         Catalog(
             routeID: route.id,
             target: route.target,
-            upstreamID: upstreamID,
+            upstreamProof: upstreamProof,
             rawResult: rawResult,
             toolsByName: ProcessToolCatalogCodec.toolsByName(in: rawResult),
             fingerprintsByName: ProcessToolCatalogCodec.toolFingerprintsByName(in: rawResult),
@@ -1921,7 +1941,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         else { return nil }
         return AvailableToolCatalog(
             rawResult: rawResult,
-            sourceUpstreamID: catalogs.sorted(by: ProcessToolCatalogCodec.catalogSort).first?.upstreamID,
+            sourceProof: catalogs.sorted(by: ProcessToolCatalogCodec.catalogSort).first?.upstreamProof,
             processIDs: Set(catalogs.map(\.target.processID))
         )
     }
@@ -1929,7 +1949,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     @discardableResult
     private static func recomputeCanonicalProjection(in state: inout State) -> Bool {
         let previousRaw = state.canonicalToolsCatalogRaw
-        let previousSource = state.canonicalSourceUpstreamID
+        let previousSource = state.canonicalSourceProof
         let activeRoutes = activeRoutes(in: state)
         let exposed = exposedProcessIDs(
             policy: .toolsCatalog,
@@ -1940,19 +1960,19 @@ final class ProcessControlPlaneAuthority: Sendable {
            let raw = state.unboundCatalogRaw,
            let source = state.unboundCatalogSource {
             state.canonicalToolsCatalogRaw = raw
-            state.canonicalSourceUpstreamID = source
+            state.canonicalSourceProof = source
         } else if exposed.isEmpty == false,
            let surface = availableToolCatalogSurface(in: state, processIDs: exposed),
            surface.processIDs == exposed,
-           let source = surface.sourceUpstreamID {
+           let source = surface.sourceProof {
             state.canonicalToolsCatalogRaw = surface.rawResult
-            state.canonicalSourceUpstreamID = source
+            state.canonicalSourceProof = source
         } else {
             state.canonicalToolsCatalogRaw = nil
-            state.canonicalSourceUpstreamID = nil
+            state.canonicalSourceProof = nil
         }
         return previousRaw != state.canonicalToolsCatalogRaw
-            || previousSource != state.canonicalSourceUpstreamID
+            || previousSource != state.canonicalSourceProof
     }
 
     private static func invalidateAttempts(in state: inout State) -> [ProcessControlPlaneEffect] {
@@ -1977,7 +1997,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             activeRoutes: activeRoutes(in: state),
             catalogProcessIDs: Set(state.catalogsByProcessID.keys),
             canonicalToolsCatalogRaw: state.canonicalToolsCatalogRaw,
-            canonicalSourceUpstreamID: state.canonicalSourceUpstreamID,
+            canonicalSourceProof: state.canonicalSourceProof,
             attempts: activeRecords(in: state).compactMap { record in
                 record.attempt.map { attemptSnapshot(routeID: record.route.id, attempt: $0) }
             } + (state.unboundAttempt.map {
@@ -1990,7 +2010,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         AttemptSnapshot(
             routeID: routeID,
             attemptID: attempt.id,
-            upstreamID: attempt.upstreamID,
+            upstreamProof: attempt.upstreamProof,
             phase: attempt.phase,
             timeoutCount: attempt.retryTimeout == nil ? 0 : 1,
             rpcCount: attempt.loads.values.reduce(0) { $0 + $1.rpcHandles.count },
@@ -2034,13 +2054,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var removesAttempt = false
         switch outcome {
         case .usable(let raw, let source):
-            effects = []
-            if let readinessToken = attempt.readinessToken {
-                effects.append(.cancelReadinessWaiter(readinessToken))
-            }
-            if let retryTimeout = attempt.retryTimeout {
-                effects.append(.cancelTimeout(retryTimeout))
-            }
+            effects = attempt.detachedEffects()
             attempt.readinessToken = nil
             attempt.retryTimeout = nil
             attempt.retryKind = nil

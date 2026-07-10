@@ -6,11 +6,26 @@ struct UpstreamTopologyProof: Sendable, Hashable {
     let slotGeneration: UInt64
 }
 
+struct UpstreamOperationLease: Sendable {
+    let proof: UpstreamTopologyProof
+    let slot: any UpstreamSlotControlling
+
+    var upstreamID: UpstreamSlotID { proof.slotID }
+    var upstreamIndex: Int { upstreamID.rawValue }
+}
+
 final class UpstreamTopologyAuthority: Sendable {
     struct Entry: Sendable {
         let id: UpstreamSlotID
         let generation: UInt64
         let slot: any UpstreamSlotControlling
+
+        var operationLease: UpstreamOperationLease {
+            UpstreamOperationLease(
+                proof: UpstreamTopologyProof(slotID: id, slotGeneration: generation),
+                slot: slot
+            )
+        }
     }
 
     struct Snapshot: Sendable {
@@ -31,6 +46,11 @@ final class UpstreamTopologyAuthority: Sendable {
                 slotID: id,
                 slotGeneration: entry.generation
             )
+        }
+
+        func operationLease(_ id: UpstreamSlotID) -> UpstreamOperationLease? {
+            guard let entry = entries.first(where: { $0.id == id }) else { return nil }
+            return entry.operationLease
         }
     }
 
@@ -148,13 +168,46 @@ final class UpstreamTopologyAuthority: Sendable {
         }
     }
 
+    func operationLease(for proof: UpstreamTopologyProof) -> UpstreamOperationLease? {
+        state.withLockedValue { state in
+            guard let entry = state.entriesByID[proof.slotID],
+                  entry.generation == proof.slotGeneration else { return nil }
+            return UpstreamOperationLease(proof: proof, slot: entry.slot)
+        }
+    }
+
+    func operationLease(for id: UpstreamSlotID) -> UpstreamOperationLease? {
+        state.withLockedValue { state in
+            guard let entry = state.entriesByID[id] else { return nil }
+            return UpstreamOperationLease(
+                proof: UpstreamTopologyProof(
+                    slotID: id,
+                    slotGeneration: entry.generation
+                ),
+                slot: entry.slot
+            )
+        }
+    }
+
+    func validate(_ lease: UpstreamOperationLease) -> Bool {
+        validate(lease.proof)
+    }
+
     func withValidated<Result>(
         _ proof: UpstreamTopologyProof,
         _ operation: () -> Result
     ) -> Result? {
+        withValidated([proof], operation)
+    }
+
+    func withValidated<Result>(
+        _ proofs: [UpstreamTopologyProof],
+        _ operation: () -> Result
+    ) -> Result? {
         state.withLockedValue { state in
-            guard state.entriesByID[proof.slotID]?.generation
-                    == proof.slotGeneration else { return nil }
+            guard proofs.allSatisfy({ proof in
+                state.entriesByID[proof.slotID]?.generation == proof.slotGeneration
+            }) else { return nil }
             return operation()
         }
     }

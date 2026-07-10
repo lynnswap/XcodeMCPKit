@@ -26,10 +26,34 @@ enum ToolRoutingDecision: Sendable {
 struct RouteForwardingAdmission: Sendable {
     let route: ProcessControlPlaneAuthority.RouteAdmissionLease
     let upstreamProofs: [UpstreamTopologyProof]
+    let window: WindowRouteAdmission?
+
+    init(
+        route: ProcessControlPlaneAuthority.RouteAdmissionLease,
+        upstreamProofs: [UpstreamTopologyProof],
+        window: WindowRouteAdmission? = nil
+    ) {
+        self.route = route
+        self.upstreamProofs = upstreamProofs
+        self.window = window
+    }
 
     func proof(for upstreamIndex: Int) -> UpstreamTopologyProof? {
         upstreamProofs.first { $0.slotID.rawValue == upstreamIndex }
     }
+}
+
+struct WindowRouteAdmission: Sendable {
+    let proof: WindowRouteProof
+    let route: ProcessControlPlaneAuthority.RouteAdmissionLease
+    let rewritePlan: OwnerBoundRequestRewritePlan
+}
+
+struct OwnerBoundRequestRewritePlan: Sendable {
+    let processID: pid_t
+    let rawTabIdentifierByProxyIdentifier: [String: String]
+    let singleRawTabIdentifierByWorkspacePath: [String: String]
+    let toolsRequiringTabIdentifier: Set<String>
 }
 
 struct ToolRoutingError: Sendable {

@@ -22,7 +22,7 @@ package enum RequestInspector {
         _ data: Data,
         parsedJSON: Any? = nil,
         sessionID: String,
-        mapID: (_ sessionID: String, _ originalID: JSONRPC.ID) -> Int64
+        mapID: (_ sessionID: String, _ originalID: JSONRPC.ID) throws -> Int64
     ) throws -> RequestTransform {
         let json = try parsedJSON ?? JSONSerialization.jsonObject(with: data, options: [])
         if var object = json as? [String: Any] {
@@ -36,7 +36,7 @@ package enum RequestInspector {
                 return method == "tools/list"
             }()
             if case .request(let method, let rpcID) = kind {
-                let upstreamID = mapID(sessionID, rpcID)
+                let upstreamID = try mapID(sessionID, rpcID)
                 object["id"] = upstreamID
                 let upstream = try JSONSerialization.data(withJSONObject: object, options: [])
                 return RequestTransform(
@@ -87,7 +87,7 @@ package enum RequestInspector {
                     if case .request(let method, let rpcID) =
                         JSONRPC.Message.Inspector.kind(of: object)
                     {
-                        let upstreamID = mapID(sessionID, rpcID)
+                        let upstreamID = try mapID(sessionID, rpcID)
                         object["id"] = upstreamID
                         responseIDs.append(rpcID)
                         responseOriginalIDsByKey[rpcID.key] = rpcID

@@ -15,7 +15,7 @@ extension ClientMCPRequestExecutor {
         eventLoop: EventLoop,
         session: SessionContext,
         leaseID: LeaseManager.ID,
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease?,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
         requestTimeoutOverride: TimeAmount?,
         admission: RouteForwardingAdmission? = nil
@@ -245,7 +245,7 @@ extension ClientMCPRequestExecutor {
                 bodyData: forwardedBodyData,
                 parsedRequestJSON: forwardedRequestJSON,
                 sessionID: sessionID,
-                upstreamIndexOverride: upstreamIndex,
+                operationLeaseOverride: operationLease,
                 admission: admission
             ) else {
                 return makeImmediateLeaseResolution(
@@ -337,7 +337,7 @@ extension ClientMCPRequestExecutor {
                             leaseID,
                             sessionID: sessionID,
                             requestIDKeys: prepared.transform.responseIDs.map(\.key),
-                            upstreamIndex: prepared.upstreamIndex
+                            operationLease: prepared.operationLease
                         )
                     }
                 )
@@ -460,8 +460,9 @@ extension ClientMCPRequestExecutor {
 
         sessionManager.sendUpstream(
             prepared.transform.upstreamData,
-            upstreamIndex: prepared.upstreamIndex,
-            ensureRunning: false
+            operationLease: prepared.operationLease,
+            ensureRunning: false,
+            admission: prepared.admission
         )
         return makeImmediateLeaseResolution(
             Self.makeLocalResponseResolution(

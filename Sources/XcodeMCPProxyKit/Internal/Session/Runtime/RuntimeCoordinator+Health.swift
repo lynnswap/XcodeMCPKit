@@ -18,22 +18,22 @@ extension RuntimeCoordinator {
         }
     }
 
-    func markRequestSucceeded(upstreamIndex: Int) {
-        upstreamHealthManager.markRequestSucceeded(upstreamIndex: upstreamIndex)
-    }
-
-    func markUpstreamOverloaded(upstreamIndex: Int) {
-        _ = upstreamHealthManager.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+    func markRequestSucceeded(_ operationLease: UpstreamOperationLease) {
+        upstreamHealthManager.markRequestSucceeded(operationLease.proof)
     }
 
     func markUpstreamOverloaded(_ proof: UpstreamTopologyProof) {
         _ = upstreamHealthManager.markUpstreamOverloaded(proof)
     }
 
-    func markRequestTimedOut(upstreamIndex: Int) {
+    func markRequestTimedOut(_ operationLease: UpstreamOperationLease) {
+        markRequestTimedOut(operationLease.proof)
+    }
+
+    private func markRequestTimedOut(_ proof: UpstreamTopologyProof) {
         let nowUptimeNs = nowUptimeNanoseconds()
         let result = upstreamHealthManager.markRequestTimedOut(
-            upstreamIndex: upstreamIndex,
+            proof,
             nowUptimeNs: nowUptimeNs
         )
         let timeoutCount = result.timeoutCount
@@ -42,7 +42,7 @@ extension RuntimeCoordinator {
             logger.warning(
                 "Upstream quarantined after repeated request timeouts",
                 metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
+                    "upstream": .string("\(proof.slotID.rawValue)"),
                     "timeout_count": .string("\(timeoutCount)"),
                 ]
             )
@@ -52,6 +52,9 @@ extension RuntimeCoordinator {
 
     func probeUpstreamHealth(_ probe: UpstreamHealthManager.ProbeRequest) {
         let upstreamIndex = probe.upstreamIndex
+        guard let operationLease = upstreamTopology.operationLease(
+            for: probe.topologyProof
+        ) else { return }
         let internalSessionID = controlPlaneSessionID(for: "health_probe", route: nil)
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
@@ -62,11 +65,14 @@ extension RuntimeCoordinator {
             on: eventLoop,
             timeout: probeTimeout
         )
-        let upstreamID = assignUpstreamID(
+        guard let upstreamID = assignUpstreamID(
             sessionID: internalSessionID,
             originalID: originalID,
-            upstreamIndex: upstreamIndex
-        )
+            operationLease: operationLease
+        ) else {
+            _ = probeSession.router.cancelPending(token: registration.token)
+            return
+        }
 
         let request = JSONRPC.Wire.requestObject(id: upstreamID, method: "tools/list")
         guard let requestData = try? JSONRPC.Wire.data(from: request) else {
@@ -78,7 +84,15 @@ extension RuntimeCoordinator {
             return
         }
 
-        sendUpstream(requestData, upstreamIndex: upstreamIndex)
+        guard sendUpstream(
+            requestData,
+            operationLease: operationLease,
+            ensureRunning: false,
+            admission: nil,
+            onRejected: {
+                _ = probeSession.router.cancelPending(token: registration.token)
+            }
+        ) else { return }
 
         addRuntimeTask { [weak self, probeSession, registration] in
             guard let self else { return }
@@ -87,7 +101,10 @@ extension RuntimeCoordinator {
                     try await registration.future.get()
                 } onCancel: {
                     _ = probeSession.router.cancelPending(token: registration.token)
-                    self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                    self.upstreamRouter.remove(
+                        proof: operationLease.proof,
+                        upstreamID: upstreamID
+                    )
                 }
                 guard let responseData = buffer.readData(length: buffer.readableBytes),
                     let object = try JSONSerialization.jsonObject(with: responseData, options: [])
@@ -95,7 +112,10 @@ extension RuntimeCoordinator {
                     object["error"] == nil,
                     object["result"] != nil
                 else {
-                    self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                    self.upstreamRouter.remove(
+                        proof: operationLease.proof,
+                        upstreamID: upstreamID
+                    )
                     self.finishHealthProbe(
                         probe,
                         success: false,
@@ -110,10 +130,16 @@ extension RuntimeCoordinator {
                 )
             } catch {
                 if error is CancellationError {
-                    self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                    self.upstreamRouter.remove(
+                        proof: operationLease.proof,
+                        upstreamID: upstreamID
+                    )
                     return
                 }
-                self.upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                self.upstreamRouter.remove(
+                    proof: operationLease.proof,
+                    upstreamID: upstreamID
+                )
                 self.finishHealthProbe(
                     probe,
                     success: false,
@@ -154,15 +180,24 @@ extension RuntimeCoordinator {
         )
     }
 
-    func markToolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64) {
-        upstreamHealthManager.markToolsListRefreshSucceeded(upstreamIndex: upstreamIndex, nowUptimeNs: nowUptimeNs)
+    func markToolsListRefreshSucceeded(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64
+    ) {
+        let upstreamIndex = proof.slotID.rawValue
+        upstreamHealthManager.markToolsListRefreshSucceeded(proof, nowUptimeNs: nowUptimeNs)
         testHooks.toolsListRefreshCompleted?(upstreamIndex, true)
     }
 
-    func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64, reason: String)
+    func markToolsListRefreshFailed(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64,
+        reason: String
+    )
     {
+        let upstreamIndex = proof.slotID.rawValue
         guard let result = upstreamHealthManager.markToolsListRefreshFailed(
-            upstreamIndex: upstreamIndex,
+            proof,
             nowUptimeNs: nowUptimeNs
         ) else { return }
         let failures = result.failures
@@ -245,12 +280,17 @@ extension RuntimeCoordinator {
             }
             return
         }
-        let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
+        guard let proof = initializeClaim.topologyProof,
+              let operationLease = upstreamTopology.operationLease(for: proof),
+              let upstreamID = upstreamRouter.assignInitialize(proof: proof) else {
+            clearUpstreamState(initializeClaim: initializeClaim)
+            return
+        }
         guard upstreamHealthManager.setWarmInitializeUpstreamID(
             upstreamID,
             for: initializeClaim
         ) else {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            upstreamRouter.remove(proof: proof, upstreamID: upstreamID)
             if let activationStart {
                 applyProcessControlPlaneTransition(
                     processControlPlane.cancelActivation(activationStart)
@@ -268,12 +308,14 @@ extension RuntimeCoordinator {
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONRPC.Wire.data(from: request) {
             guard upstreamHealthManager.beginInitializeSend(initializeClaim) else { return }
-            sendUpstream(
+            _ = sendUpstream(
                 data,
-                upstreamIndex: upstreamIndex,
+                operationLease: operationLease,
                 ensureRunning: true,
                 admission: nil,
-                initializeClaim: initializeClaim
+                onRejected: { [weak self] in
+                    self?.clearUpstreamState(initializeClaim: initializeClaim)
+                }
             )
         } else {
             clearUpstreamState(initializeClaim: initializeClaim)

@@ -3,23 +3,40 @@ import NIO
 import XcodeMCPKit
 
 protocol ProxyUpstreamRequestRuntimePort: Sendable {
-    func chooseUpstreamIndex() -> Int?
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int)
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int)
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int)
+    func chooseUpstreamOperationLease() -> UpstreamOperationLease?
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease: UpstreamOperationLease
+    ) -> Int64?
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    )
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    )
+    func onRequestSucceeded(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    )
     func rewriteOwnerBoundRequest(
         bodyData: Data,
         parsedRequestJSON: Any,
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease,
+        admission: RouteForwardingAdmission?
     ) -> (bodyData: Data, parsedRequestJSON: Any)
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
     func sendUpstream(
         _ data: Data,
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?
-    )
+        admission: RouteForwardingAdmission?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool
     func activateRequestLease(
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
@@ -32,68 +49,79 @@ extension ProxyUpstreamRequestRuntimePort {
     func rewriteOwnerBoundRequest(
         bodyData: Data,
         parsedRequestJSON: Any,
-        upstreamIndex _: Int
+        operationLease _: UpstreamOperationLease,
+        admission _: RouteForwardingAdmission?
     ) -> (bodyData: Data, parsedRequestJSON: Any) {
         (bodyData, parsedRequestJSON)
     }
 
-    func sendUpstream(_ data: Data, upstreamIndex: Int) {
-        sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
-    }
-
+    @discardableResult
     func sendUpstream(
         _ data: Data,
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission _: RouteForwardingAdmission?
-    ) {
-        sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: ensureRunning)
+        admission: RouteForwardingAdmission?
+    ) -> Bool {
+        sendUpstream(
+            data,
+            operationLease: operationLease,
+            ensureRunning: ensureRunning,
+            admission: admission,
+            onRejected: {}
+        )
     }
+
 }
 
 struct ProxyUpstreamRequestRuntime: Sendable {
     struct PreparedRequest: Sendable {
         let transform: RequestTransform
-        let upstreamIndex: Int
+        let operationLease: UpstreamOperationLease
         let admission: RouteForwardingAdmission?
+
+        var upstreamIndex: Int { operationLease.upstreamIndex }
 
         init(
             transform: RequestTransform,
-            upstreamIndex: Int,
+            operationLease: UpstreamOperationLease,
             admission: RouteForwardingAdmission? = nil
         ) {
             self.transform = transform
-            self.upstreamIndex = upstreamIndex
+            self.operationLease = operationLease
             self.admission = admission
         }
     }
 
     struct StartedRegistration: Sendable {
-        let upstreamIndex: Int
+        let operationLease: UpstreamOperationLease
         let routerPendingToken: UUID
 
-        init(upstreamIndex: Int, routerPendingToken: UUID) {
-            self.upstreamIndex = upstreamIndex
+        var upstreamIndex: Int { operationLease.upstreamIndex }
+
+        init(operationLease: UpstreamOperationLease, routerPendingToken: UUID) {
+            self.operationLease = operationLease
             self.routerPendingToken = routerPendingToken
         }
     }
 
     struct StartedRequest: Sendable {
         let transform: RequestTransform
-        let upstreamIndex: Int
+        let operationLease: UpstreamOperationLease
         let requestTimeout: TimeAmount?
         let routerPendingToken: UUID
         let future: EventLoopFuture<ByteBuffer>
 
+        var upstreamIndex: Int { operationLease.upstreamIndex }
+
         init(
             transform: RequestTransform,
-            upstreamIndex: Int,
+            operationLease: UpstreamOperationLease,
             requestTimeout: TimeAmount?,
             routerPendingToken: UUID,
             future: EventLoopFuture<ByteBuffer>
         ) {
             self.transform = transform
-            self.upstreamIndex = upstreamIndex
+            self.operationLease = operationLease
             self.requestTimeout = requestTimeout
             self.routerPendingToken = routerPendingToken
             self.future = future
@@ -102,6 +130,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
 
     enum Error: Swift.Error, Sendable {
         case missingRequestID
+        case staleUpstreamTopology
     }
 
     private let port: any ProxyUpstreamRequestRuntimePort
@@ -114,39 +143,43 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        upstreamIndexOverride: Int? = nil,
+        operationLeaseOverride: UpstreamOperationLease? = nil,
         admission: RouteForwardingAdmission? = nil
     ) throws -> PreparedRequest? {
-        let upstreamIndex: Int
-        if let upstreamIndexOverride {
-            upstreamIndex = upstreamIndexOverride
+        let operationLease: UpstreamOperationLease
+        if let operationLeaseOverride {
+            operationLease = operationLeaseOverride
         } else {
-            guard let chosen = port.chooseUpstreamIndex() else {
+            guard let chosen = port.chooseUpstreamOperationLease() else {
                 return nil
             }
-            upstreamIndex = chosen
+            operationLease = chosen
         }
 
         let rewritten = port.rewriteOwnerBoundRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
-            upstreamIndex: upstreamIndex
+            operationLease: operationLease,
+            admission: admission
         )
         let transform = try RequestInspector.transform(
             rewritten.bodyData,
             parsedJSON: rewritten.parsedRequestJSON,
             sessionID: sessionID,
             mapID: { sessionID, originalID in
-                port.assignUpstreamID(
+                guard let upstreamID = port.assignUpstreamID(
                     sessionID: sessionID,
                     originalID: originalID,
-                    upstreamIndex: upstreamIndex
-                )
+                    operationLease: operationLease
+                ) else {
+                    throw Error.staleUpstreamTopology
+                }
+                return upstreamID
             }
         )
         return PreparedRequest(
             transform: transform,
-            upstreamIndex: upstreamIndex,
+            operationLease: operationLease,
             admission: admission
         )
     }
@@ -193,19 +226,26 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         }
         onRegistered?(
             StartedRegistration(
-                upstreamIndex: prepared.upstreamIndex,
+                operationLease: prepared.operationLease,
                 routerPendingToken: registration.token
             )
         )
-        port.sendUpstream(
+        let sent = port.sendUpstream(
             prepared.transform.upstreamData,
-            upstreamIndex: prepared.upstreamIndex,
+            operationLease: prepared.operationLease,
             ensureRunning: false,
-            admission: prepared.admission
+            admission: prepared.admission,
+            onRejected: {
+                _ = router.cancelPending(token: registration.token)
+            }
         )
+        guard sent else {
+            _ = router.cancelPending(token: registration.token)
+            throw Error.staleUpstreamTopology
+        }
         return StartedRequest(
             transform: prepared.transform,
-            upstreamIndex: prepared.upstreamIndex,
+            operationLease: prepared.operationLease,
             requestTimeout: requestTimeout,
             routerPendingToken: registration.token,
             future: registration.future
@@ -220,7 +260,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             port.onRequestSucceeded(
                 sessionID: sessionID,
                 requestIDKey: responseID.key,
-                upstreamIndex: started.upstreamIndex
+                operationLease: started.operationLease
             )
         }
     }
@@ -237,20 +277,20 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             port.onRequestTimeout(
                 sessionID: sessionID,
                 requestIDKey: firstResponseID.key,
-                upstreamIndex: started.upstreamIndex
+                operationLease: started.operationLease
             )
         } else {
             port.removeUpstreamIDMapping(
                 sessionID: sessionID,
                 requestIDKey: firstResponseID.key,
-                upstreamIndex: started.upstreamIndex
+                operationLease: started.operationLease
             )
         }
         for responseID in started.transform.responseIDs.dropFirst() {
             port.removeUpstreamIDMapping(
                 sessionID: sessionID,
                 requestIDKey: responseID.key,
-                upstreamIndex: started.upstreamIndex
+                operationLease: started.operationLease
             )
         }
     }
