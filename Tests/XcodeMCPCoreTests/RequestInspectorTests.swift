@@ -23,9 +23,10 @@ struct RequestInspectorTests {
         )
 
         #expect(transform.expectsResponse == true)
-        #expect(transform.isBatch == false)
         #expect(transform.idKey == "5")
+        #expect(transform.responseID?.key == "5")
         #expect(transform.method == "tools/list")
+        #expect(transform.isCacheableToolsListRequest)
         #expect(mapped == ["s1:5"])
 
         let upstream =
@@ -53,8 +54,8 @@ struct RequestInspectorTests {
         )
 
         #expect(transform.expectsResponse == false)
-        #expect(transform.isBatch == false)
         #expect(transform.idKey == nil)
+        #expect(transform.responseID == nil)
         #expect(transform.method == "notifications/initialized")
         #expect(mapped == false)
     }
@@ -79,7 +80,7 @@ struct RequestInspectorTests {
 
         #expect(transform.expectsResponse == false)
         #expect(transform.idKey == nil)
-        #expect(transform.responseIDs.isEmpty)
+        #expect(transform.responseID == nil)
         #expect(transform.method == nil)
         #expect(mapped == false)
 
@@ -90,73 +91,24 @@ struct RequestInspectorTests {
         #expect(id == 5)
     }
 
-    @Test func requestInspectorMapsBatchRequests() async throws {
+    @Test func requestInspectorRejectsArrayJSONWithoutMappingIDs() async throws {
         let payload: [Any] = [
             ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
-            ["jsonrpc": "2.0", "method": "ping"],
-            ["jsonrpc": "2.0", "id": 2, "result": ["ok": true]],
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var mappedCount = 0
-        let transform = try RequestInspector.transform(
-            data,
-            sessionID: "s1",
-            mapID: { _, _ in
-                mappedCount += 1
-                return 77
-            }
-        )
-
-        #expect(transform.expectsResponse == true)
-        #expect(transform.isBatch == true)
-        #expect(transform.idKey == nil)
-
-        let upstream =
-            try JSONSerialization.jsonObject(with: transform.upstreamData, options: []) as? [Any]
-        let first = upstream?.first as? [String: Any]
-        let id = (first?["id"] as? NSNumber)?.intValue
-        #expect(id == 77)
-        let third = upstream?[2] as? [String: Any]
-        let responseID = (third?["id"] as? NSNumber)?.intValue
-        #expect(responseID == 2)
-        #expect(mappedCount == 1)
-        #expect(transform.cacheableToolsListResponseIDKey == "1")
-    }
-
-    @Test func requestInspectorUsesFirstToolsListIDInMixedBatch() async throws {
-        let payload: [Any] = [
-            ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
-            ["jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": ["name": "DocumentationSearch"]],
-            ["jsonrpc": "2.0", "id": 3, "method": "tools/list"],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        let transform = try RequestInspector.transform(
-            data,
-            sessionID: "s1",
-            mapID: { _, originalID in Int64(originalID.key) ?? 0 }
-        )
-
-        #expect(transform.normalizationToolsListResponseIDKey == "1")
-        #expect(transform.cacheableToolsListResponseIDKey == nil)
-    }
-
-    @Test func requestInspectorCachesPureToolsListBatchUsingFirstResponseID() async throws {
-        let payload: [Any] = [
-            ["jsonrpc": "2.0", "id": 1, "method": "tools/list"],
-            ["jsonrpc": "2.0", "id": 2, "method": "tools/list"],
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        let transform = try RequestInspector.transform(
-            data,
-            sessionID: "s1",
-            mapID: { _, originalID in Int64(originalID.key) ?? 0 }
-        )
-
-        #expect(transform.normalizationToolsListResponseIDKey == "1")
-        #expect(transform.cacheableToolsListResponseIDKey == "1")
+        #expect(throws: (any Error).self) {
+            _ = try RequestInspector.transform(
+                data,
+                sessionID: "s1",
+                mapID: { _, _ in
+                    mappedCount += 1
+                    return 77
+                }
+            )
+        }
+        #expect(mappedCount == 0)
     }
 
     @Test func requestInspectorRejectsScalarJSON() async throws {

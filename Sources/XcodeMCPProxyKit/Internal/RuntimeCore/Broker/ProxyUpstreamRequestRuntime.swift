@@ -134,33 +134,20 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         onRegistered: (@Sendable (StartedRegistration) -> Void)? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
-        let registration: JSONRPCResponseRouter.PendingRegistration
-        if prepared.transform.isBatch {
-            let responseIDKeys = prepared.transform.responseIDs.map(\.key)
-            guard responseIDKeys.isEmpty == false else {
-                throw Error.missingRequestID
-            }
-            registration = router.registerBatchPending(
-                on: eventLoop,
-                timeout: requestTimeout,
-                responseIDKeys: responseIDKeys,
-                onTimeout: onTimeout
-            )
-        } else if let idKey = prepared.transform.idKey {
-            registration = router.registerRequestPending(
-                idKey: idKey,
-                on: eventLoop,
-                timeout: requestTimeout,
-                onTimeout: onTimeout
-            )
-        } else {
+        guard let idKey = prepared.transform.idKey else {
             throw Error.missingRequestID
         }
+        let registration = router.registerRequestPending(
+            idKey: idKey,
+            on: eventLoop,
+            timeout: requestTimeout,
+            onTimeout: onTimeout
+        )
 
         if let leaseID {
             port.activateRequestLease(
                 leaseID,
-                requestIDKey: prepared.transform.responseIDs.first?.key,
+                requestIDKey: prepared.transform.responseID?.key,
                 upstreamIndex: prepared.upstreamIndex,
                 timeout: requestTimeout
             )
@@ -189,13 +176,12 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         sessionID: String,
         started: StartedRequest
     ) {
-        for responseID in started.transform.responseIDs {
-            port.onRequestSucceeded(
-                sessionID: sessionID,
-                requestIDKey: responseID.key,
-                upstreamIndex: started.upstreamIndex
-            )
-        }
+        guard let responseID = started.transform.responseID else { return }
+        port.onRequestSucceeded(
+            sessionID: sessionID,
+            requestIDKey: responseID.key,
+            upstreamIndex: started.upstreamIndex
+        )
     }
 
     func recordRequestTimedOut(
@@ -203,23 +189,16 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         started: StartedRequest,
         accountTimeout: Bool
     ) {
-        guard let firstResponseID = started.transform.responseIDs.first else {
+        guard let responseID = started.transform.responseID else {
             return
         }
         if accountTimeout {
             port.onRequestTimeout(
                 sessionID: sessionID,
-                requestIDKey: firstResponseID.key,
+                requestIDKey: responseID.key,
                 upstreamIndex: started.upstreamIndex
             )
         } else {
-            port.removeUpstreamIDMapping(
-                sessionID: sessionID,
-                requestIDKey: firstResponseID.key,
-                upstreamIndex: started.upstreamIndex
-            )
-        }
-        for responseID in started.transform.responseIDs.dropFirst() {
             port.removeUpstreamIDMapping(
                 sessionID: sessionID,
                 requestIDKey: responseID.key,

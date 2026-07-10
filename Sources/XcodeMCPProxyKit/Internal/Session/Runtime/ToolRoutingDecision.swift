@@ -5,7 +5,7 @@ enum ToolRoutingDecision: Sendable {
     case forward(preferredUpstreamIndex: Int?)
     case forwardAny(preferredUpstreamIndices: [Int])
     case localXcodeListWindows
-    case reject(errors: [ToolRoutingError], forceBatchArray: Bool)
+    case reject(errors: [ToolRoutingError])
 }
 
 struct ToolRoutingError: Sendable {

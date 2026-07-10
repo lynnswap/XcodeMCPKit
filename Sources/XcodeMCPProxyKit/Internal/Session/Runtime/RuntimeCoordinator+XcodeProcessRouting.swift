@@ -490,8 +490,7 @@ extension RuntimeCoordinator {
                     errors: toolRoutingErrors(
                         for: requests,
                         message: "XcodeListWindows must be resolved locally before forwarding mixed batches"
-                    ),
-                    forceBatchArray: requestJSON is [Any]
+                    )
                 )
             }
         }
@@ -501,8 +500,7 @@ extension RuntimeCoordinator {
         guard ownerBoundRequests.isEmpty == false else {
             if let catalogDecision = catalogToolRoutingDecision(
                 for: requests,
-                requiredProcessID: nil,
-                forceBatchArray: requestJSON is [Any]
+                requiredProcessID: nil
             ) {
                 return catalogDecision
             }
@@ -552,8 +550,7 @@ extension RuntimeCoordinator {
                         for: requests,
                         message: "conflicting Xcode window owners for one or more tools"
                     )
-                    : errors,
-                forceBatchArray: requestJSON is [Any]
+                    : errors
             )
         }
 
@@ -562,8 +559,7 @@ extension RuntimeCoordinator {
                 errors: toolRoutingErrors(
                     for: requests,
                     message: "unable to resolve Xcode window owner for one or more tools"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                )
             )
         }
 
@@ -579,8 +575,7 @@ extension RuntimeCoordinator {
                         id: id,
                         message: "mixed Xcode window owners in one batch are not supported"
                     )
-                },
-                forceBatchArray: true
+                }
             )
         }
 
@@ -594,8 +589,7 @@ extension RuntimeCoordinator {
                 errors: toolRoutingErrors(
                     for: requests,
                     message: "Xcode process that owns one or more tools is no longer available"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                )
             )
         }
         let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
@@ -615,8 +609,7 @@ extension RuntimeCoordinator {
                 errors: toolRoutingErrors(
                     for: requests,
                     message: "one or more tools are not available in the selected Xcode process"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                )
             )
         }
 
@@ -625,8 +618,7 @@ extension RuntimeCoordinator {
                 errors: toolRoutingErrors(
                     for: requests,
                     message: "no available upstream for Xcode process that owns one or more tools"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                )
             )
         }
 
@@ -710,8 +702,7 @@ extension RuntimeCoordinator {
 
     private func catalogToolRoutingDecision(
         for requests: [ToolRoutingRequest],
-        requiredProcessID: pid_t?,
-        forceBatchArray: Bool
+        requiredProcessID: pid_t?
     ) -> ToolRoutingDecision? {
         let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
             let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
@@ -740,8 +731,7 @@ extension RuntimeCoordinator {
                         id: id,
                         message: "no single Xcode process provides all requested tools"
                     )
-                },
-                forceBatchArray: forceBatchArray
+                }
             )
         }
         guard let route = preferredAvailableRoute(in: effectiveCandidates) else {
@@ -752,8 +742,7 @@ extension RuntimeCoordinator {
                         id: id,
                         message: "no available upstream for an Xcode process that provides tool '\(request.toolName)'"
                     )
-                },
-                forceBatchArray: forceBatchArray
+                }
             )
         }
         return .forwardAny(

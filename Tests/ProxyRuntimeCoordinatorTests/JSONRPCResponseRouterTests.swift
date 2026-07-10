@@ -59,105 +59,27 @@ struct JSONRPCResponseRouterTests {
         #expect(received.withLockedValue { $0 } == [notification])
     }
 
-    @Test func responseRouterHandlesBatchResponse() async throws {
+    @Test func responseRouterIgnoresTopLevelArrays() async throws {
         let eventLoop = EmbeddedEventLoop()
         let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             hasActiveClients: { false },
             sendNotification: { _ in }
         )
+        let completed = NIOLockedValueBox(false)
 
-        let future = router.registerBatchPending(on: eventLoop, responseIDKeys: ["1"]).future
-        let response = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
-        router.handleIncoming(Data(response.utf8))
+        let future = router.registerRequest(idKey: "1", on: eventLoop)
+        future.whenSuccess { _ in completed.withLockedValue { $0 = true } }
+        router.handleIncoming(Data("[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]".utf8))
         eventLoop.run()
 
-        let buffer = try await future.get()
-        let string = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes)
-        #expect(string == response)
-    }
+        #expect(completed.withLockedValue { $0 } == false)
+        #expect(router.drainBufferedNotifications().isEmpty)
 
-    @Test func responseRouterMatchesOutOfOrderBatchResponseByID() async throws {
-        let eventLoop = EmbeddedEventLoop()
-        let router = JSONRPCResponseRouter(
-            requestTimeout: .seconds(5),
-            hasActiveClients: { false },
-            sendNotification: { _ in }
-        )
-        let completions = NIOLockedValueBox<[String]>([])
-
-        let first = router.registerBatchPending(
-            on: eventLoop,
-            responseIDKeys: ["1"]
-        ).future
-        let second = router.registerBatchPending(
-            on: eventLoop,
-            responseIDKeys: ["2"]
-        ).future
-        first.whenSuccess { buffer in
-            completions.withLockedValue { values in
-                values.append("first:\(bufferString(buffer))")
-            }
-        }
-        second.whenSuccess { buffer in
-            completions.withLockedValue { values in
-                values.append("second:\(bufferString(buffer))")
-            }
-        }
-
-        let secondResponse = "[{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}]"
-        router.handleIncoming(Data(secondResponse.utf8))
+        router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}".utf8))
         eventLoop.run()
-        #expect(completions.withLockedValue { $0 } == ["second:\(secondResponse)"])
-
-        let firstResponse = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
-        router.handleIncoming(Data(firstResponse.utf8))
-        eventLoop.run()
-        #expect(completions.withLockedValue { $0 } == [
-            "second:\(secondResponse)",
-            "first:\(firstResponse)",
-        ])
-    }
-
-    @Test func responseRouterTimesOutMatchingBatchByToken() async throws {
-        let eventLoop = EmbeddedEventLoop()
-        let router = JSONRPCResponseRouter(
-            requestTimeout: nil,
-            hasActiveClients: { false },
-            sendNotification: { _ in }
-        )
-        let firstFailed = NIOLockedValueBox(false)
-        let secondFailed = NIOLockedValueBox(false)
-        let firstSucceeded = NIOLockedValueBox<String?>(nil)
-
-        let first = router.registerBatchPending(
-            on: eventLoop,
-            timeout: .seconds(2),
-            responseIDKeys: ["1"]
-        ).future
-        let second = router.registerBatchPending(
-            on: eventLoop,
-            timeout: .seconds(1),
-            responseIDKeys: ["2"]
-        ).future
-        first.whenFailure { _ in firstFailed.withLockedValue { $0 = true } }
-        second.whenFailure { _ in secondFailed.withLockedValue { $0 = true } }
-        first.whenSuccess { buffer in
-            firstSucceeded.withLockedValue { $0 = bufferString(buffer) }
-        }
-
-        eventLoop.advanceTime(by: .seconds(1))
-        eventLoop.run()
-
-        #expect(secondFailed.withLockedValue { $0 } == true)
-        #expect(firstFailed.withLockedValue { $0 } == false)
-
-        let firstResponse = "[{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}]"
-        router.handleIncoming(Data(firstResponse.utf8))
-        eventLoop.run()
-
-        #expect(firstSucceeded.withLockedValue { $0 } == firstResponse)
-        #expect(firstFailed.withLockedValue { $0 } == false)
+        #expect(completed.withLockedValue { $0 })
+        _ = try await future.get()
     }
 
     @Test func responseRouterTimesOutRequests() async throws {

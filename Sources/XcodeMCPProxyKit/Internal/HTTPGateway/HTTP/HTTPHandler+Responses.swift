@@ -33,38 +33,21 @@ extension HTTPHandler {
             }
         case .mcpError(
             let id,
-            let ids,
             let code,
             let message,
-            let forceBatchArray,
             let sessionID,
             let prefersEventStream
         ):
-            if ids.isEmpty {
-                return sendMCPError(
-                    on: channel,
-                    id: id,
-                    code: code,
-                    message: message,
-                    forceBatchArray: forceBatchArray,
-                    prefersEventStream: prefersEventStream,
-                    keepAlive: keepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-            } else {
-                return sendMCPError(
-                    on: channel,
-                    ids: ids,
-                    code: code,
-                    message: message,
-                    forceBatchArray: forceBatchArray,
-                    prefersEventStream: prefersEventStream,
-                    keepAlive: keepAlive,
-                    sessionID: sessionID,
-                    requestLog: requestLog
-                )
-            }
+            return sendMCPError(
+                on: channel,
+                id: id,
+                code: code,
+                message: message,
+                prefersEventStream: prefersEventStream,
+                keepAlive: keepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
         case .plain(let status, let body, let sessionID):
             return sendPlain(
                 on: channel,
@@ -173,7 +156,6 @@ extension HTTPHandler {
         id: JSONRPC.ID?,
         code: Int,
         message: String,
-        forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
         sessionID: String?,
@@ -184,31 +166,6 @@ extension HTTPHandler {
             id: id,
             code: code,
             message: message,
-            forceBatchArray: forceBatchArray,
-            prefersEventStream: prefersEventStream,
-            keepAlive: keepAlive,
-            sessionID: sessionID,
-            requestLog: requestLog
-        )
-    }
-
-    func sendMCPError(
-        on channel: Channel,
-        ids: [JSONRPC.ID],
-        code: Int,
-        message: String,
-        forceBatchArray: Bool = false,
-        prefersEventStream: Bool,
-        keepAlive: Bool,
-        sessionID: String?,
-        requestLog: RequestLogContext
-    ) -> EventLoopFuture<Void> {
-        responseWriter.sendMCPError(
-            on: channel,
-            ids: ids,
-            code: code,
-            message: message,
-            forceBatchArray: forceBatchArray,
             prefersEventStream: prefersEventStream,
             keepAlive: keepAlive,
             sessionID: sessionID,
