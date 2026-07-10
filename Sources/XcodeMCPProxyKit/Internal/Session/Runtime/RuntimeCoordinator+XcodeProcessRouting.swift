@@ -386,13 +386,13 @@ extension RuntimeCoordinator {
         nowUptimeNs: UInt64
     ) -> ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot {
         let states = upstreamHealthManager.activeStatesSnapshot()
-        let snapshotUsable = Set(states.compactMap { upstreamIndex, state -> Int? in
+        let snapshotUsable = Set(states.compactMap { upstreamID, state -> Int? in
             guard state.isInitialized else {
                 return nil
             }
             switch state.healthState {
             case .healthy, .degraded:
-                return upstreamIndex
+                return upstreamID.rawValue
             case .quarantined:
                 return nil
             }
@@ -402,13 +402,13 @@ extension RuntimeCoordinator {
         switch policy {
         case .toolsCatalog:
             var effects: [UpstreamHealthManager.Effect] = []
-            recoveryAwareUsable = Set(states.compactMap { upstreamIndex, _ -> Int? in
+            recoveryAwareUsable = Set(states.compactMap { upstreamID, _ -> Int? in
                 let evaluation = upstreamHealthManager.evaluateUsableInitialized(
-                    index: upstreamIndex,
+                    index: upstreamID.rawValue,
                     nowUptimeNs: nowUptimeNs
                 )
                 effects.append(contentsOf: evaluation.effects)
-                return evaluation.isUsable ? upstreamIndex : nil
+                return evaluation.isUsable ? upstreamID.rawValue : nil
             })
             applyHealthEffects(effects)
         case .ownerRouting, .windowDiscovery, .initialization:
@@ -1052,10 +1052,10 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return upstreamHealthManager.initializedHealthyishCount()
         }
-        let states = upstreamHealthManager.statesSnapshot()
         return routableProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else { return }
-            let upstream = states[upstreamIndex]
+            guard let upstream = upstreamHealthManager.state(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            ) else { return }
             guard upstream.isInitialized else { return }
             switch upstream.healthState {
             case .healthy, .degraded:
@@ -1070,10 +1070,10 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return upstreamHealthManager.anyInitialized()
         }
-        let states = upstreamHealthManager.statesSnapshot()
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
-            return states[upstreamIndex].isInitialized
+            upstreamHealthManager.state(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            )?.isInitialized == true
         }
     }
 
@@ -1081,10 +1081,10 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return upstreamHealthManager.anyRecoveryInFlight()
         }
-        let states = upstreamHealthManager.statesSnapshot()
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
-            let upstream = states[upstreamIndex]
+            guard let upstream = upstreamHealthManager.state(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            ) else { return false }
             return upstream.initInFlight || upstream.healthProbeInFlight
         }
     }

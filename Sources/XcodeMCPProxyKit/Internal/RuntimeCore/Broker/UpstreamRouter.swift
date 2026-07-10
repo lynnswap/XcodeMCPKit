@@ -121,6 +121,32 @@ final class UpstreamRouter: Sendable {
         }
     }
 
+    func consume(
+        proof: UpstreamTopologyProof,
+        upstreamID: Int64
+    ) -> UpstreamRouter.Mapping? {
+        state.withLockedValue { state in
+            guard Self.matches(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
+            let mapping = state.mappingsByUpstream[upstreamIndex]?.removeValue(forKey: upstreamID)
+            if let mapping,
+               let sessionID = mapping.sessionID,
+               let originalID = mapping.originalID {
+                let requestKey = Self.requestLookupKey(
+                    sessionID: sessionID,
+                    requestIDKey: originalID.key
+                )
+                state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeValue(
+                    forKey: requestKey
+                )
+            }
+            state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.removeAll {
+                $0 == upstreamID
+            }
+            return mapping
+        }
+    }
+
     func remove(upstreamIndex: Int, upstreamID: Int64) {
         state.withLockedValue { state in
             guard state.mappingsByUpstream[upstreamIndex] != nil else { return }
@@ -181,6 +207,16 @@ final class UpstreamRouter: Sendable {
         }
     }
 
+    func reset(proof: UpstreamTopologyProof) {
+        state.withLockedValue { state in
+            guard Self.matches(proof, state: state) else { return }
+            let upstreamIndex = proof.slotID.rawValue
+            state.mappingsByUpstream[upstreamIndex]?.removeAll()
+            state.upstreamIDByRequestKeyByUpstream[upstreamIndex]?.removeAll()
+            state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.removeAll()
+        }
+    }
+
     func resetAll() {
         state.withLockedValue { state in
             for upstreamIndex in state.mappingsByUpstream.keys {
@@ -204,6 +240,27 @@ final class UpstreamRouter: Sendable {
             state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.remove(at: index)
             return true
         }
+    }
+
+    func consumeReleasedResponseMarker(
+        proof: UpstreamTopologyProof,
+        upstreamID: Int64
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard Self.matches(proof, state: state) else { return false }
+            let upstreamIndex = proof.slotID.rawValue
+            guard let index = state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?
+                .firstIndex(of: upstreamID) else { return false }
+            state.recentlyReleasedResponseIDsByUpstream[upstreamIndex]?.remove(at: index)
+            return true
+        }
+    }
+
+    private static func matches(
+        _ proof: UpstreamTopologyProof,
+        state: State
+    ) -> Bool {
+        state.topology?.proof(proof.slotID) == proof
     }
 
     private static func requestLookupKey(sessionID: String, requestIDKey: String)

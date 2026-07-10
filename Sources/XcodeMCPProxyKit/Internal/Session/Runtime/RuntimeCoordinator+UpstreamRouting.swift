@@ -46,14 +46,27 @@ extension RuntimeCoordinator {
         }
     }
 
-    func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+    func routeUpstreamMessage(
+        _ data: Data,
+        upstreamIndex: Int,
+        proof suppliedProof: UpstreamTopologyProof? = nil
+    ) {
+        let slotID = UpstreamSlotID(rawValue: upstreamIndex)
+        guard let proof = suppliedProof ?? upstreamTopology.snapshot().proof(slotID),
+              proof.slotID == slotID,
+              upstreamTopology.validate(proof) else { return }
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            guard upstreamTopology.validate(proof) else { return }
             routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
             return
         }
 
         if let object = json as? [String: Any] {
-            switch mappedResponseRoutingOutcome(object, upstreamIndex: upstreamIndex) {
+            switch mappedResponseRoutingOutcome(
+                object,
+                upstreamIndex: upstreamIndex,
+                proof: proof
+            ) {
             case .routed(let sessionID, let object):
                 if deliverClientResponseObjects([object], sessionID: sessionID, upstreamIndex: upstreamIndex) {
                     return
@@ -63,12 +76,18 @@ extension RuntimeCoordinator {
             case .unmappedResponse, .notResponse:
                 break
             }
+            guard upstreamTopology.validate(proof) else { return }
             routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
             return
         }
 
         if let array = json as? [Any] {
-            routeUpstreamBatch(array, originalData: data, upstreamIndex: upstreamIndex)
+            routeUpstreamBatch(
+                array,
+                originalData: data,
+                upstreamIndex: upstreamIndex,
+                proof: proof
+            )
             return
         }
 
@@ -78,7 +97,8 @@ extension RuntimeCoordinator {
     private func routeUpstreamBatch(
         _ array: [Any],
         originalData: Data,
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
     ) {
         var responseObjectsBySessionID: [String: [Any]] = [:]
         var mappedSessionIDs = Set<String>()
@@ -92,7 +112,11 @@ extension RuntimeCoordinator {
                 continue
             }
 
-            switch mappedResponseRoutingOutcome(object, upstreamIndex: upstreamIndex) {
+            switch mappedResponseRoutingOutcome(
+                object,
+                upstreamIndex: upstreamIndex,
+                proof: proof
+            ) {
             case .routed(let sessionID, let object):
                 responseObjectsBySessionID[sessionID, default: []].append(object)
                 mappedSessionIDs.insert(sessionID)
@@ -152,7 +176,8 @@ extension RuntimeCoordinator {
 
     private func mappedResponseRoutingOutcome(
         _ object: [String: Any],
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
     ) -> MappedResponseRoutingOutcome {
         guard let responseID = JSONRPC.Message.Inspector.responseCorrelationID(from: object),
             let upstreamID = upstreamID(from: responseID)
@@ -161,11 +186,11 @@ extension RuntimeCoordinator {
         }
 
         guard let mapping = upstreamRouter.consume(
-            upstreamIndex: upstreamIndex,
+            proof: proof,
             upstreamID: upstreamID
         ) else {
             if upstreamRouter.consumeReleasedResponseMarker(
-                upstreamIndex: upstreamIndex,
+                proof: proof,
                 upstreamID: upstreamID
             ) {
                 logger.debug(
@@ -178,6 +203,7 @@ extension RuntimeCoordinator {
                 debugRecorder.recordLateResponse(upstreamIndex: upstreamIndex)
                 return .late
             }
+            guard upstreamTopology.validate(proof) else { return .late }
             return .unmappedResponse
         }
 
@@ -258,7 +284,16 @@ extension RuntimeCoordinator {
             && !anyActiveInitializedUpstream()
     }
 
-    func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
+    func handleUpstreamExit(
+        _ status: Int32,
+        upstreamIndex: Int,
+        proof suppliedProof: UpstreamTopologyProof? = nil
+    ) {
+        let slotID = UpstreamSlotID(rawValue: upstreamIndex)
+        guard let proof = suppliedProof ?? upstreamTopology.snapshot().proof(slotID),
+              proof.slotID == slotID,
+              upstreamTopology.validate(proof) else { return }
+        guard clearUpstreamState(proof: proof) else { return }
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
         let suppressProcessRouteWarmRestart =
@@ -271,15 +306,13 @@ extension RuntimeCoordinator {
                 upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
             }
         }
-
-        clearUpstreamState(upstreamIndex: upstreamIndex)
         if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
             markXcodeProcessRouteUnavailable(
                 upstreamIndex: upstreamIndex,
                 reason: "upstream_exit_\(status)"
             )
         }
-        upstreamRouter.reset(upstreamIndex: upstreamIndex)
+        upstreamRouter.reset(proof: proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
@@ -389,9 +422,19 @@ extension RuntimeCoordinator {
         _ data: Data,
         upstreamIndex: Int,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?
+        admission: RouteForwardingAdmission?,
+        initializeClaim: UpstreamHealthManager.InitializeClaim? = nil
     ) {
-        guard let context = upstreamSlotContext(upstreamIndex) else { return }
+        guard let context = upstreamSlotContext(upstreamIndex) else {
+            return
+        }
+        if let initializeClaim {
+            guard upstreamHealthManager.validate(initializeClaim),
+                  initializeClaim.topologyProof == context.proof,
+                  upstreamTopology.validate(context.proof) else {
+                return
+            }
+        }
         if let admission {
             guard processControlPlane.validate(admission.route),
                   let expectedProof = admission.proof(for: upstreamIndex),
@@ -406,12 +449,24 @@ extension RuntimeCoordinator {
                 return
             }
         }
-        addRuntimeTask { [weak self, context, admission] in
+        addRuntimeTask { [weak self, context, admission, initializeClaim] in
             guard let self else { return }
             if ensureRunning {
+                if let initializeClaim {
+                    guard self.upstreamHealthManager.validate(
+                              initializeClaim
+                          ) else {
+                        return
+                    }
+                }
                 await context.slot.start()
             }
-            if let admission {
+            if let initializeClaim {
+                guard self.upstreamHealthManager.validate(initializeClaim),
+                      self.upstreamTopology.validate(context.proof) else {
+                    return
+                }
+            } else if let admission {
                 guard self.processControlPlane.validate(admission.route),
                       let expectedProof = admission.proof(for: upstreamIndex),
                       expectedProof == context.proof,
@@ -584,7 +639,9 @@ extension RuntimeCoordinator {
         let initSnapshot = initializeManager.snapshot()
         let processSnapshot = processControlPlane.snapshot()
         let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()
-        let upstreamStates = upstreamHealthManager.activeStatesSnapshot()
+        let upstreamStates = upstreamHealthManager.activeStatesSnapshot().map {
+            (index: $0.id.rawValue, state: $0.state)
+        }
         let leaseSnapshots = leaseManager.debugSnapshots()
         let sessionSnapshots = leaseManager.sessionDebugSnapshots(
             allSessionIDs: sessionRegistry.sessionIDs()
@@ -1067,19 +1124,24 @@ extension RuntimeCoordinator {
 
     func handleUpstreamProtocolViolation(
         _ protocolViolation: StdioFramer.ProtocolViolation,
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        proof suppliedProof: UpstreamTopologyProof? = nil
     ) {
+        let slotID = UpstreamSlotID(rawValue: upstreamIndex)
+        guard let proof = suppliedProof ?? upstreamTopology.snapshot().proof(slotID),
+              proof.slotID == slotID,
+              upstreamTopology.validate(proof) else { return }
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = nowUptimeNanoseconds()
-        let initSnapshot = initializeManager.snapshot()
-        let transition = upstreamHealthManager.markProtocolViolation(
-            upstreamIndex: upstreamIndex,
+        guard let transition = upstreamHealthManager.markProtocolViolation(
+            proof,
             nowUptimeNs: nowUptimeNs
-        )
-        transition?.cancelledInitTimeout?.cancel()
+        ) else { return }
+        let initSnapshot = initializeManager.snapshot()
+        transition.cancelledInitTimeout?.cancel()
         let violatedActivePrimaryInitialize =
             initSnapshot.activePrimaryUpstreamIndex == upstreamIndex && initSnapshot.initInFlight
-        upstreamRouter.reset(upstreamIndex: upstreamIndex)
+        upstreamRouter.reset(proof: proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
@@ -1087,16 +1149,15 @@ extension RuntimeCoordinator {
             )
         )
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-        if let quarantineUntil = transition?.quarantineUntil {
-            logger.warning(
-                "Upstream quarantined after stdout protocol violation",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
-                    "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
-                    "uptime_ns": .string("\(nowUptimeNs)"),
-                ]
-            )
-        }
+        let quarantineUntil = transition.quarantineUntil
+        logger.warning(
+            "Upstream quarantined after stdout protocol violation",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
+                "uptime_ns": .string("\(nowUptimeNs)"),
+            ]
+        )
         let clearInitialize = violatedActivePrimaryInitialize
             && initSnapshot.hasInitResult == false
         let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)

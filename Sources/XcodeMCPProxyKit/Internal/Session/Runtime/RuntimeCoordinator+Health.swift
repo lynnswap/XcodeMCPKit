@@ -4,9 +4,18 @@ import NIOFoundationCompat
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
-    enum WarmInitializeMode: Sendable, Equatable {
+    enum WarmInitializeMode: Sendable {
         case regular
-        case processRouteActivation(processID: pid_t)
+        case processRouteActivation(ProcessControlPlaneAuthority.ActivationReservation)
+
+        var readinessToken: UpstreamReadinessWaiterToken? {
+            switch self {
+            case .regular:
+                return nil
+            case .processRouteActivation(let reservation):
+                return reservation.readinessToken
+            }
+        }
     }
 
     func markRequestSucceeded(upstreamIndex: Int) {
@@ -196,7 +205,8 @@ extension RuntimeCoordinator {
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         runWhenUpstreamReady(
             reason: "warm_initialize_\(upstreamIndex)",
-            applyBackoff: applyBackoff
+            applyBackoff: applyBackoff,
+            token: mode.readinessToken
         ) { [weak self, mode] in
             self?.startUpstreamWarmInitializeWhenReady(
                 upstreamIndex: upstreamIndex,
@@ -210,39 +220,70 @@ extension RuntimeCoordinator {
         mode: WarmInitializeMode
     ) {
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
-        guard upstreamHealthManager.beginWarmInitialize(upstreamIndex: upstreamIndex) else { return }
-
-        let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
-        upstreamHealthManager.setWarmInitializeUpstreamID(upstreamID, for: upstreamIndex)
         let activationStart = beginProcessRouteActivationIfNeeded(
             mode: mode,
             upstreamIndex: upstreamIndex
         )
         if case .processRouteActivation = mode, activationStart == nil {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
-            clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
             return
         }
-        scheduleUpstreamInitTimeout(
+        if let activationStart,
+           processControlPlane.validate(activationStart) == false {
+            applyProcessControlPlaneTransition(
+                processControlPlane.cancelActivation(activationStart)
+            )
+            return
+        }
+        guard let initializeClaim = upstreamHealthManager.claimWarmInitialize(
             upstreamIndex: upstreamIndex,
-            upstreamID: upstreamID,
+            owner: activationStart == nil ? .regular : .processRouteActivation
+        ) else {
+            if let activationStart {
+                applyProcessControlPlaneTransition(
+                    processControlPlane.cancelActivation(activationStart)
+                )
+            }
+            return
+        }
+        let upstreamID = upstreamRouter.assignInitialize(upstreamIndex: upstreamIndex)
+        guard upstreamHealthManager.setWarmInitializeUpstreamID(
+            upstreamID,
+            for: initializeClaim
+        ) else {
+            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            if let activationStart {
+                applyProcessControlPlaneTransition(
+                    processControlPlane.cancelActivation(activationStart)
+                )
+            }
+            return
+        }
+        guard upstreamHealthManager.validate(initializeClaim) else { return }
+        scheduleUpstreamInitTimeout(
             mode: mode,
-            activationAttempt: activationStart?.attempt
+            activationStart: activationStart,
+            initializeClaim: initializeClaim
         )
 
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONRPC.Wire.data(from: request) {
-            sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: true)
+            guard upstreamHealthManager.beginInitializeSend(initializeClaim) else { return }
+            sendUpstream(
+                data,
+                upstreamIndex: upstreamIndex,
+                ensureRunning: true,
+                admission: nil,
+                initializeClaim: initializeClaim
+            )
         } else {
-            clearUpstreamState(upstreamIndex: upstreamIndex)
+            clearUpstreamState(initializeClaim: initializeClaim)
         }
     }
 
     func scheduleUpstreamInitTimeout(
-        upstreamIndex: Int,
-        upstreamID: Int64,
         mode: WarmInitializeMode = .regular,
-        activationAttempt: Int? = nil
+        activationStart: ProcessControlPlaneAuthority.ActivationStart? = nil,
+        initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
         guard
             let timeoutAmount = upstreamInitTimeoutAmount(for: mode)
@@ -253,21 +294,30 @@ extension RuntimeCoordinator {
             guard let self else { return }
             switch mode {
             case .regular:
-                self.handleUpstreamInitTimeout(
-                    upstreamIndex: upstreamIndex,
-                    upstreamID: upstreamID
-                )
-            case .processRouteActivation(let processID):
-                self.handleProcessRouteActivationTimeout(
-                    processID: processID,
-                    upstreamIndex: upstreamIndex,
-                    upstreamID: upstreamID,
-                    attempt: activationAttempt
+                self.handleUpstreamInitTimeout(initializeClaim: initializeClaim)
+            case .processRouteActivation:
+                guard let activationStart else { return }
+                self.handleProcessRouteActivationChannelTimeout(
+                    lease: activationStart.lease,
+                    initializeClaim: initializeClaim
                 )
             }
         }
-        let previous = upstreamHealthManager.replaceInitTimeout(timeout, upstreamIndex: upstreamIndex)
-        previous?.cancel()
+        if case .processRouteActivation = mode {
+            guard activationStart != nil else {
+                timeout.cancel()
+                return
+            }
+        }
+        let attachment = upstreamHealthManager.replaceInitTimeout(
+            timeout,
+            for: initializeClaim
+        )
+        guard attachment.accepted else {
+            timeout.cancel()
+            return
+        }
+        attachment.replaced?.cancel()
     }
 
     func upstreamInitTimeoutAmount(for mode: WarmInitializeMode) -> TimeAmount? {
@@ -282,13 +332,11 @@ extension RuntimeCoordinator {
         }
     }
 
-    func handleUpstreamInitTimeout(upstreamIndex: Int, upstreamID: Int64) {
-        let shouldClear = upstreamHealthManager.clearWarmInitializeIfMatching(
-            upstreamIndex: upstreamIndex,
-            upstreamID: upstreamID
-        )
-        guard shouldClear else { return }
-        upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+    func handleUpstreamInitTimeout(
+        initializeClaim: UpstreamHealthManager.InitializeClaim
+    ) {
+        guard clearUpstreamState(initializeClaim: initializeClaim) else { return }
+        let upstreamIndex = initializeClaim.upstreamIndex
 
         if isCurrentPrimaryInitializeUpstream(upstreamIndex) {
             let shouldRetryEagerInit = initializeManager.consumeWarmInitRecoveryIntent(

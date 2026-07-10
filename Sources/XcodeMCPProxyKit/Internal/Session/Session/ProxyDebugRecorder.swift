@@ -30,18 +30,11 @@ final class ProxyDebugRecorder: Sendable {
     private let stderrLimit: Int
 
     init(
-        upstreamCount: Int,
         trafficLimit: Int = 50,
         stderrLimit: Int = 20
     ) {
         self.trafficLimit = trafficLimit
         self.stderrLimit = stderrLimit
-        state.withLockedValue { state in
-            for upstreamIndex in 0..<upstreamCount {
-                state.upstreams[upstreamIndex] = DebugUpstreamState()
-            }
-            state.recentTraffic = []
-        }
     }
 
     func applyTopology(_ snapshot: UpstreamTopologyAuthority.Snapshot) {

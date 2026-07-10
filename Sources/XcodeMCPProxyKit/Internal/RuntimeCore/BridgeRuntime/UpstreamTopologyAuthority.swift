@@ -103,6 +103,28 @@ final class UpstreamTopologyAuthority: Sendable {
         }
     }
 
+    func replace(
+        _ proof: UpstreamTopologyProof,
+        with slot: any UpstreamSlotControlling
+    ) -> Transition? {
+        state.withLockedValue { state -> Transition? in
+            guard let previous = state.entriesByID[proof.slotID],
+                  previous.generation == proof.slotGeneration else { return nil }
+            state.entriesByID[proof.slotID] = Entry(
+                id: proof.slotID,
+                generation: previous.generation &+ 1,
+                slot: slot
+            )
+            state.topologyEpoch &+= 1
+            return Transition(
+                snapshot: Self.snapshot(state),
+                addedIDs: [],
+                retired: [],
+                replaced: previous
+            )
+        }
+    }
+
     func retire(_ ids: Set<UpstreamSlotID>) -> Transition {
         state.withLockedValue { state in
             let retired = state.order.compactMap { id in
@@ -121,6 +143,22 @@ final class UpstreamTopologyAuthority: Sendable {
         }
     }
 
+    func retire(_ proof: UpstreamTopologyProof) -> Transition? {
+        state.withLockedValue { state -> Transition? in
+            guard let retired = state.entriesByID[proof.slotID],
+                  retired.generation == proof.slotGeneration else { return nil }
+            state.entriesByID.removeValue(forKey: proof.slotID)
+            state.order.removeAll { $0 == proof.slotID }
+            state.topologyEpoch &+= 1
+            return Transition(
+                snapshot: Self.snapshot(state),
+                addedIDs: [],
+                retired: [retired],
+                replaced: nil
+            )
+        }
+    }
+
     func snapshot() -> Snapshot {
         state.withLockedValue { state in Self.snapshot(state) }
     }
@@ -128,6 +166,17 @@ final class UpstreamTopologyAuthority: Sendable {
     func validate(_ proof: UpstreamTopologyProof) -> Bool {
         state.withLockedValue { state in
             state.entriesByID[proof.slotID]?.generation == proof.slotGeneration
+        }
+    }
+
+    func withValidated<Result>(
+        _ proof: UpstreamTopologyProof,
+        _ operation: () -> Result
+    ) -> Result? {
+        state.withLockedValue { state in
+            guard state.entriesByID[proof.slotID]?.generation
+                    == proof.slotGeneration else { return nil }
+            return operation()
         }
     }
 

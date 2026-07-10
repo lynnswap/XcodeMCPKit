@@ -53,7 +53,7 @@ struct ControlPlaneAuthorityTests {
 
         let replacement = try #require(authority.route(forProcessID: target.processID))
         #expect(replacement.id != route.id)
-        #expect(authority.currentCatalogEpoch() != initialEpoch)
+        #expect(authority.currentCatalogEpoch() == initialEpoch)
         guard case .discarded(let reason, _) = authority.completeCatalog(
             .usable(catalog("StaleTool"), source: UpstreamSlotID(rawValue: 0)),
             lease: lease,
@@ -62,7 +62,7 @@ struct ControlPlaneAuthorityTests {
             Issue.record("expected old membership lease to be discarded")
             return
         }
-        #expect(reason == .catalogEpochChanged)
+        #expect(reason == .routeRetired)
         #expect(authority.catalog(forProcessID: target.processID) == nil)
         #expect(authority.canonicalToolsCatalogRaw() == nil)
     }
@@ -101,6 +101,134 @@ struct ControlPlaneAuthorityTests {
             return
         }
         #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["NewTool"])
+    }
+
+    @Test func logicalCatalogLoadsHaveDistinctLeasesAndStaleSiblingReturnsSnapshot() throws {
+        let target = xcodeProcessTarget(processID: 41013, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (foreground, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            nowUptimeNanoseconds: 1
+        ))
+        let (background, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            nowUptimeNanoseconds: 2
+        ))
+        #expect(foreground.attempt == background.attempt)
+        #expect(foreground != background)
+
+        let foregroundRPC = ControlPlane.RPCHandle()
+        let backgroundRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(foregroundRPC), to: foreground)
+        _ = authority.attach(.rpc(backgroundRPC), to: background)
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("Foreground"), source: UpstreamSlotID(rawValue: 0)),
+            lease: foreground,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("first logical load should commit")
+            return
+        }
+        #expect(backgroundRPC.isCancelled() == false)
+        #expect(authority.validateCatalogLoad(background) == false)
+        guard case .discarded(let reason, _) = authority.completeCatalog(
+            .usable(catalog("Background"), source: UpstreamSlotID(rawValue: 0)),
+            lease: background,
+            nowUptimeNanoseconds: 4
+        ) else {
+            Issue.record("sibling completion should be stale")
+            return
+        }
+        #expect(reason == .attemptNotLoading)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["Foreground"])
+    }
+
+    @Test func unrelatedRouteAdditionDoesNotInvalidateInFlightCatalogLoad() throws {
+        let first = xcodeProcessTarget(processID: 41014, xcodeVersion: "27.0")
+        let second = xcodeProcessTarget(processID: 41015, xcodeVersion: "26.4")
+        let authority = makeAuthority([(first, [0])])
+        let route = try #require(authority.route(forProcessID: first.processID))
+        let epoch = authority.currentCatalogEpoch()
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstream: UpstreamSlotID(rawValue: 0),
+            nowUptimeNanoseconds: 1
+        ))
+        let rpc = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(rpc), to: lease)
+
+        _ = authority.reconcileRoutes(
+            [
+                XcodeProcessRoute(target: first, upstreamIndices: [0]),
+                XcodeProcessRoute(target: second, upstreamIndices: [1]),
+            ],
+            reason: "add_unrelated_route",
+            nowUptimeNs: 2,
+            usability: usability([0, 1])
+        )
+
+        #expect(authority.currentCatalogEpoch() == epoch)
+        #expect(authority.validateCatalogLoad(lease))
+        #expect(rpc.isCancelled() == false)
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("StillCurrent"), source: UpstreamSlotID(rawValue: 0)),
+            lease: lease,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("unrelated route addition must preserve the load")
+            return
+        }
+    }
+
+    @Test func supersededReadinessReservationCannotStartNewAttempt() throws {
+        let target = xcodeProcessTarget(processID: 41012, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let oldToken = UpstreamReadinessWaiterToken()
+        let oldReservation = try #require(authority.reserveActivation(
+            routeID: route.id,
+            upstreamIndex: 0,
+            nowUptimeNs: 1,
+            readinessToken: oldToken
+        )).0
+        #expect(authority.reserveActivation(
+            routeID: route.id,
+            upstreamIndex: 0,
+            nowUptimeNs: 2,
+            readinessToken: UpstreamReadinessWaiterToken()
+        ) == nil)
+        let pending = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(pending.phase == .pending)
+        #expect(pending.readinessWaiterCount == 1)
+
+        let reset = authority.resetAttempt(processID: target.processID)
+        for effect in reset.effects {
+            if case .cancelReadinessWaiter(let token) = effect {
+                token.cancel()
+            }
+        }
+        #expect(oldToken.isCancelled)
+
+        let newReservation = try #require(authority.reserveActivation(
+            routeID: route.id,
+            upstreamIndex: 0,
+            nowUptimeNs: 3,
+            readinessToken: UpstreamReadinessWaiterToken()
+        )).0
+        #expect(authority.beginAttaching(oldReservation, nowUptimeNs: 4) == nil)
+        let stillPending = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(stillPending.attemptID.rawValue == 2)
+        #expect(stillPending.phase == .pending)
+        #expect(stillPending.readinessWaiterCount == 1)
+
+        _ = try #require(authority.beginAttaching(newReservation, nowUptimeNs: 5))
+        let attaching = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(attaching.attemptID.rawValue == 2)
+        #expect(attaching.phase == .attaching)
+        #expect(attaching.readinessWaiterCount == 0)
     }
 
     @Test func windowUpdatesDoNotInvalidateCatalogLease() throws {
@@ -181,7 +309,7 @@ struct ControlPlaneAuthorityTests {
         let initial = topology.snapshot()
         let oldProof = try #require(initial.proof(UpstreamSlotID(rawValue: 0)))
         let router = UpstreamRouter(upstreamCount: 2)
-        let health = UpstreamHealthManager(upstreamCount: 2)
+        let health = UpstreamHealthManager()
         router.applyTopology(initial)
         health.applyTopology(initial)
         let requestID = router.assign(
@@ -211,13 +339,33 @@ struct ControlPlaneAuthorityTests {
         }
         #expect(replacementEventCount == 0)
         #expect(router.consume(upstreamIndex: 0, upstreamID: requestID) == nil)
-        #expect(health.activeStatesSnapshot().first { $0.index == 0 }?.state.initInFlight == false)
+        #expect(
+            health.activeStatesSnapshot().first { $0.id == UpstreamSlotID(rawValue: 0) }?
+                .state.initInFlight == false
+        )
 
         let retired = topology.retire([UpstreamSlotID(rawValue: 1)])
         router.applyTopology(retired.snapshot)
         health.applyTopology(retired.snapshot)
-        #expect(health.activeStatesSnapshot().map(\.index) == [0])
+        #expect(health.activeStatesSnapshot().map(\.id) == [UpstreamSlotID(rawValue: 0)])
         #expect(router.assignInitialize(upstreamIndex: 1) == 0)
+
+        let appended = topology.append([TestUpstreamClient()])
+        health.applyTopology(appended.snapshot)
+        #expect(
+            health.activeStatesSnapshot().map(\.id)
+                == [UpstreamSlotID(rawValue: 0), UpstreamSlotID(rawValue: 2)]
+        )
+        #expect(health.state(for: UpstreamSlotID(rawValue: 1)) == nil)
+
+        let staleTimeout = health.markRequestTimedOut(oldProof, nowUptimeNs: 0)
+        #expect(staleTimeout.timeoutCount == 0)
+        guard case .healthy = health.state(
+            for: UpstreamSlotID(rawValue: 0)
+        )?.healthState else {
+            Issue.record("stale topology proof must not mutate the replacement health state")
+            return
+        }
     }
 
     @Test func forwardingAdmissionRejectsRouteAndTopologyChangesIndependently() throws {

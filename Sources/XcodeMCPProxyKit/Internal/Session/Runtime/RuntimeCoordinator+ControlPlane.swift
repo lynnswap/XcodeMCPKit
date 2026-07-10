@@ -93,6 +93,9 @@ extension RuntimeCoordinator {
             nowUptimeNanoseconds: startedAt
         )
         applyProcessControlPlaneTransition(transition)
+        applyProcessControlPlaneTransition(
+            processControlPlane.attach(.rpc(rpcHandle), to: lease)
+        )
         do {
             let result = try await loadCanonicalToolsCatalogFromRoute(
                 .anyHealthy,
@@ -103,14 +106,14 @@ extension RuntimeCoordinator {
                 failureRouteMetadata: nil
             )
             guard let sourceUpstream = result.sourceUpstream else {
-                applyCatalogCommit(processControlPlane.completeCatalog(
+                applyCatalogCommit(commitProcessCatalog(
                     .failed,
                     lease: lease,
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
                 ))
                 throw ControlPlane.Error.invalidResponse("tools/list source upstream missing")
             }
-            let commit = processControlPlane.completeCatalog(
+            let commit = commitProcessCatalog(
                 .usable(result.rawResult, source: UpstreamSlotID(rawValue: sourceUpstream)),
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
@@ -142,11 +145,22 @@ extension RuntimeCoordinator {
                 )
             }
         } catch {
-            applyCatalogCommit(processControlPlane.completeCatalog(
+            let isCurrentLoad = processControlPlane.validateCatalogLoad(lease)
+            applyCatalogCommit(commitProcessCatalog(
                 .failed,
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             ))
+            if isCurrentLoad == false,
+               let rawResult = processControlPlane.canonicalToolsCatalogRaw() {
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: rawResult,
+                    sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                    durationMilliseconds: elapsedMilliseconds(
+                        sinceUptimeNanoseconds: startedAt
+                    )
+                )
+            }
             throw error
         }
     }
@@ -253,11 +267,39 @@ extension RuntimeCoordinator {
                             result: recordedResult
                         )
                     } catch is CancellationError {
+                        if self.processControlPlane.validateCatalogLoad(route.lease) == false {
+                            if let current = self.currentCatalogResult(
+                                startedAt: startedAt,
+                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
+                            ) {
+                                return .success(route: route, result: current)
+                            }
+                            return .stale
+                        }
+                        self.applyCatalogCommit(self.commitProcessCatalog(
+                            .failed,
+                            lease: route.lease,
+                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()
+                        ))
                         throw CancellationError()
                     } catch is TimeoutError {
+                        if self.processControlPlane.validateCatalogLoad(route.lease) == false {
+                            if let current = self.currentCatalogResult(
+                                startedAt: startedAt,
+                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
+                            ) {
+                                return .success(route: route, result: current)
+                            }
+                            return .stale
+                        }
+                        self.applyCatalogCommit(self.commitProcessCatalog(
+                            .failed,
+                            lease: route.lease,
+                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()
+                        ))
                         throw TimeoutError()
                     } catch {
-                        let commit = self.processControlPlane.completeCatalog(
+                        let commit = self.commitProcessCatalog(
                             .failed,
                             lease: route.lease,
                             nowUptimeNanoseconds: self.nowUptimeNanoseconds()
@@ -398,9 +440,11 @@ extension RuntimeCoordinator {
 
     func scheduleMissingProcessToolsCatalogRetry(
         processID: pid_t,
+        lease: CatalogLease,
         reason: String
     ) {
-        guard let scheduled = processControlPlane.scheduleRetry(processID: processID) else { return }
+        guard let scheduled = processControlPlane.scheduleRetry(lease: lease) else { return }
+        applyProcessControlPlaneTransition(scheduled.transition)
         let delay = scheduled.retry.delay
         logger.debug(
             "Scheduling missing process tools/list catalog retry",
@@ -412,13 +456,10 @@ extension RuntimeCoordinator {
         )
         let timeout = scheduleRuntimeTimeout(delay) { [weak self] in
             guard let self else { return }
-            guard self.processControlPlane.handleRetryFired(
-                      processID: processID,
-                      attemptID: scheduled.retry.attempt
-                  ),
+            guard self.processControlPlane.handleRetryFired(scheduled.lease),
                   self.processRoutingEnabled,
                   self.xcodeProcessRoutes.contains(where: {
-                      $0.target.processID == processID
+                      $0.id == scheduled.lease.routeIdentity
                   }),
                   self.processControlPlane.catalog(forProcessID: processID) == nil
             else {
@@ -459,7 +500,7 @@ extension RuntimeCoordinator {
     ) -> CanonicalToolsCatalogLoadResult? {
         guard let sourceUpstream = result.sourceUpstream else {
             applyCatalogCommit(
-                processControlPlane.completeCatalog(
+                commitProcessCatalog(
                     .failed,
                     lease: route.lease,
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
@@ -482,7 +523,7 @@ extension RuntimeCoordinator {
                 ]
             )
             applyCatalogCommit(
-                processControlPlane.completeCatalog(
+                commitProcessCatalog(
                     .unusable,
                     lease: route.lease,
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
@@ -490,6 +531,7 @@ extension RuntimeCoordinator {
             )
             scheduleMissingProcessToolsCatalogRetry(
                 processID: route.target.processID,
+                lease: route.lease,
                 reason: "empty_process_catalog"
             )
             return currentCatalogResult(
@@ -498,7 +540,7 @@ extension RuntimeCoordinator {
             )
         }
 
-        let commit = processControlPlane.completeCatalog(
+        let commit = commitProcessCatalog(
             .usable(result.rawResult, source: UpstreamSlotID(rawValue: sourceUpstream)),
             lease: route.lease,
             nowUptimeNanoseconds: nowUptimeNanoseconds()

@@ -90,13 +90,23 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         nowUptimeNs: UInt64
     ) -> ProcessControlPlaneAuthority.ActivationStart? {
+        let readinessToken = UpstreamReadinessWaiterToken()
         guard let route = processControlPlane.route(forProcessID: processID),
-              let started = processControlPlane.beginAttaching(
+              let reserved = processControlPlane.reserveActivation(
                   routeID: route.id,
                   upstreamIndex: upstreamIndex,
-                  nowUptimeNs: nowUptimeNs
+                  nowUptimeNs: nowUptimeNs,
+                  readinessToken: readinessToken
               ) else {
             Issue.record("failed to begin process route attempt for \(processID)")
+            return nil
+        }
+        applyProcessControlPlaneTransition(reserved.1)
+        guard let started = processControlPlane.beginAttaching(
+            reserved.0,
+            nowUptimeNs: nowUptimeNs
+        ) else {
+            Issue.record("failed to attach process route attempt for \(processID)")
             return nil
         }
         applyProcessControlPlaneTransition(started.1)

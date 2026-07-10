@@ -4,9 +4,33 @@ import NIO
 import NIOConcurrencyHelpers
 
 final class UpstreamHealthManager: Sendable {
+    enum InitializeClaimOwner: Sendable, Hashable {
+        case regular
+        case processRouteActivation
+    }
+
+    enum InitializeClaimPhase: Sendable, Equatable {
+        case reserved
+        case sending
+        case responseReceived
+        case initializedAwaitingCatalog
+    }
+
+    struct InitializeClaim: Sendable, Hashable {
+        fileprivate let upstreamID: UpstreamSlotID
+        fileprivate let generation: UInt64
+        let owner: InitializeClaimOwner
+        let topologyProof: UpstreamTopologyProof?
+
+        var upstreamIndex: Int { upstreamID.rawValue }
+    }
+
     struct ProbeRequest: Sendable {
-        let upstreamIndex: Int
+        let topologyProof: UpstreamTopologyProof
         let probeGeneration: UInt64
+
+        var upstreamID: UpstreamSlotID { topologyProof.slotID }
+        var upstreamIndex: Int { upstreamID.rawValue }
     }
 
     enum Effect: Sendable {
@@ -27,12 +51,21 @@ final class UpstreamHealthManager: Sendable {
     }
 
     struct SelectionResult: Sendable {
-        let upstreamIndex: Int?
+        let upstreamID: UpstreamSlotID?
         let effects: [UpstreamHealthManager.Effect]
 
-        init(upstreamIndex: Int?, effects: [UpstreamHealthManager.Effect]) {
-            self.upstreamIndex = upstreamIndex
+        var upstreamIndex: Int? { upstreamID?.rawValue }
+
+        init(upstreamID: UpstreamSlotID?, effects: [UpstreamHealthManager.Effect]) {
+            self.upstreamID = upstreamID
             self.effects = effects
+        }
+
+        init(upstreamIndex: Int?, effects: [UpstreamHealthManager.Effect]) {
+            self.init(
+                upstreamID: upstreamIndex.map(UpstreamSlotID.init(rawValue:)),
+                effects: effects
+            )
         }
     }
 
@@ -49,6 +82,22 @@ final class UpstreamHealthManager: Sendable {
 
     struct MarkInitializedTransition: Sendable {
         let timeout: RuntimeScheduledTimeout?
+    }
+
+    struct TimeoutAttachment: Sendable {
+        let accepted: Bool
+        let replaced: RuntimeScheduledTimeout?
+    }
+
+    enum CatalogActivationDisposition: Sendable, Equatable {
+        case keepWaiting
+        case complete
+    }
+
+    enum CatalogActivationCommit: Sendable {
+        case notOwned
+        case kept
+        case completed(RuntimeScheduledTimeout?)
     }
 
     enum InitPhase: Sendable, Equatable {
@@ -73,20 +122,25 @@ final class UpstreamHealthManager: Sendable {
     }
 
     enum Event: Sendable {
-        case requestSucceeded(upstreamIndex: Int)
-        case upstreamOverloaded(upstreamIndex: Int)
+        case requestSucceeded(UpstreamTopologyProof)
+        case upstreamOverloaded(UpstreamTopologyProof)
         case healthProbeFinished(
-            upstreamIndex: Int,
-            probeGeneration: UInt64,
+            request: ProbeRequest,
             success: Bool,
             nowUptimeNs: UInt64
         )
-        case toolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64)
+        case toolsListRefreshSucceeded(
+            UpstreamTopologyProof,
+            nowUptimeNs: UInt64
+        )
     }
 
     struct UpstreamState: Sendable {
         var initPhase: InitPhase = .idle
+        var initializeClaim: InitializeClaim?
+        var initializeClaimPhase: InitializeClaimPhase?
         var initTimeout: RuntimeScheduledTimeout?
+        var didReceiveInitializeResponse = false
         var didSendInitialized = false
         var healthState: Upstream.HealthState = .healthy
         var consecutiveRequestTimeouts = 0
@@ -129,42 +183,45 @@ final class UpstreamHealthManager: Sendable {
     }
 
     private struct State: Sendable {
-        var upstreamStates: [UpstreamState] = []
+        var upstreamStates: [UpstreamSlotID: UpstreamState] = [:]
         var topology: UpstreamTopologyAuthority.Snapshot?
         var nextPick: Int = 0
+        var nextInitializeClaimGeneration: UInt64 = 0
     }
 
     private let state: NIOLockedValueBox<State>
 
-    init(upstreamCount: Int) {
-        self.state = NIOLockedValueBox(State(
-            upstreamStates: Array(repeating: UpstreamState(), count: upstreamCount),
-            nextPick: 0
-        ))
+    init() {
+        self.state = NIOLockedValueBox(State())
     }
 
     func applyTopology(_ snapshot: UpstreamTopologyAuthority.Snapshot) {
-        let requiredCount = (snapshot.slotIDs.map(\.rawValue).max() ?? -1) + 1
         let cancelledTimeouts = state.withLockedValue { state -> [RuntimeScheduledTimeout] in
-            if requiredCount > state.upstreamStates.count {
-                let count = requiredCount - state.upstreamStates.count
-                state.upstreamStates.append(
-                    contentsOf: Array(repeating: UpstreamState(), count: count)
-                )
-            }
             var cancelledTimeouts: [RuntimeScheduledTimeout] = []
-            let previousIDs = Set(Self.activeIndices(in: state))
-            let nextIDs = Set(snapshot.slotIDs.map(\.rawValue))
-            let resetIndices = previousIDs.union(nextIDs).filter { index in
-                state.topology?.proof(UpstreamSlotID(rawValue: index))
-                    != snapshot.proof(UpstreamSlotID(rawValue: index))
+            let previousStates = state.upstreamStates
+            var nextStates: [UpstreamSlotID: UpstreamState] = [:]
+            nextStates.reserveCapacity(snapshot.entries.count)
+
+            for entry in snapshot.entries {
+                let id = entry.id
+                let keepsState = state.topology?.proof(id)?.slotGeneration == entry.generation
+                if keepsState, let existing = previousStates[id] {
+                    nextStates[id] = existing
+                } else {
+                    if let timeout = previousStates[id]?.initTimeout {
+                        cancelledTimeouts.append(timeout)
+                    }
+                    nextStates[id] = UpstreamState()
+                }
             }
-            for index in resetIndices where index >= 0 && index < state.upstreamStates.count {
-                if let timeout = state.upstreamStates[index].initTimeout {
+            let nextIDs = Set(snapshot.slotIDs)
+            for (id, previous) in previousStates where nextIDs.contains(id) == false {
+                if let timeout = previous.initTimeout {
                     cancelledTimeouts.append(timeout)
                 }
-                state.upstreamStates[index] = UpstreamState()
             }
+
+            state.upstreamStates = nextStates
             state.topology = snapshot
             state.nextPick = snapshot.slotIDs.isEmpty
                 ? 0
@@ -174,18 +231,19 @@ final class UpstreamHealthManager: Sendable {
         cancelledTimeouts.forEach { $0.cancel() }
     }
 
-    func statesSnapshot() -> [UpstreamState] {
-        state.withLockedValue { $0.upstreamStates }
-    }
-
-    func activeStatesSnapshot() -> [(index: Int, state: UpstreamState)] {
+    func state(for upstreamID: UpstreamSlotID) -> UpstreamState? {
         state.withLockedValue { state in
-            Self.activeIndices(in: state).map { ($0, state.upstreamStates[$0]) }
+            guard Self.isActive(upstreamID, state: state) else { return nil }
+            return state.upstreamStates[upstreamID]
         }
     }
 
-    func count() -> Int {
-        state.withLockedValue { Self.activeIndices(in: $0).count }
+    func activeStatesSnapshot() -> [(id: UpstreamSlotID, state: UpstreamState)] {
+        state.withLockedValue { state in
+            Self.activeIDs(in: state).compactMap { id in
+                state.upstreamStates[id].map { (id, $0) }
+            }
+        }
     }
 
     func clearInitTimeoutsForShutdown() -> [RuntimeScheduledTimeout?] {
@@ -313,18 +371,37 @@ final class UpstreamHealthManager: Sendable {
     }
 
     func markRequestSucceeded(upstreamIndex: Int) {
-        _ = apply(event: .requestSucceeded(upstreamIndex: upstreamIndex))
+        guard let proof = topologyProof(for: upstreamIndex) else { return }
+        markRequestSucceeded(proof)
+    }
+
+    func markRequestSucceeded(_ proof: UpstreamTopologyProof) {
+        _ = apply(event: .requestSucceeded(proof))
     }
 
     func markUpstreamOverloaded(upstreamIndex: Int) -> Bool {
-        apply(event: .upstreamOverloaded(upstreamIndex: upstreamIndex)).isEmpty == false
+        guard let proof = topologyProof(for: upstreamIndex) else { return false }
+        return markUpstreamOverloaded(proof)
+    }
+
+    func markUpstreamOverloaded(_ proof: UpstreamTopologyProof) -> Bool {
+        apply(event: .upstreamOverloaded(proof)).isEmpty == false
     }
 
     func markRequestTimedOut(upstreamIndex: Int, nowUptimeNs: UInt64) -> (shouldClearPins: Bool, timeoutCount: Int) {
+        guard let proof = topologyProof(for: upstreamIndex) else { return (false, 0) }
+        return markRequestTimedOut(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func markRequestTimedOut(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64
+    ) -> (shouldClearPins: Bool, timeoutCount: Int) {
         state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else {
+            guard Self.isActive(proof, state: state) else {
                 return (false, 0)
             }
+            let upstreamIndex = proof.slotID.rawValue
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts += 1
             let timeoutCount = state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts
             if timeoutCount >= 3 {
@@ -344,8 +421,17 @@ final class UpstreamHealthManager: Sendable {
         upstreamIndex: Int,
         nowUptimeNs: UInt64
     ) -> UpstreamHealthManager.ProtocolViolationTransition? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return markProtocolViolation(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func markProtocolViolation(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64
+    ) -> UpstreamHealthManager.ProtocolViolationTransition? {
         state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return nil }
+            guard Self.isActive(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
             let quarantineUntil = nowUptimeNs &+ 15_000_000_000
             let cancelledInitTimeout = state.upstreamStates[upstreamIndex].initTimeout
             state.upstreamStates[upstreamIndex].isInitialized = false
@@ -369,8 +455,17 @@ final class UpstreamHealthManager: Sendable {
         upstreamIndex: Int,
         nowUptimeNs: UInt64
     ) -> UpstreamHealthManager.IncompatibilityTransition? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return quarantineIncompatibleUpstream(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func quarantineIncompatibleUpstream(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64
+    ) -> UpstreamHealthManager.IncompatibilityTransition? {
         state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return nil }
+            guard Self.isActive(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
             let quarantineUntil = nowUptimeNs &+ 30_000_000_000
             let cancelledInitTimeout = state.upstreamStates[upstreamIndex].initTimeout
             let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
@@ -399,24 +494,53 @@ final class UpstreamHealthManager: Sendable {
         success: Bool,
         nowUptimeNs: UInt64
     ) {
+        guard let proof = topologyProof(for: upstreamIndex) else { return }
+        finishHealthProbe(
+            ProbeRequest(topologyProof: proof, probeGeneration: probeGeneration),
+            success: success,
+            nowUptimeNs: nowUptimeNs
+        )
+    }
+
+    func finishHealthProbe(
+        _ request: ProbeRequest,
+        success: Bool,
+        nowUptimeNs: UInt64
+    ) {
         _ = apply(event: .healthProbeFinished(
-            upstreamIndex: upstreamIndex,
-            probeGeneration: probeGeneration,
+            request: request,
             success: success,
             nowUptimeNs: nowUptimeNs
         ))
     }
 
     func markToolsListRefreshSucceeded(upstreamIndex: Int, nowUptimeNs: UInt64) {
+        guard let proof = topologyProof(for: upstreamIndex) else { return }
+        markToolsListRefreshSucceeded(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func markToolsListRefreshSucceeded(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64
+    ) {
         _ = apply(event: .toolsListRefreshSucceeded(
-            upstreamIndex: upstreamIndex,
+            proof,
             nowUptimeNs: nowUptimeNs
         ))
     }
 
     func markToolsListRefreshFailed(upstreamIndex: Int, nowUptimeNs: UInt64) -> (failures: Int, quarantineUntil: UInt64)? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return markToolsListRefreshFailed(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func markToolsListRefreshFailed(
+        _ proof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64
+    ) -> (failures: Int, quarantineUntil: UInt64)? {
         state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return nil }
+            guard Self.isActive(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
             let quarantineUntil = nowUptimeNs &+ 30 * 1_000_000_000
             state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
@@ -477,12 +601,87 @@ final class UpstreamHealthManager: Sendable {
     }
 
     func beginWarmInitialize(upstreamIndex: Int) -> Bool {
+        claimWarmInitialize(upstreamIndex: upstreamIndex) != nil
+    }
+
+    func claimWarmInitialize(
+        upstreamIndex: Int,
+        owner: InitializeClaimOwner = .regular
+    ) -> InitializeClaim? {
         state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return false }
+            guard Self.isActive(upstreamIndex, state: state) else { return nil }
             if state.upstreamStates[upstreamIndex].isInitialized || state.upstreamStates[upstreamIndex].initInFlight {
-                return false
+                return nil
             }
+            state.nextInitializeClaimGeneration &+= 1
+            let claim = InitializeClaim(
+                upstreamID: UpstreamSlotID(rawValue: upstreamIndex),
+                generation: state.nextInitializeClaimGeneration,
+                owner: owner,
+                topologyProof: state.topology?.proof(
+                    UpstreamSlotID(rawValue: upstreamIndex)
+                )
+            )
             state.upstreamStates[upstreamIndex].initInFlight = true
+            state.upstreamStates[upstreamIndex].initializeClaim = claim
+            state.upstreamStates[upstreamIndex].initializeClaimPhase = .reserved
+            return claim
+        }
+    }
+
+    func validate(_ claim: InitializeClaim) -> Bool {
+        state.withLockedValue { state in
+            Self.matches(claim, state: state)
+        }
+    }
+
+    func beginInitializeSend(_ claim: InitializeClaim) -> Bool {
+        state.withLockedValue { state in
+            guard Self.matches(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .reserved else { return false }
+            state.upstreamStates[claim.upstreamIndex].initializeClaimPhase = .sending
+            return true
+        }
+    }
+
+    func currentInitializeClaim(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64
+    ) -> InitializeClaim? {
+        state.withLockedValue { state in
+            guard Self.isActive(upstreamIndex, state: state),
+                  state.upstreamStates[upstreamIndex].initUpstreamID == expectedUpstreamID,
+                  let claim = state.upstreamStates[upstreamIndex].initializeClaim,
+                  Self.matches(claim, state: state) else { return nil }
+            return claim
+        }
+    }
+
+    func transferInitializeResponse(
+        _ claim: InitializeClaim,
+        expectedUpstreamID: Int64
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard Self.matches(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].initUpstreamID
+                    == expectedUpstreamID,
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .sending else { return false }
+            state.upstreamStates[claim.upstreamIndex].didReceiveInitializeResponse = true
+            state.upstreamStates[claim.upstreamIndex].initializeClaimPhase = .responseReceived
+            return true
+        }
+    }
+
+    @discardableResult
+    func setWarmInitializeUpstreamID(
+        _ upstreamID: Int64,
+        for claim: InitializeClaim
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard Self.matches(claim, state: state) else { return false }
+            state.upstreamStates[claim.upstreamIndex].initUpstreamID = upstreamID
             return true
         }
     }
@@ -491,6 +690,20 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             guard Self.isActive(upstreamIndex, state: state) else { return }
             state.upstreamStates[upstreamIndex].initUpstreamID = upstreamID
+        }
+    }
+
+    func clearInitializeClaim(
+        _ claim: InitializeClaim
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
+    )? {
+        state.withLockedValue { state in
+            guard Self.owns(claim, state: state) else { return nil }
+            return Self.clearUpstreamState(at: claim.upstreamIndex, state: &state)
         }
     }
 
@@ -506,6 +719,20 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
+    func replaceInitTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        for claim: InitializeClaim
+    ) -> TimeoutAttachment {
+        state.withLockedValue { state in
+            guard Self.matches(claim, state: state) else {
+                return TimeoutAttachment(accepted: false, replaced: nil)
+            }
+            let replaced = state.upstreamStates[claim.upstreamIndex].initTimeout
+            state.upstreamStates[claim.upstreamIndex].initTimeout = timeout
+            return TimeoutAttachment(accepted: true, replaced: replaced)
+        }
+    }
+
     func clearWarmInitializeIfMatching(upstreamIndex: Int, upstreamID: Int64) -> Bool {
         state.withLockedValue { state in
             guard Self.isActive(upstreamIndex, state: state) else { return false }
@@ -514,6 +741,8 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].isInitialized = false
             state.upstreamStates[upstreamIndex].initUpstreamID = nil
+            state.upstreamStates[upstreamIndex].initializeClaim = nil
+            state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
             return true
         }
     }
@@ -533,12 +762,16 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].initUpstreamID = nil
             state.upstreamStates[upstreamIndex].initTimeout = nil
+            state.upstreamStates[upstreamIndex].initializeClaim = nil
+            state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
         }
     }
 
     func clearUpstreamState(upstreamIndex: Int) -> (
         timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
     )? {
         clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: nil)
     }
@@ -548,7 +781,9 @@ final class UpstreamHealthManager: Sendable {
         expectedUpstreamID: Int64?
     ) -> (
         timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
     )? {
         state.withLockedValue { state in
             guard Self.isActive(upstreamIndex, state: state) else { return nil }
@@ -557,21 +792,28 @@ final class UpstreamHealthManager: Sendable {
             {
                 return nil
             }
-            let timeout = state.upstreamStates[upstreamIndex].initTimeout
-            let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
-            state.upstreamStates[upstreamIndex].initTimeout = nil
-            state.upstreamStates[upstreamIndex].isInitialized = false
-            state.upstreamStates[upstreamIndex].initInFlight = false
-            state.upstreamStates[upstreamIndex].didSendInitialized = false
-            state.upstreamStates[upstreamIndex].initUpstreamID = nil
-            state.upstreamStates[upstreamIndex].healthState = .healthy
-            state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
-            state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
-            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
-            state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nil
-            state.upstreamStates[upstreamIndex].requestPickCount = 0
-            return (timeout, initUpstreamID)
+            return Self.clearUpstreamState(at: upstreamIndex, state: &state)
+        }
+    }
+
+    func clearUpstreamState(
+        _ proof: UpstreamTopologyProof,
+        expectedUpstreamID: Int64? = nil
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
+    )? {
+        state.withLockedValue { state in
+            guard Self.isActive(proof, state: state) else { return nil }
+            let upstreamIndex = proof.slotID.rawValue
+            if let expectedUpstreamID,
+               state.upstreamStates[upstreamIndex].initUpstreamID != expectedUpstreamID
+            {
+                return nil
+            }
+            return Self.clearUpstreamState(at: upstreamIndex, state: &state)
         }
     }
 
@@ -585,6 +827,10 @@ final class UpstreamHealthManager: Sendable {
     ) -> UpstreamHealthManager.MarkInitializedTransition? {
         state.withLockedValue { state in
             guard Self.isActive(upstreamIndex, state: state) else { return nil }
+            if state.upstreamStates[upstreamIndex].initializeClaim?.owner
+                == .processRouteActivation {
+                return nil
+            }
             if let expectedUpstreamID,
                state.upstreamStates[upstreamIndex].initUpstreamID != expectedUpstreamID
             {
@@ -593,12 +839,116 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].isInitialized = true
             state.upstreamStates[upstreamIndex].initInFlight = false
             state.upstreamStates[upstreamIndex].initUpstreamID = nil
+            state.upstreamStates[upstreamIndex].initializeClaim = nil
+            state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
             state.upstreamStates[upstreamIndex].healthState = .healthy
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             let timeout = state.upstreamStates[upstreamIndex].initTimeout
             state.upstreamStates[upstreamIndex].initTimeout = nil
             return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
+        }
+    }
+
+    func markInitialized(
+        _ claim: InitializeClaim,
+        expectedUpstreamID: Int64,
+        commit: () -> Bool
+    ) -> UpstreamHealthManager.MarkInitializedTransition? {
+        state.withLockedValue { state in
+            guard Self.matches(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].initUpstreamID
+                    == expectedUpstreamID,
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .responseReceived,
+                  commit() else { return nil }
+            let timeout = state.upstreamStates[claim.upstreamIndex].initTimeout
+            state.upstreamStates[claim.upstreamIndex].isInitialized = true
+            state.upstreamStates[claim.upstreamIndex].initInFlight = false
+            state.upstreamStates[claim.upstreamIndex].initUpstreamID = nil
+            if claim.owner == .processRouteActivation {
+                state.upstreamStates[claim.upstreamIndex].initializeClaimPhase =
+                    .initializedAwaitingCatalog
+            } else {
+                state.upstreamStates[claim.upstreamIndex].initializeClaim = nil
+                state.upstreamStates[claim.upstreamIndex].initializeClaimPhase = nil
+            }
+            state.upstreamStates[claim.upstreamIndex].initTimeout = nil
+            state.upstreamStates[claim.upstreamIndex].healthState = .healthy
+            state.upstreamStates[claim.upstreamIndex].consecutiveRequestTimeouts = 0
+            state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = false
+            return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
+        }
+    }
+
+    func replaceCatalogTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        for claim: InitializeClaim
+    ) -> TimeoutAttachment {
+        state.withLockedValue { state in
+            guard Self.owns(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].isInitialized,
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .initializedAwaitingCatalog else {
+                return TimeoutAttachment(accepted: false, replaced: nil)
+            }
+            let replaced = state.upstreamStates[claim.upstreamIndex].initTimeout
+            state.upstreamStates[claim.upstreamIndex].initTimeout = timeout
+            return TimeoutAttachment(accepted: true, replaced: replaced)
+        }
+    }
+
+    func commitCatalogActivation(
+        upstreamIndex: Int,
+        commit: (InitializeClaim) -> CatalogActivationDisposition
+    ) -> CatalogActivationCommit {
+        state.withLockedValue { state in
+            guard Self.isActive(upstreamIndex, state: state),
+                  state.upstreamStates[upstreamIndex].isInitialized,
+                  let claim = state.upstreamStates[upstreamIndex].initializeClaim,
+                  claim.owner == .processRouteActivation,
+                  state.upstreamStates[upstreamIndex].initializeClaimPhase
+                    == .initializedAwaitingCatalog else { return .notOwned }
+            guard commit(claim) == .complete else { return .kept }
+            let timeout = state.upstreamStates[upstreamIndex].initTimeout
+            state.upstreamStates[upstreamIndex].initTimeout = nil
+            state.upstreamStates[upstreamIndex].initializeClaim = nil
+            state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
+            return .completed(timeout)
+        }
+    }
+
+    func timeoutCatalogActivation(
+        _ claim: InitializeClaim,
+        commit: (InitializeClaim) -> Bool
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
+    )? {
+        state.withLockedValue { state in
+            guard Self.owns(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].isInitialized,
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .initializedAwaitingCatalog,
+                  commit(claim) else { return nil }
+            return Self.clearUpstreamState(at: claim.upstreamIndex, state: &state)
+        }
+    }
+
+    func markInitializedNotificationSent(
+        _ claim: InitializeClaim,
+        expectedUpstreamID: Int64
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard Self.matches(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].initUpstreamID
+                    == expectedUpstreamID,
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .responseReceived else { return false }
+            state.upstreamStates[claim.upstreamIndex].didSendInitialized = true
+            return true
         }
     }
 
@@ -616,8 +966,9 @@ final class UpstreamHealthManager: Sendable {
     func apply(event: Event) -> [UpstreamHealthManager.Effect] {
         state.withLockedValue { state in
             switch event {
-            case .requestSucceeded(let upstreamIndex):
-                guard Self.isActive(upstreamIndex, state: state) else { return [] }
+            case .requestSucceeded(let proof):
+                guard Self.isActive(proof, state: state) else { return [] }
+                let upstreamIndex = proof.slotID.rawValue
                 state.upstreamStates[upstreamIndex].healthState = .healthy
                 state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
                 if state.upstreamStates[upstreamIndex].healthProbeInFlight {
@@ -626,8 +977,9 @@ final class UpstreamHealthManager: Sendable {
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = false
                 return [.failQueuedIfNoRecovery]
 
-            case .upstreamOverloaded(let upstreamIndex):
-                guard Self.isActive(upstreamIndex, state: state) else { return [] }
+            case .upstreamOverloaded(let proof):
+                guard Self.isActive(proof, state: state) else { return [] }
+                let upstreamIndex = proof.slotID.rawValue
                 if case .healthy = state.upstreamStates[upstreamIndex].healthState {
                     state.upstreamStates[upstreamIndex].healthState = .degraded
                 }
@@ -638,13 +990,14 @@ final class UpstreamHealthManager: Sendable {
                 return [.failQueuedIfNoRecovery]
 
             case .healthProbeFinished(
-                let upstreamIndex,
-                let probeGeneration,
+                let request,
                 let success,
                 let nowUptimeNs
             ):
-                guard Self.isActive(upstreamIndex, state: state) else { return [] }
-                guard state.upstreamStates[upstreamIndex].healthProbeGeneration == probeGeneration else {
+                guard Self.isActive(request.topologyProof, state: state) else { return [] }
+                let upstreamIndex = request.upstreamIndex
+                guard state.upstreamStates[upstreamIndex].healthProbeGeneration
+                        == request.probeGeneration else {
                     return []
                 }
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = false
@@ -658,8 +1011,9 @@ final class UpstreamHealthManager: Sendable {
                 }
                 return success ? [] : [.failQueuedIfNoRecovery]
 
-            case .toolsListRefreshSucceeded(let upstreamIndex, let nowUptimeNs):
-                guard Self.isActive(upstreamIndex, state: state) else { return [] }
+            case .toolsListRefreshSucceeded(let proof, let nowUptimeNs):
+                guard Self.isActive(proof, state: state) else { return [] }
+                let upstreamIndex = proof.slotID.rawValue
                 state.upstreamStates[upstreamIndex].healthState = .healthy
                 state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = false
@@ -690,11 +1044,16 @@ final class UpstreamHealthManager: Sendable {
                 return .quarantined(untilUptimeNs: untilUptimeNs)
             }
             if state.upstreamStates[upstreamIndex].healthProbeInFlight == false {
+                guard let topologyProof = state.topology?.proof(
+                    UpstreamSlotID(rawValue: upstreamIndex)
+                ) else {
+                    return .quarantined(untilUptimeNs: untilUptimeNs)
+                }
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = true
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
                 effects.append(
                     .startHealthProbe(UpstreamHealthManager.ProbeRequest(
-                        upstreamIndex: upstreamIndex,
+                        topologyProof: topologyProof,
                         probeGeneration: state.upstreamStates[upstreamIndex].healthProbeGeneration
                     ))
                 )
@@ -703,14 +1062,91 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
-    private static func isActive(_ upstreamIndex: Int, state: State) -> Bool {
-        if let topology = state.topology {
-            return topology.proof(UpstreamSlotID(rawValue: upstreamIndex)) != nil
+    private func topologyProof(for upstreamIndex: Int) -> UpstreamTopologyProof? {
+        state.withLockedValue { state in
+            let upstreamID = UpstreamSlotID(rawValue: upstreamIndex)
+            guard state.upstreamStates[upstreamID] != nil else { return nil }
+            return state.topology?.proof(upstreamID)
         }
-        return upstreamIndex >= 0 && upstreamIndex < state.upstreamStates.count
+    }
+
+    private static func isActive(_ upstreamIndex: Int, state: State) -> Bool {
+        isActive(UpstreamSlotID(rawValue: upstreamIndex), state: state)
+    }
+
+    private static func isActive(_ upstreamID: UpstreamSlotID, state: State) -> Bool {
+        state.topology?.proof(upstreamID) != nil
+            && state.upstreamStates[upstreamID] != nil
+    }
+
+    private static func isActive(_ proof: UpstreamTopologyProof, state: State) -> Bool {
+        state.topology?.proof(proof.slotID) == proof
+            && state.upstreamStates[proof.slotID] != nil
+    }
+
+    private static func matches(_ claim: InitializeClaim, state: State) -> Bool {
+        let upstreamIndex = claim.upstreamIndex
+        guard isActive(upstreamIndex, state: state),
+              state.upstreamStates[upstreamIndex].initInFlight,
+              state.upstreamStates[upstreamIndex].initializeClaim == claim
+        else {
+            return false
+        }
+        guard let proof = claim.topologyProof else { return false }
+        return isActive(proof, state: state)
+    }
+
+    private static func owns(_ claim: InitializeClaim, state: State) -> Bool {
+        let upstreamIndex = claim.upstreamIndex
+        return isActive(upstreamIndex, state: state)
+            && state.upstreamStates[upstreamIndex].initializeClaim == claim
+    }
+
+    private static func clearUpstreamState(
+        at upstreamIndex: Int,
+        state: inout State
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
+    ) {
+        let timeout = state.upstreamStates[upstreamIndex].initTimeout
+        let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
+        let didReceiveInitializeResponse =
+            state.upstreamStates[upstreamIndex].didReceiveInitializeResponse
+        let didSendInitialized = state.upstreamStates[upstreamIndex].didSendInitialized
+        let nextProbeGeneration = state.upstreamStates[upstreamIndex].healthProbeGeneration &+ 1
+        state.upstreamStates[upstreamIndex] = UpstreamState()
+        state.upstreamStates[upstreamIndex].healthProbeGeneration = nextProbeGeneration
+        return (
+            timeout,
+            initUpstreamID,
+            didReceiveInitializeResponse,
+            didSendInitialized
+        )
+    }
+
+    private static func activeIDs(in state: State) -> [UpstreamSlotID] {
+        state.topology?.slotIDs.filter { state.upstreamStates[$0] != nil } ?? []
     }
 
     private static func activeIndices(in state: State) -> [Int] {
-        state.topology?.slotIDs.map(\.rawValue) ?? Array(state.upstreamStates.indices)
+        activeIDs(in: state).map(\.rawValue)
+    }
+}
+
+private extension Dictionary
+where Key == UpstreamSlotID, Value == UpstreamHealthManager.UpstreamState {
+    subscript(_ upstreamIndex: Int) -> Value {
+        get {
+            guard let value = self[UpstreamSlotID(rawValue: upstreamIndex)] else {
+                preconditionFailure("inactive upstream slot ID: \(upstreamIndex)")
+            }
+            return value
+        }
+        set {
+            self[UpstreamSlotID(rawValue: upstreamIndex)] = newValue
+        }
     }
 }

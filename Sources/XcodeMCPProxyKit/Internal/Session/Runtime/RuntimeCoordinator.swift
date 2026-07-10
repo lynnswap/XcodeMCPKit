@@ -570,14 +570,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.initializeManager = InitializeManager(brokerState: handshakeState)
         self.sessionRegistry = SessionRegistry(configuration: config)
         let initialTopology = upstreamTopology.snapshot()
-        let debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
+        let debugRecorder = ProxyDebugRecorder()
         debugRecorder.applyTopology(initialTopology)
         self.debugRecorder = debugRecorder
         self.leaseManager = LeaseManager()
         let upstreamRouter = UpstreamRouter(upstreamCount: upstreams.count)
         upstreamRouter.applyTopology(initialTopology)
         self.upstreamRouter = upstreamRouter
-        let upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
+        let upstreamHealthManager = UpstreamHealthManager()
         upstreamHealthManager.applyTopology(initialTopology)
         self.upstreamHealthManager = upstreamHealthManager
         self.nowUptimeNanoseconds = uptimeProvider
@@ -679,7 +679,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 guard let upstreamHealthManager else { return [:] }
                 let states = upstreamHealthManager.activeStatesSnapshot()
                 return Dictionary(
-                    uniqueKeysWithValues: states.map { index, state in
+                    uniqueKeysWithValues: states.map { id, state in
                         let summary: String
                         if state.initInFlight {
                             summary = "initializing"
@@ -688,7 +688,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         } else {
                             summary = "idle"
                         }
-                        return ("\(index)", summary)
+                        return ("\(id.rawValue)", summary)
                     })
             },
             logger: ProxyLogging.make("control-plane"),
@@ -747,18 +747,27 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 guard self.upstreamTopology.validate(proof) else { return }
                 switch event {
                 case .message(let data):
-                    self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+                    self.routeUpstreamMessage(
+                        data,
+                        upstreamIndex: upstreamIndex,
+                        proof: proof
+                    )
                 case .stderr(let message):
                     self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
                 case .stdoutProtocolViolation(let protocolViolation):
                     self.handleUpstreamProtocolViolation(
                         protocolViolation,
-                        upstreamIndex: upstreamIndex
+                        upstreamIndex: upstreamIndex,
+                        proof: proof
                     )
                 case .stdoutBufferSize(let size):
                     self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
                 case .exit(let status):
-                    self.handleUpstreamExit(status, upstreamIndex: upstreamIndex)
+                    self.handleUpstreamExit(
+                        status,
+                        upstreamIndex: upstreamIndex,
+                        proof: proof
+                    )
                     if self.processRoutingEnabled {
                         self.triggerXcodeProcessReconcile(reason: "upstream_exit_\(status)")
                     }
@@ -794,7 +803,17 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         pendingInitializes.timeout?.cancel()
         if let upstreamIndex = pendingInitializes.cancelledPrimaryUpstreamIndex {
             if let upstreamID = pendingInitializes.cancelledPrimaryUpstreamID {
-                clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID)
+                if let claim = upstreamHealthManager.currentInitializeClaim(
+                    upstreamIndex: upstreamIndex,
+                    expectedUpstreamID: upstreamID
+                ) {
+                    clearUpstreamState(initializeClaim: claim)
+                } else {
+                    upstreamRouter.remove(
+                        upstreamIndex: upstreamIndex,
+                        upstreamID: upstreamID
+                    )
+                }
             }
             if let readinessToken = pendingInitializes.cancelledPrimaryReadinessToken {
                 cancelPrimaryInitializeReadinessWaiter(readinessToken)
@@ -919,6 +938,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 timeout.cancel()
             case .cancelRPC(let handle):
                 handle.cancel()
+            case .cancelReadinessWaiter(let token):
+                cancelUpstreamReadinessWaiter(token)
             }
         }
         if transition.publishesToolsListChanged {

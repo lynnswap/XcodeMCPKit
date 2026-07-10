@@ -164,7 +164,9 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else { return }
         let existingRoutes = processControlPlane.activeRoutes()
         let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
-            existingRoutes.first(where: { $0.target == target })
+            existingRoutes.first(where: {
+                $0.target == target && $0.upstreamIndices.isEmpty == false
+            })
                 ?? appendProcessBoundRoute(for: target)
         }
         let usability = processRouteUpstreamUsabilitySnapshot(
@@ -329,14 +331,13 @@ extension RuntimeCoordinator {
 
     private func clearActiveWarmInitializesBeforePrimaryRestart() {
         let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
-        let states = upstreamHealthManager.statesSnapshot()
         for upstreamIndex in activeProcessBoundUpstreamIndices().sorted() {
             guard upstreamIndex != activePrimaryUpstreamIndex,
-                  upstreamIndex >= 0,
-                  upstreamIndex < states.count else {
+                  let state = upstreamHealthManager.state(
+                    for: UpstreamSlotID(rawValue: upstreamIndex)
+                  ) else {
                 continue
             }
-            let state = states[upstreamIndex]
             guard state.initInFlight, state.isInitialized == false else {
                 continue
             }
