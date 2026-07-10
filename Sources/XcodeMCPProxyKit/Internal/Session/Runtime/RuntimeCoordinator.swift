@@ -127,6 +127,7 @@ protocol RuntimeSessionLifecyclePort: Sendable {
 protocol RuntimeSessionRegistryPort: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
+    func isSessionInitialized(id: String) -> Bool
     func negotiatedProtocolVersion(id: String) -> String?
     func markNotificationClientConnected(sessionID: String)
     func removeSession(id: String)
@@ -263,6 +264,10 @@ extension RuntimeSessionLifecyclePort {
 }
 
 extension RuntimeSessionRegistryPort {
+    func isSessionInitialized(id: String) -> Bool {
+        negotiatedProtocolVersion(id: id) != nil
+    }
+
     func negotiatedProtocolVersion(id _: String) -> String? {
         nil
     }
@@ -790,6 +795,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func hasSession(id: String) -> Bool {
         sessionRegistry.hasSession(id: id)
+    }
+
+    func isSessionInitialized(id: String) -> Bool {
+        sessionRegistry.isInitialized(id: id)
     }
 
     func negotiatedProtocolVersion(id: String) -> String? {

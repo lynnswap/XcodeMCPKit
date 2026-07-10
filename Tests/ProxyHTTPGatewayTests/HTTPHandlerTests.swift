@@ -440,63 +440,72 @@ struct HTTPHandlerTests {
         #expect(response.body == "session not found")
     }
 
-    @Test func httpPostRequiresNegotiatedProtocolVersionAfterInitialize() async throws {
-        let config = makeConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let sessionManager = TestRuntimeCoordinator(config: config)
-        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try await initializeHTTPChannel(channel)
+    @Test func httpResolvesProtocolVersionConsistentlyAcrossSessionRoutes() async throws {
+        for route in ProtocolVersionRoute.allCases {
+            for headerCase in ProtocolVersionHeaderCase.allCases {
+                let config = makeConfig()
+                let channel = EmbeddedChannel()
+                let sessionManager = TestRuntimeCoordinator(config: config)
+                try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+                let sessionID = try await initializeHTTPChannel(channel)
+                sessionManager.setCachedToolsListResult(
+                    .object(["tools": .array([])]),
+                    sourceUpstream: 0
+                )
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "MCP-Session-Id", value: sessionID)
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+                try writeProtocolVersionRequest(
+                    route,
+                    headerCase: headerCase,
+                    sessionID: sessionID,
+                    to: channel
+                )
+                let response = try await collectResponse(from: channel)
 
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .badRequest)
-        #expect(response.body == "protocol version required")
+                #expect(
+                    response.head.status == (headerCase.isAccepted ? .ok : .badRequest),
+                    "route=\(route) header=\(headerCase)"
+                )
+                if headerCase.isAccepted == false {
+                    #expect(response.body == "protocol version mismatch")
+                }
+                if route == .delete {
+                    #expect(
+                        sessionManager.hasSession(id: sessionID) == !headerCase.isAccepted,
+                        "header=\(headerCase)"
+                    )
+                } else {
+                    #expect(sessionManager.hasSession(id: sessionID))
+                }
+
+                _ = try? channel.finish()
+            }
+        }
     }
 
-    @Test func httpPostRejectsMismatchedProtocolVersionAfterInitialize() async throws {
-        let config = makeConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let sessionManager = TestRuntimeCoordinator(config: config)
-        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try await initializeHTTPChannel(channel)
+    @Test func httpRejectsUnsupportedSpecificationDefaultWithoutNegotiatedVersion() async throws {
+        #expect(HTTPRequestProtocolVersionResolver.specificationDefault == "2025-03-26")
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "MCP-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: "2025-11-25")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        for route in ProtocolVersionRoute.allCases {
+            let config = makeConfig()
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+            let sessionID = "initialized-without-version-\(route)"
+            _ = sessionManager.initializedSessionWithoutProtocolVersion(id: sessionID)
 
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .badRequest)
-        #expect(response.body == "protocol version mismatch")
+            try writeProtocolVersionRequest(
+                route,
+                headerCase: .missing,
+                sessionID: sessionID,
+                to: channel
+            )
+            let response = try await collectResponse(from: channel)
+
+            #expect(response.head.status == .badRequest, "route=\(route)")
+            #expect(response.body == "protocol version mismatch")
+            #expect(sessionManager.hasSession(id: sessionID))
+            _ = try? channel.finish()
+        }
     }
 
     @Test func httpDeleteTerminatesSession() async throws {
@@ -3205,6 +3214,103 @@ struct HTTPHandlerTests {
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    }
+
+    private enum ProtocolVersionRoute: CaseIterable {
+        case post
+        case sse
+        case delete
+    }
+
+    private enum ProtocolVersionHeaderCase: CaseIterable {
+        case missing
+        case match
+        case mismatch
+        case unsupported
+        case invalid
+        case multiple
+
+        var isAccepted: Bool {
+            switch self {
+            case .missing, .match:
+                return true
+            case .mismatch, .unsupported, .invalid, .multiple:
+                return false
+            }
+        }
+
+        func apply(to headers: inout HTTPHeaders) {
+            switch self {
+            case .missing:
+                break
+            case .match:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: MCP.ProtocolVersion.current
+                )
+            case .mismatch:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: "2025-11-25"
+                )
+            case .unsupported:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: "2024-11-05"
+                )
+            case .invalid:
+                headers.add(name: HTTPRequestValidator.protocolVersionHeader, value: "")
+            case .multiple:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: MCP.ProtocolVersion.current
+                )
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: MCP.ProtocolVersion.current
+                )
+            }
+        }
+    }
+
+    private func writeProtocolVersionRequest(
+        _ route: ProtocolVersionRoute,
+        headerCase: ProtocolVersionHeaderCase,
+        sessionID: String,
+        to channel: EmbeddedChannel
+    ) throws {
+        let method: HTTPMethod =
+            switch route {
+            case .post: .POST
+            case .sse: .GET
+            case .delete: .DELETE
+            }
+        var head = HTTPRequestHead(version: .http1_1, method: method, uri: "/mcp")
+        head.headers.add(name: HTTPRequestValidator.sessionHeader, value: sessionID)
+        switch route {
+        case .post:
+            head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+            head.headers.add(name: "Content-Type", value: "application/json")
+        case .sse:
+            head.headers.add(name: "Accept", value: "text/event-stream")
+        case .delete:
+            break
+        }
+        headerCase.apply(to: &head.headers)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+
+        if route == .post {
+            let payload: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            var body = channel.allocator.buffer(capacity: data.count)
+            body.writeBytes(data)
+            try channel.writeInbound(HTTPServerRequestPart.body(body))
+        }
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 

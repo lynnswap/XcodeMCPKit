@@ -321,11 +321,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard let sessionID = validateExistingSession(
-            on: context.channel,
-            head: head,
-            requestLog: requestLog
-        ) else {
+        guard
+            let sessionID = validateSession(
+                on: context.channel,
+                head: head,
+                requestLog: requestLog,
+                initialization: .required
+            )
+        else {
             return
         }
 
@@ -361,11 +364,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleDelete(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        guard let sessionID = validateDeletableSession(
-            on: context.channel,
-            head: head,
-            requestLog: requestLog
-        ) else {
+        guard
+            let sessionID = validateSession(
+                on: context.channel,
+                head: head,
+                requestLog: requestLog,
+                initialization: .allowUninitializedDelete
+            )
+        else {
             return
         }
         controlService.deleteSession(id: sessionID)
@@ -454,11 +460,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             effectiveSessionID = hasValidInitializeID ? UUID().uuidString : nil
             headerSessionExists = false
         } else {
-            guard let sessionID = validateExistingSession(
-                on: context.channel,
-                head: head,
-                requestLog: requestLog
-            ) else {
+            guard
+                let sessionID = validateSession(
+                    on: context.channel,
+                    head: head,
+                    requestLog: requestLog,
+                    initialization: .required
+                )
+            else {
                 return
             }
             effectiveSessionID = sessionID
@@ -527,81 +536,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
     }
 
-    private func validateExistingSession(
-        on channel: Channel,
-        head: HTTPRequestHead,
-        requestLog: RequestLogContext
-    ) -> String? {
-        guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers),
-            sessionID.isEmpty == false
-        else {
-            _ = sendPlain(
-                on: channel,
-                status: .badRequest,
-                body: "session id required",
-                keepAlive: head.isKeepAlive,
-                sessionID: nil,
-                requestLog: requestLog
-            )
-            return nil
-        }
-        guard controlService.hasSession(id: sessionID) else {
-            _ = sendPlain(
-                on: channel,
-                status: .notFound,
-                body: "session not found",
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-            return nil
-        }
-        guard let expectedProtocolVersion = controlService.negotiatedProtocolVersion(id: sessionID),
-            expectedProtocolVersion.isEmpty == false
-        else {
-            _ = sendPlain(
-                on: channel,
-                status: .badRequest,
-                body: "session is not initialized",
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-            return nil
-        }
-        guard let protocolVersion = HTTPRequestValidator.protocolVersion(from: head.headers),
-            protocolVersion.isEmpty == false
-        else {
-            _ = sendPlain(
-                on: channel,
-                status: .badRequest,
-                body: "protocol version required",
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-            return nil
-        }
-        guard MCP.ProtocolVersion.isSupported(protocolVersion),
-            protocolVersion == expectedProtocolVersion
-        else {
-            _ = sendPlain(
-                on: channel,
-                status: .badRequest,
-                body: "protocol version mismatch",
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-            return nil
-        }
-        return sessionID
+    private enum SessionInitializationRequirement {
+        case required
+        case allowUninitializedDelete
     }
 
-    private func validateDeletableSession(
+    private func validateSession(
         on channel: Channel,
         head: HTTPRequestHead,
-        requestLog: RequestLogContext
+        requestLog: RequestLogContext,
+        initialization: SessionInitializationRequirement
     ) -> String? {
         guard let sessionID = HTTPRequestValidator.sessionID(from: head.headers),
             sessionID.isEmpty == false
@@ -627,26 +571,17 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return nil
         }
-        guard let expectedProtocolVersion = controlService.negotiatedProtocolVersion(id: sessionID),
-            expectedProtocolVersion.isEmpty == false
-        else {
+        if case .allowUninitializedDelete = initialization,
+            controlService.isSessionInitialized(id: sessionID) == false
+        {
             return sessionID
         }
-        guard let protocolVersion = HTTPRequestValidator.protocolVersion(from: head.headers),
-            protocolVersion.isEmpty == false
-        else {
-            _ = sendPlain(
-                on: channel,
-                status: .badRequest,
-                body: "protocol version required",
-                keepAlive: head.isKeepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
+        let negotiatedVersion = controlService.negotiatedProtocolVersion(id: sessionID)
+        guard
+            case .accepted = HTTPRequestProtocolVersionResolver.resolve(
+                headers: head.headers,
+                negotiatedVersion: negotiatedVersion
             )
-            return nil
-        }
-        guard MCP.ProtocolVersion.isSupported(protocolVersion),
-            protocolVersion == expectedProtocolVersion
         else {
             _ = sendPlain(
                 on: channel,

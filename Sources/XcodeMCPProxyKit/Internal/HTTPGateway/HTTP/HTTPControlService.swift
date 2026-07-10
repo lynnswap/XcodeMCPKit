@@ -100,6 +100,10 @@ final class HTTPControlService: Sendable {
         runtimeCoordinator.hasSession(id: sessionID)
     }
 
+    func isSessionInitialized(id sessionID: String) -> Bool {
+        runtimeCoordinator.isSessionInitialized(id: sessionID)
+    }
+
     func negotiatedProtocolVersion(id sessionID: String) -> String? {
         runtimeCoordinator.negotiatedProtocolVersion(id: sessionID)
     }

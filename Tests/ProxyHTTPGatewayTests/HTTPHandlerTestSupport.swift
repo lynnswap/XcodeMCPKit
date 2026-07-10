@@ -127,6 +127,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
 
         var sessions: [String: SessionContext] = [:]
+        var initializedSessionIDs: Set<String> = []
         var sessionProtocolVersions: [String: String] = [:]
         var nextUpstreamID: Int64 = 1
         var assignUpstreamIDCount = 0
@@ -220,6 +221,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.initializedSessionIDs.insert(id)
             state.sessionProtocolVersions[id] = MCP.ProtocolVersion.current
             return context
         }
@@ -228,11 +230,23 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func uninitializedSession(id: String) -> SessionContext {
         state.withLockedValue { state in
             if let existing = state.sessions[id] {
+                state.initializedSessionIDs.remove(id)
                 state.sessionProtocolVersions.removeValue(forKey: id)
                 return existing
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.initializedSessionIDs.remove(id)
+            state.sessionProtocolVersions.removeValue(forKey: id)
+            return context
+        }
+    }
+
+    func initializedSessionWithoutProtocolVersion(id: String) -> SessionContext {
+        state.withLockedValue { state in
+            let context = state.sessions[id] ?? SessionContext(id: id, config: config)
+            state.sessions[id] = context
+            state.initializedSessionIDs.insert(id)
             state.sessionProtocolVersions.removeValue(forKey: id)
             return context
         }
@@ -244,6 +258,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func isSessionInitialized(id: String) -> Bool {
+        state.withLockedValue { state in
+            state.initializedSessionIDs.contains(id)
+        }
+    }
+
     func negotiatedProtocolVersion(id: String) -> String? {
         state.withLockedValue { state in
             state.sessionProtocolVersions[id]
@@ -252,6 +272,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func removeSession(id: String) {
         let context = state.withLockedValue { state in
+            state.initializedSessionIDs.remove(id)
             state.sessionProtocolVersions.removeValue(forKey: id)
             return state.sessions.removeValue(forKey: id)
         }
@@ -261,6 +282,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func debugReset() {
         state.withLockedValue { state in
             state.sessions.removeAll()
+            state.initializedSessionIDs.removeAll()
             state.sessionProtocolVersions.removeAll()
             state.cachedToolsList = nil
             state.pendingResponses.removeAll()
@@ -306,6 +328,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = session(id: sessionID)
         state.withLockedValue { state in
             state.initialized = true
+            state.initializedSessionIDs.insert(sessionID)
             state.sessionProtocolVersions[sessionID] = negotiatedProtocolVersion
         }
         _ = chooseUpstreamIndex()
