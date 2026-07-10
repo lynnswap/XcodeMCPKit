@@ -112,7 +112,7 @@ struct XcodeMCPKitTestingTests {
         ])
     }
 
-    @Test func runtimeHandlesRawRequestsAndRecordsNotifications() async throws {
+    @Test func runtimeHandlesRawRequests() async throws {
         let runtime = XcodeMCPTestRuntime()
         await runtime.setRequestHandler({ method, params in
             [
@@ -132,13 +132,6 @@ struct XcodeMCPKitTestingTests {
                 "query": "Observation",
             ]
         )
-        try await client.notify(
-            "notifications/custom",
-            params: [
-                "enabled": true,
-            ]
-        )
-
         #expect(result == [
             "method": "workspace/symbols",
             "echo": [
@@ -153,11 +146,6 @@ struct XcodeMCPKitTestingTests {
             "query": "Observation",
         ])
 
-        let notification = try #require(messages.last { $0.method == "notifications/custom" })
-        #expect(notification.id == nil)
-        #expect(notification.params == [
-            "enabled": true,
-        ])
     }
 
     @Test func runtimeRoutesProgressAndDynamicToolHandler() async throws {

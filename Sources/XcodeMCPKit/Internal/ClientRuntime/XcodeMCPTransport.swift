@@ -2,14 +2,42 @@ import Foundation
 
 package enum XcodeMCPTransportEvent: Sendable {
     case message(Data)
+    case messageWithHeaders(Data, MCPConnectionHeaders)
     case closed(String?)
+    case sessionExpired(sessionID: String)
+}
+
+package struct MCPConnectionHeaders: Sendable, Equatable {
+    package var sessionID: String?
+    package var protocolVersion: String?
+
+    package init(sessionID: String? = nil, protocolVersion: String? = nil) {
+        self.sessionID = sessionID
+        self.protocolVersion = protocolVersion
+    }
+}
+
+package enum MCPDeliveryCertainty: Sendable, Equatable {
+    case rejectedBeforeProcessing
+    case unknown
+}
+
+package enum MCPTransportFailure: Error, Sendable, Equatable {
+    case sessionExpired(sessionID: String, delivery: MCPDeliveryCertainty)
+    case deliveryUnknown(String)
+    case unavailable(String)
 }
 
 package protocol XcodeMCPTransport: Sendable {
     var events: AsyncStream<XcodeMCPTransportEvent> { get }
 
-    func send(_ data: Data) async throws
-    func close() async
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws
+    func startEventStream(headers: MCPConnectionHeaders) async
+    func close(headers: MCPConnectionHeaders) async
 }
 
 package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
@@ -68,9 +96,19 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
 
     deinit {
         bridgeTask.cancel()
+        session.cancel()
     }
 
-    package func send(_ data: Data) async throws {
+    package func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        // A local stdio bridge has no HTTP session headers. The typed boundary
+        // remains explicit so adding another transport input cannot silently
+        // fall back to a legacy send path.
+        _ = headers
+        _ = deadline
         switch await session.send(data) {
         case .accepted:
             return
@@ -81,8 +119,15 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         }
     }
 
-    package func close() async {
+    package func startEventStream(headers: MCPConnectionHeaders) async {
+        // The local process event stream starts with the process session.
+        _ = headers
+    }
+
+    package func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         bridgeTask.cancel()
         await session.stop()
+        await bridgeTask.value
     }
 }

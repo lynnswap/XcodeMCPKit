@@ -19,7 +19,7 @@ private func jsonRPCError(
             ?? [:]
         let error = body["error"] as? [String: Any]
         return ((error?["code"] as? NSNumber)?.intValue, error?["message"] as? String)
-    case .mcpError(_, _, let code, let message, _, _, _):
+    case .mcpError(_, let code, let message, _, _):
         return (code, message)
     case .plain(let status, let body, _):
         Issue.record("expected JSON-RPC response, got plain \(status): \(body)")
@@ -1236,8 +1236,7 @@ extension HTTPHandlerTests {
             ),
             bodyData: requestData,
             sessionID: "session-navigator-timeout",
-            requestIDs: [requestID],
-            requestIsBatch: false,
+            responseID: requestID,
             eventLoop: group.next(),
             windowsProvider: { _, _, _, _ in
                 [
@@ -1257,7 +1256,7 @@ extension HTTPHandlerTests {
                 }
                 return .timeout
             },
-            forwarder: { _, _, _, _, _, _, _ in
+            forwarder: { _, _, _, _, _, _ in
                 .success(upstreamFallbackData)
             }
         )
@@ -1334,8 +1333,7 @@ extension HTTPHandlerTests {
             ),
             bodyData: requestData,
             sessionID: "session-unbounded-timeout",
-            requestIDs: [requestID],
-            requestIsBatch: false,
+            responseID: requestID,
             eventLoop: group.next(),
             windowsProvider: { _, _, _, _ in
                 [
@@ -1375,7 +1373,7 @@ extension HTTPHandlerTests {
                     ],
                 ])
             },
-            forwarder: { _, _, _, _, _, _, _ in
+            forwarder: { _, _, _, _, _, _ in
                 Issue.record("unbounded timeout should not fall back to upstream")
                 return .invalidRequest
             }
@@ -1453,8 +1451,7 @@ extension HTTPHandlerTests {
             ),
             bodyData: requestData,
             sessionID: "session-cancelled-navigator",
-            requestIDs: [requestID],
-            requestIsBatch: false,
+            responseID: requestID,
             eventLoop: group.next(),
             windowsProvider: { _, _, _, _ in
                 [
@@ -1469,18 +1466,17 @@ extension HTTPHandlerTests {
                 #expect(name == "XcodeListNavigatorIssues")
                 return .cancelled
             },
-            forwarder: { _, _, _, _, _, _, _ in
+            forwarder: { _, _, _, _, _, _ in
                 Issue.record("cancelled navigator lookup should not fall back upstream")
                 return .invalidRequest
             }
         )
 
-        guard case .cancelled(let responseIDs, let isBatch) = result else {
+        guard case .cancelled(let responseID) = result else {
             Issue.record("expected cancelled result")
             return
         }
-        #expect(responseIDs.map(\.key) == [requestID.key])
-        #expect(isBatch == false)
+        #expect(responseID.key == requestID.key)
     }
 
     @Test func refreshWorkflowPreservesBackslashesInNavigatorGlob() async throws {
@@ -1536,8 +1532,7 @@ extension HTTPHandlerTests {
             ),
             bodyData: requestData,
             sessionID: "session-backslash",
-            requestIDs: [requestID],
-            requestIsBatch: false,
+            responseID: requestID,
             eventLoop: group.next(),
             windowsProvider: { _, _, _, _ in
                 [
@@ -1567,7 +1562,7 @@ extension HTTPHandlerTests {
                     ],
                 ])
             },
-            forwarder: { _, _, _, _, _, _, _ in
+            forwarder: { _, _, _, _, _, _ in
                 Issue.record("backslash-preserving proxy path should not fall back upstream")
                 return .invalidRequest
             }
@@ -2217,8 +2212,7 @@ extension HTTPHandlerTests {
                 ),
                 bodyData: requestData,
                 sessionID: "session-timeout-2",
-                requestIDs: [requestID],
-                requestIsBatch: false,
+                responseID: requestID,
                 requestTimeoutOverride: .milliseconds(50),
                 eventLoop: group.next(),
                 windowsProvider: { _, _, _, _ in
@@ -2233,7 +2227,7 @@ extension HTTPHandlerTests {
                     Issue.record("queued timeout should not call internal tools")
                     return .unavailable
                 },
-                forwarder: { _, _, _, _, _, _, _ in
+                forwarder: { _, _, _, _, _, _ in
                     Issue.record("queued timeout should not reach upstream forwarding")
                     return .invalidRequest
                 }
@@ -2244,14 +2238,13 @@ extension HTTPHandlerTests {
         clock.advance(by: .milliseconds(50))
 
         let result = await requestTask.value
-        guard case .timeout(let responseIDs, let isBatch) = result else {
+        guard case .timeout(let responseID) = result else {
             Issue.record("expected queued refresh to return standard timeout")
             releaseFirst.signal()
             _ = await activeTask.value
             return
         }
-        #expect(responseIDs.map(\.key) == [requestID.key])
-        #expect(isBatch == false)
+        #expect(responseID.key == requestID.key)
 
         releaseFirst.signal()
         _ = await activeTask.value

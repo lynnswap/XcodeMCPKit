@@ -1,18 +1,19 @@
 extension XcodeMCPProxyServer {
-    package protocol LaunchServer {
-        func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint
-        func wait() async throws
+    package protocol LaunchServer: Sendable {
+        func start() async throws -> XcodeMCPProxyServer.Endpoint
+        func waitUntilShutdown() async throws
+        func shutdown() async throws
     }
 
     package struct Launcher {
         package struct Dependencies {
-            package var makeServer: (XcodeMCPProxyServerConfiguration) -> any LaunchServer
+            package var makeServer: (PreparedConfiguration) -> any LaunchServer
             package var isAddressAlreadyInUse: (Swift.Error) -> Bool
             package var forceRestartExistingServer: (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool
             package var detectExistingServerProcessIDs: (_ host: String, _ port: Int) -> [Int]
 
             package init(
-                makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any LaunchServer,
+                makeServer: @escaping (PreparedConfiguration) -> any LaunchServer,
                 isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
                 forceRestartExistingServer: @escaping (
                     _ host: String,
@@ -30,8 +31,11 @@ extension XcodeMCPProxyServer {
             package static var live: Self {
                 let existingServerController = XcodeMCPProxyServer.ExistingServerController.liveValue
                 return Self(
-                    makeServer: { config in
-                        XcodeMCPProxyServer(configuration: config)
+                    makeServer: { preparedConfiguration in
+                        XcodeMCPProxyServer(
+                            preparedConfiguration: preparedConfiguration,
+                            dependencies: .live
+                        )
                     },
                     isAddressAlreadyInUse: XcodeMCPProxyServer.isAddressAlreadyInUse,
                     forceRestartExistingServer: { host, port, stderr in
@@ -57,23 +61,27 @@ extension XcodeMCPProxyServer {
             stderr: (String) -> Void
         ) async -> Int32 {
             do {
-                let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+                let action = try XcodeMCPProxyServer.resolveLaunchAction(
                     arguments: arguments,
                     environment: environment
                 )
 
-                switch plan.action {
-                case .showHelp:
-                    stdout(plan.usage)
+                switch action {
+                case .showHelp(let usage):
+                    stdout(usage)
                     return 0
-                case .showVersion:
-                    stdout(plan.versionLine)
+                case .showVersion(let versionLine):
+                    stdout(versionLine)
                     return 0
-                case .dryRun:
-                    stdout(plan.resolvedDryRunCommandLine ?? "")
+                case .dryRun(let commandLine):
+                    stdout(commandLine)
                     return 0
-                case .start:
-                    return try await startServer(from: plan, stderr: stderr)
+                case .start(let preparedConfiguration, let forceRestart):
+                    return try await startServer(
+                        preparedConfiguration: preparedConfiguration,
+                        forceRestart: forceRestart,
+                        stderr: stderr
+                    )
                 }
             } catch let error as XcodeMCPProxyServer.LaunchResolutionError {
                 switch error.presentation {
@@ -92,17 +100,12 @@ extension XcodeMCPProxyServer {
         }
 
         private func startServer(
-            from plan: XcodeMCPProxyServer.LaunchPlan,
+            preparedConfiguration: PreparedConfiguration,
+            forceRestart: Bool,
             stderr: (String) -> Void
         ) async throws -> Int32 {
-            guard let serverConfig = plan.configuration else {
-                throw XcodeMCPProxyServer.LaunchResolutionError(
-                    message: "server launch plan is missing configuration",
-                    presentation: .conciseUsageHint
-                )
-            }
-
-            if plan.options.forceRestart, serverConfig.bindAddress.port > 0 {
+            let serverConfig = preparedConfiguration.configuration
+            if forceRestart, serverConfig.bindAddress.port > 0 {
                 _ = dependencies.forceRestartExistingServer(
                     serverConfig.bindAddress.host,
                     serverConfig.bindAddress.port,
@@ -111,9 +114,15 @@ extension XcodeMCPProxyServer {
             }
 
             do {
-                let server = dependencies.makeServer(serverConfig)
-                _ = try server.startAndWriteDiscovery()
-                try await server.wait()
+                let server = dependencies.makeServer(preparedConfiguration)
+                _ = try await server.start()
+                do {
+                    try await server.waitUntilShutdown()
+                    try await server.shutdown()
+                } catch {
+                    try? await server.shutdown()
+                    throw error
+                }
                 return 0
             } catch {
                 if serverConfig.bindAddress.port > 0, dependencies.isAddressAlreadyInUse(error) {

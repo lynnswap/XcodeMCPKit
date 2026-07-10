@@ -1688,7 +1688,6 @@ struct DocumentationProviderTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:LongRunning",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -5871,6 +5870,8 @@ private actor BlockingStopDocumentationSession: UpstreamSession {
         self.continuation = streamContinuation
     }
 
+    nonisolated func cancel() {}
+
     func send(_ data: Data) async -> Upstream.SendResult {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
                 as? [String: Any],
@@ -5958,6 +5959,8 @@ private actor HangingDocumentationEventSession: UpstreamSession {
         }
         self.continuation = streamContinuation
     }
+
+    nonisolated func cancel() {}
 
     func send(_: Data) async -> Upstream.SendResult {
         .accepted

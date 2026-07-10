@@ -135,6 +135,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
 
         var sessions: [String: SessionContext] = [:]
+        var initializedSessionIDs: Set<String> = []
         var sessionProtocolVersions: [String: String] = [:]
         var nextUpstreamID: Int64 = 1
         var assignUpstreamIDCount = 0
@@ -231,6 +232,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.initializedSessionIDs.insert(id)
             state.sessionProtocolVersions[id] = MCP.ProtocolVersion.current
             return context
         }
@@ -239,11 +241,23 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func uninitializedSession(id: String) -> SessionContext {
         state.withLockedValue { state in
             if let existing = state.sessions[id] {
+                state.initializedSessionIDs.remove(id)
                 state.sessionProtocolVersions.removeValue(forKey: id)
                 return existing
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.initializedSessionIDs.remove(id)
+            state.sessionProtocolVersions.removeValue(forKey: id)
+            return context
+        }
+    }
+
+    func initializedSessionWithoutProtocolVersion(id: String) -> SessionContext {
+        state.withLockedValue { state in
+            let context = state.sessions[id] ?? SessionContext(id: id, config: config)
+            state.sessions[id] = context
+            state.initializedSessionIDs.insert(id)
             state.sessionProtocolVersions.removeValue(forKey: id)
             return context
         }
@@ -255,6 +269,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func isSessionInitialized(id: String) -> Bool {
+        state.withLockedValue { state in
+            state.initializedSessionIDs.contains(id)
+        }
+    }
+
     func negotiatedProtocolVersion(id: String) -> String? {
         state.withLockedValue { state in
             state.sessionProtocolVersions[id]
@@ -263,6 +283,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func removeSession(id: String) {
         let context = state.withLockedValue { state in
+            state.initializedSessionIDs.remove(id)
             state.sessionProtocolVersions.removeValue(forKey: id)
             return state.sessions.removeValue(forKey: id)
         }
@@ -272,6 +293,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func debugReset() {
         state.withLockedValue { state in
             state.sessions.removeAll()
+            state.initializedSessionIDs.removeAll()
             state.sessionProtocolVersions.removeAll()
             state.cachedToolsList = nil
             state.pendingResponses.removeAll()
@@ -317,6 +339,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = session(id: sessionID)
         state.withLockedValue { state in
             state.initialized = true
+            state.initializedSessionIDs.insert(sessionID)
             state.sessionProtocolVersions[sessionID] = negotiatedProtocolVersion
         }
         _ = chooseUpstreamIndex()
@@ -568,13 +591,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return true
         }
-        if let object = json as? [String: Any] {
-            handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
-            return true
-        }
-        if let array = json as? [Any] {
-            handleBatchUpstreamRequest(array, upstreamIndex: upstreamIndex)
-        }
+        guard let object = json as? [String: Any] else { return true }
+        handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
         return true
     }
 
@@ -672,69 +690,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         } else {
             deliverResponse()
         }
-    }
-
-    private func handleBatchUpstreamRequest(_ array: [Any], upstreamIndex: Int) {
-        var sessionID: String?
-        var responseObjects: [Any] = []
-
-        for item in array {
-            guard let object = item as? [String: Any],
-                let method = object["method"] as? String
-            else {
-                continue
-            }
-            let toolName = ((object["params"] as? [String: Any])?["name"] as? String)
-            state.withLockedValue { state in
-                state.sentRequests.append(
-                    SentRequest(
-                        method: method,
-                        toolName: toolName,
-                        upstreamIndex: upstreamIndex
-                    )
-                )
-            }
-
-            guard let upstreamIDValue = object["id"] else {
-                continue
-            }
-            let upstreamID =
-                (upstreamIDValue as? NSNumber)?.int64Value ?? (upstreamIDValue as? Int64)
-            guard let upstreamID,
-                let mapping = state.withLockedValue({ $0.upstreamIDMapping[upstreamID] })
-            else {
-                continue
-            }
-            sessionID = mapping.sessionID
-
-            let planned = responsePlan(
-                method: method,
-                toolName: toolName,
-                originalID: mapping.originalID
-            )
-            guard planned.deliverManually == false,
-                let responseObject = try? JSONSerialization.jsonObject(
-                    with: planned.data,
-                    options: []
-                )
-            else {
-                return
-            }
-            responseObjects.append(responseObject)
-        }
-
-        guard let sessionID,
-            responseObjects.isEmpty == false,
-            let responseData = try? JSONSerialization.data(
-                withJSONObject: responseObjects,
-                options: []
-            )
-        else {
-            return
-        }
-
-        let session = self.session(id: sessionID)
-        session.router.handleIncoming(responseData)
     }
 
     private func responsePlan(

@@ -5,7 +5,7 @@ import Testing
 @Suite
 struct ServerRunnerTests {
     @Test func serverLaunchPlanNormalizesServerArguments() throws {
-        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
             arguments: [
                 "xcode-mcp-proxy-server",
                 "--listen",
@@ -14,53 +14,45 @@ struct ServerRunnerTests {
                 "--refresh-code-issues-mode",
                 "upstream",
                 "--force-restart",
-                "--dry-run",
             ],
             environment: [:]
         )
 
-        let config = try #require(plan.configuration)
-        #expect(plan.action == .dryRun)
-        #expect(plan.options.forceRestart == true)
-        #expect(plan.options.dryRun == true)
+        let (config, forceRestart) = try startPayload(action)
+        #expect(forceRestart == true)
         #expect(config.bindAddress.host == "127.0.0.1")
         #expect(config.bindAddress.port == 9000)
         #expect(config.approvalPolicy == .automatic)
         #expect(config.featurePolicy.refreshCodeIssuesMode == .upstream)
-        #expect(
-            plan.resolvedDryRunCommandLine ==
-                "xcode-mcp-proxy-server --listen 127.0.0.1:9000 --auto-approve --refresh-code-issues-mode upstream"
-        )
     }
 
     @Test func serverLaunchPlanNormalizesEnvironmentDefaults() throws {
-        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+        let configURL = try makeServerConfigFile()
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
             arguments: ["xcode-mcp-proxy-server"],
             environment: [
                 "HOST": "127.0.0.1",
                 "PORT": "9999",
-                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                "MCP_XCODE_CONFIG": configURL.path,
                 "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
             ]
         )
 
-        let config = try #require(plan.configuration)
-        #expect(plan.action == .start)
+        let (config, _) = try startPayload(action)
         #expect(config.bindAddress.host == "127.0.0.1")
         #expect(config.bindAddress.port == 9999)
-        #expect(config.configurationFilePath == "/tmp/proxy-config.toml")
+        #expect(config.configurationFileURL == configURL)
         #expect(config.featurePolicy.refreshCodeIssuesMode == .upstream)
-        #expect(
-            plan.resolvedDryRunCommandLine ==
-                "xcode-mcp-proxy-server --listen 127.0.0.1:9999 --config /tmp/proxy-config.toml --refresh-code-issues-mode upstream"
-        )
     }
 
     @Test func serverLaunchPlanLetsExplicitConfigOverrideEnvironment() throws {
-        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+        let explicitConfigURL = try makeServerConfigFile()
+        defer { try? FileManager.default.removeItem(at: explicitConfigURL) }
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
             arguments: [
                 "xcode-mcp-proxy-server",
-                "--config", "/tmp/explicit.toml",
+                "--config", explicitConfigURL.path,
                 "--dry-run",
             ],
             environment: [
@@ -68,16 +60,18 @@ struct ServerRunnerTests {
             ]
         )
 
-        let config = try #require(plan.configuration)
-        #expect(config.configurationFilePath == "/tmp/explicit.toml")
+        guard case .dryRun(let commandLine) = action else {
+            Issue.record("expected dry-run action")
+            return
+        }
         #expect(
-            plan.resolvedDryRunCommandLine ==
-                "xcode-mcp-proxy-server --config /tmp/explicit.toml --listen localhost:8765"
+            commandLine ==
+                "xcode-mcp-proxy-server --config \(explicitConfigURL.path) --listen localhost:8765"
         )
     }
 
     @Test func serverLaunchPlanIgnoresRemovedXcodePIDEnvironment() throws {
-        let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
             arguments: ["xcode-mcp-proxy-server"],
             environment: [
                 "HOST": "127.0.0.1",
@@ -87,9 +81,76 @@ struct ServerRunnerTests {
             ]
         )
 
-        let config = try #require(plan.configuration)
+        let (config, _) = try startPayload(action)
         #expect(config.bindAddress.host == "127.0.0.1")
         #expect(config.bindAddress.port == 9999)
+    }
+
+    @Test func serverLaunchNormalizesOnlyZeroTimeoutToNil() throws {
+        let disabled = try XcodeMCPProxyServer.resolveLaunchAction(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--request-timeout", "0",
+            ],
+            environment: [:]
+        )
+        let (configuration, _) = try startPayload(disabled)
+        #expect(configuration.requestTimeout == nil)
+
+        for invalid in ["-1", "nan", "inf", "not-a-number"] {
+            #expect(throws: XcodeMCPProxyServer.LaunchResolutionError.self) {
+                _ = try XcodeMCPProxyServer.resolveLaunchAction(
+                    arguments: [
+                        "xcode-mcp-proxy-server",
+                        "--request-timeout", invalid,
+                    ],
+                    environment: [:]
+                )
+            }
+        }
+    }
+
+    @Test func serverLaunchReadsExplicitConfigurationExactlyOnce() throws {
+        let configURL = try makeServerConfigFile()
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let readCount = LockedBox(0)
+
+        _ = try XcodeMCPProxyServer.resolveLaunchAction(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--config", configURL.path,
+            ],
+            environment: [:],
+            loadFileConfiguration: { url in
+                #expect(url == configURL)
+                readCount.withValue { $0 += 1 }
+                return try ProxyConfig.File.Loader.loadStrict(configURL: url)
+            }
+        )
+
+        #expect(readCount.snapshot() == 1)
+    }
+
+    @Test func serverLaunchExpandsTildeConfigPathBeforeLoading() throws {
+        let relativePath = "~/.config/xcode-mcp/proxy.toml"
+        let expectedURL = URL(
+            fileURLWithPath: NSString(string: relativePath).expandingTildeInPath
+        )
+
+        _ = try XcodeMCPProxyServer.resolveLaunchAction(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--config", relativePath,
+            ],
+            environment: [:],
+            loadFileConfiguration: { url in
+                #expect(url == expectedURL)
+                return ProxyConfig.File.LoadedConfiguration(
+                    disabledToolNames: [],
+                    initializeParamsOverride: nil
+                )
+            }
+        )
     }
 
     @Test func serverRunnerPrintsVersionBeforeValidation() async throws {
@@ -187,8 +248,8 @@ struct ServerRunnerTests {
                 restarted.append("\(host):\(port)")
                 return true
             },
-            makeServer: { config in
-                fakeServer.record(config: config)
+            makeServer: { preparedConfiguration in
+                fakeServer.record(config: preparedConfiguration.configuration)
                 return fakeServer
             }
         )
@@ -223,8 +284,8 @@ struct ServerRunnerTests {
                 emitWarning("fake restart warning")
                 return true
             },
-            makeServer: { config in
-                fakeServer.record(config: config)
+            makeServer: { preparedConfiguration in
+                fakeServer.record(config: preparedConfiguration.configuration)
                 return fakeServer
             }
         )
@@ -273,10 +334,12 @@ struct ServerRunnerTests {
     }
 
     @Test func serverRunnerDryRunPrintsResolvedCommandFromLaunchPlan() async throws {
+        let configURL = try makeServerConfigFile()
+        defer { try? FileManager.default.removeItem(at: configURL) }
         let result = await runServer(
             arguments: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: [
-                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                "MCP_XCODE_CONFIG": configURL.path,
                 "HOST": "127.0.0.1",
                 "PORT": "9999",
             ]
@@ -286,7 +349,7 @@ struct ServerRunnerTests {
         #expect(result.stderr.isEmpty)
         let line = try #require(result.stdout.first)
         #expect(line.contains("--listen 127.0.0.1:9999"))
-        #expect(line.contains("--config /tmp/proxy-config.toml"))
+        #expect(line.contains("--config \(configURL.path)"))
         #expect(line.contains("--auto-approve") == false)
         #expect(line.contains("--lazy-init") == false)
     }
@@ -352,7 +415,8 @@ private func makeServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
-    makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
+    makeServer: @escaping (XcodeMCPProxyServer.PreparedConfiguration) ->
+        any XcodeMCPProxyServer.LaunchServer = { _ in
         RecordingProxyServer()
     },
     isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool = { _ in false },
@@ -368,6 +432,24 @@ private func makeServerLauncher(
     )
 }
 
+private func startPayload(
+    _ action: XcodeMCPProxyServer.LaunchAction
+) throws -> (XcodeMCPProxyServerConfiguration, Bool) {
+    guard case .start(let preparedConfiguration, let forceRestart) = action else {
+        throw UnexpectedServerLaunchAction()
+    }
+    return (preparedConfiguration.configuration, forceRestart)
+}
+
+private func makeServerConfigFile() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("server-config-\(UUID().uuidString).toml")
+    try "".write(to: url, atomically: true, encoding: .utf8)
+    return url
+}
+
+private struct UnexpectedServerLaunchAction: Error {}
+
 private struct AddressAlreadyInUseError: Error {}
 
 private final class FailingProxyServer: XcodeMCPProxyServer.LaunchServer {
@@ -377,13 +459,15 @@ private final class FailingProxyServer: XcodeMCPProxyServer.LaunchServer {
         self.error = error
     }
 
-    func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint {
+    func start() async throws -> XcodeMCPProxyServer.Endpoint {
         throw error
     }
 
-    func wait() async throws {
+    func waitUntilShutdown() async throws {
         Issue.record("wait should not be called when start fails")
     }
+
+    func shutdown() async throws {}
 }
 
 private final class RecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
@@ -397,18 +481,20 @@ private final class RecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
         }
     }
 
-    func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint {
+    func start() async throws -> XcodeMCPProxyServer.Endpoint {
         state.withValue { value in
             value.startCount += 1
         }
         return XcodeMCPProxyServer.Endpoint(host: "127.0.0.1", port: 8765)
     }
 
-    func wait() async throws {
+    func waitUntilShutdown() async throws {
         state.withValue { value in
             value.waitCount += 1
         }
     }
+
+    func shutdown() async throws {}
 
     func recordedConfig() -> XcodeMCPProxyServerConfiguration? {
         state.snapshot().config

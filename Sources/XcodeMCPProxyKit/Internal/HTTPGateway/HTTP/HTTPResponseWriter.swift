@@ -110,7 +110,6 @@ struct HTTPResponseWriter: Sendable {
         id: JSONRPC.ID?,
         code: Int,
         message: String,
-        forceBatchArray: Bool = false,
         prefersEventStream: Bool,
         keepAlive: Bool,
         sessionID: String?,
@@ -119,44 +118,7 @@ struct HTTPResponseWriter: Sendable {
         guard let data = MCPErrorResponder.errorResponseData(
             id: id,
             code: code,
-            message: message,
-            forceBatchArray: forceBatchArray
-        ) else {
-            return sendPlain(
-                on: channel,
-                status: .badGateway,
-                body: "invalid error response",
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        }
-        return sendErrorPayload(
-            on: channel,
-            data: data,
-            prefersEventStream: prefersEventStream,
-            keepAlive: keepAlive,
-            sessionID: sessionID,
-            requestLog: requestLog
-        )
-    }
-
-    func sendMCPError(
-        on channel: Channel,
-        ids: [JSONRPC.ID],
-        code: Int,
-        message: String,
-        forceBatchArray: Bool = false,
-        prefersEventStream: Bool,
-        keepAlive: Bool,
-        sessionID: String?,
-        requestLog: HTTPHandler.RequestLogContext
-    ) -> EventLoopFuture<Void> {
-        guard let data = MCPErrorResponder.errorResponseData(
-            ids: ids,
-            code: code,
-            message: message,
-            forceBatchArray: forceBatchArray
+            message: message
         ) else {
             return sendPlain(
                 on: channel,

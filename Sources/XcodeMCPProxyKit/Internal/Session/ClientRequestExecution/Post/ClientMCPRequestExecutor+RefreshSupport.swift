@@ -1,8 +1,5 @@
 import Foundation
-import Logging
 import NIO
-import NIOConcurrencyHelpers
-import NIOFoundationCompat
 import XcodeMCPKit
 
 extension ClientMCPRequestExecutor {
@@ -16,18 +13,15 @@ extension ClientMCPRequestExecutor {
         _ = sessionID
         _ = eventLoop
         _ = cancellationHandle
-        let windowQueryService = XcodeWindowQueryService()
-        let route: ControlPlane.Route = if let upstreamIndexOverride {
-            .pinnedUpstream(upstreamIndexOverride)
-        } else {
-            .anyHealthy
-        }
+        let route: ControlPlane.Route = upstreamIndexOverride.map {
+            .pinnedUpstream($0)
+        } ?? .anyHealthy
         do {
             let result = try await sessionManager.liveXcodeListWindowsResult(
                 route: route,
                 requestTimeoutOverride: requestTimeoutOverride
             )
-            return windowQueryService.parseWindowsResult(result.foundationObject)
+            return XcodeWindowQueryService().parseWindowsResult(result.foundationObject)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -38,32 +32,25 @@ extension ClientMCPRequestExecutor {
     func forwardOnce(
         bodyData: Data,
         sessionID: String,
-        requestIDs: [JSONRPC.ID],
-        requestIsBatch: Bool,
+        responseID: JSONRPC.ID,
         shouldRequeueLeaseOnRetryableFailure: @Sendable () -> Bool,
         eventLoop: EventLoop,
         leaseID: LeaseManager.ID,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
         requestTimeoutOverride: TimeAmount? = nil
     ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
-        let parsedRequestJSON: Any
-        do {
-            parsedRequestJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
-        } catch {
+        guard let requestObject = try? JSONRPC.Wire.object(fromData: bodyData) else {
             return .invalidRequest
         }
-
         let descriptor = Self.topLevelRequestDescriptor(
             sessionID: sessionID,
-            parsedRequestJSON: parsedRequestJSON,
-            requestIsBatch: requestIsBatch,
-            requestIDs: requestIDs
+            parsedRequestJSON: requestObject,
+            responseID: responseID
         )
-        let allowsLeaseRetry = Self.isRetryScopedRefreshLeaseRequest(parsedRequestJSON)
         let preferredUpstreamIndices: [Int]?
         let admission: RouteForwardingAdmission?
         switch await sessionManager.toolRoutingDecision(
-            for: parsedRequestJSON,
+            for: requestObject,
             requestTimeoutOverride: requestTimeoutOverride
         ) {
         case .forward(let resolvedUpstreamIndex):
@@ -76,15 +63,9 @@ extension ClientMCPRequestExecutor {
             preferredUpstreamIndices = resolvedUpstreamIndices
             admission = resolvedAdmission
         case .localXcodeListWindows:
-            return .upstreamUnavailable(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
+            return .upstreamUnavailable(responseID: responseID)
         case .reject:
-            return .upstreamUnavailable(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
+            return .upstreamUnavailable(responseID: responseID)
         }
 
         do {
@@ -96,24 +77,18 @@ extension ClientMCPRequestExecutor {
                 preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedOperationLease in
                 cancellationHandle?.activate(operationLease: selectedOperationLease)
-
-                let parsedAttemptRequestJSON: Any
-                do {
-                    parsedAttemptRequestJSON = try JSONSerialization.jsonObject(
-                        with: bodyData,
-                        options: []
-                    )
-                } catch {
+                guard let attemptRequestObject = try? JSONRPC.Wire.object(
+                    fromData: bodyData
+                ) else {
                     return eventLoop.makeSucceededFuture(
                         MCPForwardingService.ResponseResolution.invalidUpstreamResponse
                     )
                 }
-
                 let prepared: MCPForwardingService.PreparedRequest
                 do {
                     guard let candidate = try self.forwardingService.prepareRequest(
                         bodyData: bodyData,
-                        parsedRequestJSON: parsedAttemptRequestJSON,
+                        parsedRequestJSON: attemptRequestObject,
                         sessionID: sessionID,
                         operationLeaseOverride: selectedOperationLease,
                         admission: admission
@@ -142,15 +117,13 @@ extension ClientMCPRequestExecutor {
                             self.sessionManager.handleRequestLeaseTimeout(
                                 leaseID,
                                 sessionID: sessionID,
-                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
+                                requestIDKeys: [responseID.key],
                                 operationLease: prepared.operationLease
                             )
                         }
                     )
                 } catch {
-                    return eventLoop.makeSucceededFuture(
-                        MCPForwardingService.ResponseResolution.invalidUpstreamResponse
-                    )
+                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                 }
 
                 return started.future.map { buffer in
@@ -172,40 +145,25 @@ extension ClientMCPRequestExecutor {
 
             switch resolution {
             case .success(let responseData):
-                // Releasing the slot between retry attempts is this
-                // function's job; the terminal lease transition belongs to
-                // the caller that owns the whole refresh request.
-                if allowsLeaseRetry,
-                    RefreshCodeIssues.Workflow.isRetryableRefreshCodeIssuesFailure(responseData),
+                if RefreshCodeIssues.Workflow.isRetryableRefreshCodeIssuesFailure(responseData),
                     shouldRequeueLeaseOnRetryableFailure()
                 {
                     sessionManager.requeueRequestLease(leaseID)
                 }
                 return .success(responseData)
             case .timeout:
-                return .timeout(
-                    responseIDs: requestIDs,
-                    isBatch: requestIsBatch
-                )
+                return .timeout(responseID: responseID)
             case .invalidUpstreamResponse:
                 return .invalidUpstreamResponse
             }
         } catch is CancellationError {
             cancellationHandle?.cancel(using: sessionManager)
-            return .cancelled(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
+            return .cancelled(responseID: responseID)
         } catch {
-            return .upstreamUnavailable(
-                responseIDs: requestIDs,
-                isBatch: requestIsBatch
-            )
+            return .upstreamUnavailable(responseID: responseID)
         }
     }
 
-    /// The single terminal lease transition for a refresh request,
-    /// regardless of whether the proxy answered locally or forwarded.
     func finishRefreshLease(
         _ leaseID: LeaseManager.ID,
         result: RefreshCodeIssues.Workflow.ForwardAttemptResult
@@ -214,11 +172,7 @@ extension ClientMCPRequestExecutor {
         case .success:
             sessionManager.completeRequestLease(leaseID)
         case .timeout:
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .timedOut,
-                reason: .timedOut
-            )
+            sessionManager.failRequestLease(leaseID, terminalState: .timedOut, reason: .timedOut)
         case .invalidRequest, .invalidUpstreamResponse:
             sessionManager.failRequestLease(
                 leaseID,
@@ -232,53 +186,31 @@ extension ClientMCPRequestExecutor {
                 reason: .upstreamUnavailable
             )
         case .cancelled:
-            // The cancellation handle owns lease teardown on this path.
             break
         }
     }
 
     static func requestLabel(from requestJSON: Any) -> String {
-        if let object = requestJSON as? [String: Any] {
-            let method = (object["method"] as? String) ?? "unknown"
-            if method == "tools/call",
-                let params = object["params"] as? [String: Any],
-                let name = params["name"] as? String
-            {
-                return "\(method):\(name)"
-            }
-            return method
+        guard let object = requestJSON as? [String: Any] else { return "unknown" }
+        let method = (object["method"] as? String) ?? "unknown"
+        if method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let name = params["name"] as? String
+        {
+            return "\(method):\(name)"
         }
-        if let array = requestJSON as? [Any] {
-            return "batch[\(array.count)]"
-        }
-        return "unknown"
+        return method
     }
-
-    static func isRetryScopedRefreshLeaseRequest(_ requestJSON: Any) -> Bool {
-        if let object = requestJSON as? [String: Any] {
-            return RefreshCodeIssues.Request(requestObject: object) != nil
-        }
-        guard let array = requestJSON as? [Any],
-            array.count == 1,
-            let object = array.first as? [String: Any]
-        else {
-            return false
-        }
-        return RefreshCodeIssues.Request(requestObject: object) != nil
-    }
-
 
     static func topLevelRequestDescriptor(
         sessionID: String,
         parsedRequestJSON: Any,
-        requestIsBatch: Bool,
-        requestIDs: [JSONRPC.ID]
+        responseID: JSONRPC.ID?
     ) -> SessionRequestPipeline.Descriptor {
         SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: requestLabel(from: parsedRequestJSON),
-            isBatch: requestIsBatch,
-            expectsResponse: requestIDs.isEmpty == false,
+            expectsResponse: responseID != nil,
             isTopLevelClientRequest: true
         )
     }
@@ -287,8 +219,7 @@ extension ClientMCPRequestExecutor {
         _ refreshRequest: RefreshCodeIssues.Request,
         bodyData: Data,
         sessionID: String,
-        requestIDs: [JSONRPC.ID],
-        requestIsBatch: Bool,
+        responseID: JSONRPC.ID,
         requestTimeoutOverride: TimeAmount? = nil,
         eventLoop: EventLoop,
         leaseID: LeaseManager.ID,
@@ -298,17 +229,16 @@ extension ClientMCPRequestExecutor {
             refreshRequest: refreshRequest,
             bodyData: bodyData,
             sessionID: sessionID,
-            requestIDs: requestIDs,
-            requestIsBatch: requestIsBatch,
+            responseID: responseID,
             requestTimeoutOverride: requestTimeoutOverride,
             eventLoop: eventLoop,
-            windowsProvider: { sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in
+            windowsProvider: { sessionID, eventLoop, upstreamIndex, timeout in
                 try await self.listXcodeWindows(
                     sessionID: sessionID,
                     eventLoop: eventLoop,
                     cancellationHandle: cancellationHandle,
-                    upstreamIndexOverride: upstreamIndexOverride,
-                    requestTimeoutOverride: requestTimeoutOverride
+                    upstreamIndexOverride: upstreamIndex,
+                    requestTimeoutOverride: timeout
                 )
             },
             internalUpstreamChooser: { _ in
@@ -326,88 +256,18 @@ extension ClientMCPRequestExecutor {
                     requestTimeoutOverride: requestTimeoutOverride
                 )
             },
-            forwarder: {
-                bodyData, sessionID, requestIDs, requestIsBatch, shouldRequeueLeaseOnRetryableFailure, eventLoop, requestTimeoutOverride in
+            forwarder: { bodyData, sessionID, responseID, shouldRequeue, eventLoop, timeout in
                 await self.forwardOnce(
                     bodyData: bodyData,
                     sessionID: sessionID,
-                    requestIDs: requestIDs,
-                    requestIsBatch: requestIsBatch,
-                    shouldRequeueLeaseOnRetryableFailure: shouldRequeueLeaseOnRetryableFailure,
+                    responseID: responseID,
+                    shouldRequeueLeaseOnRetryableFailure: shouldRequeue,
                     eventLoop: eventLoop,
                     leaseID: leaseID,
                     cancellationHandle: cancellationHandle,
-                    requestTimeoutOverride: requestTimeoutOverride
+                    requestTimeoutOverride: timeout
                 )
             }
-        )
-    }
-
-    /// Runs one already-classified refresh route directly. A route is a
-    /// pure XcodeRefreshCodeIssuesInFile call extracted by the routing pass,
-    /// so re-entering handle() for it would only replay request gates that
-    /// are no-ops; this performs exactly the lease/cancellation choreography
-    /// the re-entry used to produce.
-    func executeRefreshRoute(
-        _ route: ClientMCPRequestExecutor.RefreshRoute,
-        sessionID: String,
-        prefersEventStream: Bool,
-        eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount?,
-        parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
-    ) async -> ClientMCPRequestExecutor.Resolution {
-        let parsedRoutePayload =
-            (try? JSONSerialization.jsonObject(with: route.bodyData, options: []))
-            ?? [String: Any]()
-        let descriptor = Self.topLevelRequestDescriptor(
-            sessionID: sessionID,
-            parsedRequestJSON: parsedRoutePayload,
-            requestIsBatch: route.requestIsBatch,
-            requestIDs: route.requestIDs
-        )
-        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
-            leaseID: leaseID,
-            sessionID: sessionID,
-            requestIDKeys: route.requestIDs.map(\.key)
-        )
-        if let parentCancellationHandle,
-            parentCancellationHandle.bindChildHandle(cancellationHandle) == false
-        {
-            cancellationHandle.cancel(using: sessionManager)
-            return .empty(status: .accepted, sessionID: sessionID)
-        }
-        sessionManager.activateRequestLease(
-            leaseID,
-            requestIDKey: route.requestIDs.first?.key,
-            upstreamIndex: nil,
-            timeout: requestTimeoutOverride
-                ?? Self.topLevelRequestTimeoutOverride(
-                    method: nil,
-                    defaultSeconds: requestTimeoutSeconds
-                )
-        )
-        let result = await forwardRefreshCodeIssuesRequest(
-            route.request,
-            bodyData: route.bodyData,
-            sessionID: sessionID,
-            requestIDs: route.requestIDs,
-            requestIsBatch: route.requestIsBatch,
-            requestTimeoutOverride: requestTimeoutOverride,
-            eventLoop: eventLoop,
-            leaseID: leaseID,
-            cancellationHandle: cancellationHandle
-        )
-        if Task.isCancelled {
-            cancellationHandle.markCompleted()
-            return .empty(status: .accepted, sessionID: sessionID)
-        }
-        cancellationHandle.markCompleted()
-        finishRefreshLease(leaseID, result: result)
-        return makeResolution(
-            from: result,
-            sessionID: sessionID,
-            prefersEventStream: prefersEventStream
         )
     }
 
@@ -423,50 +283,35 @@ extension ClientMCPRequestExecutor {
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream
             )
-        case .timeout(let responseIDs, let isBatch):
+        case .timeout(let responseID):
             return .mcpError(
-                id: nil,
-                ids: responseIDs,
+                id: responseID,
                 code: -32000,
                 message: "upstream timeout",
-                forceBatchArray: isBatch,
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream
             )
-        case .upstreamUnavailable(let responseIDs, let isBatch):
-            if responseIDs.isEmpty {
-                return .plain(
-                    status: .serviceUnavailable,
-                    body: "upstream unavailable",
-                    sessionID: sessionID
-                )
-            }
+        case .upstreamUnavailable(let responseID):
             return .mcpError(
-                id: nil,
-                ids: responseIDs,
+                id: responseID,
                 code: -32001,
                 message: "upstream unavailable",
-                forceBatchArray: isBatch,
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream
             )
-        case .cancelled(let responseIDs, let isBatch):
+        case .cancelled(let responseID):
             return .mcpError(
-                id: nil,
-                ids: responseIDs,
+                id: responseID,
                 code: -32800,
                 message: "request cancelled",
-                forceBatchArray: isBatch,
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream
             )
         case .invalidRequest:
             return .mcpError(
                 id: nil,
-                ids: [],
-                code: -32700,
-                message: "invalid json",
-                forceBatchArray: false,
+                code: -32600,
+                message: "invalid request",
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream
             )
@@ -505,5 +350,4 @@ extension ClientMCPRequestExecutor {
         )
         handle.cancel(using: sessionManager)
     }
-
 }

@@ -833,7 +833,6 @@ extension RuntimeCoordinator {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: internalSessionID,
             label: label,
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )

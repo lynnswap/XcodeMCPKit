@@ -2198,7 +2198,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-retired-slot",
             label: "tools/call:GenericTool",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -2582,79 +2581,6 @@ struct RuntimeCoordinatorTests {
         _ = try await responseFuture.get()
     }
 
-    @Test func sessionManagerRoutesServerRequestFromMixedUpstreamBatchThroughTracker()
-        async throws
-    {
-        let upstream = TestUpstreamClient()
-        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
-        defer { fixture.shutdownAndWait() }
-        let eventLoop = fixture.eventLoop
-        let manager = fixture.manager
-
-        let sessionID = "session-mixed-upstream-batch"
-        let session = manager.session(id: sessionID)
-        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
-
-        let originalID = JSONRPC.ID(any: NSNumber(value: 42))!
-        let responseFuture = session.router.registerRequest(
-            idKey: originalID.key,
-            on: eventLoop
-        )
-        let upstreamID = manager.assignUpstreamID(
-            sessionID: sessionID,
-            originalID: originalID,
-            upstreamIndex: 0
-        )
-
-        let batch: [[String: Any]] = [
-            [
-                "jsonrpc": "2.0",
-                "id": NSNumber(value: upstreamID),
-                "result": ["ok": true],
-            ],
-            [
-                "jsonrpc": "2.0",
-                "id": "server-request-1",
-                "method": "sampling/createMessage",
-                "params": [String: Any](),
-            ],
-        ]
-        manager.routeUpstreamMessage(
-            try JSONSerialization.data(withJSONObject: batch, options: []),
-            upstreamIndex: 0
-        )
-
-        let response = try decodeJSON(from: try await responseFuture.get())
-        #expect((response["id"] as? NSNumber)?.intValue == 42)
-        #expect((response["result"] as? [String: Any])?["ok"] as? Bool == true)
-
-        let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
-        let route = try #require(session.serverRequestTracker.lookup(clientID: clientID))
-        #expect(route.upstreamIndex == 0)
-        #expect(route.upstreamID.key == "server-request-1")
-
-        let clientResponse: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": clientID.value.foundationObject,
-            "result": ["accepted": true],
-        ]
-        let forwardingResult = try await manager.forwardServerRequestResponse(
-            responseData: try JSONSerialization.data(withJSONObject: clientResponse, options: []),
-            sessionID: sessionID,
-            responseID: clientID,
-            on: eventLoop
-        ).get()
-        #expect(forwardingResult == .accepted)
-        #expect(session.serverRequestTracker.lookup(clientID: clientID) == nil)
-
-        let forwarded = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
-        let forwardedObject = try #require(
-            JSONSerialization.jsonObject(with: forwarded, options: []) as? [String: Any]
-        )
-        #expect(forwardedObject["id"] as? String == "server-request-1")
-        #expect((forwardedObject["result"] as? [String: Any])?["accepted"] as? Bool == true)
-    }
-
     @Test func sessionManagerCompletesMalformedMappedUpstreamResponseWithError()
         async throws
     {
@@ -2845,7 +2771,6 @@ struct RuntimeCoordinatorTests {
             descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: secondSessionID,
                 label: "tools/call:owner",
-                isBatch: false,
                 expectsResponse: true,
                 isTopLevelClientRequest: true
             )
@@ -5708,7 +5633,6 @@ struct RuntimeCoordinatorTests {
         let preferredDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-catalog-cooldown-preferred",
             label: "tools/call:BuildProject",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -5734,7 +5658,6 @@ struct RuntimeCoordinatorTests {
         let genericDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-catalog-cooldown-generic",
             label: "tools/call:XcodeRead",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -6930,7 +6853,6 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: workspaceBRequest) == 1)
         #expect(manager.preferredUpstreamIndex(for: genericTabARequest) == nil)
         #expect(manager.preferredUpstreamIndex(for: genericWorkspaceBRequest) == nil)
-        #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
     }
 
     @Test func sessionManagerXcodeListWindowsRetriesSiblingBeforeDroppingProcessRoute()
@@ -7230,7 +7152,7 @@ struct RuntimeCoordinatorTests {
             )
         )
         let decision = await decisionTask.value
-        guard case .reject(let errors, _) = decision else {
+        guard case .reject(let errors) = decision else {
             Issue.record("expected duplicate workspace owner to reject")
             return
         }
@@ -7511,7 +7433,7 @@ struct RuntimeCoordinatorTests {
             )
         )
         let ambiguousDecision = await ambiguousTask.value
-        guard case .reject(let errors, _) = ambiguousDecision else {
+        guard case .reject(let errors) = ambiguousDecision else {
             Issue.record("expected raw tab collision within one process to reject")
             return
         }
@@ -8175,7 +8097,7 @@ struct RuntimeCoordinatorTests {
             )
         )
         let ambiguousDecision = await ambiguousTask.value
-        guard case .reject(let errors, _) = ambiguousDecision else {
+        guard case .reject(let errors) = ambiguousDecision else {
             Issue.record("expected raw tab-only request to reject")
             return
         }
@@ -8610,7 +8532,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:LongRunningBuild",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -8629,7 +8550,6 @@ struct RuntimeCoordinatorTests {
         let routedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-routed",
             label: "tools/call:BuildProject",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -9151,218 +9071,6 @@ struct RuntimeCoordinatorTests {
         #expect(await upstream1.sentCount() == 0)
     }
 
-    @Test func publicXcodeListWindowsMixedNonToolBatchIsRejected() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 620, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0]),
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (target, 0, [toolDescriptor(name: "XcodeListWindows")]),
-            ]
-        )
-
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: [
-                    toolsCallObject(
-                        id: 119,
-                        name: "XcodeListWindows",
-                        arguments: [:]
-                    ),
-                    [
-                        "jsonrpc": "2.0",
-                        "id": 120,
-                        "method": "resources/list",
-                    ],
-                ]
-            )
-        )
-
-        guard case .reject(let errors, let forceBatchArray) = decision else {
-            Issue.record("expected mixed XcodeListWindows batch to reject")
-            return
-        }
-        #expect(errors.map(\.id.key) == ["119"])
-        #expect(forceBatchArray)
-    }
-
-    @Test func publicXcodeListWindowsNotificationDoesNotRejectOtherRequest() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 621, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0]),
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (
-                    target,
-                    0,
-                    [
-                        toolDescriptor(name: "XcodeListWindows"),
-                        toolDescriptor(name: "XcodeRead"),
-                    ]
-                ),
-            ]
-        )
-
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: [
-                    toolsCallObject(
-                        id: nil,
-                        name: "XcodeListWindows",
-                        arguments: [:]
-                    ),
-                    toolsCallObject(
-                        id: 121,
-                        name: "XcodeRead",
-                        arguments: ["path": "/tmp/file.swift"]
-                    ),
-                ]
-            )
-        )
-
-        let preferredUpstreamIndices = try #require(decision.preferredUpstreamIndices)
-        #expect(preferredUpstreamIndices == [0])
-    }
-
-    @Test func publicXcodeListWindowsWithNotificationForwardsWholeBatch() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 622, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0]),
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (
-                    target,
-                    0,
-                    [
-                        toolDescriptor(name: "XcodeListWindows"),
-                        toolDescriptor(name: "XcodeRead"),
-                    ]
-                ),
-            ]
-        )
-
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: [
-                    toolsCallObject(
-                        id: 122,
-                        name: "XcodeListWindows",
-                        arguments: [:]
-                    ),
-                    toolsCallObject(
-                        id: nil,
-                        name: "XcodeRead",
-                        arguments: ["path": "/tmp/file.swift"]
-                    ),
-                ]
-            )
-        )
-
-        let preferredUpstreamIndices = try #require(decision.preferredUpstreamIndices)
-        #expect(preferredUpstreamIndices == [0])
-    }
-
-    @Test func ownerBoundBatchRejectsToolMissingFromOwnerProcess() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target0 = xcodeProcessTarget(processID: 616, xcodeVersion: "27.0")
-        let target1 = xcodeProcessTarget(processID: 617, xcodeVersion: "26.6")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
-                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        manager.markUpstreamInitialized(upstreamIndex: 1)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [toolDescriptor(name: "Xcode27OnlyTool")]),
-            ]
-        )
-        #expect(
-            manager.recordXcodeWindowOwners(
-                from: try jsonValue([
-                    "structuredContent": [
-                        "message": "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace",
-                    ],
-                ]),
-                upstreamIndex: 0
-            )
-        )
-
-        let decision = await manager.toolRoutingDecision(
-            for: [
-                toolsCallObject(
-                    id: 112,
-                    name: "BuildProject",
-                    arguments: ["tabIdentifier": "tab-a"]
-                ),
-                toolsCallObject(
-                    id: 113,
-                    name: "Xcode27OnlyTool",
-                    arguments: [:]
-                ),
-            ],
-            requestTimeoutOverride: .seconds(2)
-        )
-
-        guard case .reject(let errors, let forceBatchArray) = decision else {
-            Issue.record("expected batch with owner-missing tool to reject")
-            return
-        }
-        #expect(forceBatchArray)
-        #expect(errors.map(\.id.key) == ["112", "113"])
-        #expect(errors.first?.message.contains("not available") == true)
-    }
-
     @Test func ownerBoundToolRefreshesWindowsOnCacheMissBeforeRouting() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -9696,11 +9404,10 @@ struct RuntimeCoordinatorTests {
         )
 
         let decision = await task.value
-        guard case .reject(let errors, let forceBatchArray) = decision else {
+        guard case .reject(let errors) = decision else {
             Issue.record("expected unresolved owner-bound request to reject")
             return
         }
-        #expect(forceBatchArray == false)
         #expect(errors.map(\.id.key) == ["103"])
         #expect(errors.first?.message.contains("unable to resolve Xcode window owner") == true)
     }
@@ -9751,108 +9458,12 @@ struct RuntimeCoordinatorTests {
             requestTimeoutOverride: .seconds(2)
         )
 
-        guard case .reject(let errors, let forceBatchArray) = decision else {
+        guard case .reject(let errors) = decision else {
             Issue.record("expected missing owner capability to reject")
             return
         }
-        #expect(forceBatchArray == false)
         #expect(errors.map(\.id.key) == ["104"])
         #expect(errors.first?.message.contains("not available") == true)
-    }
-
-    @Test func ownerBoundBatchRejectsMixedOwnersButPinsSingleOwner() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target0 = xcodeProcessTarget(processID: 650, xcodeVersion: "27.0")
-        let target1 = xcodeProcessTarget(processID: 651, xcodeVersion: "26.6")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target0, upstreamIndices: [0]),
-                XcodeProcessRoute(target: target1, upstreamIndices: [1]),
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        manager.markUpstreamInitialized(upstreamIndex: 1)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (target0, 0, [ownerBoundToolDescriptor(name: "BuildProject")]),
-                (target1, 1, [ownerBoundToolDescriptor(name: "BuildProject")]),
-            ]
-        )
-        #expect(
-            manager.recordXcodeWindowOwners(
-                from: try jsonValue([
-                    "structuredContent": [
-                        "message": "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace\n"
-                            + "* tabIdentifier: tab-b, workspacePath: /Work/B.xcworkspace",
-                    ],
-                ]),
-                upstreamIndex: 0
-            )
-        )
-        #expect(
-            manager.recordXcodeWindowOwners(
-                from: try jsonValue([
-                    "structuredContent": [
-                        "message": "* tabIdentifier: tab-c, workspacePath: /Work/C.xcworkspace",
-                    ],
-                ]),
-                upstreamIndex: 1
-            )
-        )
-
-        let singleOwnerDecision = await manager.toolRoutingDecision(
-            for: [
-                toolsCallObject(
-                    id: 105,
-                    name: "BuildProject",
-                    arguments: ["tabIdentifier": "tab-a"]
-                ),
-                toolsCallObject(
-                    id: 106,
-                    name: "BuildProject",
-                    arguments: ["workspacePath": "/Work/B.xcworkspace"]
-                ),
-            ],
-            requestTimeoutOverride: .seconds(2)
-        )
-        let preferredUpstreamIndices = try #require(singleOwnerDecision.preferredUpstreamIndices)
-        #expect(preferredUpstreamIndices == [0])
-
-        let mixedDecision = await manager.toolRoutingDecision(
-            for: [
-                toolsCallObject(
-                    id: 107,
-                    name: "BuildProject",
-                    arguments: ["tabIdentifier": "tab-a"]
-                ),
-                toolsCallObject(
-                    id: 108,
-                    name: "BuildProject",
-                    arguments: ["tabIdentifier": "tab-c"]
-                ),
-                toolsCallObject(
-                    id: 114,
-                    name: "SharedTool",
-                    arguments: [:]
-                ),
-            ],
-            requestTimeoutOverride: .seconds(2)
-        )
-        guard case .reject(let errors, let forceBatchArray) = mixedDecision else {
-            Issue.record("expected mixed-owner batch to reject")
-            return
-        }
-        #expect(forceBatchArray)
-        #expect(errors.map(\.id.key) == ["107", "108", "114"])
-        #expect(errors.allSatisfy { $0.message.contains("mixed Xcode window owners") })
     }
 
     @Test func sessionManagerLiveXcodeListWindowsCancellationCancelsLastWaiterLoad()
@@ -10186,7 +9797,11 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
-        config.loadFileConfig()
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        )
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -10218,22 +9833,19 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let publicServer = XcodeMCPProxyServer(
-            configuration: .init(
-                configurationFilePath: configPath,
-                featurePolicy: .init(prewarmToolsList: false),
-                initializeHandshake: .init(
-                    clientInfo: .init(name: "typed-proxy"),
-                    capabilities: [
-                        "sampling": [
-                            "enabled": true,
-                        ],
-                    ]
-                )
-            )
+        let publicConfiguration = XcodeMCPProxyServerConfiguration(
+            configurationFileURL: URL(fileURLWithPath: configPath),
+            initializeHandshake: .init(
+                clientInfo: .init(name: "typed-proxy"),
+                capabilities: [
+                    "sampling": [
+                        "enabled": true,
+                    ],
+                ]
+            ),
+            featurePolicy: .init(prewarmToolsList: false)
         )
-        let config = publicServer.config
-        try await publicServer.shutdown()
+        let config = try ProxyConfig.resolving(publicConfiguration)
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -10271,7 +9883,11 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
-        config.loadFileConfig()
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        )
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -10307,9 +9923,7 @@ struct RuntimeCoordinatorTests {
         #expect(version == "1.2.3")
     }
 
-    @Test func sessionManagerFallsBackToDefaultInitializeParamsWhenConfigFileIsInvalid()
-        async throws
-    {
+    @Test func strictConfigLoaderRejectsInvalidInitializeConfiguration() async throws {
         let configPath = try makeTempProxyConfigFile(
             """
             [upstream_handshake
@@ -10318,24 +9932,11 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        var config = makeConfig(requestTimeout: 5)
-        config.configPath = configPath
-        config.loadFileConfig()
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
-
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
-        let params = try #require(object?["params"] as? [String: Any])
-        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
-
-        #expect(params["protocolVersion"] as? String == "2025-06-18")
-        #expect(clientInfo["name"] as? String == InitializeHandshakeParams.defaultProxyClientName())
-        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
+        #expect(throws: ProxyConfig.File.LoadError.self) {
+            _ = try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        }
     }
 
     @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
@@ -10357,7 +9958,11 @@ struct RuntimeCoordinatorTests {
         let initializeCleanupCompleted = TestSignal()
         var config = makeConfig(requestTimeout: 0.1)
         config.configPath = configPath
-        config.loadFileConfig()
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        )
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
@@ -10480,7 +10085,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -10512,7 +10116,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/list",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -10655,7 +10258,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -10687,7 +10289,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/list",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -11428,7 +11029,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-quarantine-recovery",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -11476,7 +11076,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -11516,7 +11115,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/list",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -11612,7 +11210,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -11637,7 +11234,6 @@ struct RuntimeCoordinatorTests {
         let preferredDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-preferred",
             label: "tools/call:XcodeListWindows",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -11658,7 +11254,6 @@ struct RuntimeCoordinatorTests {
         let genericDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-generic",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -11717,7 +11312,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-preferred-unusable",
             label: "tools/call:BuildProject",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -12464,7 +12058,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-recovery-trigger",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -12523,7 +12116,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -12547,7 +12139,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -12589,7 +12180,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -12651,7 +12241,6 @@ struct RuntimeCoordinatorTests {
             descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: "session-terminal-lease",
                 label: "tools/call:DocumentationSearch",
-                isBatch: false,
                 expectsResponse: true,
                 isTopLevelClientRequest: true
             )
@@ -12692,7 +12281,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -12932,7 +12520,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -12956,7 +12543,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13020,7 +12606,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-probe-failure",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13077,7 +12662,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-timeout-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13101,7 +12685,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-timeout-queued",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13156,7 +12739,6 @@ struct RuntimeCoordinatorTests {
             descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: "session-debug-reset",
                 label: "tools/call:DocumentationSearch",
-                isBatch: false,
                 expectsResponse: true,
                 isTopLevelClientRequest: true
             )
@@ -13272,7 +12854,6 @@ struct RuntimeCoordinatorTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13296,7 +12877,6 @@ struct RuntimeCoordinatorTests {
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13325,7 +12905,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-bounded-history",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13357,7 +12936,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-requeue",
             label: "tools/call:XcodeRefreshCodeIssuesInFile",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13389,7 +12967,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-abandon-history",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13434,7 +13011,6 @@ struct RuntimeCoordinatorTests {
         let firstDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-race-1",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13459,7 +13035,6 @@ struct RuntimeCoordinatorTests {
         let secondDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-race-2",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13497,7 +13072,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-fail-race",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13536,7 +13110,6 @@ struct RuntimeCoordinatorTests {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-reset-race",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13574,7 +13147,6 @@ struct RuntimeCoordinatorTests {
         let firstDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-a",
             label: "tools/call:DocumentationSearch",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13598,7 +13170,6 @@ struct RuntimeCoordinatorTests {
         let secondDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-a",
             label: "tools/call:ExecuteSnippet",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -13621,7 +13192,6 @@ struct RuntimeCoordinatorTests {
         let thirdDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-b",
             label: "tools/call:XcodeListWindows",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )

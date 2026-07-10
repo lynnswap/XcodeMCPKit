@@ -1,153 +1,132 @@
 # XcodeMCPProxyKit
 
-Swift API for embedding the Xcode MCP proxy server, STDIO adapter, and source
-installer flow.
+Swift API for embedding the Xcode MCP proxy server or its Streamable HTTP to
+STDIO adapter.
 
-## Overview
+Use the bundled executables when a library host is unnecessary:
 
-Use `XcodeMCPProxyKit` when Swift code needs to host the proxy, build a custom
-launcher around the same command-line behavior as `xcode-mcp-proxy-server`, or
-compose the STDIO adapter and installer flows.
+- `xcode-mcp-proxy-server` runs the HTTP proxy.
+- `xcode-mcp-proxy` adapts MCP STDIO to a running proxy.
+- `xcode-mcp-proxy-install` installs those executables. Installer internals are
+  not a public library API.
 
-The public API includes:
+## Server
 
-- `XcodeMCPProxyServer`, the embeddable proxy server lifecycle object
-- `XcodeMCPProxyServerConfiguration`, the embeddable server configuration
-- `XcodeMCPProxyServer.resolveLaunchPlan(...)` for launcher argv/environment
-  normalization
-- `XcodeMCPProxyStdioAdapter`, the STDIO compatibility adapter
-- `XcodeMCPProxyStdioAdapterConfiguration`, the adapter configuration
-- `XcodeMCPProxyAdapterEndpointResolver`, the adapter endpoint resolver
-- `XcodeMCPProxyAdapterEndpointResolutionOptions`, endpoint resolution inputs
-- `XcodeMCPProxyInstaller`, the install plan and copy/build API
-
-For most users, the root README's `xcode-mcp-proxy-server` command is simpler.
-Use this API when the proxy has to be embedded in another Swift process or when
-a custom launcher needs the same parsing, dry-run, force-restart, and version
-behavior as the bundled executables.
-
-## Server Quickstart
-
-Depend on the `XcodeMCPProxyKit` library product, then construct the server
-directly:
+Construct one server, start it once, and shut it down explicitly:
 
 ```swift
 import XcodeMCPProxyKit
 
-let config = XcodeMCPProxyServerConfiguration(
-    bindAddress: .localhost(port: 8765),
-    upstream: .defaultMCPBridge(processesPerXcode: 1),
-    limits: .init(maxBodyBytes: 1_048_576, requestTimeout: 300),
-    discovery: .init(fileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-proxy.json")),
-    approvalPolicy: .manual
+let server = XcodeMCPProxyServer(
+    configuration: .init(
+        bindAddress: .localhost(port: 0),
+        upstream: .defaultMCPBridge(processesPerXcode: 1),
+        requestTimeout: .seconds(300),
+        discovery: .defaultLocation,
+        approvalPolicy: .manual
+    )
 )
 
-let server = XcodeMCPProxyServer(configuration: config)
-let endpoint = try server.startAndWriteDiscovery()
+let endpoint = try await server.start()
 print("Listening on \(endpoint.url)")
 
-let waiter = Task {
-    try await server.wait()
-}
+let status = await server.snapshot()
+print("Lifecycle: \(status.phase)")
 
-// Keep your application alive here, then shut down on your own signal.
 try await server.shutdown()
-try await waiter.value
 ```
 
-After startup, MCP clients can connect to `http://<host>:<port>/mcp`. The
-discovery file is written by `startAndWriteDiscovery()` for local adapters that
-look up the running HTTP endpoint.
+`start()` returns only after the listener, runtime, and requested discovery
+record are ready. A discovery write failure unwinds acquired resources and
+throws. Use `waitUntilShutdown()` when another task owns the shutdown signal.
 
-## Configuration
+`shutdown()` is idempotent and is the graceful completion boundary. It returns
+after listener and accepted channels, runtime activity, permission automation,
+and event-loop resources have stopped. A server instance is one-shot; construct
+a new instance after shutdown.
 
-Use `XcodeMCPProxyServerConfiguration` to configure the server:
+### Server configuration
 
-- `bindAddress` chooses the HTTP bind address.
-- `upstream` chooses the upstream MCP bridge and process count.
-- `limits` bounds request timeout and body size.
-- `discovery` overrides the endpoint discovery file.
-- `approvalPolicy` controls Xcode permission dialog automation.
-- `featurePolicy.refreshCodeIssuesMode` selects proxy diagnostics or upstream
-  forwarding for `XcodeRefreshCodeIssuesInFile`.
-- `toolPolicy.disabledToolNames` hides tools from `tools/list` and rejects
-  matching `tools/call` requests locally.
-- `initializeHandshake` overrides the protocol version, client info, or
-  capabilities sent when the proxy initializes upstream `mcpbridge` processes.
+`XcodeMCPProxyServerConfiguration` exposes the supported embedding choices:
 
-The server can also load TOML-backed initialize overrides and disabled tools
-when `configurationFilePath` is set. If typed configuration and a file are both
-set, typed values override the matching file-backed disabled-tools and
-initialize handshake fields.
+- `bindAddress`: host and port; port `0` requests an ephemeral port.
+- `upstream`: the default `xcrun mcpbridge` invocation or an explicit command.
+- `maxBodyBytes`: positive maximum HTTP request body size.
+- `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
+- `configurationFileURL`: optional TOML file. An explicit unreadable or invalid
+  file makes `start()` fail before runtime resources are acquired.
+- `toolPolicy` and `initializeHandshake`: typed overrides for file-backed tool
+  visibility and upstream initialization.
+- `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
+- `approvalPolicy`: manual or automatic Xcode permission handling.
+- `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
 
 ```swift
+import Foundation
 import XcodeMCPKit
 import XcodeMCPProxyKit
 
-let config = XcodeMCPProxyServerConfiguration(
-    configurationFilePath: "/etc/xcode-mcp/proxy.toml",
-    toolPolicy: .init(
-        disabledToolNames: ["RunAllTests", "RunSomeTests"]
-    ),
+let configuration = XcodeMCPProxyServerConfiguration(
+    configurationFileURL: URL(fileURLWithPath: "/etc/xcode-mcp/proxy.toml"),
+    toolPolicy: .init(disabledToolNames: ["RunAllTests"]),
     initializeHandshake: .init(
         clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
-        capabilities: [
-            "roots": [
-                "listChanged": true,
-            ],
-        ]
+        capabilities: ["roots": ["listChanged": true]]
     )
 )
 ```
 
-The `capabilities` dictionary uses `MCPJSONValue` from `XcodeMCPKit`, so Swift
-JSON literals remain concise while proxy internals still translate to the
-runtime config format.
+`snapshot()` returns a sanitized aggregate read model: lifecycle phase,
+endpoint, proxy/catalog readiness, queued request count, and per-upstream
+health. It does not expose traffic payloads, tool arguments, or stderr.
 
-## Lifecycle
+## STDIO adapter
 
-`start()` binds HTTP channels, starts the proxy runtime, and returns the
-resolved ``XcodeMCPProxyServer/Endpoint``. `startAndWriteDiscovery()` does the
-same startup work, then writes the endpoint discovery file and logs a startup
-summary.
-`wait()` suspends until the listening channels close. `shutdown()` stops
-permission automation, closes listening and accepted channels, shuts down the
-runtime, and terminates the event loop group.
-
-Use one `XcodeMCPProxyServer` per proxy server instance. Create a new instance
-after shutdown instead of restarting the same object.
-
-## Launch Plans
-
-Launchers that want the same behavior as `xcode-mcp-proxy-server` can resolve a
-high-level launch plan from argv and environment:
+The adapter resolves one HTTP endpoint when it is constructed, forwards STDIO
+messages after `start()`, and owns session recovery:
 
 ```swift
-let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
-    arguments: CommandLine.arguments,
-    environment: ProcessInfo.processInfo.environment
+import Foundation
+import XcodeMCPProxyKit
+
+let adapter = try XcodeMCPProxyStdioAdapter(
+    configuration: .init(
+        endpoint: .url(URL(string: "http://localhost:8765/mcp")!),
+        requestTimeout: .seconds(300)
+    )
 )
 
-switch plan.action {
-case .showHelp:
-    print(plan.usage)
-case .showVersion:
-    print(plan.versionLine)
-case .dryRun:
-    print(plan.resolvedDryRunCommandLine ?? "")
-case .start:
-    let server = XcodeMCPProxyServer(configuration: plan.configuration!)
-    _ = try server.startAndWriteDiscovery()
-    try await server.wait()
-}
+try await adapter.start()
+let state = await adapter.connectionState()
+print("Connection: \(state.phase)")
+
+await adapter.stop()
 ```
 
-`LaunchPlan` exposes the resolved server `XcodeMCPProxyServerConfiguration`, normalized
-`LaunchOptions`, stable dry-run command line, and display text. Port-in-use
-messages are represented by `XcodeMCPProxyServer.PortInUseError`, and product
-version information is available through `XcodeMCPProxyServer.productMetadata`.
+Endpoint policies are:
 
-Executable-style hosts can also run the server command behavior directly:
+- `.url(URL)` for one concrete HTTP or HTTPS endpoint.
+- `.discoveryFile(URL)` for one explicit proxy discovery record.
+- `.proxyDefault(environment:)` for
+  `XCODE_MCP_PROXY_ENDPOINT` → default discovery file →
+  `http://localhost:8765/mcp` resolution.
+
+`start()` is one-shot. `waitUntilStopped()` waits for EOF-driven or explicit
+shutdown. `stop()` is idempotent and returns only after input, output, pending
+requests, event delivery, recovery, network activity, and file-descriptor I/O
+have reached terminal state.
+
+When a request carrying the active MCP session ID is rejected with HTTP 404,
+the adapter shares one bounded recovery, performs a hidden fresh initialize,
+and never writes that internal response to STDIO. A request is replayed at most
+once and only when the transport proves it was rejected before processing.
+Delivery-unknown operations are not replayed. Connection state is available
+through `connectionState()`.
+
+## Command facades
+
+Swift hosts that need executable-compatible argument parsing can use the two
+public `run(...)` facades without depending on parser or launch-plan types:
 
 ```swift
 let exitCode = await XcodeMCPProxyServer.run(
@@ -158,69 +137,17 @@ let exitCode = await XcodeMCPProxyServer.run(
 )
 ```
 
-## STDIO Adapter
+`XcodeMCPProxyStdioAdapter.run(...)` has the same callback and exit-code shape.
+The adapter CLI accepts `--url` as its only explicit endpoint flag.
+`--request-timeout 0` disables its timeout; negative, non-finite, or nonnumeric
+values are rejected. The removed `--stdio` spelling is not redirected.
 
-`XcodeMCPProxyStdioAdapter` forwards MCP STDIO messages to a running
-Streamable HTTP proxy endpoint. The endpoint resolver uses this order:
+The installer remains command-only:
 
-1. Explicit URL, such as a CLI `--url` value.
-2. `XCODE_MCP_PROXY_ENDPOINT`.
-3. The discovery file written by `XcodeMCPProxyServer.startAndWriteDiscovery()`.
-4. `http://localhost:8765/mcp`.
-
-```swift
-import Foundation
-import XcodeMCPProxyKit
-
-let endpoint = try XcodeMCPProxyAdapterEndpointResolver().resolve(
-    .init(
-        explicitURL: nil,
-        environment: ProcessInfo.processInfo.environment
-    )
-)
-
-let adapter = XcodeMCPProxyStdioAdapter(
-    endpoint: endpoint,
-    requestTimeout: 300,
-    input: .standardInput,
-    output: .standardOutput
-)
-
-await adapter.start()
-await adapter.wait()
+```bash
+xcode-mcp-proxy-install
+xcode-mcp-proxy-install --dry-run
 ```
 
-The adapter preserves the proxy's modern MCP HTTP contract: initialize is sent
-without a session header, subsequent POST/GET/DELETE requests include the
-server-issued `MCP-Session-Id`, and the negotiated
-`MCP-Protocol-Version` is forwarded after initialize.
-
-Command-line hosts can run the same adapter behavior with
-`XcodeMCPProxyStdioAdapter.run(arguments:environment:stdout:stderr:)`.
-
-## Installer
-
-`XcodeMCPProxyInstaller` provides the source install composition used by
-`xcode-mcp-proxy-install`. It installs the STDIO adapter and proxy server
-binaries:
-
-```swift
-import Foundation
-import XcodeMCPProxyKit
-
-let installer = XcodeMCPProxyInstaller(
-    configuration: .init(prefix: "\(NSHomeDirectory())/.local", dryRun: true)
-)
-let plan = installer.plan(
-    executableURL: URL(fileURLWithPath: "/path/to/xcode-mcp-proxy-install")
-)
-print(plan.dryRunLines.joined(separator: "\n"))
-```
-
-`--bindir` has priority over `--prefix`; otherwise the default destination is
-`~/.local/bin`. A non-dry-run install builds release products when the installer
-is running from a SwiftPM `.build` directory and then copies
-`XcodeMCPProxyInstaller.binaryNames` into the resolved bin directory.
-
-Command-line hosts can run the installer behavior with
-`XcodeMCPProxyInstaller.run(arguments:environment:stdout:stderr:)`.
+See [the breaking migration guide](../../Docs/migration-2026-07.md) for old to
+new symbol and CLI mappings.

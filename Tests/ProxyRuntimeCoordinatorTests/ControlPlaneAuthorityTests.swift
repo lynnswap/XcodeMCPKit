@@ -524,7 +524,6 @@ struct ControlPlaneAuthorityTests {
             descriptor: .init(
                 sessionID: "generation-race",
                 label: "tools/list",
-                isBatch: false,
                 expectsResponse: true,
                 isTopLevelClientRequest: true
             ),

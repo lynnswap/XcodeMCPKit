@@ -195,11 +195,10 @@ struct ToolSurfaceTests {
             options: []
         )
         let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
+            method: "tools/list",
             toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: ["1": "tools/list"],
-            normalizationToolsListResponseIDKey: "1",
+            originalID: JSONRPC.ID(any: NSNumber(value: 1)),
+            cachesToolsListResult: true,
             upstreamData: upstreamData
         )
 
@@ -236,11 +235,10 @@ struct ToolSurfaceTests {
             options: []
         )
         let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
+            method: "tools/list",
             toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: ["1": "tools/list"],
-            normalizationToolsListResponseIDKey: "1",
+            originalID: JSONRPC.ID(any: NSNumber(value: 1)),
+            cachesToolsListResult: true,
             upstreamData: upstreamData
         )
 
@@ -251,68 +249,6 @@ struct ToolSurfaceTests {
         let tools = try #require(result["tools"] as? [[String: Any]])
         #expect(tools.isEmpty)
     }
-
-    @Test func toolSurfaceNormalizesMixedBatchUsingCatalogFromSamePayload() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
-        )
-
-        let upstreamData = try JSONSerialization.data(
-            withJSONObject: [
-                [
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": [
-                        "tools": [
-                            [
-                                "name": "DocumentationSearch",
-                                "outputSchema": [
-                                    "type": "object",
-                                ],
-                            ],
-                        ],
-                    ],
-                ],
-                [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": [
-                        "content": [
-                            [
-                                "type": "text",
-                                "text": "{\"answer\":\"ok\"}",
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-            options: []
-        )
-        let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
-            toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: [
-                "1": "tools/list",
-                "2": "tools/call",
-            ],
-            responseToolNamesByIDKey: [
-                "2": "DocumentationSearch",
-            ],
-            normalizationToolsListResponseIDKey: "1",
-            upstreamData: upstreamData
-        )
-
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [[String: Any]]
-        )
-        let callResult = try #require(payload.last?["result"] as? [String: Any])
-        let structuredContent = try #require(callResult["structuredContent"] as? [String: Any])
-        #expect(structuredContent["answer"] as? String == "ok")
-    }
-
 
     @Test func toolSurfaceNormalizesUsingSourceProcessCatalog() throws {
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())

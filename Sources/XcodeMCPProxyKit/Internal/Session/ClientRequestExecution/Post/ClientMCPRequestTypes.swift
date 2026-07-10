@@ -43,10 +43,8 @@ extension ClientMCPRequestExecutor {
         )
         case mcpError(
             id: JSONRPC.ID?,
-            ids: [JSONRPC.ID],
             code: Int,
             message: String,
-            forceBatchArray: Bool,
             sessionID: String?,
             prefersEventStream: Bool
         )
@@ -64,20 +62,6 @@ extension ClientMCPRequestExecutor {
     struct Operation {
         let future: EventLoopFuture<ClientMCPRequestExecutor.Resolution>
         let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
-    }
-
-    struct RefreshRoute: Sendable {
-        let request: RefreshCodeIssues.Request
-        let bodyData: Data
-        let requestIDs: [JSONRPC.ID]
-        let requestIsBatch: Bool
-    }
-
-    struct RefreshRouting: Sendable {
-        let refreshRoutes: [ClientMCPRequestExecutor.RefreshRoute]
-        let remainingBodyData: Data?
-        let remainingRequestIDs: [JSONRPC.ID]
-        let remainingLocalResponseData: Data?
     }
 
     enum CancellationSource: String, Sendable {

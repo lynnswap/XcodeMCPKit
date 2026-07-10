@@ -24,6 +24,15 @@ final class SessionContext: Sendable {
             },
             sendNotification: { [weak notificationHub] data in
                 notificationHub?.broadcast(data)
+            },
+            onNotificationBufferOverflow: { droppedNotificationCount in
+                ProxyLogging.make("http.session").warning(
+                    "SSE notification buffer overflow",
+                    metadata: [
+                        "session": .string(id),
+                        "dropped_notifications": .string("\(droppedNotificationCount)"),
+                    ]
+                )
             }
         )
     }
@@ -101,12 +110,14 @@ enum ServerRequestResponseForwardingResult: Sendable, Equatable {
 protocol RuntimeSessionLifecyclePort: Sendable {
     func start()
     func debugReset()
+    func cancelForDeinit()
     func shutdown() async
 }
 
 protocol RuntimeSessionRegistryPort: Sendable {
     func session(id: String) -> SessionContext
     func hasSession(id: String) -> Bool
+    func isSessionInitialized(id: String) -> Bool
     func negotiatedProtocolVersion(id: String) -> String?
     func markNotificationClientConnected(sessionID: String)
     func removeSession(id: String)
@@ -239,9 +250,14 @@ protocol RuntimeCoordinating:
 
 extension RuntimeSessionLifecyclePort {
     func start() {}
+    func cancelForDeinit() {}
 }
 
 extension RuntimeSessionRegistryPort {
+    func isSessionInitialized(id: String) -> Bool {
+        negotiatedProtocolVersion(id: id) != nil
+    }
+
     func negotiatedProtocolVersion(id _: String) -> String? {
         nil
     }
@@ -796,6 +812,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         sessionRegistry.hasSession(id: id)
     }
 
+    func isSessionInitialized(id: String) -> Bool {
+        sessionRegistry.isInitialized(id: id)
+    }
+
     func negotiatedProtocolVersion(id: String) -> String? {
         sessionRegistry.negotiatedProtocolVersion(id: id)
     }
@@ -915,6 +935,26 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         await upstreamEventTasks.shutdown()
         await controlPlaneDrain.wait()
         await runtimeDrain.wait()
+    }
+
+    func cancelForDeinit() {
+        let shutdownState = initializeManager.beginShutdown()
+        shutdownState.timeout?.cancel()
+        for timeout in upstreamHealthManager.clearInitTimeoutsForShutdown() {
+            timeout?.cancel()
+        }
+        let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue { taskBox in
+            let task = taskBox
+            taskBox = nil
+            return task
+        }
+        documentationPrewarmTask?.cancel()
+        upstreamReadinessCoordinator.shutdown()
+        xcodeProcessEventMonitor.stop()
+        resetAllProcessRouteActivations(reason: "deinit")
+        applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
+        _ = runtimeTasks.beginShutdown()
+        _ = upstreamEventTasks.beginShutdown()
     }
 
     func isInitialized() -> Bool {

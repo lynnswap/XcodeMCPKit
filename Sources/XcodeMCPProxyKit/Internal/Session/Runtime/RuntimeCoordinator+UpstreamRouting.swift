@@ -67,7 +67,11 @@ extension RuntimeCoordinator {
                 proof: proof
             ) {
             case .routed(let sessionID, let object):
-                if deliverClientResponseObjects([object], sessionID: sessionID, upstreamIndex: upstreamIndex) {
+                if deliverClientResponseObject(
+                    object,
+                    sessionID: sessionID,
+                    upstreamIndex: upstreamIndex
+                ) {
                     return
                 }
             case .handled, .late:
@@ -80,99 +84,8 @@ extension RuntimeCoordinator {
             return
         }
 
-        if let array = json as? [Any] {
-            routeUpstreamBatch(
-                array,
-                originalData: data,
-                upstreamIndex: upstreamIndex,
-                operationLease: operationLease
-            )
-            return
-        }
-
         routeUnmappedUpstreamMessage(data, operationLease: operationLease)
     }
-
-    private func routeUpstreamBatch(
-        _ array: [Any],
-        originalData: Data,
-        upstreamIndex: Int,
-        operationLease: UpstreamOperationLease
-    ) {
-        var responseObjectsBySessionID: [String: [Any]] = [:]
-        var mappedSessionIDs = Set<String>()
-        var serverInitiatedPayloads: [ServerInitiatedPayload] = []
-        var unmappedItems: [Any] = []
-        var droppedLateResponse = false
-
-        for item in array {
-            guard let object = item as? [String: Any] else {
-                unmappedItems.append(item)
-                continue
-            }
-
-            switch mappedResponseRoutingOutcome(
-                object,
-                upstreamIndex: upstreamIndex,
-                proof: operationLease.proof
-            ) {
-            case .routed(let sessionID, let object):
-                responseObjectsBySessionID[sessionID, default: []].append(object)
-                mappedSessionIDs.insert(sessionID)
-            case .handled:
-                continue
-            case .late:
-                droppedLateResponse = true
-            case .unmappedResponse:
-                unmappedItems.append(item)
-            case .notResponse:
-                if let payload = serverInitiatedPayload(from: object) {
-                    serverInitiatedPayloads.append(payload)
-                } else {
-                    unmappedItems.append(item)
-                }
-            }
-        }
-
-        let owningTargetOverride: SessionContext? = {
-            guard mappedSessionIDs.count == 1,
-                let sessionID = mappedSessionIDs.first
-            else {
-                return nil
-            }
-            return sessionRegistry.contextIfPresent(id: sessionID)
-        }()
-        let routedServerInitiated = routeServerInitiatedPayloads(
-            serverInitiatedPayloads,
-            operationLease: operationLease,
-            sourceByteCount: originalData.count,
-            owningTargetOverride: owningTargetOverride
-        )
-        let routedClientResponses = routeClientResponses(
-            responseObjectsBySessionID,
-            upstreamIndex: upstreamIndex
-        )
-
-        if unmappedItems.isEmpty {
-            if droppedLateResponse && !routedClientResponses && !routedServerInitiated {
-                logger.debug(
-                    "Dropping late upstream batch response",
-                    metadata: [
-                        "upstream": .string("\(upstreamIndex)"),
-                    ]
-                )
-            }
-            return
-        }
-
-        if routedClientResponses || routedServerInitiated || droppedLateResponse {
-            routeUnmappedBatchItems(unmappedItems, operationLease: operationLease)
-            return
-        }
-
-        routeUnmappedUpstreamMessage(originalData, operationLease: operationLease)
-    }
-
     private func mappedResponseRoutingOutcome(
         _ object: [String: Any],
         upstreamIndex: Int,
@@ -236,33 +149,12 @@ extension RuntimeCoordinator {
         return JSONRPC.Wire.objectByReplacingID(in: object, with: originalID)
     }
 
-    private func routeClientResponses(
-        _ responseObjectsBySessionID: [String: [Any]],
-        upstreamIndex: Int
-    ) -> Bool {
-        var routedAny = false
-        for (sessionID, objects) in responseObjectsBySessionID {
-            if deliverClientResponseObjects(
-                objects,
-                sessionID: sessionID,
-                upstreamIndex: upstreamIndex
-            ) {
-                routedAny = true
-            }
-        }
-        return routedAny
-    }
-
-    private func deliverClientResponseObjects(
-        _ objects: [Any],
+    private func deliverClientResponseObject(
+        _ object: [String: Any],
         sessionID: String,
         upstreamIndex: Int
     ) -> Bool {
-        guard !objects.isEmpty else {
-            return false
-        }
-        let payload: Any = objects.count == 1 ? objects[0] : objects
-        guard let data = try? JSONRPC.Wire.data(from: payload) else {
+        guard let data = try? JSONRPC.Wire.data(from: object) else {
             return false
         }
         recordTraffic(
@@ -798,30 +690,11 @@ extension RuntimeCoordinator {
 
         let overloadError = JSONRPC.Wire.ErrorPayload(code: code, message: message)
 
-        let responseAny: Any? = {
-            if let object = any as? [String: Any] {
-                guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return nil }
-                return JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
-            }
-            if let array = any as? [Any] {
-                let objects = array.compactMap { item -> [String: Any]? in
-                    guard let object = item as? [String: Any],
-                        let id = JSONRPC.Message.Inspector.requestID(from: object)
-                    else {
-                        return nil
-                    }
-                    return JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
-                }
-                if objects.isEmpty {
-                    return nil
-                }
-                return objects
-            }
-            return nil
-        }()
-
-        guard let responseAny,
-            let data = try? JSONRPC.Wire.data(from: responseAny)
+        guard let object = any as? [String: Any],
+            let id = JSONRPC.Message.Inspector.requestID(from: object),
+            let data = try? JSONRPC.Wire.data(
+                from: JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
+            )
         else {
             return
         }
@@ -841,29 +714,6 @@ extension RuntimeCoordinator {
 
     func upstreamID(from id: JSONRPC.ID) -> Int64? {
         upstreamID(from: id.value.foundationObject)
-    }
-
-    func isServerInitiatedMessage(_ value: Any) -> Bool {
-        if let object = value as? [String: Any] {
-            switch JSONRPC.Message.Inspector.kind(of: object) {
-            case .request, .notification:
-                return true
-            case .response, .malformed, .other:
-                return false
-            }
-        }
-        if let array = value as? [Any] {
-            return array.contains { item in
-                guard let object = item as? [String: Any] else { return false }
-                switch JSONRPC.Message.Inspector.kind(of: object) {
-                case .request, .notification:
-                    return true
-                case .response, .malformed, .other:
-                    return false
-                }
-            }
-        }
-        return false
     }
 
     func routeUnmappedUpstreamMessage(
@@ -887,9 +737,11 @@ extension RuntimeCoordinator {
             return
         }
 
-        let serverInitiatedPayloads = serverInitiatedPayloads(from: any, originalData: data)
-
-        guard !serverInitiatedPayloads.isEmpty else {
+        guard let object = any as? [String: Any],
+              let serverInitiatedPayload = serverInitiatedPayload(
+                from: object,
+                originalData: data
+              ) else {
             logger.debug(
                 "Dropping unmapped upstream response",
                 metadata: [
@@ -900,8 +752,8 @@ extension RuntimeCoordinator {
             return
         }
 
-        if routeServerInitiatedPayloads(
-            serverInitiatedPayloads,
+        if routeServerInitiatedPayload(
+            serverInitiatedPayload,
             operationLease: operationLease,
             sourceByteCount: data.count,
             owningTargetOverride: nil
@@ -910,78 +762,29 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func serverInitiatedPayload(from object: [String: Any]) -> ServerInitiatedPayload? {
-        guard let encoded = try? JSONRPC.Wire.data(from: object) else {
-            return nil
-        }
+    private func serverInitiatedPayload(
+        from object: [String: Any],
+        originalData: Data
+    ) -> ServerInitiatedPayload? {
         let kind = JSONRPC.Message.Inspector.kind(of: object)
         guard kind.isServerInitiated else {
             return nil
         }
         return ServerInitiatedPayload(
-            data: encoded,
+            data: originalData,
             object: object,
             expectsResponse: kind.requestID != nil
         )
     }
 
-    private func serverInitiatedPayloads(
-        from any: Any,
-        originalData: Data
-    ) -> [ServerInitiatedPayload] {
-        if let object = any as? [String: Any] {
-            let kind = JSONRPC.Message.Inspector.kind(of: object)
-            guard kind.isServerInitiated else { return [] }
-            return [
-                ServerInitiatedPayload(
-                    data: originalData,
-                    object: object,
-                    expectsResponse: kind.requestID != nil
-                )
-            ]
-        }
-        if let array = any as? [Any] {
-            var payloads: [ServerInitiatedPayload] = []
-            payloads.reserveCapacity(array.count)
-            for item in array {
-                guard let object = item as? [String: Any],
-                    let payload = serverInitiatedPayload(from: object)
-                else {
-                    continue
-                }
-                payloads.append(payload)
-            }
-            return payloads
-        }
-        return []
-    }
-
-    private func routeUnmappedBatchItems(
-        _ items: [Any],
-        operationLease: UpstreamOperationLease
-    ) {
-        guard !items.isEmpty else {
-            return
-        }
-        let payload: Any = items.count == 1 ? items[0] : items
-        guard let data = try? JSONRPC.Wire.data(from: payload) else {
-            return
-        }
-        routeUnmappedUpstreamMessage(data, operationLease: operationLease)
-    }
-
     @discardableResult
-    private func routeServerInitiatedPayloads(
-        _ serverInitiatedPayloads: [ServerInitiatedPayload],
+    private func routeServerInitiatedPayload(
+        _ serverInitiatedPayload: ServerInitiatedPayload,
         operationLease: UpstreamOperationLease,
         sourceByteCount: Int,
         owningTargetOverride: SessionContext?
     ) -> Bool {
-        guard !serverInitiatedPayloads.isEmpty else {
-            return false
-        }
         let upstreamIndex = operationLease.upstreamIndex
-
         var routedTargets: [SessionContext] = []
         var routedSessionIDs = Set<String>()
         var pendingInitializeTargets: [SessionContext] = []
@@ -1018,35 +821,33 @@ extension RuntimeCoordinator {
 
         let owningTarget =
             owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
-        var routedAnyPayload = false
-
-        for payload in serverInitiatedPayloads {
-            let payloadTargets = serverInitiatedTargets(
-                expectsResponse: payload.expectsResponse,
-                owningTarget: owningTarget,
-                pendingInitializeTargets: pendingInitializeTargets,
-                routedTargets: routedTargets
+        let payloadTargets = serverInitiatedTargets(
+            expectsResponse: serverInitiatedPayload.expectsResponse,
+            owningTarget: owningTarget,
+            pendingInitializeTargets: pendingInitializeTargets,
+            routedTargets: routedTargets
+        )
+        if serverInitiatedPayload.expectsResponse && payloadTargets.isEmpty {
+            logger.debug(
+                "Dropping response-requiring server request without an owning session",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(serverInitiatedPayload.data.count)"),
+                ]
             )
-            if payload.expectsResponse && payloadTargets.isEmpty {
-                logger.debug(
-                    "Dropping response-requiring server request without an owning session",
-                    metadata: [
-                        "upstream": .string("\(upstreamIndex)"),
-                        "bytes": .string("\(payload.data.count)"),
-                    ]
-                )
+            return false
+        }
+
+        var routedAnyPayload = false
+        for session in payloadTargets {
+            guard let routedData = serverInitiatedPayload.routedData(
+                for: session,
+                operationLease: operationLease
+            ) else {
                 continue
             }
-            for session in payloadTargets {
-                guard let routedData = payload.routedData(
-                    for: session,
-                    operationLease: operationLease
-                ) else {
-                    continue
-                }
-                session.router.handleIncoming(routedData)
-                routedAnyPayload = true
-            }
+            session.router.handleIncoming(routedData)
+            routedAnyPayload = true
         }
 
         guard routedAnyPayload else {

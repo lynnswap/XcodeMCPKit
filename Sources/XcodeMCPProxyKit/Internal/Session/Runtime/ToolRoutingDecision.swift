@@ -9,7 +9,7 @@ enum ToolRoutingDecision: Sendable {
         admission: RouteForwardingAdmission
     )
     case localXcodeListWindows
-    case reject(errors: [ToolRoutingError], forceBatchArray: Bool)
+    case reject(errors: [ToolRoutingError])
 
     var preferredUpstreamIndices: [Int]? {
         switch self {

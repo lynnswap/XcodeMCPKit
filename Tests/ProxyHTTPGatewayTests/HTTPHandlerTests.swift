@@ -440,63 +440,72 @@ struct HTTPHandlerTests {
         #expect(response.body == "session not found")
     }
 
-    @Test func httpPostRequiresNegotiatedProtocolVersionAfterInitialize() async throws {
-        let config = makeConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let sessionManager = TestRuntimeCoordinator(config: config)
-        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try await initializeHTTPChannel(channel)
+    @Test func httpResolvesProtocolVersionConsistentlyAcrossSessionRoutes() async throws {
+        for route in ProtocolVersionRoute.allCases {
+            for headerCase in ProtocolVersionHeaderCase.allCases {
+                let config = makeConfig()
+                let channel = EmbeddedChannel()
+                let sessionManager = TestRuntimeCoordinator(config: config)
+                try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+                let sessionID = try await initializeHTTPChannel(channel)
+                sessionManager.setCachedToolsListResult(
+                    .object(["tools": .array([])]),
+                    sourceUpstream: 0
+                )
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "MCP-Session-Id", value: sessionID)
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+                try writeProtocolVersionRequest(
+                    route,
+                    headerCase: headerCase,
+                    sessionID: sessionID,
+                    to: channel
+                )
+                let response = try await collectResponse(from: channel)
 
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .badRequest)
-        #expect(response.body == "protocol version required")
+                #expect(
+                    response.head.status == (headerCase.isAccepted ? .ok : .badRequest),
+                    "route=\(route) header=\(headerCase)"
+                )
+                if headerCase.isAccepted == false {
+                    #expect(response.body == "protocol version mismatch")
+                }
+                if route == .delete {
+                    #expect(
+                        sessionManager.hasSession(id: sessionID) == !headerCase.isAccepted,
+                        "header=\(headerCase)"
+                    )
+                } else {
+                    #expect(sessionManager.hasSession(id: sessionID))
+                }
+
+                _ = try? channel.finish()
+            }
+        }
     }
 
-    @Test func httpPostRejectsMismatchedProtocolVersionAfterInitialize() async throws {
-        let config = makeConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let sessionManager = TestRuntimeCoordinator(config: config)
-        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
-        let sessionID = try await initializeHTTPChannel(channel)
+    @Test func httpRejectsUnsupportedSpecificationDefaultWithoutNegotiatedVersion() async throws {
+        #expect(HTTPRequestProtocolVersionResolver.specificationDefault == "2025-03-26")
 
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "MCP-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: "2025-11-25")
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        for route in ProtocolVersionRoute.allCases {
+            let config = makeConfig()
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+            let sessionID = "initialized-without-version-\(route)"
+            _ = sessionManager.initializedSessionWithoutProtocolVersion(id: sessionID)
 
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .badRequest)
-        #expect(response.body == "protocol version mismatch")
+            try writeProtocolVersionRequest(
+                route,
+                headerCase: .missing,
+                sessionID: sessionID,
+                to: channel
+            )
+            let response = try await collectResponse(from: channel)
+
+            #expect(response.head.status == .badRequest, "route=\(route)")
+            #expect(response.body == "protocol version mismatch")
+            #expect(sessionManager.hasSession(id: sessionID))
+            _ = try? channel.finish()
+        }
     }
 
     @Test func httpDeleteTerminatesSession() async throws {
@@ -545,6 +554,164 @@ struct HTTPHandlerTests {
         let deleteResponse = try await collectResponse(from: channel)
         #expect(deleteResponse.head.status == .ok)
         #expect(sessionManager.hasSession(id: "uninitialized-session") == false)
+    }
+
+    @Test func httpAppliesOriginPolicyBeforeEveryRoute() async throws {
+        for route in OriginPolicyRoute.allCases {
+            for originCase in OriginPolicyHeaderCase.allCases {
+                var config = makeConfig()
+                config.listenPort = 8765
+                if route == .debugReset, originCase.isRejected == false {
+                    // The live loopback reset path is covered separately. A non-loopback
+                    // listener keeps this Cartesian header test synchronous.
+                    config.listenHost = "0.0.0.0"
+                }
+                let channel = EmbeddedChannel()
+                let sessionManager = TestRuntimeCoordinator(config: config)
+                _ = sessionManager.session(id: "origin-policy-sentinel")
+                sessionManager.setCachedToolsListResult(
+                    .object(["tools": .array([])]),
+                    sourceUpstream: 0
+                )
+                try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+                try writeOriginPolicyRequest(
+                    route,
+                    originCase: originCase,
+                    to: channel
+                )
+                let response = try await collectResponse(from: channel)
+
+                let expectedStatus =
+                    originCase.isRejected
+                    ? HTTPResponseStatus.forbidden
+                    : route.statusWithoutOriginRejection
+                #expect(
+                    response.head.status == expectedStatus,
+                    "route=\(route) origin=\(originCase)"
+                )
+                if originCase.isRejected {
+                    #expect(response.body == "origin not allowed")
+                    #expect(sessionManager.hasSession(id: "origin-policy-sentinel"))
+                    #expect(sessionManager.cachedToolsListResult() != nil)
+                    #expect(sessionManager.sentUpstreamCount() == 0)
+                }
+
+                _ = try? channel.finish()
+            }
+        }
+    }
+
+    @Test func httpRejectsNonOriginURLShapes() async throws {
+        let rejectedOrigins = [
+            "https://localhost:8765",
+            "ftp://localhost:8765",
+            "http://user@localhost:8765",
+            "http://user:password@localhost:8765",
+            "http://localhost:8765/",
+            "http://localhost:8765/path",
+            "http://localhost:8765?query=1",
+            "http://localhost:8765#fragment",
+            "http://localhost:8766",
+            "http://127.attacker.example:8765",
+            "http://localhost:8765,http://localhost:8765",
+        ]
+
+        for origin in rejectedOrigins {
+            var config = makeConfig()
+            config.listenPort = 8765
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
+            head.headers.add(name: "Origin", value: origin)
+            try channel.writeInbound(HTTPServerRequestPart.head(head))
+            try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+            let response = try await collectResponse(from: channel)
+            #expect(response.head.status == .forbidden, "origin=\(origin)")
+            _ = try? channel.finish()
+        }
+    }
+
+    @Test func httpAllowsExactLoopbackOrigins() async throws {
+        let allowedOrigins = [
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
+            "http://127.42.0.1:8765",
+            "http://[::1]:8765",
+            "http://[0:0:0:0:0:0:0:1]:8765",
+        ]
+
+        for origin in allowedOrigins {
+            var config = makeConfig()
+            config.listenPort = 8765
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
+            head.headers.add(name: "Origin", value: origin)
+            try channel.writeInbound(HTTPServerRequestPart.head(head))
+            try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+            let response = try await collectResponse(from: channel)
+            #expect(response.head.status == .ok, "origin=\(origin)")
+            _ = try? channel.finish()
+        }
+    }
+
+    @Test func httpAllowsOriginMatchingEphemeralListenerPort() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            var components = URLComponents(url: server.url, resolvingAgainstBaseURL: false)!
+            components.path = "/health"
+            let requestURL = try #require(components.url)
+            let port = try #require(server.url.port)
+            var request = URLRequest(url: requestURL)
+            request.setValue("http://127.0.0.1:\(port)", forHTTPHeaderField: "Origin")
+
+            let (responseData, response) = try await withTestURLSession { session in
+                try await session.data(for: request)
+            }
+            let httpResponse = try #require(response as? HTTPURLResponse)
+            #expect(httpResponse.statusCode == HTTPResponseStatus.ok.code)
+            #expect(String(data: responseData, encoding: .utf8) == "ok")
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
+    @Test func httpRejectsOriginBeforeApplyingBodyLimit() async throws {
+        var config = makeConfig(maxBodyBytes: 1)
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Origin", value: "http://example.invalid:8765")
+        var body = channel.allocator.buffer(capacity: 2)
+        body.writeString("{}")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
     @Test func httpRejectsInvalidOrigin() async throws {
@@ -677,6 +844,26 @@ struct HTTPHandlerTests {
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id") != nil)
+    }
+
+    @Test func httpRejectsLoopbackOriginForExplicitNonLoopbackListener() async throws {
+        var config = makeConfig()
+        config.listenHost = "192.0.2.10"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        try writeInitializePost(
+            to: channel,
+            origin: "http://localhost:8765"
+        )
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.isInitialized() == false)
     }
 
     @Test func httpRejectsOriginMismatchingHostHeaderWhenBoundToWildcard() async throws {
@@ -984,6 +1171,37 @@ struct HTTPHandlerTests {
         #expect(sessionManager.isInitialized() == false)
     }
 
+    @Test func httpBatchShapeMatrixIsRejectedWithoutDownstreamSideEffects() async throws {
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/list",
+        ]
+        let payloads: [[Any]] = [
+            [],
+            [request],
+            [request, "invalid batch member"],
+        ]
+
+        for payload in payloads {
+            let config = makeConfig()
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+            try postJSONArray(payload, sessionID: nil, to: channel)
+            assertBatchRejected(try await collectResponse(from: channel))
+
+            #expect(sessionManager.isInitialized() == false)
+            #expect(sessionManager.sentUpstreamCount() == 0)
+            #expect(sessionManager.assignedUpstreamIDCount() == 0)
+            #expect(sessionManager.chooseUpstreamIndexCallCount() == 0)
+            #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+            #expect(sessionManager.requestTimeoutNotificationCount() == 0)
+            _ = try channel.finish()
+        }
+    }
+
     @Test func httpJSONArrayBodyIsRejectedBeforeUpstreamRouting() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -1113,7 +1331,7 @@ struct HTTPHandlerTests {
             await routingGate.signal()
 
             switch try await operation.future.get() {
-            case .mcpError(_, _, let code, let message, _, _, _):
+            case .mcpError(_, let code, let message, _, _):
                 #expect(code == -32000)
                 #expect(message == "upstream timeout")
             default:
@@ -1355,8 +1573,7 @@ struct HTTPHandlerTests {
                         id: requestID,
                         message: "unable to resolve Xcode window owner for tool 'BuildProject'"
                     ),
-                ],
-                forceBatchArray: false
+                ]
             )
         )
         let server = try TestHTTPHandlerServer.start(
@@ -1468,101 +1685,6 @@ struct HTTPHandlerTests {
         try await server.shutdown()
     }
 
-    @Test func httpToolRoutingRejectReturnsErrorsForNonToolBatchItems() async throws {
-        let config = makeConfig()
-        let sessionManager = TestRuntimeCoordinator(config: config)
-        sessionManager.setInitialized(true)
-        let toolRequestID = try #require(JSONRPC.ID(any: NSNumber(value: 3301)))
-        let resourceRequestID = try #require(JSONRPC.ID(any: NSNumber(value: 3302)))
-        sessionManager.setToolRoutingDecision(
-            .reject(
-                errors: [
-                    ToolRoutingError(
-                        id: toolRequestID,
-                        message: "unable to resolve Xcode window owner for one or more tools"
-                    ),
-                ],
-                forceBatchArray: true
-            )
-        )
-        let service = ClientMCPRequestExecutor(
-            config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
-                defaultRequestTimeoutSeconds: config.requestTimeout
-            )
-        )
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        do {
-            let payload: [[String: Any]] = [
-                toolsCallPayload(
-                    id: 3301,
-                    name: "BuildProject",
-                    arguments: ["tabIdentifier": "missing-tab"]
-                ),
-                [
-                    "jsonrpc": "2.0",
-                    "id": 3302,
-                    "method": "resources/list",
-                ],
-            ]
-            let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
-            let operation = service.makeForwardingOperation(
-                filteredRequest: ClientMCPRequestExecutor.FilteredToolCallRequest(
-                    bodyData: bodyData,
-                    localResponseData: nil,
-                    forwardedResponseIDs: [toolRequestID, resourceRequestID],
-                    forceBatchArray: true
-                ),
-                sessionID: "session-routing-reject-batch",
-                headerSessionID: "session-routing-reject-batch",
-                requestIsBatch: true,
-                prefersEventStream: false,
-                eventLoop: group.next(),
-                requestTimeoutOverride: nil,
-                parentCancellationHandle: nil
-            )
-
-            let resolution = try await operation.future.get()
-            let responseData: Data
-            switch resolution {
-            case .responseData(let data, _, _):
-                responseData = data
-            default:
-                Issue.record("expected response data, got \(resolution)")
-                return
-            }
-            let objects = try #require(
-                JSONSerialization.jsonObject(with: responseData, options: []) as? [[String: Any]]
-            )
-            #expect(
-                objects.compactMap { ($0["id"] as? NSNumber)?.intValue }.sorted()
-                    == [3301, 3302]
-            )
-            let toolResponse = try #require(
-                objects.first { ($0["id"] as? NSNumber)?.intValue == 3301 }
-            )
-            let toolResult = try #require(toolResponse["result"] as? [String: Any])
-            #expect(toolResult["isError"] as? Bool == true)
-
-            let resourceResponse = try #require(
-                objects.first { ($0["id"] as? NSNumber)?.intValue == 3302 }
-            )
-            let resourceError = try #require(resourceResponse["error"] as? [String: Any])
-            #expect((resourceError["code"] as? NSNumber)?.intValue == -32000)
-            #expect(
-                (resourceError["message"] as? String)?
-                    .contains("tool routing rejected the batch") == true
-            )
-            #expect(sessionManager.sentMethods().isEmpty)
-        } catch {
-            try? await shutdown(group)
-            throw error
-        }
-        try await shutdown(group)
-    }
-
     @Test func httpToolRoutingLocalXcodeListWindowsReturnsAggregatedResult() async throws {
         let config = makeConfig()
         let sessionManager = TestRuntimeCoordinator(
@@ -1602,12 +1724,9 @@ struct HTTPHandlerTests {
                 filteredRequest: ClientMCPRequestExecutor.FilteredToolCallRequest(
                     bodyData: bodyData,
                     localResponseData: nil,
-                    forwardedResponseIDs: [requestID],
-                    forceBatchArray: false
+                    forwardedResponseID: requestID
                 ),
                 sessionID: "session-routing-local-windows",
-                headerSessionID: "session-routing-local-windows",
-                requestIsBatch: false,
                 prefersEventStream: false,
                 eventLoop: group.next(),
                 requestTimeoutOverride: nil,
@@ -2476,46 +2595,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
-    @Test func forwardingServiceSelectsMatchingObjectFromMultiItemBatchResponse() throws {
-        let responseData = try JSONSerialization.data(
-            withJSONObject: [
-                [
-                    "jsonrpc": "2.0",
-                    "id": "other",
-                    "result": [
-                        "content": [
-                            [
-                                "type": "text",
-                                "text": "other",
-                            ]
-                        ]
-                    ],
-                ],
-                [
-                    "jsonrpc": "2.0",
-                    "id": "wanted",
-                    "result": [
-                        "content": [
-                            [
-                                "type": "text",
-                                "text": "wanted",
-                            ]
-                        ]
-                    ],
-                ],
-            ],
-            options: []
-        )
-
-        let object = ToolSurface.responseObject(
-            from: responseData,
-            matching: "wanted"
-        )
-
-        #expect(object?["id"] as? String == "wanted")
-    }
-
-    @Test func forwardingServiceRewritesSingleObjectResourcesListResponseUsingResponseIDMap()
+    @Test func forwardingServiceRewritesSingleObjectResourcesListResponse()
         throws
     {
         let config = makeConfig()
@@ -2526,17 +2606,17 @@ struct HTTPHandlerTests {
         )
 
         let requestData = try JSONSerialization.data(
-            withJSONObject: [[
+            withJSONObject: [
                 "jsonrpc": "2.0",
                 "id": 91,
                 "method": "resources/list",
                 "params": [String: Any](),
-            ]],
+            ],
             options: []
         )
         let transform = try RequestInspector.transform(
             requestData,
-            sessionID: "session-batch-object-rewrite",
+            sessionID: "session-object-rewrite",
             mapID: { _, _ in 4001 }
         )
 
@@ -2567,7 +2647,7 @@ struct HTTPHandlerTests {
         let resolution = forwardingService.resolveResponse(
             .success(buffer),
             started: started,
-            sessionID: "session-batch-object-rewrite"
+            sessionID: "session-object-rewrite"
         )
 
         guard case .success(let rewrittenData) = resolution,
@@ -3029,6 +3109,221 @@ struct HTTPHandlerTests {
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    }
+
+    private enum ProtocolVersionRoute: CaseIterable {
+        case post
+        case sse
+        case delete
+    }
+
+    private enum ProtocolVersionHeaderCase: CaseIterable {
+        case missing
+        case match
+        case mismatch
+        case unsupported
+        case invalid
+        case multiple
+
+        var isAccepted: Bool {
+            switch self {
+            case .missing, .match:
+                return true
+            case .mismatch, .unsupported, .invalid, .multiple:
+                return false
+            }
+        }
+
+        func apply(to headers: inout HTTPHeaders) {
+            switch self {
+            case .missing:
+                break
+            case .match:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: MCP.ProtocolVersion.current
+                )
+            case .mismatch:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: "2025-11-25"
+                )
+            case .unsupported:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: "2024-11-05"
+                )
+            case .invalid:
+                headers.add(name: HTTPRequestValidator.protocolVersionHeader, value: "")
+            case .multiple:
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: MCP.ProtocolVersion.current
+                )
+                headers.add(
+                    name: HTTPRequestValidator.protocolVersionHeader,
+                    value: MCP.ProtocolVersion.current
+                )
+            }
+        }
+    }
+
+    private func writeProtocolVersionRequest(
+        _ route: ProtocolVersionRoute,
+        headerCase: ProtocolVersionHeaderCase,
+        sessionID: String,
+        to channel: EmbeddedChannel
+    ) throws {
+        let method: HTTPMethod =
+            switch route {
+            case .post: .POST
+            case .sse: .GET
+            case .delete: .DELETE
+            }
+        var head = HTTPRequestHead(version: .http1_1, method: method, uri: "/mcp")
+        head.headers.add(name: HTTPRequestValidator.sessionHeader, value: sessionID)
+        switch route {
+        case .post:
+            head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+            head.headers.add(name: "Content-Type", value: "application/json")
+        case .sse:
+            head.headers.add(name: "Accept", value: "text/event-stream")
+        case .delete:
+            break
+        }
+        headerCase.apply(to: &head.headers)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+
+        if route == .post {
+            let payload: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            var body = channel.allocator.buffer(capacity: data.count)
+            body.writeBytes(data)
+            try channel.writeInbound(HTTPServerRequestPart.body(body))
+        }
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    }
+
+    private enum OriginPolicyRoute: CaseIterable {
+        case health
+        case debugSnapshot
+        case debugReset
+        case sse
+        case deleteSession
+        case post
+        case notFound
+
+        var method: HTTPMethod {
+            switch self {
+            case .health, .debugSnapshot, .sse, .notFound:
+                return .GET
+            case .debugReset, .post:
+                return .POST
+            case .deleteSession:
+                return .DELETE
+            }
+        }
+
+        var uri: String {
+            switch self {
+            case .health:
+                return "/health"
+            case .debugSnapshot:
+                return "/debug/upstreams?includeSensitive=1"
+            case .debugReset:
+                return "/debug/reset"
+            case .sse, .deleteSession, .post:
+                return "/mcp"
+            case .notFound:
+                return "/not-found"
+            }
+        }
+
+        var statusWithoutOriginRejection: HTTPResponseStatus {
+            switch self {
+            case .health, .debugSnapshot, .post:
+                return .ok
+            case .debugReset:
+                return .notFound
+            case .sse, .deleteSession:
+                return .badRequest
+            case .notFound:
+                return .notFound
+            }
+        }
+    }
+
+    private enum OriginPolicyHeaderCase: CaseIterable {
+        case missing
+        case allowed
+        case disallowed
+        case empty
+        case multiple
+        case null
+        case malformed
+
+        var isRejected: Bool {
+            switch self {
+            case .missing, .allowed:
+                return false
+            case .disallowed, .empty, .multiple, .null, .malformed:
+                return true
+            }
+        }
+
+        func apply(to headers: inout HTTPHeaders) {
+            switch self {
+            case .missing:
+                break
+            case .allowed:
+                headers.add(name: "Origin", value: "http://localhost:8765")
+            case .disallowed:
+                headers.add(name: "Origin", value: "http://example.invalid:8765")
+            case .empty:
+                headers.add(name: "Origin", value: "")
+            case .multiple:
+                headers.add(name: "Origin", value: "http://localhost:8765")
+                headers.add(name: "Origin", value: "http://127.0.0.1:8765")
+            case .null:
+                headers.add(name: "Origin", value: "null")
+            case .malformed:
+                headers.add(name: "Origin", value: "http://[::1")
+            }
+        }
+    }
+
+    private func writeOriginPolicyRequest(
+        _ route: OriginPolicyRoute,
+        originCase: OriginPolicyHeaderCase,
+        to channel: EmbeddedChannel
+    ) throws {
+        var head = HTTPRequestHead(version: .http1_1, method: route.method, uri: route.uri)
+        if route == .sse {
+            head.headers.add(name: "Accept", value: "text/event-stream")
+        } else if route == .post {
+            head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+            head.headers.add(name: "Content-Type", value: "application/json")
+        }
+        originCase.apply(to: &head.headers)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+
+        if route == .post {
+            let payload: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": ["capabilities": [String: Any]()],
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            var body = channel.allocator.buffer(capacity: data.count)
+            body.writeBytes(data)
+            try channel.writeInbound(HTTPServerRequestPart.body(body))
+        }
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 

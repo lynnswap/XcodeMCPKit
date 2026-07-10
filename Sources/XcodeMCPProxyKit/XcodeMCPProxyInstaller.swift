@@ -1,18 +1,18 @@
 import Foundation
 
 /// Destination and mode settings for a source install.
-public struct XcodeMCPProxyInstallerConfiguration: Equatable, Sendable {
+package struct XcodeMCPProxyInstallerConfiguration: Equatable, Sendable {
     /// Install prefix used when ``binaryDirectory`` is not set.
-    public var prefix: String?
+    package var prefix: String?
 
     /// Explicit binary directory. This takes precedence over ``prefix``.
-    public var binaryDirectory: String?
+    package var binaryDirectory: String?
 
     /// Whether to only compute and print the install plan.
-    public var dryRun: Bool
+    package var dryRun: Bool
 
     /// Creates installer configuration.
-    public init(
+    package init(
         prefix: String? = nil,
         binaryDirectory: String? = nil,
         dryRun: Bool = false
@@ -24,77 +24,27 @@ public struct XcodeMCPProxyInstallerConfiguration: Equatable, Sendable {
 }
 
 /// Installer facade for Xcode MCP proxy executables.
-public struct XcodeMCPProxyInstaller: Sendable {
+package struct XcodeMCPProxyInstaller: Sendable {
     /// Top-level action for an installer invocation.
-    public enum LaunchAction: Equatable, Sendable {
-        /// Print usage and exit.
-        case showHelp
-
-        /// Print version information and exit.
-        case showVersion
-
-        /// Install proxy executables.
-        case install
-    }
-
-    /// Normalized installer launch options.
-    public struct LaunchOptions: Equatable, Sendable {
-        /// Executable name resolved from argv.
-        public let executableName: String
-
-        /// Creates normalized installer launch options.
-        public init(executableName: String) {
-            self.executableName = executableName
-        }
-    }
-
-    /// Resolved launch plan for `xcode-mcp-proxy-install`.
-    public struct LaunchPlan: Equatable, Sendable {
-        /// Top-level action to execute.
-        public let action: LaunchAction
-
-        /// Installer configuration. This is present for `.install` plans and
-        /// absent for display-only plans.
-        public let configuration: XcodeMCPProxyInstallerConfiguration?
-
-        /// Normalized launch options.
-        public let options: LaunchOptions
-
-        /// Usage text for help or validation failures.
-        public let usage: String
-
-        /// Version line for version display.
-        public let versionLine: String
-
-        /// Creates an installer launch plan.
-        public init(
-            action: LaunchAction,
-            configuration: XcodeMCPProxyInstallerConfiguration?,
-            options: LaunchOptions,
-            usage: String,
-            versionLine: String
-        ) {
-            self.action = action
-            self.configuration = configuration
-            self.options = options
-            self.usage = usage
-            self.versionLine = versionLine
-        }
+    package enum LaunchAction: Equatable, Sendable {
+        case showHelp(String)
+        case showVersion(String)
+        case install(XcodeMCPProxyInstallerConfiguration)
     }
 
     /// One proxy executable that will be copied by an install plan.
-    public struct Binary: Equatable, Sendable {
+    package struct Binary: Equatable, Sendable {
         /// Executable file name.
-        public let name: String
+        package let name: String
 
         /// Source executable path.
-        public let sourceURL: URL
+        package let sourceURL: URL
 
         /// Destination executable path.
-        public let destinationURL: URL
+        package let destinationURL: URL
 
         /// Creates a binary copy entry.
-        public init(name: String, sourceURL: URL, destinationURL: URL) {
+        package init(name: String, sourceURL: URL, destinationURL: URL) {
             self.name = name
             self.sourceURL = sourceURL
             self.destinationURL = destinationURL
@@ -102,25 +52,25 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     /// Fully resolved install plan.
-    public struct InstallPlan: Equatable, Sendable {
+    package struct InstallPlan: Equatable, Sendable {
         /// Directory where executables will be installed.
-        public let binDirectory: URL
+        package let binDirectory: URL
 
         /// Executables included in the install.
-        public let binaries: [Binary]
+        package let binaries: [Binary]
 
         /// Whether the plan should be displayed without copying files.
-        public let dryRun: Bool
+        package let dryRun: Bool
 
         /// Creates an install plan.
-        public init(binDirectory: URL, binaries: [Binary], dryRun: Bool) {
+        package init(binDirectory: URL, binaries: [Binary], dryRun: Bool) {
             self.binDirectory = binDirectory
             self.binaries = binaries
             self.dryRun = dryRun
         }
 
         /// Human-readable lines printed for a dry run.
-        public var dryRunLines: [String] {
+        package var dryRunLines: [String] {
             var lines = ["Would create: \(binDirectory.path)"]
             lines.append(contentsOf: binaries.map { "Would install: \($0.destinationURL.path)" })
             return lines
@@ -128,12 +78,12 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     /// Errors raised while planning or executing an install.
-    public enum Error: Swift.Error, CustomStringConvertible, Equatable {
+    package enum Error: Swift.Error, CustomStringConvertible, Equatable {
         /// A user-facing install failure message.
         case message(String)
 
         /// User-facing error description.
-        public var description: String {
+        package var description: String {
             switch self {
             case .message(let text):
                 return text
@@ -142,16 +92,16 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     /// Executable product names installed by the source installer.
-    public static let binaryNames = [
+    package static let binaryNames = [
         "xcode-mcp-proxy",
         "xcode-mcp-proxy-server",
     ]
 
     /// Installer configuration.
-    public var configuration: XcodeMCPProxyInstallerConfiguration
+    package var configuration: XcodeMCPProxyInstallerConfiguration
 
     /// Creates an installer facade.
-    public init(
+    package init(
         configuration: XcodeMCPProxyInstallerConfiguration =
             XcodeMCPProxyInstallerConfiguration()
     ) {
@@ -159,7 +109,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     /// CLI usage for `xcode-mcp-proxy-install`.
-    public static var installUsage: String {
+    package static var installUsage: String {
         """
         Usage:
           xcode-mcp-proxy-install [--bindir path] [--prefix path] [--dry-run]
@@ -178,52 +128,29 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     /// Formats a CLI-compatible installer version line.
-    public static func installVersionLine(arguments: [String]) -> String {
+    package static func installVersionLine(arguments: [String]) -> String {
         XcodeMCPProxyServer.productMetadata.versionLine(
             arguments: arguments,
             defaultExecutableName: "xcode-mcp-proxy-install"
         )
     }
 
-    /// Resolves argv and environment into an installer launch plan.
-    public static func resolveLaunchPlan(
+    package static func resolveLaunchAction(
         arguments: [String],
         environment: [String: String]
-    ) throws -> LaunchPlan {
+    ) throws -> LaunchAction {
         let scan = ProxyCLIInvocationScanner.scanInstall(arguments)
-        let options = LaunchOptions(
-            executableName: executableName(
-                arguments: arguments,
-                defaultExecutableName: "xcode-mcp-proxy-install"
-            )
-        )
         let versionLine = installVersionLine(arguments: arguments)
 
         if scan.showHelp {
-            return LaunchPlan(
-                action: .showHelp,
-                configuration: nil,
-                options: options,
-                usage: installUsage,
-                versionLine: versionLine
-            )
+            return .showHelp(installUsage)
         }
         if scan.showVersion {
-            return LaunchPlan(
-                action: .showVersion,
-                configuration: nil,
-                options: options,
-                usage: installUsage,
-                versionLine: versionLine
-            )
+            return .showVersion(versionLine)
         }
 
-        return LaunchPlan(
-            action: .install,
-            configuration: try parseLaunchConfiguration(arguments, environment: environment),
-            options: options,
-            usage: installUsage,
-            versionLine: versionLine
+        return .install(
+            try parseLaunchConfiguration(arguments, environment: environment)
         )
     }
 
@@ -270,7 +197,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
     ///
     /// - Parameter executableURL: Path to the running installer executable.
     /// - Returns: A plan containing source and destination executable paths.
-    public func plan(executableURL: URL) -> InstallPlan {
+    package func plan(executableURL: URL) -> InstallPlan {
         let sourceDirectory = executableURL.deletingLastPathComponent()
         let binDirectory = Self.resolveBinDirectory(
             prefix: configuration.prefix,
@@ -294,7 +221,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
     ///
     /// When ``XcodeMCPProxyInstallerConfiguration/dryRun`` is true this method
     /// prints the dry-run plan and does not create directories or copy files.
-    public func install(
+    package func install(
         executableURL: URL,
         stdout: (String) -> Void = { print($0) }
     ) throws {
@@ -353,7 +280,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
     ///
     /// `binaryDirectory` takes precedence over `prefix`; otherwise this returns
     /// `~/.local/bin`.
-    public static func resolveBinDirectory(prefix: String?, binaryDirectory: String?) -> URL {
+    package static func resolveBinDirectory(prefix: String?, binaryDirectory: String?) -> URL {
         if let binaryDirectory {
             return URL(fileURLWithPath: expandPath(binaryDirectory), isDirectory: true)
         }
@@ -365,7 +292,7 @@ public struct XcodeMCPProxyInstaller: Sendable {
     }
 
     /// Expands a leading tilde in a filesystem path.
-    public static func expandPath(_ path: String) -> String {
+    package static func expandPath(_ path: String) -> String {
         if path.hasPrefix("~") {
             return (path as NSString).expandingTildeInPath
         }
@@ -391,14 +318,6 @@ public struct XcodeMCPProxyInstaller: Sendable {
         }
     }
 
-    private static func executableName(arguments: [String], defaultExecutableName: String) -> String {
-        guard let rawExecutable = arguments.first, !rawExecutable.isEmpty else {
-            return defaultExecutableName
-        }
-
-        let name = URL(fileURLWithPath: rawExecutable).lastPathComponent
-        return name.isEmpty ? defaultExecutableName : name
-    }
 }
 
 extension XcodeMCPProxyInstaller {
@@ -446,24 +365,19 @@ extension XcodeMCPProxyInstaller {
             stderr: (String) -> Void
         ) -> Int32 {
             do {
-                let plan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
+                let action = try XcodeMCPProxyInstaller.resolveLaunchAction(
                     arguments: arguments,
                     environment: environment
                 )
 
-                switch plan.action {
-                case .showHelp:
-                    stdout(plan.usage)
+                switch action {
+                case .showHelp(let usage):
+                    stdout(usage)
                     return 0
-                case .showVersion:
-                    stdout(plan.versionLine)
+                case .showVersion(let versionLine):
+                    stdout(versionLine)
                     return 0
-                case .install:
-                    guard let configuration = plan.configuration else {
-                        throw XcodeMCPProxyInstaller.Error.message(
-                            "installer launch plan is missing configuration"
-                        )
-                    }
+                case .install(let configuration):
                     guard let executableURL = dependencies.executableURL() else {
                         throw XcodeMCPProxyInstaller.Error.message(
                             "failed to locate installer executable"

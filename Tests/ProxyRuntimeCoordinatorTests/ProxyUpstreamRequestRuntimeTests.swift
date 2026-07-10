@@ -114,21 +114,14 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(Data(responseBytes) == responseData)
     }
 
-    @Test func completionAccountingCoversAllResponseIDs() throws {
+    @Test func completionAccountingCoversSingleResponseID() throws {
         let port = RecordingUpstreamRuntimePort(chosenUpstreamIndex: 0)
         let runtime = ProxyUpstreamRequestRuntime(port: port)
         let requestData = try JSONSerialization.data(
             withJSONObject: [
-                [
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/list",
-                ],
-                [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/list",
-                ],
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
             ],
             options: []
         )
@@ -150,7 +143,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         )
 
         runtime.recordRequestSucceeded(sessionID: "session-3", started: started)
-        #expect(port.successes().map(\.requestIDKey) == ["1", "2"])
+        #expect(port.successes().map(\.requestIDKey) == ["1"])
 
         runtime.recordRequestTimedOut(
             sessionID: "session-3",
@@ -158,7 +151,7 @@ struct ProxyUpstreamRequestRuntimeTests {
             accountTimeout: true
         )
         #expect(port.timeouts().map(\.requestIDKey) == ["1"])
-        #expect(port.removals().map(\.requestIDKey) == ["2"])
+        #expect(port.removals().isEmpty)
 
         let alreadyAccountedPort = RecordingUpstreamRuntimePort(chosenUpstreamIndex: 0)
         let alreadyAccountedRuntime = ProxyUpstreamRequestRuntime(port: alreadyAccountedPort)
@@ -182,7 +175,7 @@ struct ProxyUpstreamRequestRuntimeTests {
             accountTimeout: false
         )
         #expect(alreadyAccountedPort.timeouts().isEmpty)
-        #expect(alreadyAccountedPort.removals().map(\.requestIDKey) == ["1", "2"])
+        #expect(alreadyAccountedPort.removals().map(\.requestIDKey) == ["1"])
     }
 }
 
