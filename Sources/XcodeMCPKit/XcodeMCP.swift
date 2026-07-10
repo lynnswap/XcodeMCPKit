@@ -182,6 +182,8 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
 /// ```
 public actor XcodeMCP {
     private let session: InitializedMCPClientSession
+    private let defaultRequestTimeout: Duration?
+    private let clock: ClockClient
 
     /// Connects to the configured MCP transport and returns an initialized
     /// client.
@@ -205,28 +207,34 @@ public actor XcodeMCP {
         streamableHTTPDiscoveryResolver: StreamableHTTPDiscoveryResolver
     ) async throws {
         do {
-            let transport: any XcodeMCPTransport
+            let recipe: MCPTransportRecipe
             switch configuration.transport.storage {
             case .localBridge(let bridge):
-                transport = try await UpstreamProcessXcodeMCPTransport.start(
-                    command: bridge.command,
-                    arguments: bridge.arguments,
-                    environment: bridge.environment,
-                    maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
-                )
+                recipe = MCPTransportRecipe {
+                    try await UpstreamProcessXcodeMCPTransport.start(
+                        command: bridge.command,
+                        arguments: bridge.arguments,
+                        environment: bridge.environment,
+                        maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
+                    )
+                }
             case .streamableHTTP(let endpoint):
-                transport = try await StreamableHTTPXcodeMCPTransport.start(
-                    endpoint: endpoint,
-                    requestTimeout: configuration.requestTimeout
-                )
+                recipe = MCPTransportRecipe {
+                    try await StreamableHTTPXcodeMCPTransport.start(
+                        endpoint: endpoint,
+                        requestTimeout: configuration.requestTimeout
+                    )
+                }
             case .streamableHTTPDiscoveryFile(let discoveryFile):
-                transport = try await StreamableHTTPXcodeMCPTransport.start(
-                    discoveryFile: discoveryFile,
-                    requestTimeout: configuration.requestTimeout,
-                    discoveryResolver: streamableHTTPDiscoveryResolver
-                )
+                recipe = MCPTransportRecipe {
+                    try await StreamableHTTPXcodeMCPTransport.start(
+                        discoveryFile: discoveryFile,
+                        requestTimeout: configuration.requestTimeout,
+                        discoveryResolver: streamableHTTPDiscoveryResolver
+                    )
+                }
             }
-            try await self.init(configuration: configuration, transport: transport)
+            try await self.init(configuration: configuration, recipe: recipe)
         } catch {
             throw Self.publicError(from: error)
         }
@@ -236,25 +244,48 @@ public actor XcodeMCP {
         configuration: XcodeMCPConfiguration = XcodeMCPConfiguration(),
         transport: any XcodeMCPTransport
     ) async throws {
-        do {
-            self.session = try await InitializedMCPClientSession(
-                transport: transport,
-                configuration: InitializedMCPClientSession.Configuration(
-                    clientName: configuration.clientName,
-                    clientVersion: configuration.clientVersion,
-                    capabilities: configuration.capabilities.mapValues(\.jsonValue),
-                    requestTimeout: configuration.requestTimeout
-                )
-            )
-        } catch {
-            throw Self.publicError(from: error)
-        }
+        try await self.init(
+            configuration: configuration,
+            recipe: MCPTransportRecipe { transport }
+        )
     }
 
-    isolated deinit {
-        let session = session
-        Task {
-            await session.close()
+    package init(
+        configuration: XcodeMCPConfiguration = XcodeMCPConfiguration(),
+        recipe: MCPTransportRecipe
+    ) async throws {
+        do {
+            if let timeout = configuration.requestTimeout, timeout <= .zero {
+                throw XcodeMCPError.invalidRequest(
+                    "requestTimeout must be greater than zero; use nil to disable timeouts"
+                )
+            }
+            let sessionConfiguration = InitializedMCPClientSession.Configuration(
+                clientName: configuration.clientName,
+                clientVersion: configuration.clientVersion,
+                capabilities: configuration.capabilities.mapValues(\.jsonValue),
+                requestTimeout: configuration.requestTimeout
+            )
+            let authority = try await MCPClientSessionAuthority.startManaged(
+                recipe: recipe,
+                initialize: MCPManagedInitializeContext(
+                    clientName: configuration.clientName,
+                    clientVersion: configuration.clientVersion,
+                    capabilities: sessionConfiguration.capabilities
+                ),
+                defaultTimeout: configuration.requestTimeout,
+                clock: sessionConfiguration.clock
+            )
+            let session = InitializedMCPClientSession(
+                authority: authority,
+                configuration: sessionConfiguration
+            )
+            await session.start()
+            self.session = session
+            self.defaultRequestTimeout = configuration.requestTimeout
+            self.clock = sessionConfiguration.clock
+        } catch {
+            throw Self.publicError(from: error)
         }
     }
 
@@ -263,12 +294,58 @@ public actor XcodeMCP {
     /// The returned catalog is dynamic and comes from the running Xcode MCP
     /// server. Use the tool `name` with ``callTool(_:arguments:onProgress:)``
     /// and treat `inputSchema` and `raw` as MCP JSON supplied by the server.
-    public func listTools() async throws -> [MCPTool] {
-        let result = try await request("tools/list")
-        guard let tools = result.objectValue?["tools"]?.arrayValue else {
-            throw XcodeMCPError.invalidResponse("tools/list result is missing tools")
+    public func listTools(
+        options: XcodeMCPRequestOptions = .init()
+    ) async throws -> [MCPTool] {
+        let deadline = try operationDeadline(options.timeout)
+        var expectedGeneration = await session.connectionState().generation
+        var restartedAfterGenerationChange = false
+        var replayAvailable = options.replayPolicy == .onceWhenRejectedBeforeProcessing
+        var cursor: String?
+        var seenCursors: Set<String> = []
+        var tools: [MCPTool] = []
+
+        while true {
+            let params = cursor.map { MCPJSONValue.object(["cursor": .string($0)]) }
+            var pageOptions = options
+            pageOptions.replayPolicy = replayAvailable
+                ? .onceWhenRejectedBeforeProcessing
+                : .never
+            let result = try await request(
+                "tools/list",
+                params: params,
+                options: pageOptions,
+                deadline: deadline,
+                onProgress: nil
+            )
+            let generation = await session.connectionState().generation
+            if generation != expectedGeneration {
+                guard restartedAfterGenerationChange == false else {
+                    throw XcodeMCPError.sessionRecoveryFailed(
+                        "connection changed more than once while loading the tool catalog"
+                    )
+                }
+                restartedAfterGenerationChange = true
+                replayAvailable = false
+                expectedGeneration = generation
+                cursor = nil
+                seenCursors.removeAll()
+                tools.removeAll()
+                continue
+            }
+            guard let page = result["tools"]?.arrayValue else {
+                throw XcodeMCPError.invalidResponse("tools/list result is missing tools")
+            }
+            tools.append(contentsOf: try page.map { try MCPTool(json: $0) })
+            guard let nextCursor = result["nextCursor"]?.stringValue,
+                  nextCursor.isEmpty == false else {
+                return tools
+            }
+            guard seenCursors.insert(nextCursor).inserted else {
+                throw XcodeMCPError.invalidResponse("tools/list returned a cursor cycle")
+            }
+            cursor = nextCursor
         }
-        return try tools.map { try MCPTool(json: $0) }
     }
 
     /// Calls an Xcode MCP tool and returns its final result.
@@ -289,6 +366,7 @@ public actor XcodeMCP {
     public func callTool(
         _ name: String,
         arguments: [String: MCPJSONValue] = [:],
+        options: XcodeMCPRequestOptions = .init(),
         onProgress: (@Sendable (MCPProgress) async -> Void)? = nil
     ) async throws -> MCPToolResult {
         guard name.isEmpty == false else {
@@ -314,6 +392,7 @@ public actor XcodeMCP {
         let result = try await request(
             "tools/call",
             params: .object(params),
+            options: options,
             onProgress: progressHandler
         )
         return try MCPToolResult(json: result)
@@ -336,9 +415,10 @@ public actor XcodeMCP {
     ///   server response omits `result`.
     public func request(
         _ method: String,
-        params: MCPJSONValue? = nil
+        params: MCPJSONValue? = nil,
+        options: XcodeMCPRequestOptions = .init()
     ) async throws -> MCPJSONValue {
-        try await request(method, params: params, onProgress: nil)
+        try await request(method, params: params, options: options, onProgress: nil)
     }
 
     /// Sends an arbitrary MCP notification.
@@ -358,6 +438,26 @@ public actor XcodeMCP {
         }
     }
 
+    /// Returns the current atomic connection snapshot.
+    public func connectionState() async -> XcodeMCPConnectionSnapshot {
+        await session.connectionState()
+    }
+
+    /// Returns an independent state stream whose first element is the current
+    /// snapshot. The stream finishes after ``close()``.
+    public func connectionStates() async -> AsyncStream<XcodeMCPConnectionSnapshot> {
+        await session.connectionStates()
+    }
+
+    /// Explicitly creates and initializes a fresh transport connection.
+    public func reconnect(options: XcodeMCPRequestOptions = .init()) async throws {
+        do {
+            try await session.reconnect(deadline: try operationDeadline(options.timeout))
+        } catch {
+            throw Self.publicError(from: error)
+        }
+    }
+
     /// Closes the client and terminates the underlying transport.
     ///
     /// Closing is idempotent. Pending requests fail with ``XcodeMCPError/closed``,
@@ -372,12 +472,18 @@ extension XcodeMCP {
     package func request(
         _ method: String,
         params: MCPJSONValue? = nil,
+        options: XcodeMCPRequestOptions = .init(),
+        deadline: Deadline? = nil,
         onProgress: InitializedMCPClientSession.ProgressHandler?
     ) async throws -> MCPJSONValue {
         do {
             let result = try await session.request(
                 method,
                 params: params?.jsonValue,
+                deadline: deadline ?? (try operationDeadline(options.timeout)),
+                replayPolicy: options.replayPolicy == .never
+                    ? .never
+                    : .onceWhenRejectedBeforeProcessing,
                 onProgress: onProgress
             )
             return MCPJSONValue(result)
@@ -388,14 +494,44 @@ extension XcodeMCP {
 }
 
 private extension XcodeMCP {
+    func operationDeadline(_ timeout: XcodeMCPRequestOptions.Timeout) throws -> Deadline? {
+        switch timeout {
+        case .configurationDefault:
+            return Deadline.fromNow(defaultRequestTimeout, clock: clock)
+        case .disabled:
+            return nil
+        case .after(let duration):
+            guard duration > .zero else {
+                throw XcodeMCPError.invalidRequest(
+                    "request timeout must be greater than zero; use .disabled to disable it"
+                )
+            }
+            return Deadline.fromNow(duration, clock: clock)
+        }
+    }
+
     static func publicError(from error: any Error) -> any Error {
         if let error = error as? XcodeMCPError {
             return error
+        }
+        if let failure = error as? MCPClientSessionFailure,
+           case .sessionRecoveryFailed(let reason) = failure {
+            return XcodeMCPError.sessionRecoveryFailed(reason)
         }
         if error is CancellationError {
             return error
         }
         guard let runtimeError = error as? MCPBridgeRuntimeError else {
+            if let failure = error as? MCPTransportFailure {
+                switch failure {
+                case .sessionExpired(let sessionID, _):
+                    return XcodeMCPError.sessionRecoveryFailed(
+                        "session \(sessionID) expired and could not be replaced"
+                    )
+                case .deliveryUnknown(let reason), .unavailable(let reason):
+                    return XcodeMCPError.transportUnavailable(reason)
+                }
+            }
             return XcodeMCPError.transportUnavailable(errorDescription(error))
         }
         switch runtimeError {

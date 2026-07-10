@@ -213,7 +213,8 @@ private struct ProxyToolVerifier {
                 status = .hung
             case .serverError:
                 status = .rpcError
-            case .closed, .invalidRequest, .invalidResponse, .transportUnavailable:
+            case .closed, .invalidRequest, .invalidResponse, .transportUnavailable,
+                 .sessionRecoveryFailed:
                 status = .failed
             }
             return ToolVerificationRecord(

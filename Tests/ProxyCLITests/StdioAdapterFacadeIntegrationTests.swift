@@ -26,7 +26,7 @@ struct StdioAdapterFacadeIntegrationTests {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .sse,
             postSSEPreludeEventsByMethod: ["tools/list": [progressNotification]],
-            stdinLines: [initializeRequest, toolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
             timeoutDescription: "STDIO adapter should emit all SSE POST events"
         )
 
@@ -51,7 +51,7 @@ struct StdioAdapterFacadeIntegrationTests {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .sse,
             openPostSSEMethods: ["initialize"],
-            stdinLines: [initializeRequest, toolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
             timeoutDescription: "STDIO adapter should not block after streamed initialize response"
         )
 
@@ -72,7 +72,7 @@ struct StdioAdapterFacadeIntegrationTests {
             responseMode: .json,
             gatedResponseMethods: ["tools/list"],
             getSSEEvents: [startupNotification],
-            stdinLines: [initializeRequest, toolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
             timeoutDescription: "STDIO adapter should finish after stdin closes",
             whileRunning: { server in
                 _ = try await waitWithTimeout(
@@ -101,7 +101,7 @@ struct StdioAdapterFacadeIntegrationTests {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             gatedResponseMethods: ["tools/call"],
-            stdinLines: [initializeRequest, slowCall, concurrentToolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, slowCall, concurrentToolsListRequest],
             timeoutDescription: "STDIO adapter should finish after gated concurrent request completes",
             whileRunning: { server in
                 let responseGate = try #require(server.responseGate)
@@ -189,7 +189,7 @@ struct StdioAdapterFacadeIntegrationTests {
                     ]
                 )
             ],
-            stdinLines: [initializeRequest, toolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
             timeoutDescription: "STDIO adapter should forward JSON-RPC HTTP error bodies"
         )
 
@@ -211,7 +211,7 @@ struct StdioAdapterFacadeIntegrationTests {
                     contentType: "text/plain"
                 )
             ],
-            stdinLines: [initializeRequest, toolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
             timeoutDescription: "STDIO adapter should report HTTP status for non-JSON errors"
         )
 
@@ -229,7 +229,7 @@ struct StdioAdapterFacadeIntegrationTests {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             hangingResponseMethod: "tools/call",
-            stdinLines: [initializeRequest, longRunningCall],
+            stdinLines: [initializeRequest, initializedNotification, longRunningCall],
             proxyArguments: ["--request-timeout", "0"],
             timeoutDescription: "STDIO adapter should delete the session after timed-out drain",
             timeout: .seconds(6),
@@ -278,7 +278,7 @@ struct StdioAdapterFacadeIntegrationTests {
     private func runStdioAdapterFacadeRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: responseMode,
-            stdinLines: [initializeRequest, toolsListRequest],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
             timeoutDescription: "STDIO adapter should finish after stdin closes",
             closeInputBeforeRunning: false,
             whileRunning: { server in
@@ -330,6 +330,8 @@ struct StdioAdapterFacadeIntegrationTests {
 
 private let initializeRequest =
     #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+private let initializedNotification =
+    #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
 private let toolsListRequest = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
 private let concurrentToolsListRequest = #"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#
 
@@ -1015,6 +1017,18 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             if let requestObject,
                 stubIsJSONRPCResponse(requestObject)
             {
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Length", value: "0")
+                let responseHead = HTTPResponseHead(
+                    version: requestHead.version,
+                    status: .accepted,
+                    headers: headers
+                )
+                context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+                return
+            }
+            if requestObject?["method"] != nil, requestObject?["id"] == nil {
                 var headers = HTTPHeaders()
                 headers.add(name: "Content-Length", value: "0")
                 let responseHead = HTTPResponseHead(

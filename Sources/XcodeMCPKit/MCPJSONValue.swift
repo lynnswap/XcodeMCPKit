@@ -110,7 +110,7 @@ extension MCPJSONValue {
     /// tool-specific wrapper.
     ///
     /// - Parameter value: The value to encode into MCP JSON.
-    public init<T: Encodable>(encoding value: T) throws {
+    public init<T: Encodable>(_ value: T) throws {
         let data = try JSONEncoder().encode(value)
         let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         try self.init(jsonObject: object)
@@ -199,11 +199,6 @@ extension MCPJSONValue {
         return value
     }
 
-    /// Returns the integer when this value is an integer JSON number.
-    public var intValue: Int64? {
-        integerValue
-    }
-
     /// Returns the numeric value as a `Double` when this value is any JSON
     /// number.
     public var doubleValue: Double? {
@@ -220,6 +215,19 @@ extension MCPJSONValue {
     /// Whether this value is JSON null.
     public var isNull: Bool {
         self == .null
+    }
+
+    /// Returns the value for `key` when this value is an object.
+    public subscript(key: String) -> MCPJSONValue? {
+        guard case .object(let object) = self else { return nil }
+        return object[key]
+    }
+
+    /// Returns the element at `index` when this value is an array and the
+    /// index is in bounds.
+    public subscript(index: Int) -> MCPJSONValue? {
+        guard case .array(let array) = self, array.indices.contains(index) else { return nil }
+        return array[index]
     }
 }
 

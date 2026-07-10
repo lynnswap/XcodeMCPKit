@@ -684,7 +684,7 @@ func compileOnlyClientDomainSurface() throws {
     let tags = arguments["tags"]?.arrayValue?.compactMap { $0.stringValue }
     let query = arguments["query"]?.stringValue
     let includeBeta = arguments["includeBeta"]?.boolValue
-    let limit = arguments["limit"]?.intValue
+    let limit = arguments["limit"]?.integerValue
     let integerLimit = arguments["limit"]?.integerValue
     let score = arguments["score"]?.doubleValue
     let optionalIsNull = metadata?["optional"]?.isNull
@@ -693,7 +693,7 @@ func compileOnlyClientDomainSurface() throws {
         "limit": 3,
         "optional": NSNull(),
     ])
-    let jsonFromEncodable = try MCPJSONValue(encoding: ContractPayload(
+    let jsonFromEncodable = try MCPJSONValue(ContractPayload(
         query: "Observation",
         limit: 2
     ))

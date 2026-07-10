@@ -2,14 +2,65 @@ import Foundation
 
 package enum XcodeMCPTransportEvent: Sendable {
     case message(Data)
+    case messageWithHeaders(Data, MCPConnectionHeaders)
     case closed(String?)
+    case sessionExpired(sessionID: String)
+}
+
+package struct MCPConnectionHeaders: Sendable, Equatable {
+    package var sessionID: String?
+    package var protocolVersion: String?
+
+    package init(sessionID: String? = nil, protocolVersion: String? = nil) {
+        self.sessionID = sessionID
+        self.protocolVersion = protocolVersion
+    }
+}
+
+package enum MCPDeliveryCertainty: Sendable, Equatable {
+    case rejectedBeforeProcessing
+    case unknown
+}
+
+package enum MCPTransportFailure: Error, Sendable, Equatable {
+    case sessionExpired(sessionID: String, delivery: MCPDeliveryCertainty)
+    case deliveryUnknown(String)
+    case unavailable(String)
 }
 
 package protocol XcodeMCPTransport: Sendable {
     var events: AsyncStream<XcodeMCPTransportEvent> { get }
 
     func send(_ data: Data) async throws
+    func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws
+    func startEventStream(headers: MCPConnectionHeaders) async
     func close() async
+    func close(headers: MCPConnectionHeaders) async
+}
+
+extension XcodeMCPTransport {
+    package func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
+        try await send(data)
+    }
+
+    package func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    package func close(headers: MCPConnectionHeaders) async {
+        _ = headers
+        await close()
+    }
 }
 
 package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
@@ -84,5 +135,6 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
     package func close() async {
         bridgeTask.cancel()
         await session.stop()
+        await bridgeTask.value
     }
 }
