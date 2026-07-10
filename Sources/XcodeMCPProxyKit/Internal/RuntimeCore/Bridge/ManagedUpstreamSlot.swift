@@ -149,8 +149,19 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
     private func handleSessionEvent(
         _ event: Upstream.Event,
         from running: RunningSessionBox
-    ) {
+    ) async {
         guard current === running else {
+            return
+        }
+
+        if case .message(let data) = event,
+            Self.isTopLevelJSONArray(data)
+        {
+            current = nil
+            continuation.yield(
+                .stdoutProtocolViolation(Self.unexpectedTopLevelArrayViolation(data))
+            )
+            await running.session.stop()
             return
         }
 
@@ -169,5 +180,28 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
             return
         }
         current = nil
+    }
+
+    private static func isTopLevelJSONArray(_ data: Data) -> Bool {
+        guard let value = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return false
+        }
+        return value is [Any]
+    }
+
+    private static func unexpectedTopLevelArrayViolation(
+        _ data: Data
+    ) -> StdioFramer.ProtocolViolation {
+        let previewData = data.prefix(200)
+        return StdioFramer.ProtocolViolation(
+            reason: .unexpectedTopLevelArray,
+            bufferedByteCount: data.count,
+            preview: String(decoding: previewData, as: UTF8.self),
+            previewHex: previewData.map { byte in
+                let digits = String(byte, radix: 16)
+                return byte < 0x10 ? "0\(digits)" : digits
+            }.joined(),
+            leadingByteHex: "5b"
+        )
     }
 }
