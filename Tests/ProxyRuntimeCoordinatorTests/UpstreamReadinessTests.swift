@@ -8,7 +8,8 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 
-extension RuntimeCoordinatorTests {
+@Suite(.serialized, .asyncTestCleanup)
+struct UpstreamReadinessTests {
     @discardableResult
     private func waitForReadinessPollSleep(
         _ sleepRecorder: ControlledReadinessSleep,
@@ -477,6 +478,7 @@ extension RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: true)
         let sleepRecorder = ControlledReadinessSleep()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -485,6 +487,9 @@ extension RuntimeCoordinatorTests {
             upstreamReadinessGate: makeTestReadinessGate(
                 readiness: readiness,
                 sleepRecorder: sleepRecorder
+            ),
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -493,6 +498,7 @@ extension RuntimeCoordinatorTests {
         let firstInitID = try extractUpstreamID(from: firstInit)
         await upstream.yield(.message(try makeInitializeResponse(id: firstInitID)))
         _ = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        _ = try await initializedUpstreams.nextValue(at: 0)
 
         await upstream.yield(.exit(1))
         _ = try await waitWithTimeout(
@@ -509,6 +515,7 @@ extension RuntimeCoordinatorTests {
         let secondInitID = try extractUpstreamID(from: secondInit)
         await upstream.yield(.message(try makeInitializeResponse(id: secondInitID)))
         _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        _ = try await initializedUpstreams.nextValue(at: 1)
 
         await upstream.yield(.exit(1))
         let secondDelay = try await waitWithTimeout(

@@ -268,7 +268,13 @@ struct XcodeMCPTests {
         #expect(await closeCompletions.count() == 0)
 
         await callbackTerminalGate.open()
-        _ = try await callTask.value
+        do {
+            _ = try await callTask.value
+        } catch {
+            // The final response is already queued when the callback closes
+            // the client. Either the response or close may win that race.
+            #expect(error as? XcodeMCPError == .closed)
+        }
         await secondCloseTask.value
         #expect(try await callbackCloseCounts.nextValue() == 1)
         #expect(await callbackStarts.count() == 1)

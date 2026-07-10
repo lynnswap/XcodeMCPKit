@@ -213,30 +213,14 @@ extension RuntimeCoordinator {
         noteUpstreamInitializationSucceeded()
     }
 
-    /// Test-only synchronous teardown for defer blocks; production code
-    /// awaits shutdown() directly.
+    /// Test-only `defer` hook that requires an `AsyncTestCleanupTrait` scope.
     func shutdownAndWait() {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) { [self] in
-            await shutdown()
-            semaphore.signal()
-        }
-        waitForTestSemaphore(
-            semaphore,
-            description: "timed out waiting for RuntimeCoordinator.shutdown()"
-        )
-    }
-
-    func drainRuntimeTasksAndWaitForTesting() {
-        let drain = runtimeTasks.drainCurrentTasks()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
-            await drain.wait()
-            semaphore.signal()
-        }
-        waitForTestSemaphore(
-            semaphore,
-            description: "timed out waiting for RuntimeCoordinator runtime task drain"
+        precondition(
+            registerAsyncTestCleanup(
+                description: "RuntimeCoordinator shutdown failed",
+                operation: { [self] in await shutdown() }
+            ),
+            "shutdownAndWait requires an AsyncTestCleanupTrait scope"
         )
     }
 
@@ -2333,7 +2317,6 @@ extension ToggleableOverloadUpstreamClient: InitializableTestUpstream {}
 extension BlockingInitializedNotificationUpstreamClient: InitializableTestUpstream {}
 
 struct RuntimeCoordinatorFixture {
-    let group: MultiThreadedEventLoopGroup
     let eventLoop: EventLoop
     let manager: RuntimeCoordinator
 
@@ -2357,9 +2340,9 @@ struct RuntimeCoordinatorFixture {
         startImmediately: Bool = true,
         runtimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let eventLoop = group.next()
-        self.group = group
+        // RuntimeCoordinator owns its tasks, but not the injected event loop. Reuse NIO's
+        // process-scoped group so the package suite does not create hundreds of kernel threads.
+        let eventLoop = MultiThreadedEventLoopGroup.singleton.next()
         self.eventLoop = eventLoop
         self.manager = RuntimeCoordinator(
             config: config,
@@ -2383,7 +2366,6 @@ struct RuntimeCoordinatorFixture {
 
     func shutdownAndWait() {
         manager.shutdownAndWait()
-        XcodeMCPProxyTestSupport.shutdownAndWait(group)
     }
 
     func registerInitialize(
@@ -2445,7 +2427,12 @@ struct RuntimeCoordinatorFixture {
             serverName: serverName,
             timeout: timeout
         )
-        return try await future.get()
+        return try await waitWithTimeout(
+            "waiting for primary initialize response",
+            timeout: timeout
+        ) {
+            try await future.get()
+        }
     }
 }
 

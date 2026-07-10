@@ -8,7 +8,7 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 
-@Suite(.serialized)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorTests {
     @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
@@ -2789,7 +2789,12 @@ struct RuntimeCoordinatorTests {
         let secondSessionID = "session-server-request-b"
         let secondSession = manager.session(id: secondSessionID)
         let secondFuture = fixture.registerInitialize(requestID: 2, sessionID: secondSessionID)
-        _ = try await secondFuture.get()
+        _ = try await waitWithTimeout(
+            "waiting for second session initialize response",
+            timeout: .seconds(2)
+        ) {
+            try await secondFuture.get()
+        }
 
         let ownerLeaseID = manager.createRequestLease(
             descriptor: SessionRequestPipeline.Descriptor(
@@ -2883,7 +2888,12 @@ struct RuntimeCoordinatorTests {
 
         await replacement.yield(.message(try makeInitializeResponse(id: retriedUpstreamID)))
 
-        _ = try await future.get()
+        _ = try await waitWithTimeout(
+            "waiting for initialize response after overload recovery",
+            timeout: .seconds(2)
+        ) {
+            try await future.get()
+        }
     }
 
     @Test func sessionManagerCancelsOriginalInitTimeoutBeforeRetryingInitializedNotificationOverload()

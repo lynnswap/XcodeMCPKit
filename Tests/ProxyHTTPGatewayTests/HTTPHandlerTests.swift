@@ -9,7 +9,7 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 
 
-@Suite(.serialized)
+@Suite(.serialized, .asyncTestCleanup)
 struct HTTPHandlerTests {
     @Test func httpHealthCheck() async throws {
         let config = makeConfig()

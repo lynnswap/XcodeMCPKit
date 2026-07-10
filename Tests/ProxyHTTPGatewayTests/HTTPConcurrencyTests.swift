@@ -8,7 +8,7 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyInternalTestSupport
 import XcodeMCPProxyTestSupport
 
-@Suite(.serialized)
+@Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
     @Test func httpConcurrentInitializeRequests() async throws {
         let server = try TestHTTPServer.start()
@@ -214,7 +214,7 @@ struct HTTPConcurrencyTests {
             executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
         )
         eventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
@@ -238,7 +238,7 @@ struct HTTPConcurrencyTests {
         #expect(firstObject["error"] == nil)
 
         eventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
@@ -255,7 +255,7 @@ struct HTTPConcurrencyTests {
         #expect(secondObject["error"] == nil)
     }
 
-    @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() throws {
+    @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
         let config = makeEmbeddedConfig(requestTimeout: 0.15)
         let firstChannel = EmbeddedChannel()
@@ -309,7 +309,7 @@ struct HTTPConcurrencyTests {
             to: firstChannel
         )
         firstChannel.embeddedEventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
@@ -329,7 +329,7 @@ struct HTTPConcurrencyTests {
         #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
 
         secondChannel.embeddedEventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",

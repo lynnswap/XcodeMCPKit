@@ -41,8 +41,14 @@ jobs:
 
       - name: Run package tests
         run: |
+          # Keep the large serialized runtime suite in its own Swift Testing process.
           ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \
+            --filter ProxyRuntimeCoordinatorTests \
+            -Xswiftc -strict-concurrency=minimal
+          ./scripts/ci-test-watchdog.sh swift test \
+            --no-parallel \
+            --skip ProxyRuntimeCoordinatorTests \
             -Xswiftc -strict-concurrency=minimal
 
       - name: Run process tests

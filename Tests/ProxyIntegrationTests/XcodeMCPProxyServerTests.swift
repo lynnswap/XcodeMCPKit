@@ -380,15 +380,21 @@ struct XcodeMCPProxyServerTests {
 
         _ = try await server?.start()
         #expect(runtimeReference.value != nil)
+        let runtimeTaskDrains = try #require(
+            runtimeReference.runtimeTaskDrains()
+        )
         server = nil
 
-        for _ in 0..<100 where runtimeReference.value != nil {
-            await Task.yield()
+        try await waitWithTimeout(
+            "waiting for deinit-cancelled runtime tasks",
+            timeout: .seconds(2)
+        ) {
+            await runtimeTaskDrains.wait()
         }
-        #expect(runtimeReference.value == nil)
 
         // This test deliberately omits the server's explicit shutdown contract.
-        // The injected event-loop group therefore remains a test-owned resource.
+        // Deinit guarantees cancellation signaling, not synchronous runtime
+        // destruction. The injected event-loop group remains test-owned.
         try await shutdown(try #require(eventLoopGroup.withLockedValue { $0 }))
     }
 
@@ -679,6 +685,16 @@ private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermi
 }
 
 private final class WeakRuntimeReference: @unchecked Sendable {
+    struct TaskDrains: Sendable {
+        let runtime: AsyncTaskSupervisor.Drain
+        let upstreamEvents: AsyncTaskSupervisor.Drain
+
+        func wait() async {
+            await upstreamEvents.wait()
+            await runtime.wait()
+        }
+    }
+
     private let lock = NSLock()
     private weak var storage: RuntimeCoordinator?
 
@@ -693,6 +709,18 @@ private final class WeakRuntimeReference: @unchecked Sendable {
             storage = newValue
             lock.unlock()
         }
+    }
+
+    func runtimeTaskDrains() -> TaskDrains? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let runtime = storage else {
+            return nil
+        }
+        return TaskDrains(
+            runtime: runtime.runtimeTasks.drainCurrentTasks(),
+            upstreamEvents: runtime.upstreamEventTasks.drainCurrentTasks()
+        )
     }
 }
 

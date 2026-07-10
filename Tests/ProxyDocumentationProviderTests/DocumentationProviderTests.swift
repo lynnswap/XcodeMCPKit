@@ -254,7 +254,7 @@ private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
     )
 }
 
-@Suite(.serialized)
+@Suite(.serialized, .asyncTestCleanup)
 struct DocumentationProviderTests {
     @Test func documentationProviderConnectionCancelsEventReaderOnDeinit() async throws {
         let terminated = TestSignal()
