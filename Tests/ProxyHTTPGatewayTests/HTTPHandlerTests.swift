@@ -547,6 +547,164 @@ struct HTTPHandlerTests {
         #expect(sessionManager.hasSession(id: "uninitialized-session") == false)
     }
 
+    @Test func httpAppliesOriginPolicyBeforeEveryRoute() async throws {
+        for route in OriginPolicyRoute.allCases {
+            for originCase in OriginPolicyHeaderCase.allCases {
+                var config = makeConfig()
+                config.listenPort = 8765
+                if route == .debugReset, originCase.isRejected == false {
+                    // The live loopback reset path is covered separately. A non-loopback
+                    // listener keeps this Cartesian header test synchronous.
+                    config.listenHost = "0.0.0.0"
+                }
+                let channel = EmbeddedChannel()
+                let sessionManager = TestRuntimeCoordinator(config: config)
+                _ = sessionManager.session(id: "origin-policy-sentinel")
+                sessionManager.setCachedToolsListResult(
+                    .object(["tools": .array([])]),
+                    sourceUpstream: 0
+                )
+                try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+                try writeOriginPolicyRequest(
+                    route,
+                    originCase: originCase,
+                    to: channel
+                )
+                let response = try await collectResponse(from: channel)
+
+                let expectedStatus =
+                    originCase.isRejected
+                    ? HTTPResponseStatus.forbidden
+                    : route.statusWithoutOriginRejection
+                #expect(
+                    response.head.status == expectedStatus,
+                    "route=\(route) origin=\(originCase)"
+                )
+                if originCase.isRejected {
+                    #expect(response.body == "origin not allowed")
+                    #expect(sessionManager.hasSession(id: "origin-policy-sentinel"))
+                    #expect(sessionManager.cachedToolsListResult() != nil)
+                    #expect(sessionManager.sentUpstreamCount() == 0)
+                }
+
+                _ = try? channel.finish()
+            }
+        }
+    }
+
+    @Test func httpRejectsNonOriginURLShapes() async throws {
+        let rejectedOrigins = [
+            "https://localhost:8765",
+            "ftp://localhost:8765",
+            "http://user@localhost:8765",
+            "http://user:password@localhost:8765",
+            "http://localhost:8765/",
+            "http://localhost:8765/path",
+            "http://localhost:8765?query=1",
+            "http://localhost:8765#fragment",
+            "http://localhost:8766",
+            "http://127.attacker.example:8765",
+            "http://localhost:8765,http://localhost:8765",
+        ]
+
+        for origin in rejectedOrigins {
+            var config = makeConfig()
+            config.listenPort = 8765
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
+            head.headers.add(name: "Origin", value: origin)
+            try channel.writeInbound(HTTPServerRequestPart.head(head))
+            try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+            let response = try await collectResponse(from: channel)
+            #expect(response.head.status == .forbidden, "origin=\(origin)")
+            _ = try? channel.finish()
+        }
+    }
+
+    @Test func httpAllowsExactLoopbackOrigins() async throws {
+        let allowedOrigins = [
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
+            "http://127.42.0.1:8765",
+            "http://[::1]:8765",
+            "http://[0:0:0:0:0:0:0:1]:8765",
+        ]
+
+        for origin in allowedOrigins {
+            var config = makeConfig()
+            config.listenPort = 8765
+            let channel = EmbeddedChannel()
+            let sessionManager = TestRuntimeCoordinator(config: config)
+            try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
+            head.headers.add(name: "Origin", value: origin)
+            try channel.writeInbound(HTTPServerRequestPart.head(head))
+            try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+            let response = try await collectResponse(from: channel)
+            #expect(response.head.status == .ok, "origin=\(origin)")
+            _ = try? channel.finish()
+        }
+    }
+
+    @Test func httpAllowsOriginMatchingEphemeralListenerPort() async throws {
+        let config = makeConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            var components = URLComponents(url: server.url, resolvingAgainstBaseURL: false)!
+            components.path = "/health"
+            let requestURL = try #require(components.url)
+            let port = try #require(server.url.port)
+            var request = URLRequest(url: requestURL)
+            request.setValue("http://127.0.0.1:\(port)", forHTTPHeaderField: "Origin")
+
+            let (responseData, response) = try await withTestURLSession { session in
+                try await session.data(for: request)
+            }
+            let httpResponse = try #require(response as? HTTPURLResponse)
+            #expect(httpResponse.statusCode == HTTPResponseStatus.ok.code)
+            #expect(String(data: responseData, encoding: .utf8) == "ok")
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+
+        try await server.shutdown()
+    }
+
+    @Test func httpRejectsOriginBeforeApplyingBodyLimit() async throws {
+        var config = makeConfig(maxBodyBytes: 1)
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Origin", value: "http://example.invalid:8765")
+        var body = channel.allocator.buffer(capacity: 2)
+        body.writeString("{}")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.sentUpstreamCount() == 0)
+    }
+
     @Test func httpRejectsInvalidOrigin() async throws {
         let config = makeConfig()
         let channel = EmbeddedChannel()
@@ -677,6 +835,26 @@ struct HTTPHandlerTests {
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Mcp-Session-Id") != nil)
+    }
+
+    @Test func httpRejectsLoopbackOriginForExplicitNonLoopbackListener() async throws {
+        var config = makeConfig()
+        config.listenHost = "192.0.2.10"
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        try writeInitializePost(
+            to: channel,
+            origin: "http://localhost:8765"
+        )
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "origin not allowed")
+        #expect(sessionManager.isInitialized() == false)
     }
 
     @Test func httpRejectsOriginMismatchingHostHeaderWhenBoundToWildcard() async throws {
@@ -3027,6 +3205,124 @@ struct HTTPHandlerTests {
         body.writeBytes(data)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    }
+
+    private enum OriginPolicyRoute: CaseIterable {
+        case health
+        case debugSnapshot
+        case debugReset
+        case sse
+        case deleteSession
+        case post
+        case notFound
+
+        var method: HTTPMethod {
+            switch self {
+            case .health, .debugSnapshot, .sse, .notFound:
+                return .GET
+            case .debugReset, .post:
+                return .POST
+            case .deleteSession:
+                return .DELETE
+            }
+        }
+
+        var uri: String {
+            switch self {
+            case .health:
+                return "/health"
+            case .debugSnapshot:
+                return "/debug/upstreams?includeSensitive=1"
+            case .debugReset:
+                return "/debug/reset"
+            case .sse, .deleteSession, .post:
+                return "/mcp"
+            case .notFound:
+                return "/not-found"
+            }
+        }
+
+        var statusWithoutOriginRejection: HTTPResponseStatus {
+            switch self {
+            case .health, .debugSnapshot, .post:
+                return .ok
+            case .debugReset:
+                return .notFound
+            case .sse, .deleteSession:
+                return .badRequest
+            case .notFound:
+                return .notFound
+            }
+        }
+    }
+
+    private enum OriginPolicyHeaderCase: CaseIterable {
+        case missing
+        case allowed
+        case disallowed
+        case empty
+        case multiple
+        case null
+        case malformed
+
+        var isRejected: Bool {
+            switch self {
+            case .missing, .allowed:
+                return false
+            case .disallowed, .empty, .multiple, .null, .malformed:
+                return true
+            }
+        }
+
+        func apply(to headers: inout HTTPHeaders) {
+            switch self {
+            case .missing:
+                break
+            case .allowed:
+                headers.add(name: "Origin", value: "http://localhost:8765")
+            case .disallowed:
+                headers.add(name: "Origin", value: "http://example.invalid:8765")
+            case .empty:
+                headers.add(name: "Origin", value: "")
+            case .multiple:
+                headers.add(name: "Origin", value: "http://localhost:8765")
+                headers.add(name: "Origin", value: "http://127.0.0.1:8765")
+            case .null:
+                headers.add(name: "Origin", value: "null")
+            case .malformed:
+                headers.add(name: "Origin", value: "http://[::1")
+            }
+        }
+    }
+
+    private func writeOriginPolicyRequest(
+        _ route: OriginPolicyRoute,
+        originCase: OriginPolicyHeaderCase,
+        to channel: EmbeddedChannel
+    ) throws {
+        var head = HTTPRequestHead(version: .http1_1, method: route.method, uri: route.uri)
+        if route == .sse {
+            head.headers.add(name: "Accept", value: "text/event-stream")
+        } else if route == .post {
+            head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+            head.headers.add(name: "Content-Type", value: "application/json")
+        }
+        originCase.apply(to: &head.headers)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+
+        if route == .post {
+            let payload: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": ["capabilities": [String: Any]()],
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            var body = channel.allocator.buffer(capacity: data.count)
+            body.writeBytes(data)
+            try channel.writeInbound(HTTPServerRequestPart.body(body))
+        }
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 

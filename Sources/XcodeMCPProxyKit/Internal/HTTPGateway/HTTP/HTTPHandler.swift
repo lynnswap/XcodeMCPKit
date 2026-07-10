@@ -23,6 +23,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         var isSSE = false
         var sseSessionID: String?
         var bodyTooLarge = false
+        var originRejected = false
         var activePostRequestHandles: [String: ClientMCPRequestExecutor.CancellationHandle] = [:]
         var responseWriteTail: EventLoopFuture<Void>?
     }
@@ -32,6 +33,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     let controlService: HTTPControlService
     let postService: ClientMCPRequestExecutor
     let responseWriter: HTTPResponseWriter
+    let requestSecurityPolicy: HTTPRequestSecurityPolicy
     let logger: Logger = ProxyLogging.make("http")
 
     init(
@@ -68,16 +70,29 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             logger: ProxyLogging.make("http")
         )
         self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))
+        self.requestSecurityPolicy = HTTPRequestSecurityPolicy(
+            configuredHost: config.listenHost,
+            configuredPort: config.listenPort
+        )
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
+            let originRejected =
+                requestSecurityPolicy.evaluate(
+                    head,
+                    localAddress: context.channel.localAddress
+                ) == .rejectOrigin
             state.withLockedValue { state in
                 state.requestHead = head
-                state.bodyBuffer = context.channel.allocator.buffer(capacity: 0)
+                state.bodyBuffer =
+                    originRejected
+                    ? nil
+                    : context.channel.allocator.buffer(capacity: 0)
                 state.bodyTooLarge = false
+                state.originRejected = originRejected
             }
         case .body(var buffer):
             var shouldReturn = false
@@ -137,12 +152,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleRequest(context: ChannelHandlerContext) {
-        let head = state.withLockedValue { state -> HTTPRequestHead? in
-            let head = state.requestHead
+        let request = state.withLockedValue { state -> (HTTPRequestHead, Bool)? in
+            guard let head = state.requestHead else {
+                return nil
+            }
             state.requestHead = nil
-            return head
+            let originRejected = state.originRejected
+            state.originRejected = false
+            return (head, originRejected)
         }
-        guard let head else { return }
+        guard let (head, originRejected) = request else { return }
 
         let path = head.uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? head.uri
         let requestLog = RequestLogContext(
@@ -152,6 +171,18 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             remoteAddress: remoteAddressString(for: context.channel)
         )
         logRequest(requestLog)
+
+        if originRejected {
+            _ = sendPlain(
+                on: context.channel,
+                status: .forbidden,
+                body: "origin not allowed",
+                keepAlive: head.isKeepAlive,
+                sessionID: nil,
+                requestLog: requestLog
+            )
+            return
+        }
 
         let bodyTooLarge = state.withLockedValue { $0.bodyTooLarge }
         if bodyTooLarge {
@@ -167,11 +198,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
 
         let route = HTTPRoute.resolve(method: head.method, path: path)
-        if routeRequiresOriginValidation(route),
-            rejectInvalidOriginIfNeeded(context: context, head: head, requestLog: requestLog)
-        {
-            return
-        }
 
         switch route {
         case .health:
@@ -275,149 +301,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             guard let value = item.value?.lowercased() else { return false }
             return value == "1" || value == "true" || value == "yes"
         }) == true
-    }
-
-    private func routeRequiresOriginValidation(_ route: HTTPRoute) -> Bool {
-        switch route {
-        case .sse, .deleteSession, .post:
-            return true
-        case .health, .debugSnapshot, .debugReset, .notFound:
-            return false
-        }
-    }
-
-    private func rejectInvalidOriginIfNeeded(
-        context: ChannelHandlerContext,
-        head: HTTPRequestHead,
-        requestLog: RequestLogContext
-    ) -> Bool {
-        guard let origin = head.headers.first(name: "Origin"),
-            origin.isEmpty == false
-        else {
-            return false
-        }
-        guard originIsAllowed(origin, requestHead: head) else {
-            _ = sendPlain(
-                on: context.channel,
-                status: .forbidden,
-                body: "origin not allowed",
-                keepAlive: head.isKeepAlive,
-                sessionID: nil,
-                requestLog: requestLog
-            )
-            return true
-        }
-        return false
-    }
-
-    private func originIsAllowed(_ origin: String, requestHead: HTTPRequestHead) -> Bool {
-        guard let components = URLComponents(string: origin),
-            let scheme = components.scheme?.lowercased(),
-            scheme == "http" || scheme == "https",
-            let originHost = components.host
-        else {
-            return false
-        }
-
-        let normalizedOriginHost = Self.normalizedHost(originHost)
-        let hostHeader = requestHead.headers.first(name: "Host")
-        guard Self.originHostIsAllowed(
-            normalizedOriginHost,
-            configuredHost: config.listenHost
-        ) else {
-            return false
-        }
-
-        let originPort = components.port ?? Self.defaultPort(for: scheme)
-        if let hostHeaderPort = Self.port(fromHostHeader: hostHeader),
-            originPort != hostHeaderPort
-        {
-            return false
-        }
-        if config.listenPort > 0,
-            originPort != config.listenPort
-        {
-            return false
-        }
-        return true
-    }
-
-    private static func normalizedHost(_ host: String) -> String {
-        host
-            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-            .lowercased()
-    }
-
-    private static func defaultPort(for scheme: String) -> Int {
-        scheme == "https" ? 443 : 80
-    }
-
-    private static func originHostIsAllowed(
-        _ originHost: String,
-        configuredHost: String
-    ) -> Bool {
-        if isLoopbackHost(originHost) {
-            return true
-        }
-
-        let configured = normalizedHost(configuredHost)
-        guard isWildcardHost(configured) == false else {
-            return false
-        }
-
-        return originHost == configured
-    }
-
-    private static func isLoopbackHost(_ host: String) -> Bool {
-        if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" {
-            return true
-        }
-        if isIPv4LoopbackHost(host) {
-            return true
-        }
-        return false
-    }
-
-    private static func isWildcardHost(_ host: String) -> Bool {
-        switch normalizedHost(host) {
-        case "0.0.0.0", "::", "0:0:0:0:0:0:0:0":
-            return true
-        default:
-            return false
-        }
-    }
-
-    private static func isIPv4LoopbackHost(_ host: String) -> Bool {
-        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-
-        var octets: [Int] = []
-        for part in parts {
-            guard part.isEmpty == false,
-                part.allSatisfy({ $0.isNumber }),
-                let value = Int(part),
-                (0...255).contains(value)
-            else {
-                return false
-            }
-            octets.append(value)
-        }
-        return octets.first == 127
-    }
-
-    private static func port(fromHostHeader hostHeader: String?) -> Int? {
-        guard let hostHeader else { return nil }
-        if hostHeader.hasPrefix("["),
-            let closeBracket = hostHeader.firstIndex(of: "]")
-        {
-            let rest = hostHeader[hostHeader.index(after: closeBracket)...]
-            guard rest.first == ":" else { return nil }
-            return Int(rest.dropFirst())
-        }
-        guard let colon = hostHeader.lastIndex(of: ":") else {
-            return nil
-        }
-        return Int(hostHeader[hostHeader.index(after: colon)...])
     }
 
     private func handleSSE(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
