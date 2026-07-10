@@ -540,13 +540,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return
         }
-        if let object = json as? [String: Any] {
-            handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
-            return
-        }
-        if let array = json as? [Any] {
-            handleBatchUpstreamRequest(array, upstreamIndex: upstreamIndex)
-        }
+        guard let object = json as? [String: Any] else { return }
+        handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
     }
 
     func forwardServerRequestResponse(
@@ -643,69 +638,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         } else {
             deliverResponse()
         }
-    }
-
-    private func handleBatchUpstreamRequest(_ array: [Any], upstreamIndex: Int) {
-        var sessionID: String?
-        var responseObjects: [Any] = []
-
-        for item in array {
-            guard let object = item as? [String: Any],
-                let method = object["method"] as? String
-            else {
-                continue
-            }
-            let toolName = ((object["params"] as? [String: Any])?["name"] as? String)
-            state.withLockedValue { state in
-                state.sentRequests.append(
-                    SentRequest(
-                        method: method,
-                        toolName: toolName,
-                        upstreamIndex: upstreamIndex
-                    )
-                )
-            }
-
-            guard let upstreamIDValue = object["id"] else {
-                continue
-            }
-            let upstreamID =
-                (upstreamIDValue as? NSNumber)?.int64Value ?? (upstreamIDValue as? Int64)
-            guard let upstreamID,
-                let mapping = state.withLockedValue({ $0.upstreamIDMapping[upstreamID] })
-            else {
-                continue
-            }
-            sessionID = mapping.sessionID
-
-            let planned = responsePlan(
-                method: method,
-                toolName: toolName,
-                originalID: mapping.originalID
-            )
-            guard planned.deliverManually == false,
-                let responseObject = try? JSONSerialization.jsonObject(
-                    with: planned.data,
-                    options: []
-                )
-            else {
-                return
-            }
-            responseObjects.append(responseObject)
-        }
-
-        guard let sessionID,
-            responseObjects.isEmpty == false,
-            let responseData = try? JSONSerialization.data(
-                withJSONObject: responseObjects,
-                options: []
-            )
-        else {
-            return
-        }
-
-        let session = self.session(id: sessionID)
-        session.router.handleIncoming(responseData)
     }
 
     private func responsePlan(

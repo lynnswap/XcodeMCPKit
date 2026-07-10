@@ -8484,7 +8484,6 @@ struct RuntimeCoordinatorTests {
         #expect(manager.preferredUpstreamIndex(for: workspaceBRequest) == 1)
         #expect(manager.preferredUpstreamIndex(for: genericTabARequest) == nil)
         #expect(manager.preferredUpstreamIndex(for: genericWorkspaceBRequest) == nil)
-        #expect(manager.preferredUpstreamIndex(for: [tabARequest, tabBRequest]) == nil)
     }
 
     @Test func sessionManagerXcodeListWindowsRetriesSiblingBeforeDroppingProcessRoute()

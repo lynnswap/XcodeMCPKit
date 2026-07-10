@@ -1,6 +1,24 @@
 import XcodeMCPKit
 import Foundation
 
+struct ManagedUpstreamStopPlan: Sendable {
+    typealias SessionStopOperation = @Sendable () async -> Void
+
+    let sessionStopOperations: [SessionStopOperation]
+    let eventTasks: [Task<Void, Never>]
+    let pendingStartSettlementTask: Task<Void, Never>?
+
+    func drain() async {
+        for stopSession in sessionStopOperations {
+            await stopSession()
+        }
+        for eventTask in eventTasks {
+            await eventTask.value
+        }
+        await pendingStartSettlementTask?.value
+    }
+}
+
 actor ManagedUpstreamSlot: UpstreamSlotControlling {
     private final class StartAttempt: @unchecked Sendable {
         let task: Task<any UpstreamSession, Error>
@@ -56,16 +74,8 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
         if let stopTask {
             return stopTask
         }
-        isShutdown = true
-        let stopTask = Task<Void, Never> { [weak self] in
-            guard let self else { return }
-            await self.performStop()
-        }
-        self.stopTask = stopTask
-        return stopTask
-    }
 
-    private func performStop() async {
+        isShutdown = true
         current = nil
 
         let pending = pendingStart
@@ -76,21 +86,30 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
         continuation.finish()
 
         let runningSessions = Array(sessions.values)
-        let stopOperations = runningSessions.map { running in
-            (running, startStopIfNeeded(running))
-        }
+        let sessionStopOperations: [ManagedUpstreamStopPlan.SessionStopOperation] =
+            runningSessions.map { running in
+                let sessionStopTask = startStopIfNeeded(running)
+                return { [weak self, running, sessionStopTask] in
+                    await sessionStopTask.value
+                    await self?.markStopFinished(running)
+                }
+            }
         let eventTasks = runningSessions.compactMap(\.eventTask)
         for eventTask in eventTasks {
             eventTask.cancel()
         }
-        for (running, stopTask) in stopOperations {
-            await stopTask.value
-            markStopFinished(running)
+
+        let stopPlan = ManagedUpstreamStopPlan(
+            sessionStopOperations: sessionStopOperations,
+            eventTasks: eventTasks,
+            pendingStartSettlementTask: pendingSettlementTask
+        )
+
+        let stopTask = Task<Void, Never> {
+            await stopPlan.drain()
         }
-        for eventTask in eventTasks {
-            await eventTask.value
-        }
-        await pendingSettlementTask?.value
+        self.stopTask = stopTask
+        return stopTask
     }
 
     func send(_ data: Data) async -> Upstream.SendResult {
