@@ -20,8 +20,8 @@ The public API is intentionally small:
 
 Xcode decides the available tools at runtime, so the SDK does not provide
 tool-specific Swift wrappers. Use `listTools()` to discover tools, `callTool`
-to call them, and `request(_:params:)` or `notify(_:params:)` for dynamic MCP
-methods outside `tools/call`.
+to call them, and `request(_:params:)` for dynamic MCP methods outside
+`tools/call`.
 
 Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
 notifications, and tool results through the same `XcodeMCP` API without
@@ -111,8 +111,8 @@ accessors such as `objectValue`, `arrayValue`, `stringValue`, `boolValue`,
 Use `MCPJSONValue(jsonObject:)`, `MCPJSONValue(_:)`, and `jsonObject` to
 bridge between Foundation or Codable values and raw MCP JSON.
 
-For dynamic MCP methods that are not tool calls, use the raw request and
-notification escape hatches:
+For dynamic MCP methods that are not tool calls, use the raw request escape
+hatch:
 
 ```swift
 struct SymbolParams: Encodable {
@@ -126,11 +126,6 @@ let symbols = try await xcode.request(
         query: "NavigationStack",
         limit: 5
     ))
-)
-
-try await xcode.notify(
-    "notifications/custom",
-    params: try MCPJSONValue(jsonObject: ["enabled": true])
 )
 ```
 
