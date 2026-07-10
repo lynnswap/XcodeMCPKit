@@ -20,7 +20,8 @@ final class ProxyDebugRecorder: Sendable {
     }
 
     private struct State: Sendable {
-        var upstreams: [DebugUpstreamState] = []
+        var upstreams: [Int: DebugUpstreamState] = [:]
+        var topology: UpstreamTopologyAuthority.Snapshot?
         var recentTraffic: [ProxyDebug.TrafficEvent] = []
     }
 
@@ -36,28 +37,44 @@ final class ProxyDebugRecorder: Sendable {
         self.trafficLimit = trafficLimit
         self.stderrLimit = stderrLimit
         state.withLockedValue { state in
-            state.upstreams = Array(repeating: DebugUpstreamState(), count: upstreamCount)
+            for upstreamIndex in 0..<upstreamCount {
+                state.upstreams[upstreamIndex] = DebugUpstreamState()
+            }
             state.recentTraffic = []
         }
     }
 
-    func appendUpstreams(count: Int) {
-        guard count > 0 else { return }
+    func applyTopology(_ snapshot: UpstreamTopologyAuthority.Snapshot) {
         state.withLockedValue { state in
-            state.upstreams.append(contentsOf: Array(repeating: DebugUpstreamState(), count: count))
+            let nextGenerations = Dictionary(uniqueKeysWithValues: snapshot.entries.map {
+                ($0.id.rawValue, $0.generation)
+            })
+            state.upstreams = nextGenerations.reduce(into: [:]) { result, pair in
+                let (index, generation) = pair
+                result[index] = state.topology?.proof(UpstreamSlotID(rawValue: index))?
+                    .slotGeneration == generation
+                    ? state.upstreams[index] ?? DebugUpstreamState()
+                    : DebugUpstreamState()
+            }
+            state.topology = snapshot
+            state.recentTraffic.removeAll { nextGenerations[$0.upstreamIndex] == nil }
         }
     }
 
     func resetUpstream(_ upstreamIndex: Int) {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
+            guard state.upstreams[upstreamIndex] != nil else { return }
             state.upstreams[upstreamIndex] = DebugUpstreamState()
         }
     }
 
     func resetAll() {
         state.withLockedValue { state in
-            state.upstreams = Array(repeating: DebugUpstreamState(), count: state.upstreams.count)
+            state.upstreams = Dictionary(
+                uniqueKeysWithValues: state.upstreams.keys.map {
+                    ($0, DebugUpstreamState())
+                }
+            )
             state.recentTraffic.removeAll()
         }
     }
@@ -65,18 +82,19 @@ final class ProxyDebugRecorder: Sendable {
     func recordStderr(_ message: String, upstreamIndex: Int) {
         let event = ProxyDebug.Event(timestamp: Date(), message: message)
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
-            state.upstreams[upstreamIndex].recentStderr.append(event)
-            if state.upstreams[upstreamIndex].recentStderr.count > stderrLimit {
-                state.upstreams[upstreamIndex].recentStderr.removeFirst(
-                    state.upstreams[upstreamIndex].recentStderr.count - stderrLimit
+            guard state.upstreams[upstreamIndex] != nil else { return }
+            state.upstreams[upstreamIndex]?.recentStderr.append(event)
+            let overflow = (state.upstreams[upstreamIndex]?.recentStderr.count ?? 0) - stderrLimit
+            if overflow > 0 {
+                state.upstreams[upstreamIndex]?.recentStderr.removeFirst(
+                    overflow
                 )
             }
             if message.contains("Could not decode agent message") {
-                state.upstreams[upstreamIndex].lastDecodeError = event
+                state.upstreams[upstreamIndex]?.lastDecodeError = event
             }
             if message.contains("BridgeError") {
-                state.upstreams[upstreamIndex].lastBridgeError = event
+                state.upstreams[upstreamIndex]?.lastBridgeError = event
             }
         }
     }
@@ -86,40 +104,40 @@ final class ProxyDebugRecorder: Sendable {
         upstreamIndex: Int
     ) {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
-            state.upstreams[upstreamIndex].protocolViolationCount += 1
-            state.upstreams[upstreamIndex].lastProtocolViolationAt = Date()
-            state.upstreams[upstreamIndex].lastProtocolViolationReason =
+            guard state.upstreams[upstreamIndex] != nil else { return }
+            state.upstreams[upstreamIndex]?.protocolViolationCount += 1
+            state.upstreams[upstreamIndex]?.lastProtocolViolationAt = Date()
+            state.upstreams[upstreamIndex]?.lastProtocolViolationReason =
                 protocolViolation.reason.rawValue
-            state.upstreams[upstreamIndex].lastProtocolViolationBufferedBytes =
+            state.upstreams[upstreamIndex]?.lastProtocolViolationBufferedBytes =
                 protocolViolation.bufferedByteCount
-            state.upstreams[upstreamIndex].lastProtocolViolationPreview =
+            state.upstreams[upstreamIndex]?.lastProtocolViolationPreview =
                 protocolViolation.preview
-            state.upstreams[upstreamIndex].lastProtocolViolationPreviewHex =
+            state.upstreams[upstreamIndex]?.lastProtocolViolationPreviewHex =
                 protocolViolation.previewHex
-            state.upstreams[upstreamIndex].lastProtocolViolationLeadingByteHex =
+            state.upstreams[upstreamIndex]?.lastProtocolViolationLeadingByteHex =
                 protocolViolation.leadingByteHex
         }
     }
 
     func recordBufferedStdoutBytes(_ size: Int, upstreamIndex: Int) {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
-            state.upstreams[upstreamIndex].bufferedStdoutBytes = size
+            guard state.upstreams[upstreamIndex] != nil else { return }
+            state.upstreams[upstreamIndex]?.bufferedStdoutBytes = size
         }
     }
 
     func recordDroppedUnmappedNotification(upstreamIndex: Int) {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
-            state.upstreams[upstreamIndex].droppedUnmappedNotificationCount += 1
+            guard state.upstreams[upstreamIndex] != nil else { return }
+            state.upstreams[upstreamIndex]?.droppedUnmappedNotificationCount += 1
         }
     }
 
     func recordLateResponse(upstreamIndex: Int) {
         state.withLockedValue { state in
-            guard upstreamIndex >= 0, upstreamIndex < state.upstreams.count else { return }
-            state.upstreams[upstreamIndex].lateResponseDropCount += 1
+            guard state.upstreams[upstreamIndex] != nil else { return }
+            state.upstreams[upstreamIndex]?.lateResponseDropCount += 1
         }
     }
 
@@ -146,8 +164,8 @@ final class ProxyDebugRecorder: Sendable {
         cachedToolsListAvailable: Bool,
         controlPlane: ControlPlane.DebugSnapshot?,
         processRoutes: [ProxyDebug.ProcessRouteSnapshot],
-        processToolCatalogs: [ProcessToolSurfaceStore.DebugSnapshot],
-        upstreamStates: [UpstreamHealthManager.UpstreamState],
+        processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot],
+        upstreamStates: [(index: Int, state: UpstreamHealthManager.UpstreamState)],
         sessionSnapshots: [SessionRequestPipeline.DebugSnapshot],
         leaseSnapshots: [LeaseManager.DebugSnapshot],
         queuedRequestCount: Int,
@@ -163,10 +181,8 @@ final class ProxyDebugRecorder: Sendable {
             counts[upstreamIndex, default: 0] += 1
         }
 
-        let upstreamSnapshots = upstreamStates.enumerated().map { index, upstream in
-            let debug =
-                index < recordedState.upstreams.count
-                ? recordedState.upstreams[index] : DebugUpstreamState()
+        let upstreamSnapshots = upstreamStates.map { index, upstream in
+            let debug = recordedState.upstreams[index] ?? DebugUpstreamState()
             return ProxyDebug.UpstreamSnapshot(
                 upstreamIndex: index,
                 isInitialized: upstream.isInitialized,

@@ -124,9 +124,9 @@ final class InitializeManager: Sendable {
     /// Single owner of the cached initialize result. This manager only
     /// tracks in-flight/pending handshake state; the cached result lives in
     /// the canonical broker state so there is exactly one store to clear.
-    private let brokerState: CanonicalBrokerState
+    private let brokerState: CanonicalHandshakeState
 
-    init(brokerState: CanonicalBrokerState) {
+    init(brokerState: CanonicalHandshakeState) {
         self.brokerState = brokerState
     }
 

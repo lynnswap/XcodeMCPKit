@@ -1,0 +1,148 @@
+import NIOConcurrencyHelpers
+import XcodeMCPKit
+
+struct UpstreamTopologyProof: Sendable, Hashable {
+    let slotID: UpstreamSlotID
+    let slotGeneration: UInt64
+}
+
+final class UpstreamTopologyAuthority: Sendable {
+    struct Entry: Sendable {
+        let id: UpstreamSlotID
+        let generation: UInt64
+        let slot: any UpstreamSlotControlling
+    }
+
+    struct Snapshot: Sendable {
+        let topologyEpoch: UInt64
+        let entries: [Entry]
+
+        var slotIDs: [UpstreamSlotID] { entries.map(\.id) }
+        var slots: [any UpstreamSlotControlling] { entries.map(\.slot) }
+
+        func slot(_ id: UpstreamSlotID) -> (any UpstreamSlotControlling)? {
+            entries.first { $0.id == id }?.slot
+        }
+
+        func proof(_ id: UpstreamSlotID) -> UpstreamTopologyProof? {
+            guard entries.contains(where: { $0.id == id }) else { return nil }
+            guard let entry = entries.first(where: { $0.id == id }) else { return nil }
+            return UpstreamTopologyProof(
+                slotID: id,
+                slotGeneration: entry.generation
+            )
+        }
+    }
+
+    struct Transition: Sendable {
+        let snapshot: Snapshot
+        let addedIDs: [UpstreamSlotID]
+        let retired: [Entry]
+        let replaced: Entry?
+    }
+
+    private struct State: Sendable {
+        var topologyEpoch: UInt64 = 0
+        var nextRawID: Int = 0
+        var entriesByID: [UpstreamSlotID: Entry] = [:]
+        var order: [UpstreamSlotID] = []
+    }
+
+    private let state: NIOLockedValueBox<State>
+
+    init(_ slots: [any UpstreamSlotControlling]) {
+        var initial = State()
+        for slot in slots {
+            let id = UpstreamSlotID(rawValue: initial.nextRawID)
+            initial.nextRawID &+= 1
+            initial.entriesByID[id] = Entry(id: id, generation: 1, slot: slot)
+            initial.order.append(id)
+        }
+        if slots.isEmpty == false { initial.topologyEpoch = 1 }
+        state = NIOLockedValueBox(initial)
+    }
+
+    func append(_ slots: [any UpstreamSlotControlling]) -> Transition {
+        state.withLockedValue { state in
+            var added: [UpstreamSlotID] = []
+            for slot in slots {
+                let id = UpstreamSlotID(rawValue: state.nextRawID)
+                state.nextRawID &+= 1
+                state.entriesByID[id] = Entry(id: id, generation: 1, slot: slot)
+                state.order.append(id)
+                added.append(id)
+            }
+            if added.isEmpty == false { state.topologyEpoch &+= 1 }
+            return Transition(
+                snapshot: Self.snapshot(state),
+                addedIDs: added,
+                retired: [],
+                replaced: nil
+            )
+        }
+    }
+
+    func replace(
+        _ id: UpstreamSlotID,
+        with slot: any UpstreamSlotControlling
+    ) -> Transition? {
+        state.withLockedValue { state -> Transition? in
+            guard let previous = state.entriesByID[id] else { return nil }
+            state.entriesByID[id] = Entry(
+                id: id,
+                generation: previous.generation &+ 1,
+                slot: slot
+            )
+            state.topologyEpoch &+= 1
+            return Transition(
+                snapshot: Self.snapshot(state),
+                addedIDs: [],
+                retired: [],
+                replaced: previous
+            )
+        }
+    }
+
+    func retire(_ ids: Set<UpstreamSlotID>) -> Transition {
+        state.withLockedValue { state in
+            let retired = state.order.compactMap { id in
+                ids.contains(id) ? state.entriesByID.removeValue(forKey: id) : nil
+            }
+            if retired.isEmpty == false {
+                state.order.removeAll { ids.contains($0) }
+                state.topologyEpoch &+= 1
+            }
+            return Transition(
+                snapshot: Self.snapshot(state),
+                addedIDs: [],
+                retired: retired,
+                replaced: nil
+            )
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        state.withLockedValue { state in Self.snapshot(state) }
+    }
+
+    func validate(_ proof: UpstreamTopologyProof) -> Bool {
+        state.withLockedValue { state in
+            state.entriesByID[proof.slotID]?.generation == proof.slotGeneration
+        }
+    }
+
+    func contains(_ id: UpstreamSlotID) -> Bool {
+        state.withLockedValue { $0.entriesByID[id] != nil }
+    }
+
+    func slot(_ id: UpstreamSlotID) -> (any UpstreamSlotControlling)? {
+        state.withLockedValue { $0.entriesByID[id]?.slot }
+    }
+
+    private static func snapshot(_ state: State) -> Snapshot {
+        Snapshot(
+            topologyEpoch: state.topologyEpoch,
+            entries: state.order.compactMap { state.entriesByID[$0] }
+        )
+    }
+}

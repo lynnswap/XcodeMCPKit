@@ -36,14 +36,8 @@ final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 }
 
 struct RuntimeCoordinatorTestHooks: Sendable {
-    var initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
-    var processToolsCatalogLoadedBeforeRecord:
-        (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
-    var processToolsCatalogFailureCleanupBeforeApply:
-        (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)?
-    var processToolCatalogSurfaceUpdatePassedInitialGenerationCheck: (@Sendable () -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamRequestQueued:
         (@Sendable (
@@ -52,19 +46,10 @@ struct RuntimeCoordinatorTestHooks: Sendable {
             _ queuedRequestCount: Int
         ) -> Void)?
     var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
-    var processRouteActivationEvent:
-        (@Sendable (_ processID: pid_t, _ upstreamIndex: Int?, _ event: String) -> Void)?
 
     init(
-        initializedNotificationStaleIgnored: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
-        processToolsCatalogLoadedBeforeRecord:
-            (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
-        processToolsCatalogFailureCleanupBeforeApply:
-            (@Sendable (_ target: XcodeProcessTarget, _ upstreamIndex: Int) async -> Void)? = nil,
-        processToolCatalogSurfaceUpdatePassedInitialGenerationCheck:
-            (@Sendable () -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamRequestQueued:
             (@Sendable (
@@ -73,20 +58,12 @@ struct RuntimeCoordinatorTestHooks: Sendable {
                 _ queuedRequestCount: Int
             ) -> Void)? = nil,
         primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil,
-        processRouteActivationEvent:
-            (@Sendable (_ processID: pid_t, _ upstreamIndex: Int?, _ event: String) -> Void)? = nil
     ) {
-        self.initializedNotificationStaleIgnored = initializedNotificationStaleIgnored
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
-        self.processToolsCatalogLoadedBeforeRecord = processToolsCatalogLoadedBeforeRecord
-        self.processToolsCatalogFailureCleanupBeforeApply = processToolsCatalogFailureCleanupBeforeApply
-        self.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck =
-            processToolCatalogSurfaceUpdatePassedInitialGenerationCheck
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
-        self.processRouteActivationEvent = processRouteActivationEvent
     }
 }
 
@@ -136,7 +113,6 @@ protocol RuntimeSessionRegistryPort: Sendable {
 protocol RuntimeToolsCatalogPort: Sendable {
     func cachedToolsListResult() -> JSONValue?
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue?
-    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int)
 }
 
 protocol RuntimeInitializeToolsPort: Sendable {
@@ -398,15 +374,17 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let upstreamRouter: UpstreamRouter
     let config: ProxyConfig
     let logger: Logger = ProxyLogging.make("session")
-    let upstreamsBox: NIOLockedValueBox<[any UpstreamSlotControlling]>
+    let upstreamTopology: UpstreamTopologyAuthority
     var upstreams: [any UpstreamSlotControlling] {
-        upstreamsBox.withLockedValue { $0 }
+        upstreamTopology.snapshot().slots
+    }
+    var upstreamSlotIDs: [UpstreamSlotID] {
+        upstreamTopology.snapshot().slotIDs
     }
     let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
-    let canonicalBrokerState: CanonicalBrokerState
+    let canonicalHandshakeState: CanonicalHandshakeState
     let controlPlaneDebugMirror = ControlPlane.DebugMirror()
-    let processToolSurfaceStore = ProcessToolSurfaceStore()
-    private let processToolSurfaceMutationLock = NIOLockedValueBox(())
+    let processControlPlane: ProcessControlPlaneAuthority
 
     let upstreamHealthManager: UpstreamHealthManager
     let upstreamSlotScheduler: UpstreamSlotScheduler
@@ -420,18 +398,16 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let controlPlaneCoordinator: ControlPlaneCoordinator
     let documentationProviderManager: (any DocumentationProviderManaging)?
     let processRoutingEnabled: Bool
-    let processRouteStore: ProcessRouteStore
     let xcodeProcessReconcileScheduleState =
         NIOLockedValueBox(XcodeProcessReconcileScheduleState())
     let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
     let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
     let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?
     var xcodeProcessRoutes: [XcodeProcessRoute] {
-        processRouteStore.activeRoutes()
+        processControlPlane.activeRoutes()
     }
-    let windowOwnerIndex = NIOLockedValueBox(WindowOwnerIndex())
-    let availableToolsCatalogRefreshKeys = NIOLockedValueBox<Set<String>>([])
-    let processRouteReadinessStore = ProcessRouteReadinessStore()
+    let windowOwnershipAuthority = WindowOwnershipAuthority()
+    let windowRoutingResolver = WindowRoutingResolver()
     let prewarmDocumentationProviderOnStartup: Bool
     let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -586,28 +562,34 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         self.config = config
         self.eventLoop = eventLoop
-        let upstreamStore = NIOLockedValueBox(upstreams)
-        self.upstreamsBox = upstreamStore
+        let upstreamTopology = UpstreamTopologyAuthority(upstreams)
+        self.upstreamTopology = upstreamTopology
         self.clock = runtimeClock
-        let brokerState = CanonicalBrokerState()
-        self.canonicalBrokerState = brokerState
-        self.initializeManager = InitializeManager(brokerState: brokerState)
+        let handshakeState = CanonicalHandshakeState()
+        self.canonicalHandshakeState = handshakeState
+        self.initializeManager = InitializeManager(brokerState: handshakeState)
         self.sessionRegistry = SessionRegistry(configuration: config)
-        self.debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
+        let initialTopology = upstreamTopology.snapshot()
+        let debugRecorder = ProxyDebugRecorder(upstreamCount: upstreams.count)
+        debugRecorder.applyTopology(initialTopology)
+        self.debugRecorder = debugRecorder
         self.leaseManager = LeaseManager()
-        self.upstreamRouter = UpstreamRouter(upstreamCount: upstreams.count)
+        let upstreamRouter = UpstreamRouter(upstreamCount: upstreams.count)
+        upstreamRouter.applyTopology(initialTopology)
+        self.upstreamRouter = upstreamRouter
         let upstreamHealthManager = UpstreamHealthManager(upstreamCount: upstreams.count)
+        upstreamHealthManager.applyTopology(initialTopology)
         self.upstreamHealthManager = upstreamHealthManager
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
         self.processRoutingEnabled = resolvedProcessRoutingEnabled
-        let processRouteStore = ProcessRouteStore(
+        let processControlPlane = ProcessControlPlaneAuthority(
             initialRoutes: xcodeProcessRoutes,
             nowUptimeNs: uptimeProvider(),
             reason: "startup"
         )
-        self.processRouteStore = processRouteStore
+        self.processControlPlane = processControlPlane
         self.xcodeTargetDiscovery = xcodeTargetDiscovery
         self.dynamicUpstreamFactory = dynamicUpstreamFactory
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
@@ -623,15 +605,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let routableProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = { [runtimeBox] in
             guard resolvedProcessRoutingEnabled else { return [] }
             guard let runtime = runtimeBox.value else {
-                return Set(processRouteStore.activeRoutes().flatMap(\.upstreamIndices))
+                return Set(processControlPlane.activeRoutes().flatMap(\.upstreamIndices))
             }
             return runtime.routableProcessBoundUpstreamIndices()
         }
         let inactiveProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = {
             guard resolvedProcessRoutingEnabled else { return [] }
             let active = routableProcessBoundUpstreamIndices()
-            let upstreamCount = upstreamStore.withLockedValue { $0.count }
-            return Set(0..<upstreamCount).subtracting(active)
+            return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(active)
         }
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
             canUseUpstream: {
@@ -667,7 +648,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         self.initializeParamsOverride = config.initializeParamsOverride
         self.controlPlaneCoordinator = ControlPlaneCoordinator(
-            brokerState: self.canonicalBrokerState,
+            handshakeState: self.canonicalHandshakeState,
+            cachedToolsCatalog: { [processControlPlane] in
+                processControlPlane.canonicalToolsCatalogRaw()
+            },
+            canonicalToolsSource: { [processControlPlane] in
+                processControlPlane.canonicalSourceUpstream()
+            },
             debugMirror: self.controlPlaneDebugMirror,
             toolsCatalogLoader: { [runtimeBox] requestTimeout, rpcHandle in
                 guard let runtime = runtimeBox.value else {
@@ -690,9 +677,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             },
             upstreamHandshakeStates: { [weak upstreamHealthManager = self.upstreamHealthManager] in
                 guard let upstreamHealthManager else { return [:] }
-                let states = upstreamHealthManager.statesSnapshot()
+                let states = upstreamHealthManager.activeStatesSnapshot()
                 return Dictionary(
-                    uniqueKeysWithValues: states.enumerated().map { index, state in
+                    uniqueKeysWithValues: states.map { index, state in
                         let summary: String
                         if state.initInFlight {
                             summary = "initializing"
@@ -712,8 +699,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         runtimeBox.value = self
 
-        for (upstreamIndex, upstream) in upstreams.enumerated() {
-            observeUpstreamEvents(upstream, upstreamIndex: upstreamIndex)
+        for entry in upstreamTopology.snapshot().entries {
+            observeUpstreamEvents(entry.slot, upstreamIndex: entry.id.rawValue)
         }
 
         if startImmediately {
@@ -751,9 +738,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         _ upstream: any UpstreamSlotControlling,
         upstreamIndex: Int
     ) {
-        upstreamEventTasks.run { [weak self, upstream] in
+        guard let proof = upstreamTopology.snapshot().proof(
+            UpstreamSlotID(rawValue: upstreamIndex)
+        ) else { return }
+        upstreamEventTasks.run { [weak self, upstream, proof] in
             guard let self else { return }
             for await event in upstream.events {
+                guard self.upstreamTopology.validate(proof) else { return }
                 switch event {
                 case .message(let data):
                     self.routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
@@ -843,17 +834,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         cancelPrimaryInitializeReadinessWaiter()
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
-        processRouteStore.resetExposureState()
         resetAllProcessRouteActivations(reason: "debug_reset")
-        cancelAllScheduledProcessToolsCatalogRetries()
-        processRouteReadinessStore.removeAllPendingCatalogRefreshes()
         clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
             clearInitialize: true,
-            clearToolsCatalog: true
+            clearToolsCatalog: false
         )
-        resetControlPlaneSurfaceState()
+        applyProcessControlPlaneTransition(processControlPlane.reset())
         restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset()
     }
 
@@ -880,11 +868,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
         resetAllProcessRouteActivations(reason: "shutdown")
         xcodeProcessEventMonitor.stop()
-        cancelAllScheduledProcessToolsCatalogRetries()
-        processRouteReadinessStore.removeAllPendingCatalogRefreshes()
 
         let runtimeDrain = runtimeTasks.beginShutdown()
-        resetControlPlaneSurfaceState()
+        applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
         let controlPlaneDrain = await controlPlaneCoordinator.beginShutdown(
             reason: "shutdown",
             clearInitialize: true,
@@ -918,177 +904,45 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func cachedToolsListResult() -> JSONValue? {
-        canonicalBrokerState.toolsCatalogRaw()
+        processControlPlane.canonicalToolsCatalogRaw()
     }
 
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
-        processToolSurfaceStore.toolsListResult(forUpstreamIndex: upstreamIndex)
-            ?? canonicalBrokerState.toolsCatalogRaw()
+        processControlPlane.catalog(forUpstreamIndex: upstreamIndex)?.rawResult
+            ?? processControlPlane.canonicalToolsCatalogRaw()
     }
 
-    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream: Int) {
-        guard isValidToolsListResult(result) else { return }
-        canonicalBrokerState.syncCanonicalToolsCatalog(
-            result,
-            sourceUpstream: sourceUpstream
-        )
-    }
-
-    @discardableResult
-    func applyToolCatalogSurfaceUpdate(
-        _ update: ProcessToolSurfaceStore.SurfaceUpdate,
-        onlyIfGeneration expectedGeneration: UInt64? = nil
-    ) -> Bool {
-        processToolSurfaceMutationLock.withLockedValue { _ in
-            applyToolCatalogSurfaceUpdateLocked(
-                update,
-                onlyIfGeneration: expectedGeneration,
-                notifyInitialGenerationCheck: true
-            )
-        }
-    }
-
-    @discardableResult
-    func applyToolCatalogSurfaceMutation(
-        onlyIfGeneration expectedGeneration: UInt64? = nil,
-        _ mutation: () -> ProcessToolSurfaceStore.SurfaceUpdate
-    ) -> ProcessToolSurfaceStore.SurfaceUpdate? {
-        processToolSurfaceMutationLock.withLockedValue { _ in
-            guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
-                return nil
-            }
-            testHooks.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck?()
-            guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
-                return nil
-            }
-            let update = mutation()
-            guard applyToolCatalogSurfaceUpdateLocked(
-                update,
-                onlyIfGeneration: expectedGeneration,
-                notifyInitialGenerationCheck: false
-            ) else {
-                return nil
-            }
-            return update
-        }
-    }
-
-    func invalidateControlPlaneGeneration(
-        clearInitialize: Bool,
-        clearToolsCatalog: Bool
-    ) -> UInt64 {
-        processToolSurfaceMutationLock.withLockedValue { _ in
-            if clearInitialize {
-                canonicalBrokerState.clearInitialize()
-            }
-            if clearToolsCatalog {
-                canonicalBrokerState.clearToolsCatalog()
-            }
-            return canonicalBrokerState.generation()
-        }
-    }
-
-    private func resetControlPlaneSurfaceState() {
-        processToolSurfaceMutationLock.withLockedValue { _ in
-            canonicalBrokerState.reset()
-            processToolSurfaceStore.reset()
-        }
-    }
-
-    private func toolCatalogBrokerGenerationIsCurrent(_ expectedGeneration: UInt64?) -> Bool {
-        guard let expectedGeneration else {
-            return true
-        }
-        return canonicalBrokerState.generation() == expectedGeneration
-    }
-
-    private func applyToolCatalogSurfaceUpdateLocked(
-        _ update: ProcessToolSurfaceStore.SurfaceUpdate,
-        onlyIfGeneration expectedGeneration: UInt64?,
-        notifyInitialGenerationCheck: Bool
-    ) -> Bool {
-        guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
-            return false
-        }
-        if notifyInitialGenerationCheck {
-            testHooks.processToolCatalogSurfaceUpdatePassedInitialGenerationCheck?()
-            guard toolCatalogBrokerGenerationIsCurrent(expectedGeneration) else {
-                return false
+    func applyProcessControlPlaneTransition(_ transition: ProcessControlPlaneTransition) {
+        for effect in transition.effects {
+            switch effect {
+            case .cancelTimeout(let timeout):
+                timeout.cancel()
+            case .cancelRPC(let handle):
+                handle.cancel()
             }
         }
-        let applied: Bool
-        switch update.canonicalAction {
-        case .noChange:
-            applied = toolCatalogBrokerGenerationIsCurrent(expectedGeneration)
-        case .syncCanonical(let rawResult, let sourceUpstream):
-            applied = canonicalBrokerState.syncCanonicalToolsCatalog(
-                rawResult,
-                sourceUpstream: sourceUpstream,
-                onlyIfGeneration: expectedGeneration
-            )
-        case .clearCanonical:
-            applied = canonicalBrokerState.clearToolsCatalog(
-                onlyIfGeneration: expectedGeneration
-            )
-        }
-        if applied, update.publishesToolsListChanged {
+        if transition.publishesToolsListChanged {
             publishToolsListChangedNotification()
         }
-        return applied
     }
 
-    func cancelScheduledProcessToolsCatalogRetry(
-        processID: pid_t,
-        generation expectedGeneration: UInt64? = nil
-    ) {
-        let retry = processRouteReadinessStore.takeScheduledCatalogRetry(
-            processID: processID,
-            expectedGeneration: expectedGeneration
-        )
-        retry?.timeout.cancel()
+    func publishUpstreamTopology(_ snapshot: UpstreamTopologyAuthority.Snapshot) {
+        upstreamRouter.applyTopology(snapshot)
+        upstreamHealthManager.applyTopology(snapshot)
+        debugRecorder.applyTopology(snapshot)
     }
 
-    func cancelAllScheduledProcessToolsCatalogRetries() {
-        let retries = processRouteReadinessStore.takeAllScheduledCatalogRetries()
-        for retry in retries {
-            retry.timeout.cancel()
-        }
+    func upstreamSlotContext(
+        _ upstreamIndex: Int
+    ) -> (slot: any UpstreamSlotControlling, proof: UpstreamTopologyProof)? {
+        let snapshot = upstreamTopology.snapshot()
+        let id = UpstreamSlotID(rawValue: upstreamIndex)
+        guard let slot = snapshot.slot(id), let proof = snapshot.proof(id) else { return nil }
+        return (slot, proof)
     }
 
     func processToolCatalogExposedProcessIDs() -> Set<pid_t> {
         catalogExposedUsableProcessIDs()
-    }
-
-    func removeProcessToolCatalogAfterExposureLoss(
-        processID: pid_t
-    ) -> ProcessToolSurfaceStore.SurfaceUpdate {
-        let exposedProcessIDs = processToolCatalogExposedProcessIDs()
-        let removalUpdate = processToolSurfaceStore.removeProcess(
-            processID: processID,
-            exposedProcessIDs: exposedProcessIDs
-        )
-        guard removalUpdate.isNoChange else {
-            return removalUpdate
-        }
-        let surface = processToolSurfaceStore.availableToolCatalogSurface(
-            processIDs: exposedProcessIDs
-        )
-        guard surface?.processIDs == exposedProcessIDs
-            || canonicalBrokerState.toolsCatalogRaw() != nil else {
-            return .noChange
-        }
-        return processToolSurfaceStore.recomputeSurface(
-            exposedProcessIDs: exposedProcessIDs,
-            publishesToolsListChanged: true
-        )
-    }
-
-    func processToolSurfaceStoreHasCompleteConfiguredCatalog() -> Bool {
-        let configuredProcessIDs = catalogEligibleConfiguredProcessIDs()
-        guard configuredProcessIDs.isEmpty == false else {
-            return false
-        }
-        return processToolSurfaceStore.processIDsWithCatalog() == configuredProcessIDs
     }
 
     func refreshToolsListIfNeeded() {
@@ -1513,7 +1367,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     private func toolCatalogSourceProcess() -> ToolCatalogStartupLogFormatter.Process? {
-        guard let upstreamIndex = canonicalBrokerState.toolsSourceUpstream(),
+        guard let upstreamIndex = processControlPlane.canonicalSourceUpstream(),
               let route = xcodeProcessRoutes.first(where: {
                   $0.upstreamIndices.contains(upstreamIndex)
               })
@@ -1658,22 +1512,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         clearInitialize: Bool,
         clearToolsCatalog: Bool
     ) {
-        // The synchronous cache clear bumps the broker generation, which is
-        // what keeps stale fast paths from serving or re-populating the
-        // cache. The delayed actor cleanup must only cancel loads that
-        // started before this generation, because fresh requests may already
-        // have started by the time the actor receives the cleanup message.
-        let invalidatedGeneration = invalidateControlPlaneGeneration(
-            clearInitialize: clearInitialize,
-            clearToolsCatalog: clearToolsCatalog
-        )
-        let coordinator = controlPlaneCoordinator
-        addRuntimeTask {
-            await coordinator.cancelLoadsStartedBeforeGeneration(
-                invalidatedGeneration,
-                reason: reason
-            )
+        if clearInitialize {
+            canonicalHandshakeState.clearInitialize()
         }
+        if clearToolsCatalog {
+            applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
+        }
+        logger.debug("control_plane_invalidated", metadata: ["reason": .string(reason)])
     }
 
 }

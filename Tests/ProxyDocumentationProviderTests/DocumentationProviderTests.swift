@@ -2349,7 +2349,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2390,7 +2390,7 @@ struct DocumentationProviderTests {
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2440,7 +2440,7 @@ struct DocumentationProviderTests {
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2491,7 +2491,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     documentationDescriptor(version: "26.6").foundationObject,
@@ -2532,7 +2532,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     documentationDescriptor(version: "26.6").foundationObject,
@@ -2590,7 +2590,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     documentationDescriptor(version: "27.0").foundationObject,
@@ -2648,7 +2648,7 @@ struct DocumentationProviderTests {
                 documentationDescriptor(version: "27.0").foundationObject,
             ],
         ])
-        manager.setCachedToolsListResult(cachedTools, sourceUpstream: 0)
+        manager.seedCanonicalToolsCatalog(cachedTools, sourceUpstream: 0)
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
@@ -2679,7 +2679,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [

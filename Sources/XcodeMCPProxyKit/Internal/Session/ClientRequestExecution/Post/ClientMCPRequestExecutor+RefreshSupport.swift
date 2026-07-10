@@ -61,14 +61,20 @@ extension ClientMCPRequestExecutor {
         )
         let allowsLeaseRetry = Self.isRetryScopedRefreshLeaseRequest(parsedRequestJSON)
         let preferredUpstreamIndices: [Int]?
+        let admission: RouteForwardingAdmission?
         switch await sessionManager.toolRoutingDecision(
             for: parsedRequestJSON,
             requestTimeoutOverride: requestTimeoutOverride
         ) {
         case .forward(let resolvedUpstreamIndex):
             preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+            admission = nil
         case .forwardAny(let resolvedUpstreamIndices):
             preferredUpstreamIndices = resolvedUpstreamIndices
+            admission = nil
+        case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
+            preferredUpstreamIndices = resolvedUpstreamIndices
+            admission = resolvedAdmission
         case .localXcodeListWindows:
             return .upstreamUnavailable(
                 responseIDs: requestIDs,
@@ -109,7 +115,8 @@ extension ClientMCPRequestExecutor {
                         bodyData: bodyData,
                         parsedRequestJSON: parsedAttemptRequestJSON,
                         sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex
+                        upstreamIndexOverride: selectedUpstreamIndex,
+                        admission: admission
                     ) else {
                         return eventLoop.makeSucceededFuture(
                             MCPForwardingService.ResponseResolution.invalidUpstreamResponse

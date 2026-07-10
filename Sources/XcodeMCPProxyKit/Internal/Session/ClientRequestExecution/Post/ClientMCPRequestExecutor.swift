@@ -536,7 +536,8 @@ final class ClientMCPRequestExecutor: Sendable {
                 return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
             func makeForwardingFuture(
-                preferredUpstreamIndices: [Int]?
+                preferredUpstreamIndices: [Int]?,
+                admission: RouteForwardingAdmission? = nil
             ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
                 let forwardingTimeout = remainingForwardingTimeout()
                 if forwardingDeadline != nil, forwardingTimeout == nil {
@@ -566,7 +567,8 @@ final class ClientMCPRequestExecutor: Sendable {
                         leaseID: leaseID,
                         upstreamIndex: upstreamIndex,
                         cancellationHandle: cancellationHandle,
-                        requestTimeoutOverride: forwardingTimeout
+                        requestTimeoutOverride: forwardingTimeout,
+                        admission: admission
                     )
                 }.flatMapError { error in
                     if error is CancellationError {
@@ -709,6 +711,11 @@ final class ClientMCPRequestExecutor: Sendable {
             case .forwardAny(let preferredUpstreamIndices):
                 return makeForwardingFuture(
                     preferredUpstreamIndices: preferredUpstreamIndices
+                )
+            case .forwardAdmitted(let preferredUpstreamIndices, let admission):
+                return makeForwardingFuture(
+                    preferredUpstreamIndices: preferredUpstreamIndices,
+                    admission: admission
                 )
             }
         }

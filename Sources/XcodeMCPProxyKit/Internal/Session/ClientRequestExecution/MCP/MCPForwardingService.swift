@@ -28,13 +28,15 @@ struct MCPForwardingService: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        upstreamIndexOverride: Int? = nil
+        upstreamIndexOverride: Int? = nil,
+        admission: RouteForwardingAdmission? = nil
     ) throws -> PreparedRequest? {
         try upstreamRuntime.prepareRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
-            upstreamIndexOverride: upstreamIndexOverride
+            upstreamIndexOverride: upstreamIndexOverride,
+            admission: admission
         )
     }
 
@@ -88,17 +90,10 @@ struct MCPForwardingService: Sendable {
                 responseToolNamesByIDKey: started.transform.responseToolNamesByIDKey,
                 responseOriginalIDsByKey: started.transform.responseOriginalIDsByKey,
                 normalizationToolsListResponseIDKey: started.transform.normalizationToolsListResponseIDKey,
-                cacheableToolsListResponseIDKey: started.transform.cacheableToolsListResponseIDKey,
                 upstreamIndex: started.upstreamIndex,
                 upstreamData: data
             )
             let responseData = rewritten.responseData
-            if let result = rewritten.cacheableToolsListResult {
-                sessionManager.setCachedToolsListResult(
-                    result,
-                    sourceUpstream: started.upstreamIndex
-                )
-            }
             if accountSuccess, toolSurface.shouldNotifyUpstreamSuccess(for: responseData) {
                 upstreamRuntime.recordRequestSucceeded(
                     sessionID: sessionID,
@@ -171,8 +166,10 @@ struct MCPForwardingService: Sendable {
         }
 
         let preferredUpstreamIndices: [Int]?
+        let admission: RouteForwardingAdmission?
         if let upstreamIndexOverride {
             preferredUpstreamIndices = [upstreamIndexOverride]
+            admission = nil
         } else {
             switch await sessionManager.toolRoutingDecision(
                 for: requestObject,
@@ -180,8 +177,13 @@ struct MCPForwardingService: Sendable {
             ) {
             case .forward(let resolvedUpstreamIndex):
                 preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+                admission = nil
             case .forwardAny(let resolvedUpstreamIndices):
                 preferredUpstreamIndices = resolvedUpstreamIndices
+                admission = nil
+            case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
+                preferredUpstreamIndices = resolvedUpstreamIndices
+                admission = resolvedAdmission
             case .localXcodeListWindows:
                 return .unavailable
             case .reject:
@@ -220,7 +222,8 @@ struct MCPForwardingService: Sendable {
                         bodyData: bodyData,
                         parsedRequestJSON: parsedRequestJSON,
                         sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex
+                        upstreamIndexOverride: selectedUpstreamIndex,
+                        admission: admission
                     ) else {
                         return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                     }

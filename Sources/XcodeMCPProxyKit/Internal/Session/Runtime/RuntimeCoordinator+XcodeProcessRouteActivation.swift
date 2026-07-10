@@ -4,6 +4,13 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    func applyCatalogCommit(_ commit: CatalogCommit) {
+        switch commit {
+        case .accepted(_, let transition), .discarded(_, let transition):
+            applyProcessControlPlaneTransition(transition)
+        }
+    }
+
     func startProcessRouteActivation(for route: XcodeProcessRoute) {
         guard unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
             return
@@ -15,7 +22,6 @@ extension RuntimeCoordinator {
             )
             return
         }
-        processRouteReadinessStore.prepare(processID: route.target.processID)
         startUpstreamWarmInitialize(
             upstreamIndex: upstreamIndex,
             mode: .processRouteActivation(processID: route.target.processID)
@@ -34,8 +40,8 @@ extension RuntimeCoordinator {
         else {
             return false
         }
-        switch processRouteReadinessStore.phase(processID: route.target.processID) {
-        case .pending, .attaching, .initialized:
+        switch processControlPlane.attemptSnapshot(processID: route.target.processID)?.phase {
+        case .pending, .attaching, .initialized, .loadingCatalog, .backoff:
             return true
         case .cataloged, .abandoned, nil:
             return false
@@ -45,18 +51,22 @@ extension RuntimeCoordinator {
     func beginProcessRouteActivationIfNeeded(
         mode: WarmInitializeMode,
         upstreamIndex: Int
-    ) -> ProcessRouteReadinessStore.Start? {
+    ) -> ProcessControlPlaneAuthority.ActivationStart? {
         guard case .processRouteActivation(let processID) = mode else {
             return nil
         }
+        guard let route = processControlPlane.route(forProcessID: processID) else {
+            return nil
+        }
         let now = nowUptimeNanoseconds()
-        guard let start = processRouteReadinessStore.beginAttaching(
-            processID: processID,
+        guard let (start, transition) = processControlPlane.beginAttaching(
+            routeID: route.id,
             upstreamIndex: upstreamIndex,
             nowUptimeNs: now
         ) else {
             return nil
         }
+        applyProcessControlPlaneTransition(transition)
         let timeoutMs = upstreamInitTimeoutAmount(for: mode).map {
             $0.nanoseconds / 1_000_000
         }
@@ -69,7 +79,6 @@ extension RuntimeCoordinator {
                 "timeout_ms": .string(timeoutMs.map(String.init) ?? "disabled"),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, upstreamIndex, "started")
         return start
     }
 
@@ -80,15 +89,16 @@ extension RuntimeCoordinator {
         attempt: Int?
     ) {
         guard let attempt,
-              let retry = processRouteReadinessStore.handleTimeout(
+              let timeout = processControlPlane.handleActivationTimeout(
                   processID: processID,
                   upstreamIndex: upstreamIndex,
-                  attempt: attempt
+                  attemptID: attempt
               )
         else {
             return
         }
 
+        applyProcessControlPlaneTransition(timeout.transition)
         logger.info(
             "route_activation_timeout",
             metadata: [
@@ -97,7 +107,6 @@ extension RuntimeCoordinator {
                 "attempt": .string("\(attempt)"),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, upstreamIndex, "timeout")
 
         guard clearUpstreamState(upstreamIndex: upstreamIndex, expectedUpstreamID: upstreamID) else {
             resetProcessRouteActivation(
@@ -111,7 +120,7 @@ extension RuntimeCoordinator {
         }
         scheduleProcessRouteActivationRetry(
             processID: processID,
-            retry: retry,
+            retry: timeout.retry,
             reason: "timeout"
         )
     }
@@ -121,10 +130,9 @@ extension RuntimeCoordinator {
             return
         }
         let processID = route.target.processID
-        guard let initialized = processRouteReadinessStore.markInitialized(
-            processID: processID,
-            upstreamIndex: upstreamIndex,
-            nowUptimeNs: nowUptimeNanoseconds()
+        guard let initialized = processControlPlane.markInitialized(
+            routeID: route.id,
+            upstreamIndex: upstreamIndex
         ) else {
             return
         }
@@ -135,14 +143,12 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(upstreamIndex)"),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, upstreamIndex, "initialized")
-        if let existingCatalog = processToolSurfaceStore.catalog(forProcessID: processID),
-           markProcessRouteActivationCataloged(
-               target: route.target,
-               upstreamIndex: existingCatalog.upstreamIndex,
-               activationUpstreamIndex: upstreamIndex,
-               attempt: initialized.attempt
-           ) {
+        if let existingCatalog = processControlPlane.catalog(forProcessID: processID) {
+            applyCatalogCommit(processControlPlane.completeCatalog(
+                .usable(existingCatalog.rawResult, source: existingCatalog.upstreamID),
+                lease: initialized.lease,
+                nowUptimeNanoseconds: nowUptimeNanoseconds()
+            ))
             return
         }
         scheduleProcessRouteActivationCatalogTimeout(
@@ -158,16 +164,18 @@ extension RuntimeCoordinator {
         activationUpstreamIndex: Int? = nil,
         attempt: Int? = nil
     ) -> Bool {
-        let now = nowUptimeNanoseconds()
-        guard let cataloged = processRouteReadinessStore.markCataloged(
+        guard let lease = processControlPlane.currentCatalogLease(
             processID: target.processID,
-            upstreamIndex: activationUpstreamIndex ?? upstreamIndex,
-            catalogedUpstreamIndex: upstreamIndex,
-            attempt: attempt,
-            nowUptimeNs: now
-        ) else {
+            upstreamIndex: activationUpstreamIndex ?? upstreamIndex
+        ), let catalog = processControlPlane.catalog(forProcessID: target.processID) else {
             return false
         }
+        guard case .accepted(_, let transition) = processControlPlane.completeCatalog(
+            .usable(catalog.rawResult, source: catalog.upstreamID),
+            lease: lease,
+            nowUptimeNanoseconds: nowUptimeNanoseconds()
+        ) else { return false }
+        applyProcessControlPlaneTransition(transition)
         markXcodeProcessRouteCatalogAvailable(upstreamIndex: upstreamIndex)
         logger.info(
             "route_activation_cataloged",
@@ -175,11 +183,10 @@ extension RuntimeCoordinator {
                 "pid": .string("\(target.processID)"),
                 "upstream": .string("\(upstreamIndex)"),
                 "duration_ms": .string(
-                    "\(cataloged / 1_000_000)"
+                    "0"
                 ),
             ]
         )
-        testHooks.processRouteActivationEvent?(target.processID, upstreamIndex, "cataloged")
         return true
     }
 
@@ -187,10 +194,12 @@ extension RuntimeCoordinator {
         processID: pid_t,
         upstreamIndex: Int
     ) -> Int? {
-        processRouteReadinessStore.catalogAttempt(
-            processID: processID,
-            upstreamIndex: upstreamIndex
-        )
+        guard let attempt = processControlPlane.attemptSnapshot(processID: processID),
+              attempt.upstreamID.rawValue == upstreamIndex,
+              [.attaching, .initialized, .loadingCatalog].contains(attempt.phase) else {
+            return nil
+        }
+        return attempt.attemptID.rawValue
     }
 
     func finishProcessRouteActivationCatalogRequestAfterEmptyCatalog(
@@ -198,17 +207,20 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         attempt: Int
     ) {
-        guard processRouteReadinessStore.finishCatalogRequestWithoutCatalog(
+        guard processControlPlane.attemptSnapshot(processID: processID)?.attemptID.rawValue == attempt,
+              let lease = processControlPlane.currentCatalogLease(
             processID: processID,
-            upstreamIndex: upstreamIndex,
-            attempt: attempt
-        ) else {
-            return
-        }
+            upstreamIndex: upstreamIndex
+        ) else { return }
+        applyCatalogCommit(processControlPlane.completeCatalog(
+            .unusable,
+            lease: lease,
+            nowUptimeNanoseconds: nowUptimeNanoseconds()
+        ))
     }
 
     func abandonProcessRouteActivation(processID: pid_t, reason: String) {
-        processRouteReadinessStore.abandon(processID: processID, reason: reason)
+        applyProcessControlPlaneTransition(processControlPlane.abandon(processID: processID))
         logger.info(
             "route_activation_abandoned",
             metadata: [
@@ -216,13 +228,12 @@ extension RuntimeCoordinator {
                 "reason": .string(reason),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, nil, "abandoned")
     }
 
     func resetProcessRouteActivation(processID: pid_t, reason: String) {
-        guard processRouteReadinessStore.reset(processID: processID) else {
-            return
-        }
+        let transition = processControlPlane.resetAttempt(processID: processID)
+        guard transition.effects.isEmpty == false else { return }
+        applyProcessControlPlaneTransition(transition)
         logger.info(
             "route_activation_abandoned",
             metadata: [
@@ -230,49 +241,47 @@ extension RuntimeCoordinator {
                 "reason": .string(reason),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, nil, "abandoned")
     }
 
     func resetProcessRouteActivationIfClearingPreCatalogUpstream(upstreamIndex: Int) {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil
+              processControlPlane.catalog(forProcessID: route.target.processID) == nil
         else {
             return
         }
-        switch processRouteReadinessStore.phase(processID: route.target.processID) {
-        case .attaching(let activationUpstreamIndex, _, _)
-            where activationUpstreamIndex == upstreamIndex:
+        switch processControlPlane.attemptSnapshot(processID: route.target.processID) {
+        case let attempt? where attempt.phase == .attaching && attempt.upstreamID.rawValue == upstreamIndex:
             resetProcessRouteActivation(
                 processID: route.target.processID,
                 reason: "upstream_cleared_before_catalog"
             )
-        case .initialized(let activationUpstreamIndex, _, _)
-            where activationUpstreamIndex == upstreamIndex:
+        case let attempt? where attempt.phase == .initialized && attempt.upstreamID.rawValue == upstreamIndex:
             resetProcessRouteActivation(
                 processID: route.target.processID,
                 reason: "upstream_cleared_before_catalog"
             )
-        case .pending, .cataloged, .abandoned, .attaching, .initialized, nil:
+        case _:
             return
         }
     }
 
     func clearsInitializedProcessRouteActivationBeforeCatalog(upstreamIndex: Int) -> Bool {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil
+              processControlPlane.catalog(forProcessID: route.target.processID) == nil
         else {
             return false
         }
-        guard case .initialized(let activationUpstreamIndex, _, _) =
-            processRouteReadinessStore.phase(processID: route.target.processID)
-        else {
+        guard let attempt = processControlPlane.attemptSnapshot(processID: route.target.processID),
+              attempt.phase == .initialized else {
             return false
         }
-        return activationUpstreamIndex == upstreamIndex
+        return attempt.upstreamID.rawValue == upstreamIndex
     }
 
     func resetAllProcessRouteActivations(reason: String) {
-        for processID in processRouteReadinessStore.resetAll() {
+        let reset = processControlPlane.resetAllAttempts()
+        applyProcessControlPlaneTransition(reset.transition)
+        for processID in reset.processIDs {
             logger.info(
                 "route_activation_abandoned",
                 metadata: [
@@ -280,13 +289,12 @@ extension RuntimeCoordinator {
                     "reason": .string(reason),
                 ]
             )
-            testHooks.processRouteActivationEvent?(processID, nil, "abandoned")
         }
     }
 
     private func scheduleProcessRouteActivationRetry(
         processID: pid_t,
-        retry: ProcessRouteReadinessStore.Retry,
+        retry: ProcessControlPlaneAuthority.Retry,
         reason: String
     ) {
         logger.info(
@@ -298,11 +306,11 @@ extension RuntimeCoordinator {
                 "reason": .string(reason),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, nil, "retry_scheduled")
         let timeout = scheduleRuntimeTimeout(retry.delay) { [weak self] in
             guard let self else { return }
-            guard self.processRouteReadinessStore.handleRetryFired(
-                processID: processID
+            guard self.processControlPlane.handleRetryFired(
+                processID: processID,
+                attemptID: retry.attempt
             ) else {
                 return
             }
@@ -317,10 +325,16 @@ extension RuntimeCoordinator {
             }
             self.startProcessRouteActivation(for: route)
         }
-        processRouteReadinessStore.storeRetry(
+        if let lease = processControlPlane.currentCatalogLease(
             processID: processID,
-            timeout: timeout
-        )
+            upstreamIndex: processControlPlane.attemptSnapshot(processID: processID)?.upstreamID.rawValue ?? -1
+        ) {
+            applyProcessControlPlaneTransition(
+                processControlPlane.attach(.retryTimeout(timeout), to: lease)
+            )
+        } else {
+            timeout.cancel()
+        }
     }
 
     private func scheduleProcessRouteActivationCatalogTimeout(
@@ -338,11 +352,16 @@ extension RuntimeCoordinator {
                 attempt: attempt
             )
         }
-        processRouteReadinessStore.storeCatalogTimeout(
+        guard processControlPlane.attemptSnapshot(processID: processID)?.attemptID.rawValue == attempt,
+              let lease = processControlPlane.currentCatalogLease(
             processID: processID,
-            upstreamIndex: upstreamIndex,
-            attempt: attempt,
-            timeout: timeout
+            upstreamIndex: upstreamIndex
+        ) else {
+            timeout.cancel()
+            return
+        }
+        applyProcessControlPlaneTransition(
+            processControlPlane.attach(.catalogTimeout(timeout), to: lease)
         )
     }
 
@@ -355,14 +374,14 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         attempt: Int
     ) {
-        guard let timeout = processRouteReadinessStore.handleCatalogTimeout(
+        guard let timeout = processControlPlane.handleCatalogTimeout(
             processID: processID,
             upstreamIndex: upstreamIndex,
-            attempt: attempt
+            attemptID: attempt
         ) else {
             return
         }
-        timeout.rpcHandles.forEach { $0.cancel() }
+        applyProcessControlPlaneTransition(timeout.transition)
 
         logger.info(
             "route_activation_timeout",
@@ -374,7 +393,6 @@ extension RuntimeCoordinator {
                 "retry_delay_ms": .string("\(timeout.retry.delayMilliseconds)"),
             ]
         )
-        testHooks.processRouteActivationEvent?(processID, upstreamIndex, "timeout")
 
         clearUpstreamState(upstreamIndex: upstreamIndex)
         guard replaceProcessBoundUpstreamSlot(processID: processID, upstreamIndex: upstreamIndex) else {
@@ -410,15 +428,10 @@ extension RuntimeCoordinator {
             return false
         }
 
-        let previous = upstreamsBox.withLockedValue { upstreams -> (any UpstreamSlotControlling)? in
-            guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
-                return nil
-            }
-            let previous = upstreams[upstreamIndex]
-            upstreams[upstreamIndex] = replacement
-            return previous
-        }
-        guard let previous else {
+        guard let topologyTransition = upstreamTopology.replace(
+            UpstreamSlotID(rawValue: upstreamIndex),
+            with: replacement
+        ), let previous = topologyTransition.replaced?.slot else {
             for unusedReplacement in replacements {
                 addRuntimeTask {
                     await unusedReplacement.stop()
@@ -430,6 +443,7 @@ extension RuntimeCoordinator {
             )
             return false
         }
+        publishUpstreamTopology(topologyTransition.snapshot)
         observeUpstreamEvents(replacement, upstreamIndex: upstreamIndex)
         addRuntimeTask {
             await previous.stop()

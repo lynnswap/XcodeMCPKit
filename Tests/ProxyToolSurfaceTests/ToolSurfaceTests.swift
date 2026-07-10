@@ -169,7 +169,7 @@ struct ToolSurfaceTests {
         #expect((issues[1]["line"] as? NSNumber)?.intValue == 0)
     }
 
-    @Test func toolSurfaceRewritesToolsListAndExtractsCanonicalCatalog() throws {
+    @Test func toolSurfaceRewritesToolsList() throws {
         var config = makeToolSurfaceConfig()
         config.disabledToolNames = ["RunAllTests"]
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
@@ -200,11 +200,8 @@ struct ToolSurfaceTests {
             originalID: nil,
             responseMethodsByIDKey: ["1": "tools/list"],
             normalizationToolsListResponseIDKey: "1",
-            cacheableToolsListResponseIDKey: "1",
             upstreamData: upstreamData
         )
-
-        #expect(rewritten.cacheableToolsListResult != nil)
 
         let payload = try #require(
             JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
@@ -244,11 +241,8 @@ struct ToolSurfaceTests {
             originalID: nil,
             responseMethodsByIDKey: ["1": "tools/list"],
             normalizationToolsListResponseIDKey: "1",
-            cacheableToolsListResponseIDKey: "1",
             upstreamData: upstreamData
         )
-
-        #expect(rewritten.cacheableToolsListResult != nil)
 
         let payload = try #require(
             JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
@@ -311,8 +305,6 @@ struct ToolSurfaceTests {
             upstreamData: upstreamData
         )
 
-        #expect(rewritten.cacheableToolsListResult == nil)
-
         let payload = try #require(
             JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [[String: Any]]
         )
@@ -321,68 +313,6 @@ struct ToolSurfaceTests {
         #expect(structuredContent["answer"] as? String == "ok")
     }
 
-    @Test func toolSurfaceSeedsCanonicalCatalogFromFirstToolsListInBatch() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
-        )
-
-        let upstreamData = try JSONSerialization.data(
-            withJSONObject: [
-                [
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": [
-                        "tools": [
-                            [
-                                "name": "DocumentationSearch",
-                                "outputSchema": [
-                                    "type": "object",
-                                ],
-                            ],
-                        ],
-                    ],
-                ],
-                [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": [
-                        "tools": [
-                            [
-                                "name": "OtherTool",
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-            options: []
-        )
-        let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
-            toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: [
-                "1": "tools/list",
-                "2": "tools/list",
-            ],
-            normalizationToolsListResponseIDKey: "1",
-            cacheableToolsListResponseIDKey: "1",
-            upstreamData: upstreamData
-        )
-
-        let result = try #require(rewritten.cacheableToolsListResult)
-        guard case .object(let resultObject) = result,
-            case .array(let tools) = resultObject["tools"],
-            case .object(let firstTool) = try #require(tools.first),
-            case .string(let name) = firstTool["name"]
-        else {
-            Issue.record("expected first tools/list result to seed canonical catalog")
-            return
-        }
-
-        #expect(name == "DocumentationSearch")
-    }
 
     @Test func toolSurfaceNormalizesUsingSourceProcessCatalog() throws {
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())

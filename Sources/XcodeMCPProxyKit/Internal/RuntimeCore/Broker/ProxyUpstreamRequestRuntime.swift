@@ -14,6 +14,12 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
         upstreamIndex: Int
     ) -> (bodyData: Data, parsedRequestJSON: Any)
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool)
+    func sendUpstream(
+        _ data: Data,
+        upstreamIndex: Int,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?
+    )
     func activateRequestLease(
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
@@ -34,16 +40,31 @@ extension ProxyUpstreamRequestRuntimePort {
     func sendUpstream(_ data: Data, upstreamIndex: Int) {
         sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: false)
     }
+
+    func sendUpstream(
+        _ data: Data,
+        upstreamIndex: Int,
+        ensureRunning: Bool,
+        admission _: RouteForwardingAdmission?
+    ) {
+        sendUpstream(data, upstreamIndex: upstreamIndex, ensureRunning: ensureRunning)
+    }
 }
 
 struct ProxyUpstreamRequestRuntime: Sendable {
     struct PreparedRequest: Sendable {
         let transform: RequestTransform
         let upstreamIndex: Int
+        let admission: RouteForwardingAdmission?
 
-        init(transform: RequestTransform, upstreamIndex: Int) {
+        init(
+            transform: RequestTransform,
+            upstreamIndex: Int,
+            admission: RouteForwardingAdmission? = nil
+        ) {
             self.transform = transform
             self.upstreamIndex = upstreamIndex
+            self.admission = admission
         }
     }
 
@@ -93,7 +114,8 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        upstreamIndexOverride: Int? = nil
+        upstreamIndexOverride: Int? = nil,
+        admission: RouteForwardingAdmission? = nil
     ) throws -> PreparedRequest? {
         let upstreamIndex: Int
         if let upstreamIndexOverride {
@@ -122,7 +144,11 @@ struct ProxyUpstreamRequestRuntime: Sendable {
                 )
             }
         )
-        return PreparedRequest(transform: transform, upstreamIndex: upstreamIndex)
+        return PreparedRequest(
+            transform: transform,
+            upstreamIndex: upstreamIndex,
+            admission: admission
+        )
     }
 
     func startRequest(
@@ -174,7 +200,8 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         port.sendUpstream(
             prepared.transform.upstreamData,
             upstreamIndex: prepared.upstreamIndex,
-            ensureRunning: false
+            ensureRunning: false,
+            admission: prepared.admission
         )
         return StartedRequest(
             transform: prepared.transform,

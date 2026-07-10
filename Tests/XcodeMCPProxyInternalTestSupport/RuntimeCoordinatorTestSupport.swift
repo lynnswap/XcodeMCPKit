@@ -39,6 +39,69 @@ extension RuntimeCoordinator {
     func drainRuntimeTasksForTesting() async {
         await runtimeTasks.drainCurrentTasks().wait()
     }
+
+    func seedCanonicalToolsCatalog(_ result: JSONValue, sourceUpstream: Int) {
+        do {
+            let source = UpstreamSlotID(rawValue: sourceUpstream)
+            let lease: CatalogLease
+            if let route = processControlPlane.route(forUpstreamIndex: sourceUpstream) {
+                let slotIDs = Set(xcodeProcessRoutes.flatMap(\.upstreamIndices).map {
+                    UpstreamSlotID(rawValue: $0)
+                })
+                applyProcessControlPlaneTransition(processControlPlane.updateUsability(
+                    .init(
+                        snapshotUsableUpstreamIDs: slotIDs,
+                        recoveryAwareUsableUpstreamIDs: slotIDs
+                    ),
+                    nowUptimeNs: nowUptimeNanoseconds()
+                ))
+                let started = try #require(processControlPlane.beginCatalogAttempt(
+                    routeID: route.id,
+                    preferredUpstream: source,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
+                ))
+                lease = started.0
+                applyProcessControlPlaneTransition(started.1)
+            } else {
+                let started = processControlPlane.beginUnboundCatalogAttempt(
+                    preferredUpstream: source,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
+                )
+                lease = started.0
+                applyProcessControlPlaneTransition(started.1)
+            }
+            applyCatalogCommit(processControlPlane.completeCatalog(
+                .usable(result, source: source),
+                lease: lease,
+                nowUptimeNanoseconds: nowUptimeNanoseconds()
+            ))
+        } catch {
+            Issue.record("failed to seed canonical tools catalog: \(error)")
+        }
+    }
+
+    func clearCanonicalToolsCatalogForTesting() {
+        applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
+    }
+
+    @discardableResult
+    func beginProcessRouteAttachingForTesting(
+        processID: pid_t,
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64
+    ) -> ProcessControlPlaneAuthority.ActivationStart? {
+        guard let route = processControlPlane.route(forProcessID: processID),
+              let started = processControlPlane.beginAttaching(
+                  routeID: route.id,
+                  upstreamIndex: upstreamIndex,
+                  nowUptimeNs: nowUptimeNs
+              ) else {
+            Issue.record("failed to begin process route attempt for \(processID)")
+            return nil
+        }
+        applyProcessControlPlaneTransition(started.1)
+        return started.0
+    }
 }
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
@@ -267,20 +330,38 @@ func seedProcessToolCatalogs(
     on manager: RuntimeCoordinator,
     entries: [(target: XcodeProcessTarget, upstreamIndex: Int, tools: [[String: Any]])]
 ) throws {
+    let slotIDs = Set(manager.xcodeProcessRoutes.flatMap(\.upstreamIndices).map {
+        UpstreamSlotID(rawValue: $0)
+    })
+    manager.applyProcessControlPlaneTransition(
+        manager.processControlPlane.updateUsability(
+            .init(
+                snapshotUsableUpstreamIDs: slotIDs,
+                recoveryAwareUsableUpstreamIDs: slotIDs
+            ),
+            nowUptimeNs: manager.nowUptimeNanoseconds()
+        )
+    )
     for entry in entries {
         let result = try jsonValue([
             "tools": entry.tools,
         ])
-        manager.processToolSurfaceStore.record(
-            target: entry.target,
-            upstreamIndex: entry.upstreamIndex,
-            rawResult: result
+        let route = try #require(manager.processControlPlane.route(forProcessID: entry.target.processID))
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstream: UpstreamSlotID(rawValue: entry.upstreamIndex),
+                nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+            )
         )
-    }
-    if let surface = manager.processToolSurfaceStore.availableToolCatalogSurface(),
-       let sourceUpstream = surface.sourceUpstream
-    {
-        manager.setCachedToolsListResult(surface.rawResult, sourceUpstream: sourceUpstream)
+        manager.applyProcessControlPlaneTransition(transition)
+        manager.applyCatalogCommit(
+            manager.processControlPlane.completeCatalog(
+                .usable(result, source: UpstreamSlotID(rawValue: entry.upstreamIndex)),
+                lease: lease,
+                nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+            )
+        )
     }
 }
 

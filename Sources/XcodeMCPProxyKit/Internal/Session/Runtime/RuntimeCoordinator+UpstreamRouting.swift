@@ -254,7 +254,7 @@ extension RuntimeCoordinator {
     /// survive losing the upstream it came from unless another initialized
     /// upstream can still vouch for an equivalent catalog.
     func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
-        canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
+        processControlPlane.canonicalSourceUpstream() == upstreamIndex
             && !anyActiveInitializedUpstream()
     }
 
@@ -324,7 +324,7 @@ extension RuntimeCoordinator {
         }
 
         let primaryUpstreamIndex = globalInit.primaryInitUpstreamIndex
-            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? canonicalHandshakeState.initializeSourceUpstream()
             ?? 0
         if upstreamIndex == primaryUpstreamIndex {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
@@ -377,15 +377,57 @@ extension RuntimeCoordinator {
     }
 
     func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
-        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
-            return
+        sendUpstream(
+            data,
+            upstreamIndex: upstreamIndex,
+            ensureRunning: ensureRunning,
+            admission: nil
+        )
+    }
+
+    func sendUpstream(
+        _ data: Data,
+        upstreamIndex: Int,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?
+    ) {
+        guard let context = upstreamSlotContext(upstreamIndex) else { return }
+        if let admission {
+            guard processControlPlane.validate(admission.route),
+                  let expectedProof = admission.proof(for: upstreamIndex),
+                  expectedProof == context.proof,
+                  upstreamTopology.validate(expectedProof) else {
+                failPendingSend(
+                    originalRequestData: data,
+                    upstreamIndex: upstreamIndex,
+                    code: -32001,
+                    message: "Xcode process route changed before forwarding"
+                )
+                return
+            }
         }
-        addRuntimeTask { [weak self] in
+        addRuntimeTask { [weak self, context, admission] in
             guard let self else { return }
             if ensureRunning {
-                await self.upstreams[upstreamIndex].start()
+                await context.slot.start()
             }
-            switch await self.upstreams[upstreamIndex].send(data) {
+            if let admission {
+                guard self.processControlPlane.validate(admission.route),
+                      let expectedProof = admission.proof(for: upstreamIndex),
+                      expectedProof == context.proof,
+                      self.upstreamTopology.validate(expectedProof) else {
+                    self.failPendingSend(
+                        originalRequestData: data,
+                        upstreamIndex: upstreamIndex,
+                        code: -32001,
+                        message: "Xcode process route changed before forwarding"
+                    )
+                    return
+                }
+            } else {
+                guard self.upstreamTopology.validate(context.proof) else { return }
+            }
+            switch await context.slot.send(data) {
             case .accepted:
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
@@ -507,10 +549,11 @@ extension RuntimeCoordinator {
         _ data: Data,
         upstreamIndex: Int
     ) async -> Upstream.SendResult {
-        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+        guard let context = upstreamSlotContext(upstreamIndex),
+              upstreamTopology.validate(context.proof) else {
             return .unavailable(.notStarted)
         }
-        switch await upstreams[upstreamIndex].send(data) {
+        switch await context.slot.send(data) {
         case .accepted:
             recordTraffic(
                 upstreamIndex: upstreamIndex,
@@ -539,52 +582,29 @@ extension RuntimeCoordinator {
 
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         let initSnapshot = initializeManager.snapshot()
-        let brokerSnapshot = canonicalBrokerState.snapshot()
+        let processSnapshot = processControlPlane.snapshot()
         let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()
-        let upstreamStates = upstreamHealthManager.statesSnapshot()
+        let upstreamStates = upstreamHealthManager.activeStatesSnapshot()
         let leaseSnapshots = leaseManager.debugSnapshots()
         let sessionSnapshots = leaseManager.sessionDebugSnapshots(
             allSessionIDs: sessionRegistry.sessionIDs()
         )
         let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
-        let processToolCatalogs = processToolSurfaceStore.debugSnapshots(
-            exposedCatalog: brokerSnapshot.toolsCatalogRaw,
-            canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-            tabOwnerCountsByProcessID: windowOwnerIndex.withLockedValue {
-                $0.tabOwnerCountsByProcessID()
-            },
-            workspaceOwnerCountsByProcessID: windowOwnerIndex.withLockedValue {
-                $0.workspaceOwnerCountsByProcessID()
-            }
+        let processToolCatalogs = processControlPlane.debugCatalogSnapshots(
+            exposedCatalog: processSnapshot.canonicalToolsCatalogRaw,
+            tabOwnerCountsByProcessID: windowOwnershipAuthority.snapshot()
+                .tabOwnerCountsByProcessID(),
+            workspaceOwnerCountsByProcessID: windowOwnershipAuthority.snapshot()
+                .workspaceOwnerCountsByProcessID()
         )
-        let processIDsWithToolCatalog = Set(processToolCatalogs.map(\.processID))
-        let pendingToolCatalogProcessIDs =
-            processRouteReadinessStore.pendingCatalogRefreshProcessIDsSnapshot()
-        let unavailableProcessIDs = unavailableXcodeProcessIDs()
-
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
-            cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
+            cachedToolsListAvailable: processSnapshot.canonicalToolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
-            processRoutes: processRouteStore.debugSnapshots(
+            processRoutes: processControlPlane.debugRouteSnapshots(
                 usableSlotCount: { [weak self] route in
                     guard let self else { return 0 }
                     return self.usableInitializedUpstreamIndices(in: route).count
-                },
-                toolsCatalogState: { route, routeState in
-                    guard routeState == "active" else {
-                        return "retired"
-                    }
-                    if processIDsWithToolCatalog.contains(route.target.processID) {
-                        return "available"
-                    }
-                    if unavailableProcessIDs.contains(route.target.processID) {
-                        return "unavailable"
-                    }
-                    if pendingToolCatalogProcessIDs.contains(route.target.processID) {
-                        return "pending"
-                    }
-                    return "missing"
                 }
             ),
             processToolCatalogs: processToolCatalogs,
@@ -690,7 +710,7 @@ extension RuntimeCoordinator {
 
     func testStateSnapshot() -> TestSnapshot {
         let initSnapshot = initializeManager.snapshot()
-        let upstreams = upstreamHealthManager.statesSnapshot().map { upstream in
+        let upstreams = upstreamHealthManager.activeStatesSnapshot().map { _, upstream in
                 TestSnapshot.Upstream(
                     isInitialized: upstream.isInitialized,
                     initInFlight: upstream.initInFlight,
@@ -1100,7 +1120,7 @@ extension RuntimeCoordinator {
         }
 
         let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex
-            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? canonicalHandshakeState.initializeSourceUpstream()
             ?? 0
         if upstreamIndex == primaryUpstreamIndex {
             if initSnapshot.hasInitResult {

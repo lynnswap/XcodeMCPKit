@@ -17,7 +17,8 @@ extension ClientMCPRequestExecutor {
         leaseID: LeaseManager.ID,
         upstreamIndex: Int,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        admission: RouteForwardingAdmission? = nil
     ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         guard let forwardedBodyData = filteredRequest.bodyData
         else {
@@ -244,7 +245,8 @@ extension ClientMCPRequestExecutor {
                 bodyData: forwardedBodyData,
                 parsedRequestJSON: forwardedRequestJSON,
                 sessionID: sessionID,
-                upstreamIndexOverride: upstreamIndex
+                upstreamIndexOverride: upstreamIndex,
+                admission: admission
             ) else {
                 return makeImmediateLeaseResolution(
                     Self.makeUpstreamUnavailableResolution(

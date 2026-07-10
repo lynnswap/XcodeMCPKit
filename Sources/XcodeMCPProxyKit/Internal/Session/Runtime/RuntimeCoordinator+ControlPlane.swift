@@ -55,12 +55,10 @@ extension ControlPlane {
 
 extension RuntimeCoordinator {
     private struct AvailableToolsCatalogRoute: Sendable {
-        let routeID: ProcessRouteID
+        let route: XcodeProcessRoute
         let target: XcodeProcessTarget
         let upstreamIndices: [Int]
-        let brokerGeneration: UInt64
-        let activationUpstreamIndex: Int?
-        let activationAttempt: Int?
+        let lease: CatalogLease
     }
 
     private enum AvailableToolsCatalogOutcome: Sendable {
@@ -87,14 +85,70 @@ extension RuntimeCoordinator {
                 startedAt: startedAt
             )
         }
-        return try await loadCanonicalToolsCatalogFromRoute(
-            .anyHealthy,
-            requestTimeout: effectiveRequestTimeout,
-            rpcHandle: rpcHandle,
-            startedAt: startedAt,
-            purpose: "tools",
-            failureRouteMetadata: nil
+        guard let preferredUpstream = upstreamSlotIDs.first else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let (lease, transition) = processControlPlane.beginUnboundCatalogAttempt(
+            preferredUpstream: preferredUpstream,
+            nowUptimeNanoseconds: startedAt
         )
+        applyProcessControlPlaneTransition(transition)
+        do {
+            let result = try await loadCanonicalToolsCatalogFromRoute(
+                .anyHealthy,
+                requestTimeout: effectiveRequestTimeout,
+                rpcHandle: rpcHandle,
+                startedAt: startedAt,
+                purpose: "tools",
+                failureRouteMetadata: nil
+            )
+            guard let sourceUpstream = result.sourceUpstream else {
+                applyCatalogCommit(processControlPlane.completeCatalog(
+                    .failed,
+                    lease: lease,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
+                ))
+                throw ControlPlane.Error.invalidResponse("tools/list source upstream missing")
+            }
+            let commit = processControlPlane.completeCatalog(
+                .usable(result.rawResult, source: UpstreamSlotID(rawValue: sourceUpstream)),
+                lease: lease,
+                nowUptimeNanoseconds: nowUptimeNanoseconds()
+            )
+            switch commit {
+            case .accepted(let snapshot, let transition):
+                applyProcessControlPlaneTransition(transition)
+                guard let rawResult = snapshot.canonicalToolsCatalogRaw else {
+                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
+                }
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: rawResult,
+                    sourceUpstream: snapshot.canonicalSourceUpstream,
+                    durationMilliseconds: elapsedMilliseconds(
+                        sinceUptimeNanoseconds: startedAt
+                    )
+                )
+            case .discarded(_, let transition):
+                applyProcessControlPlaneTransition(transition)
+                guard let rawResult = processControlPlane.canonicalToolsCatalogRaw() else {
+                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
+                }
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: rawResult,
+                    sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                    durationMilliseconds: elapsedMilliseconds(
+                        sinceUptimeNanoseconds: startedAt
+                    )
+                )
+            }
+        } catch {
+            applyCatalogCommit(processControlPlane.completeCatalog(
+                .failed,
+                lease: lease,
+                nowUptimeNanoseconds: nowUptimeNanoseconds()
+            ))
+            throw error
+        }
     }
 
     private func loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
@@ -102,30 +156,13 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        let brokerGeneration = canonicalBrokerState.generation()
         let exposure = processRouteExposure(policy: .toolsCatalog)
-        let routes = exposure.routes.map { routeExposure -> AvailableToolsCatalogRoute in
-            let route = routeExposure.route
-            let upstreamIndices = routeExposure.usableUpstreamIndices
-            let activation = availableToolsCatalogActivation(
-                route: route,
-                upstreamIndices: upstreamIndices
-            )
-            return AvailableToolsCatalogRoute(
-                routeID: route.id,
-                target: route.target,
-                upstreamIndices: upstreamIndices,
-                brokerGeneration: brokerGeneration,
-                activationUpstreamIndex: activation?.upstreamIndex,
-                activationAttempt: activation?.attempt
-            )
-        }
-        guard routes.isEmpty == false else {
+        guard exposure.routes.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
         let exposedProcessIDs = exposure.processIDs
-        let currentSurface = processToolSurfaceStore.availableToolCatalogSurface(
+        let currentSurface = processControlPlane.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
         )
         if let surface = currentSurface,
@@ -139,80 +176,46 @@ extension RuntimeCoordinator {
         }
 
         let cachedProcessIDs = currentSurface?.processIDs ?? []
-        let uncachedRoutes = routes.filter { cachedProcessIDs.contains($0.target.processID) == false }
-        guard uncachedRoutes.isEmpty == false else {
+        let uncachedExposures = exposure.routes.filter {
+            cachedProcessIDs.contains($0.route.target.processID) == false
+        }
+        guard uncachedExposures.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        if let surface = currentSurface,
-           let sourceUpstream = surface.sourceUpstream {
-            scheduleAvailableToolsCatalogCompletion(
-                uncachedRoutes,
-                requestTimeout: requestTimeout
+        let routes = uncachedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
+            guard let preferred = exposure.usableUpstreamIDs.first,
+                  let (lease, transition) = processControlPlane.beginCatalogAttempt(
+                      routeID: exposure.route.id,
+                      preferredUpstream: preferred,
+                      nowUptimeNanoseconds: nowUptimeNanoseconds()
+                  ) else { return nil }
+            applyProcessControlPlaneTransition(transition)
+            return AvailableToolsCatalogRoute(
+                route: exposure.route,
+                target: exposure.route.target,
+                upstreamIndices: exposure.usableUpstreamIndices,
+                lease: lease
             )
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: surface.rawResult,
-                sourceUpstream: sourceUpstream,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                cacheableAsCanonical: false
-            )
+        }
+        guard routes.isEmpty == false else {
+            if let current = processControlPlane.canonicalToolsCatalogRaw() {
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: current,
+                    sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                    durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+                )
+            }
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
-        do {
-            return try await loadAvailableToolsCatalogsInBatch(
-                uncachedRoutes,
-                requestTimeout: requestTimeout,
-                deadlineUptimeNs: deadlineUptimeNs,
-                startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs,
-            )
-        } catch is CancellationError {
-            guard Task.isCancelled == false,
-                  let surface = try await waitForAvailableToolsCatalogSurface(
-                      exposedProcessIDs: exposedProcessIDs,
-                      deadlineUptimeNs: deadlineUptimeNs
-                  ),
-                  let sourceUpstream = surface.sourceUpstream else {
-                throw CancellationError()
-            }
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: surface.rawResult,
-                sourceUpstream: sourceUpstream,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
-            )
-        } catch {
-            guard let surface = currentSurface,
-                  let sourceUpstream = surface.sourceUpstream else {
-                throw error
-            }
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: surface.rawResult,
-                sourceUpstream: sourceUpstream,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
-            )
-        }
-    }
-
-    private func waitForAvailableToolsCatalogSurface(
-        exposedProcessIDs: Set<pid_t>,
-        deadlineUptimeNs: UInt64?
-    ) async throws -> ProcessToolSurfaceStore.AvailableToolCatalog? {
-        while true {
-            if let surface = processToolSurfaceStore.availableToolCatalogSurface(
-                processIDs: exposedProcessIDs
-            ),
-                surface.processIDs == exposedProcessIDs
-            {
-                return surface
-            }
-            try Task.checkCancellation()
-            if let deadlineUptimeNs,
-               nowUptimeNanoseconds() >= deadlineUptimeNs {
-                return nil
-            }
-            try await Task.sleep(for: .milliseconds(25))
-        }
+        return try await loadAvailableToolsCatalogsInBatch(
+            routes,
+            requestTimeout: requestTimeout,
+            deadlineUptimeNs: deadlineUptimeNs,
+            startedAt: startedAt,
+            exposedProcessIDs: exposedProcessIDs,
+            returnAfterFirstSuccess: false
+        )
     }
 
     private func loadAvailableToolsCatalogsInBatch(
@@ -237,16 +240,8 @@ extension RuntimeCoordinator {
                             deadlineUptimeNs: deadlineUptimeNs,
                             startedAt: startedAt
                         )
-                        if let sourceUpstream = result.sourceUpstream,
-                           let hook = self.testHooks.processToolsCatalogLoadedBeforeRecord {
-                            await hook(route.target, sourceUpstream)
-                        }
-                        guard let recordedResult = self.recordAvailableToolsCatalog(
-                            routeID: route.routeID,
-                            brokerGeneration: route.brokerGeneration,
-                            target: route.target,
-                            activationUpstreamIndex: route.activationUpstreamIndex,
-                            activationAttempt: route.activationAttempt,
+                        guard let recordedResult = self.commitProcessCatalog(
+                            route: route,
                             result: result,
                             startedAt: startedAt,
                             exposedProcessIDs: exposedProcessIDs
@@ -262,33 +257,15 @@ extension RuntimeCoordinator {
                     } catch is TimeoutError {
                         throw TimeoutError()
                     } catch {
-                        guard self.processToolsCatalogLoadLeaseIsCurrent(
-                            routeID: route.routeID,
-                            brokerGeneration: route.brokerGeneration,
-                            target: route.target,
-                            sourceUpstream: route.upstreamIndices.last ?? -1
-                        ) else {
-                            return .stale
-                        }
-                        if let hook = self.testHooks.processToolsCatalogFailureCleanupBeforeApply {
-                            await hook(route.target, route.upstreamIndices.last ?? -1)
-                        }
-                        guard self.processToolsCatalogLoadLeaseIsCurrent(
-                            routeID: route.routeID,
-                            brokerGeneration: route.brokerGeneration,
-                            target: route.target,
-                            sourceUpstream: route.upstreamIndices.last ?? -1
-                        ) else {
-                            return .stale
-                        }
-                        if self.processToolSurfaceStore.catalog(
-                            forProcessID: route.target.processID
-                        ) != nil,
-                            let surface = self.processToolSurfaceStore.availableToolCatalogSurface(
-                                processIDs: exposedProcessIDs
-                            ),
-                            let surfaceSourceUpstream = surface.sourceUpstream
-                        {
+                        let commit = self.processControlPlane.completeCatalog(
+                            .failed,
+                            lease: route.lease,
+                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()
+                        )
+                        self.applyCatalogCommit(commit)
+                        if let surface = self.processControlPlane.availableToolCatalogSurface(
+                            processIDs: exposedProcessIDs
+                        ), let surfaceSourceUpstream = surface.sourceUpstream {
                             return .success(
                                 route: route,
                                 result: CanonicalToolsCatalogLoadResult(
@@ -296,22 +273,9 @@ extension RuntimeCoordinator {
                                     sourceUpstream: surfaceSourceUpstream,
                                     durationMilliseconds: self.elapsedMilliseconds(
                                         sinceUptimeNanoseconds: startedAt
-                                    ),
-                                    cacheableAsCanonical:
-                                        self.processToolSurfaceIsCompleteForCurrentExposure(surface)
+                                    )
                                 )
                             )
-                        }
-                        guard self.applyToolCatalogSurfaceMutation(
-                            onlyIfGeneration: route.brokerGeneration,
-                            {
-                                self.processToolSurfaceStore.removeProcess(
-                                    processID: route.target.processID,
-                                    exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
-                                )
-                            }
-                        ) != nil else {
-                            return .stale
                         }
                         return .failure(
                             route: route,
@@ -369,30 +333,28 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled, isInitialized() else {
             return
         }
-        let brokerGeneration = canonicalBrokerState.generation()
         let exposure = processRouteExposure(policy: .toolsCatalog)
-        let routes = exposure.routes.map { routeExposure -> AvailableToolsCatalogRoute in
-            let route = routeExposure.route
-            let upstreamIndices = routeExposure.usableUpstreamIndices
-            let activation = availableToolsCatalogActivation(
-                route: route,
-                upstreamIndices: upstreamIndices
-            )
-            return AvailableToolsCatalogRoute(
-                routeID: route.id,
-                target: route.target,
-                upstreamIndices: upstreamIndices,
-                brokerGeneration: brokerGeneration,
-                activationUpstreamIndex: activation?.upstreamIndex,
-                activationAttempt: activation?.attempt
-            )
-        }
-        let missingRoutes = routes.filter {
+        let missingExposures = exposure.routes.filter {
             if let requestedProcessIDs,
-               requestedProcessIDs.contains($0.target.processID) == false {
+               requestedProcessIDs.contains($0.route.target.processID) == false {
                 return false
             }
-            return processToolSurfaceStore.catalog(forProcessID: $0.target.processID) == nil
+            return processControlPlane.catalog(forProcessID: $0.route.target.processID) == nil
+        }
+        let missingRoutes = missingExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
+            guard let preferred = exposure.usableUpstreamIDs.first,
+                  let (lease, transition) = processControlPlane.beginCatalogAttempt(
+                      routeID: exposure.route.id,
+                      preferredUpstream: preferred,
+                      nowUptimeNanoseconds: nowUptimeNanoseconds()
+                  ) else { return nil }
+            applyProcessControlPlaneTransition(transition)
+            return AvailableToolsCatalogRoute(
+                route: exposure.route,
+                target: exposure.route.target,
+                upstreamIndices: exposure.usableUpstreamIndices,
+                lease: lease
+            )
         }
         guard missingRoutes.isEmpty == false else {
             return
@@ -408,54 +370,57 @@ extension RuntimeCoordinator {
                 ),
             ]
         )
-        scheduleAvailableToolsCatalogCompletion(
-            missingRoutes,
-            requestTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
-                defaultSeconds: config.requestTimeout
-            )
+        let requestTimeout = MCP.MethodDispatcher.timeoutForControlPlane(
+            defaultSeconds: config.requestTimeout
         )
+        addRuntimeTask { [weak self] in
+            guard let self else { return }
+            let startedAt = self.nowUptimeNanoseconds()
+            do {
+                _ = try await self.loadAvailableToolsCatalogsInBatch(
+                    missingRoutes,
+                    requestTimeout: requestTimeout,
+                    deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
+                    startedAt: startedAt,
+                    exposedProcessIDs: self.processToolCatalogExposedProcessIDs(),
+                    returnAfterFirstSuccess: false
+                )
+                await self.controlPlaneCoordinator.syncDebug()
+            } catch is CancellationError {
+            } catch {
+                self.logger.debug(
+                    "Background process tools/list refresh failed",
+                    metadata: ["error": .string(String(describing: error))]
+                )
+            }
+        }
     }
 
     func scheduleMissingProcessToolsCatalogRetry(
         processID: pid_t,
         reason: String
     ) {
-        processRouteReadinessStore.insertPendingCatalogRefresh(processID: processID)
-        let delay = TimeAmount.milliseconds(250)
-        let generation = canonicalBrokerState.generation()
-        let staleRetry = processRouteReadinessStore.takeStaleScheduledCatalogRetry(
-            processID: processID,
-            currentGeneration: generation
-        )
-        staleRetry?.timeout.cancel()
-        guard processRouteReadinessStore.hasScheduledCatalogRetry(processID: processID) == false else {
-            return
-        }
+        guard let scheduled = processControlPlane.scheduleRetry(processID: processID) else { return }
+        let delay = scheduled.retry.delay
         logger.debug(
             "Scheduling missing process tools/list catalog retry",
             metadata: [
                 "pid": .string("\(processID)"),
-                "delay_ms": .string("250"),
+                "delay_ms": .string("\(scheduled.retry.delayMilliseconds)"),
                 "reason": .string(reason),
             ]
         )
         let timeout = scheduleRuntimeTimeout(delay) { [weak self] in
             guard let self else { return }
-            let isScheduledRetry =
-                self.processRouteReadinessStore.takeScheduledCatalogRetryIfCurrent(
-                    processID: processID,
-                    generation: generation
-                )
-            guard isScheduledRetry,
-                  self.canonicalBrokerState.generation() == generation,
+            guard self.processControlPlane.handleRetryFired(
+                      processID: processID,
+                      attemptID: scheduled.retry.attempt
+                  ),
                   self.processRoutingEnabled,
                   self.xcodeProcessRoutes.contains(where: {
                       $0.target.processID == processID
                   }),
-                  self.processRouteReadinessStore.hasPendingCatalogRefresh(
-                      processID: processID
-                  ),
-                  self.processToolSurfaceStore.catalog(forProcessID: processID) == nil
+                  self.processControlPlane.catalog(forProcessID: processID) == nil
             else {
                 return
             }
@@ -464,14 +429,9 @@ extension RuntimeCoordinator {
                 processIDs: [processID]
             )
         }
-        let didSchedule = processRouteReadinessStore.storeScheduledCatalogRetry(
-            processID: processID,
-            generation: generation,
-            timeout: timeout
+        applyProcessControlPlaneTransition(
+            processControlPlane.attach(.retryTimeout(timeout), to: scheduled.lease)
         )
-        if didSchedule == false {
-            timeout.cancel()
-        }
     }
 
     private func availableToolsCatalogSurfaceResult(
@@ -479,7 +439,7 @@ extension RuntimeCoordinator {
         exposedProcessIDs: Set<pid_t>,
         fallback: CanonicalToolsCatalogLoadResult
     ) -> CanonicalToolsCatalogLoadResult {
-        guard let surface = processToolSurfaceStore.availableToolCatalogSurface(
+        guard let surface = processControlPlane.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
         ) else {
             return fallback
@@ -487,353 +447,128 @@ extension RuntimeCoordinator {
         return CanonicalToolsCatalogLoadResult(
             rawResult: surface.rawResult,
             sourceUpstream: surface.sourceUpstream ?? fallback.sourceUpstream,
-            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-            cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
         )
     }
 
-    private func processToolSurfaceIsCompleteForCurrentExposure(
-        _ surface: ProcessToolSurfaceStore.AvailableToolCatalog?
-    ) -> Bool {
-        guard let surface else {
-            return false
-        }
-        let currentExposedProcessIDs = processToolCatalogExposedProcessIDs()
-        return currentExposedProcessIDs.isEmpty == false
-            && surface.processIDs == currentExposedProcessIDs
-    }
-
-    private func recordAvailableToolsCatalog(
-        routeID: ProcessRouteID,
-        brokerGeneration: UInt64,
-        target: XcodeProcessTarget,
-        activationUpstreamIndex: Int?,
-        activationAttempt: Int?,
+    private func commitProcessCatalog(
+        route: AvailableToolsCatalogRoute,
         result: CanonicalToolsCatalogLoadResult,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>
     ) -> CanonicalToolsCatalogLoadResult? {
         guard let sourceUpstream = result.sourceUpstream else {
-            return result
-        }
-        guard let activeRoute = processRouteStore.route(forUpstreamIndex: sourceUpstream),
-              activeRoute.id == routeID,
-              activeRoute.target == target else {
-            logger.debug(
-                "Dropping stale process tools/list catalog",
-                metadata: [
-                    "pid": .string("\(target.processID)"),
-                    "app_path": .string(target.appPath),
-                    "xcode_version": .string(target.xcodeVersion),
-                    "upstream": .string("\(sourceUpstream)"),
-                ]
+            applyCatalogCommit(
+                processControlPlane.completeCatalog(
+                    .failed,
+                    lease: route.lease,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
+                )
             )
-            return nil
+            return currentCatalogResult(
+                startedAt: startedAt,
+                exposedProcessIDs: exposedProcessIDs
+            )
         }
-        guard processToolsCatalogLoadLeaseIsCurrent(
-            routeID: routeID,
-            brokerGeneration: brokerGeneration,
-            target: target,
-            sourceUpstream: sourceUpstream
-        ) else {
-            return nil
-        }
-        let hadProcessCatalog =
-            processToolSurfaceStore.catalog(forProcessID: target.processID) != nil
-        // Control-plane catalog loads see upstream results before client-facing
-        // disabled-tool filtering. Empty tools arrays are valid MCP wire shape,
-        // but they are not a usable process-bound Xcode catalog surface.
-        guard ProcessToolSurfaceStore.hasUsableUpstreamToolsCatalog(in: result.rawResult) else {
+
+        guard ProcessToolCatalogCodec.hasUsableUpstreamToolsCatalog(in: result.rawResult) else {
             logger.debug(
                 "Dropping empty process tools/list catalog",
                 metadata: [
-                    "pid": .string("\(target.processID)"),
-                    "app_path": .string(target.appPath),
-                    "xcode_version": .string(target.xcodeVersion),
+                    "pid": .string("\(route.target.processID)"),
+                    "app_path": .string(route.target.appPath),
+                    "xcode_version": .string(route.target.xcodeVersion),
                     "upstream": .string("\(sourceUpstream)"),
                 ]
             )
-            if let activationUpstreamIndex, let activationAttempt {
-                finishProcessRouteActivationCatalogRequestAfterEmptyCatalog(
-                    processID: target.processID,
-                    upstreamIndex: activationUpstreamIndex,
-                    attempt: activationAttempt
+            applyCatalogCommit(
+                processControlPlane.completeCatalog(
+                    .unusable,
+                    lease: route.lease,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
                 )
-            }
-            if hadProcessCatalog {
-                guard applyToolCatalogSurfaceMutation(
-                    onlyIfGeneration: brokerGeneration,
-                    {
-                        processToolSurfaceStore.removeProcess(
-                            processID: target.processID,
-                            exposedProcessIDs: processToolCatalogExposedProcessIDs()
-                        )
-                    }
-                ) != nil else {
-                    return nil
-                }
-                scheduleMissingProcessToolsCatalogRetry(
-                    processID: target.processID,
-                    reason: "empty_process_catalog"
-                )
-                guard let surface = processToolSurfaceStore.availableToolCatalogSurface(
-                    processIDs: exposedProcessIDs
-                ),
-                    let surfaceSourceUpstream = surface.sourceUpstream
-                else {
-                    return nil
-                }
-                return CanonicalToolsCatalogLoadResult(
-                    rawResult: surface.rawResult,
-                    sourceUpstream: surfaceSourceUpstream,
-                    durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-                    cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
-                )
-            }
+            )
             scheduleMissingProcessToolsCatalogRetry(
-                processID: target.processID,
+                processID: route.target.processID,
                 reason: "empty_process_catalog"
             )
-            return nil
-        }
-        let resolvedActivation: (upstreamIndex: Int, attempt: Int)?
-        if let activationUpstreamIndex, let activationAttempt {
-            resolvedActivation = (activationUpstreamIndex, activationAttempt)
-        } else {
-            resolvedActivation = availableToolsCatalogActivation(
-                route: activeRoute,
-                upstreamIndices: activeRoute.upstreamIndices
+            return currentCatalogResult(
+                startedAt: startedAt,
+                exposedProcessIDs: exposedProcessIDs
             )
         }
-        if let resolvedActivation,
-           markProcessRouteActivationCataloged(
-               target: target,
-               upstreamIndex: sourceUpstream,
-               activationUpstreamIndex: resolvedActivation.upstreamIndex,
-               attempt: resolvedActivation.attempt
-           ) == false {
-            if hadProcessCatalog {
-                return availableToolsCatalogSurfaceResult(
-                    startedAt: startedAt,
-                    exposedProcessIDs: exposedProcessIDs,
-                    fallback: result
+
+        let commit = processControlPlane.completeCatalog(
+            .usable(result.rawResult, source: UpstreamSlotID(rawValue: sourceUpstream)),
+            lease: route.lease,
+            nowUptimeNanoseconds: nowUptimeNanoseconds()
+        )
+        switch commit {
+        case .accepted(let snapshot, let transition):
+            applyProcessControlPlaneTransition(transition)
+            markXcodeProcessRouteCatalogAvailable(upstreamIndex: sourceUpstream)
+            logger.info(
+                "route_activation_cataloged",
+                metadata: [
+                    "pid": .string("\(route.target.processID)"),
+                    "upstream": .string("\(sourceUpstream)"),
+                    "duration_ms": .string(
+                        "\(elapsedMilliseconds(sinceUptimeNanoseconds: startedAt))"
+                    ),
+                ]
+            )
+            if let raw = snapshot.canonicalToolsCatalogRaw {
+                return CanonicalToolsCatalogLoadResult(
+                    rawResult: raw,
+                    sourceUpstream: snapshot.canonicalSourceUpstream,
+                    durationMilliseconds: elapsedMilliseconds(
+                        sinceUptimeNanoseconds: startedAt
+                    )
                 )
             }
-            guard processRouteReadinessStore.isCataloged(
-                processID: target.processID,
-                attempt: resolvedActivation.attempt
-            ) else {
-                logger.debug(
-                    "Dropping stale process tools/list catalog",
-                    metadata: [
-                        "pid": .string("\(target.processID)"),
-                        "app_path": .string(target.appPath),
-                        "xcode_version": .string(target.xcodeVersion),
-                        "upstream": .string("\(sourceUpstream)"),
-                        "activation_attempt": .string("\(resolvedActivation.attempt)"),
-                    ]
-                )
-                return nil
-            }
-        }
-        guard applyToolCatalogSurfaceMutation(
-            onlyIfGeneration: brokerGeneration,
-            {
-                processToolSurfaceStore.recordCatalog(
-                    routeID: activeRoute.id,
-                    target: target,
-                    upstreamIndex: sourceUpstream,
-                    associatedUpstreamIndices: activeRoute.upstreamIndices,
-                    rawResult: result.rawResult,
-                    exposedProcessIDs: processToolCatalogExposedProcessIDs()
-                )
-            }
-        ) != nil else {
-            return nil
-        }
-        if resolvedActivation == nil {
-            _ = markProcessRouteActivationCataloged(
-                target: target,
-                upstreamIndex: sourceUpstream
+            return currentCatalogResult(
+                startedAt: startedAt,
+                exposedProcessIDs: exposedProcessIDs
+            )
+        case .discarded(let reason, let transition):
+            applyProcessControlPlaneTransition(transition)
+            logger.debug(
+                "Discarding stale process tools/list completion",
+                metadata: [
+                    "pid": .string("\(route.target.processID)"),
+                    "upstream": .string("\(sourceUpstream)"),
+                    "reason": .string(String(describing: reason)),
+                ]
+            )
+            return currentCatalogResult(
+                startedAt: startedAt,
+                exposedProcessIDs: processToolCatalogExposedProcessIDs()
             )
         }
-        processRouteReadinessStore.removePendingCatalogRefresh(processID: target.processID)
-        cancelScheduledProcessToolsCatalogRetry(processID: target.processID)
-        let surface = processToolSurfaceStore.availableToolCatalogSurface(
+    }
+
+    private func currentCatalogResult(
+        startedAt: UInt64,
+        exposedProcessIDs: Set<pid_t>
+    ) -> CanonicalToolsCatalogLoadResult? {
+        if let raw = processControlPlane.canonicalToolsCatalogRaw() {
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: raw,
+                sourceUpstream: processControlPlane.canonicalSourceUpstream(),
+                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+            )
+        }
+        guard let surface = processControlPlane.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
-        )
+        ), let source = surface.sourceUpstream else {
+            return nil
+        }
         return CanonicalToolsCatalogLoadResult(
-            rawResult: surface?.rawResult ?? result.rawResult,
-            sourceUpstream: surface?.sourceUpstream ?? sourceUpstream,
-            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt),
-            cacheableAsCanonical: processToolSurfaceIsCompleteForCurrentExposure(surface)
+            rawResult: surface.rawResult,
+            sourceUpstream: source,
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
         )
     }
-
-    private func processToolsCatalogRouteLeaseIsCurrent(
-        routeID: ProcessRouteID,
-        target: XcodeProcessTarget,
-        sourceUpstream: Int
-    ) -> Bool {
-        let nowUptimeNs = nowUptimeNanoseconds()
-        guard processRouteStore.containsExposedRoute(
-            id: routeID,
-            policy: .toolsCatalog,
-            upstreamUsability: processRouteUpstreamUsabilitySnapshot(
-                policy: .toolsCatalog,
-                nowUptimeNs: nowUptimeNs
-            ),
-            nowUptimeNs: nowUptimeNs
-        ) else {
-            logger.debug(
-                "Dropping stale process tools/list catalog",
-                metadata: [
-                    "pid": .string("\(target.processID)"),
-                    "app_path": .string(target.appPath),
-                    "xcode_version": .string(target.xcodeVersion),
-                    "upstream": .string("\(sourceUpstream)"),
-                ]
-            )
-            return false
-        }
-        return true
-    }
-
-    private func processToolsCatalogLoadLeaseIsCurrent(
-        routeID: ProcessRouteID,
-        brokerGeneration: UInt64,
-        target: XcodeProcessTarget,
-        sourceUpstream: Int
-    ) -> Bool {
-        let currentGeneration = canonicalBrokerState.generation()
-        guard currentGeneration == brokerGeneration else {
-            logger.debug(
-                "Dropping stale process tools/list catalog",
-                metadata: [
-                    "pid": .string("\(target.processID)"),
-                    "app_path": .string(target.appPath),
-                    "xcode_version": .string(target.xcodeVersion),
-                    "upstream": .string("\(sourceUpstream)"),
-                    "expected_broker_generation": .string("\(brokerGeneration)"),
-                    "current_broker_generation": .string("\(currentGeneration)"),
-                ]
-            )
-            return false
-        }
-        return processToolsCatalogRouteLeaseIsCurrent(
-            routeID: routeID,
-            target: target,
-            sourceUpstream: sourceUpstream
-        )
-    }
-
-    private func availableToolsCatalogActivation(
-        route: XcodeProcessRoute,
-        upstreamIndices: [Int]
-    ) -> (upstreamIndex: Int, attempt: Int)? {
-        guard processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil,
-              let primaryUpstreamIndex = route.primaryUpstreamIndex
-        else {
-            return nil
-        }
-        guard let attempt = processRouteActivationCatalogAttempt(
-            processID: route.target.processID,
-            upstreamIndex: primaryUpstreamIndex
-        ) else {
-            return nil
-        }
-        return (primaryUpstreamIndex, attempt)
-    }
-
-    private func scheduleAvailableToolsCatalogCompletion(
-        _ routes: [AvailableToolsCatalogRoute],
-        requestTimeout: TimeAmount?
-    ) {
-        let key = availableToolsCatalogRefreshKey(for: routes)
-        let shouldStart = availableToolsCatalogRefreshKeys.withLockedValue { keys in
-            keys.insert(key).inserted
-        }
-        guard shouldStart else {
-            return
-        }
-        let accepted = addRuntimeTask { [weak self] in
-            guard let self else { return }
-            defer {
-                _ = self.availableToolsCatalogRefreshKeys.withLockedValue { keys in
-                    keys.remove(key)
-                }
-            }
-            let startedAt = self.nowUptimeNanoseconds()
-            let generation = self.canonicalBrokerState.generation()
-            let exposure = self.processRouteExposure(policy: .toolsCatalog)
-            let currentRouteIDs = Set(exposure.routes.map(\.route.id))
-            let exposedProcessIDs = exposure.processIDs
-            let currentRoutes = routes.filter {
-                $0.brokerGeneration == generation
-                    && currentRouteIDs.contains($0.routeID)
-            }
-            guard currentRoutes.isEmpty == false else {
-                return
-            }
-            do {
-                _ = try await self.loadAvailableToolsCatalogsInBatch(
-                    currentRoutes,
-                    requestTimeout: requestTimeout,
-                    deadlineUptimeNs: self.deadlineUptimeNanoseconds(for: requestTimeout),
-                    startedAt: startedAt,
-                    exposedProcessIDs: exposedProcessIDs,
-                    returnAfterFirstSuccess: false
-                )
-                if self.syncCurrentProcessToolsCatalogSurfaceIfComplete(generation: generation) {
-                    await self.controlPlaneCoordinator.syncDebug()
-                }
-            } catch is CancellationError {
-            } catch {
-                if self.syncCurrentProcessToolsCatalogSurfaceIfComplete(generation: generation) {
-                    await self.controlPlaneCoordinator.syncDebug()
-                }
-            }
-        }
-        if accepted == false {
-            _ = availableToolsCatalogRefreshKeys.withLockedValue { keys in
-                keys.remove(key)
-            }
-        }
-    }
-
-    private func availableToolsCatalogRefreshKey(
-        for routes: [AvailableToolsCatalogRoute]
-    ) -> String {
-        routes
-            .map { route in
-                if let activationAttempt = route.activationAttempt {
-                    return "\(route.target.processID):\(activationAttempt)"
-                }
-                return "\(route.target.processID)"
-            }
-            .sorted()
-            .joined(separator: ",")
-    }
-
-    private func syncCurrentProcessToolsCatalogSurfaceIfComplete(generation: UInt64) -> Bool {
-        let currentExposedProcessIDs = processToolCatalogExposedProcessIDs()
-        guard currentExposedProcessIDs.isEmpty == false,
-              let surface = processToolSurfaceStore.availableToolCatalogSurface(
-                  processIDs: currentExposedProcessIDs
-              ),
-              surface.processIDs == currentExposedProcessIDs,
-              let sourceUpstream = surface.sourceUpstream,
-              canonicalBrokerState.generation() == generation
-        else {
-            return false
-        }
-        return canonicalBrokerState.syncCanonicalToolsCatalog(
-            surface.rawResult,
-            sourceUpstream: sourceUpstream,
-            onlyIfGeneration: generation
-        )
-    }
-
     private func loadToolsCatalogFromAvailableProcessRoute(
         _ route: AvailableToolsCatalogRoute,
         requestTimeout: TimeAmount?,
@@ -843,18 +578,9 @@ extension RuntimeCoordinator {
         var lastFailure: (upstreamIndex: Int, error: any Error)?
         for upstreamIndex in route.upstreamIndices {
             let rpcHandle = ControlPlane.RPCHandle()
-            // Fallback-upstream RPCs are registered on the activation attempt
-            // too; otherwise they outlive the catalog-phase timeout and their
-            // late failure would drop a catalog recorded by a newer attempt.
-            if let activationUpstreamIndex = route.activationUpstreamIndex,
-               let activationAttempt = route.activationAttempt {
-                processRouteReadinessStore.storeCatalogRPCHandle(
-                    processID: route.target.processID,
-                    upstreamIndex: activationUpstreamIndex,
-                    attempt: activationAttempt,
-                    rpcHandle: rpcHandle
-                )
-            }
+            applyProcessControlPlaneTransition(
+                processControlPlane.attach(.rpc(rpcHandle), to: route.lease)
+            )
             let routeTimeout = timeAmount(until: deadlineUptimeNs) ?? requestTimeout
             if routeTimeout?.nanoseconds == 0 {
                 throw TimeoutError()
@@ -1421,7 +1147,7 @@ extension RuntimeCoordinator {
         kind: String,
         reason: String
     ) {
-        canonicalBrokerState.recordIncompatibility(
+        canonicalHandshakeState.recordIncompatibility(
             upstreamIndex: upstreamIndex,
             kind: kind,
             reason: reason

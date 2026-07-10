@@ -27,9 +27,12 @@ extension RuntimeCoordinator {
     }
 
     func startAllUpstreamSlots() {
-        for upstream in upstreams {
-            addRuntimeTask { [upstream] in
-                await upstream.start()
+        let snapshot = upstreamTopology.snapshot()
+        for entry in snapshot.entries {
+            guard let proof = snapshot.proof(entry.id) else { continue }
+            addRuntimeTask { [weak self, entry, proof] in
+                guard let self, self.upstreamTopology.validate(proof) else { return }
+                await entry.slot.start()
             }
         }
     }
@@ -39,9 +42,10 @@ extension RuntimeCoordinator {
     }
 
     func startUpstreamSlot(_ upstreamIndex: Int) {
-        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else { return }
-        let upstream = upstreams[upstreamIndex]
-        addRuntimeTask { [upstream] in
+        guard let context = upstreamSlotContext(upstreamIndex) else { return }
+        addRuntimeTask { [weak self, context] in
+            guard let self, self.upstreamTopology.validate(context.proof) else { return }
+            let upstream = context.slot
             await upstream.start()
         }
     }

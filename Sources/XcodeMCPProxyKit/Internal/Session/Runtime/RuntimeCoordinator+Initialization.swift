@@ -128,7 +128,7 @@ extension RuntimeCoordinator {
 
     func currentPrimaryInitializeUpstreamIndex() -> Int {
         initializeManager.activePrimaryInitializeUpstreamIndex()
-            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? canonicalHandshakeState.initializeSourceUpstream()
             ?? primaryInitializeUpstreamIndex()
             ?? 0
     }
@@ -233,7 +233,7 @@ extension RuntimeCoordinator {
             processRoutingEnabled
             && isPrimaryInitialize == false
             && activePrimaryInitializeUpstreamIndex == nil
-            && canonicalBrokerState.initializeResult() == nil
+            && canonicalHandshakeState.initializeResult() == nil
         let handlesPrimaryInitialize = isPrimaryInitialize
             || canPromoteWarmInitializeToPrimary
             || (
@@ -282,7 +282,7 @@ extension RuntimeCoordinator {
         }
 
         if handlesPrimaryInitialize == false {
-            if let canonicalInitialize = canonicalBrokerState.initializeResult(),
+            if let canonicalInitialize = canonicalHandshakeState.initializeResult(),
                 !initializeResultsEquivalent(canonicalInitialize, result)
             {
                 noteIncompatibleUpstream(
@@ -331,7 +331,7 @@ extension RuntimeCoordinator {
             ) else {
                 return
             }
-            self.canonicalBrokerState.syncCanonicalInitialize(
+            self.canonicalHandshakeState.syncCanonicalInitialize(
                 result,
                 sourceUpstream: upstreamIndex
             )
@@ -462,7 +462,7 @@ extension RuntimeCoordinator {
         let canPromoteWarmInitializeToPrimary =
             processRoutingEnabled
             && activePrimaryUpstreamIndex == nil
-            && canonicalBrokerState.initializeResult() == nil
+            && canonicalHandshakeState.initializeResult() == nil
             && processRouteActivationOwnsPrimaryInitialize(upstreamIndex: upstreamIndex)
         let handlesPrimaryInitialize = activePrimaryUpstreamIndex == upstreamIndex
             || canPromoteWarmInitializeToPrimary
@@ -582,15 +582,15 @@ extension RuntimeCoordinator {
             return
         }
 
-        addRuntimeTask { [weak self] in
-            guard let self else { return }
-            let result = await self.upstreams[upstreamIndex].send(data)
+        guard let context = upstreamSlotContext(upstreamIndex) else { return }
+        addRuntimeTask { [weak self, context] in
+            guard let self, self.upstreamTopology.validate(context.proof) else { return }
+            let result = await context.slot.send(data)
             if result == .accepted {
                 guard self.upstreamHealthManager.markInitializedNotificationSent(
                     upstreamIndex: upstreamIndex,
                     expectedUpstreamID: expectedUpstreamID
                 ) else {
-                    self.testHooks.initializedNotificationStaleIgnored?(upstreamIndex)
                     return
                 }
                 self.recordTraffic(
@@ -619,7 +619,7 @@ extension RuntimeCoordinator {
         let handlesPrimaryInitialize = treatsAsPrimary || isCurrentPrimaryInitializeUpstream(upstreamIndex)
         let hasHealthySecondary = handlesPrimaryInitialize
             && hasUsableInitializedSecondaryUpstreams(excluding: upstreamIndex)
-        if canonicalBrokerState.toolsSourceUpstream() == upstreamIndex && !hasHealthySecondary {
+        if processControlPlane.canonicalSourceUpstream() == upstreamIndex && !hasHealthySecondary {
             invalidateControlPlane(
                 reason: "initialized_notification_overload_\(upstreamIndex)",
                 clearInitialize: false,
@@ -733,21 +733,8 @@ extension RuntimeCoordinator {
         if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
            let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route)
         {
-            applyToolCatalogSurfaceMutation {
-                processToolSurfaceStore.removeUpstream(
-                    upstreamIndex: upstreamIndex,
-                    replacementUpstreamIndex: replacementUpstreamIndex,
-                    exposedProcessIDs: processToolCatalogExposedProcessIDs()
-                )
-            }
+            _ = replacementUpstreamIndex
         } else {
-            applyToolCatalogSurfaceMutation {
-                processToolSurfaceStore.removeUpstream(
-                    upstreamIndex: upstreamIndex,
-                    replacementUpstreamIndex: nil,
-                    exposedProcessIDs: processToolCatalogExposedProcessIDs()
-                )
-            }
             removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         }
         return true

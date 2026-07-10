@@ -24,18 +24,15 @@ struct CanonicalToolsCatalogLoadResult: Sendable {
     let rawResult: JSONValue
     let sourceUpstream: Int?
     let durationMilliseconds: Int
-    let cacheableAsCanonical: Bool
 
     init(
         rawResult: JSONValue,
         sourceUpstream: Int?,
-        durationMilliseconds: Int,
-        cacheableAsCanonical: Bool = true
+        durationMilliseconds: Int
     ) {
         self.rawResult = rawResult
         self.sourceUpstream = sourceUpstream
         self.durationMilliseconds = durationMilliseconds
-        self.cacheableAsCanonical = cacheableAsCanonical
     }
 }
 
@@ -56,7 +53,7 @@ extension ControlPlane {
         let upstreamHandshakeStates: [String: String]
         let waiterCounts: ControlPlane.WaiterCounts
         let inFlightControlPlaneRequests: [String]
-        let lastIncompatibility: CanonicalBrokerState.Incompatibility?
+        let lastIncompatibility: CanonicalHandshakeState.Incompatibility?
     }
 }
 

@@ -4,7 +4,6 @@ import XcodeMCPKit
 struct ToolSurface: Sendable {
     struct RewriteResult: Sendable {
         let responseData: Data
-        let cacheableToolsListResult: JSONValue?
     }
 
     private let refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode
@@ -28,7 +27,6 @@ struct ToolSurface: Sendable {
         responseToolNamesByIDKey: [String: String] = [:],
         responseOriginalIDsByKey: [String: JSONRPC.ID] = [:],
         normalizationToolsListResponseIDKey: String? = nil,
-        cacheableToolsListResponseIDKey: String? = nil,
         upstreamIndex: Int? = nil,
         upstreamData: Data
     ) -> ToolSurface.RewriteResult {
@@ -50,9 +48,6 @@ struct ToolSurface: Sendable {
                 matching: responseIDKey
             )
         }
-        let cacheableToolsListResult = cacheableToolsListResponseIDKey.flatMap { _ in
-            normalizationToolsListResult
-        }
         let normalizedToolsCallData = callNormalizer.normalizeResponseDataIfNeeded(
             method: method,
             toolName: toolName,
@@ -68,10 +63,7 @@ struct ToolSurface: Sendable {
             responseMethodsByIDKey: responseMethodsByIDKey,
             hiddenToolNames: hiddenToolNames
         )
-        return ToolSurface.RewriteResult(
-            responseData: responseData,
-            cacheableToolsListResult: cacheableToolsListResult
-        )
+        return ToolSurface.RewriteResult(responseData: responseData)
     }
 
     func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {

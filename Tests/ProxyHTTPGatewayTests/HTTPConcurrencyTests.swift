@@ -198,7 +198,7 @@ struct HTTPConcurrencyTests {
             negotiatedProtocolVersion: MCP.ProtocolVersion.current
         )
         sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
+        sessionManager.canonicalHandshakeState.syncCanonicalInitialize(
             try #require(
                 JSONValue(any: [
                     "protocolVersion": MCP.ProtocolVersion.current,
@@ -207,7 +207,7 @@ struct HTTPConcurrencyTests {
             ),
             sourceUpstream: 0
         )
-        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        sessionManager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
         upstream.clearRecordedRequests()
 
         let firstOperation = try handlePost(
@@ -291,7 +291,7 @@ struct HTTPConcurrencyTests {
             negotiatedProtocolVersion: MCP.ProtocolVersion.current
         )
         sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
+        sessionManager.canonicalHandshakeState.syncCanonicalInitialize(
             try #require(
                 JSONValue(any: [
                     "protocolVersion": MCP.ProtocolVersion.current,
@@ -300,7 +300,7 @@ struct HTTPConcurrencyTests {
             ),
             sourceUpstream: 0
         )
-        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        sessionManager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
         upstream.clearRecordedRequests()
 
         try postEmbeddedJSON(
