@@ -7,7 +7,27 @@
 - 付随資料: [evidence/](evidence/)(収集レポート 7 本)、[verification/](verification/)(検証レポート 8 本)、[handoff-prompt.md](handoff-prompt.md)(修正作業の引き継ぎプロンプト)
 - 監査証拠 status: **CORRECTED**(2026-07-10、`eab7260d` で再照合)。
 - 設計status: **APPROVED** (2026-07-10)。実装契約の正本は [canonical-design.md](canonical-design.md)。以下のowner mapとprimary fixは監査時の仮説であり、競合時はcanonical designを優先する。
+- 実装status: **COMPLETE** (2026-07-10)。Task 0/A/B/C/D、旧owner・旧batch経路の削除、public consumer契約、breaking migrationを現行treeへ反映済み。
 - 互換方針: **BREAKING CHANGES ALLOWED**(2026-07-10ユーザー決定)。既存source/CLI surfaceのcompatibility layerは既定で追加せず、残すcontractをdesign gateで確定して不要APIを直接削除・型変更する。wire/package/product境界まで変える場合は、許可の有無とは別にconsumer storyと影響をcanonical designへ記録する。
+
+## 実装結果
+
+この節だけが現行treeの状態を表す。以降の「結論」「Owner map」「Finding」は基準commit時点の監査証拠であり、未修正の現行欠陥一覧ではない。
+
+| Task | 状態 | 現行の標準形 |
+|---|---|---|
+| 0 — HTTP security | 完了 | `HTTPRequestSecurityPolicy` が全routeのOriginをside effect前に検証し、欠落protocol versionはsessionのnegotiated versionへfallbackする |
+| A — control plane | 完了 | `ProcessControlPlaneAuthority`、`WindowOwnershipAuthority`、`UpstreamTopologyAuthority` がsemantic stateとexact leaseを所有し、coordinatorはI/O/effect配線に限定する |
+| B — lifecycle / protocol | 完了 | SDKとSTDIO adapterは単一`MCPClientSessionAuthority`を共有し、typed 404 recovery、1 logical deadline、cancel/progress/pagination、明示closeを同じownerで完結する。内部transportはsingle-messageのみ |
+| C — public API | 完了 | server/adapterはasync one-shot lifecycleとsanitized snapshotを公開し、launch-plan/installer library surface、旧CLI flag redirect、旧SDK escape hatchを直接削除した |
+| D — hygiene / docs | 完了 | 実在するnon-product test-support moduleの外部import失敗を検査し、architecture、module README、[breaking migration](../migration-2026-07.md)を現行surfaceへ同期した |
+
+完了シグナル:
+
+- `ProcessRouteStore`、`ProcessRouteReadinessStore`、`ProcessToolSurfaceStore`、`WindowOwnerIndex`、`CanonicalBrokerState` と、proofなしのproduction catalog writeは0件。
+- `JSONRPCRequestEnvelope`、multi-ID / internal batch response helper、`pendingBatches`、`forceBatchArray`、whole-batch routingは0件。HTTP/STDIOのtop-level arrayは下流I/O前に単一errorとしてrejectし、upstream array responseはprotocol violationにする。
+- public product fixtureはSDK、testing、server、adapterのsupported storyを外部Swift packageからcompile/linkし、削除surfaceと`XcodeMCPProxyTestSupport`の非公開性を独立したnegative targetで検査する。
+- graceful completionは`close()` / `stop()` / `shutdown()`だけが保証し、deinitは同期cancel backstopに限定する。ownerが保持するtask、transport、stream continuationはterminal完了までownerが回収する。
 
 ## 結論
 

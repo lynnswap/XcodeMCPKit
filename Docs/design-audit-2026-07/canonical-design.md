@@ -1,13 +1,14 @@
 # Design Audit 2026-07 — Canonical Remediation Design
 
-- Status: **APPROVED**
+- Status: **APPROVED / IMPLEMENTED**
 - Approved: 2026-07-10
+- Implemented: 2026-07-10
 - Approval: ユーザーが破壊的変更を含む全判断を委任。以下を実装契約として採用する。
 - Design baseline: 4d60f711f11bd39e93e133afac81f5f1814035a4
 - Toolchain: Swift 6.3.3 / language mode 6 / strict memory safety / macOS 15.4+
 - Baseline: swift test -Xswiftc -strict-concurrency=minimal — 840 tests / 52 suites passed
 
-このファイルを修正実装の唯一の design source of truth とする。README.md は監査結果、design-contracts.md は候補規範、handoff-prompt.md は発見時点の引き継ぎ資料であり、競合時は本書を優先する。
+このファイルを修正実装の唯一の design source of truth とする。実装結果と現行 owner は [README.md の「実装結果」](README.md#実装結果) および `Docs/architecture.md` / `Docs/maintainer-architecture.md` に記録する。README.md の残りは監査時点の結果、design-contracts.md は候補規範、handoff-prompt.md は発見時点の引き継ぎ資料であり、設計判断が競合する場合は本書を優先する。
 
 ## 1. 標準形と consumer story
 
