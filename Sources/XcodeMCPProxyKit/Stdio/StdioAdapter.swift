@@ -47,7 +47,7 @@ actor StdioAdapter {
 
     init(
         upstreamURL: URL,
-        requestTimeout: TimeInterval,
+        requestTimeout: Duration?,
         input: FileHandle = .standardInput,
         output: FileHandle = .standardOutput
     ) {
@@ -62,25 +62,24 @@ actor StdioAdapter {
 
     init(
         upstreamURL: URL,
-        requestTimeout: TimeInterval,
+        requestTimeout: Duration?,
         input: FileHandle,
         output: FileHandle,
         shutdownPolicy: StdioAdapterShutdownPolicy
     ) {
-        let timeout = Self.duration(fromRequestTimeout: requestTimeout)
         let recipe = MCPTransportRecipe {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = true
             return StreamableHTTPXcodeMCPTransport(
                 endpoint: upstreamURL,
                 urlSession: URLSession(configuration: configuration),
-                requestTimeout: timeout,
+                requestTimeout: requestTimeout,
                 deleteSessionGrace: shutdownPolicy.deleteSessionGrace,
                 clock: shutdownPolicy.clock
             )
         }
         self.init(
-            requestTimeout: timeout,
+            requestTimeout: requestTimeout,
             input: input,
             output: output,
             recipe: recipe,
@@ -108,8 +107,12 @@ actor StdioAdapter {
         )
     }
 
-    func start() {
-        guard lifecycle == .idle else { return }
+    func start() throws {
+        guard lifecycle == .idle else {
+            throw XcodeMCPError.invalidRequest(
+                "STDIO adapter can only be started once"
+            )
+        }
         lifecycle = .running
         startAuthorityEventTask()
         let input = inputHandle
@@ -129,8 +132,13 @@ actor StdioAdapter {
         }
     }
 
-    func wait() async {
-        await readTask?.value
+    func connectionState() async -> XcodeMCPConnectionSnapshot {
+        await authority.connectionState()
+    }
+
+    func waitUntilStopped() async {
+        guard lifecycle != .closed else { return }
+        await withCheckedContinuation { closeWaiters.append($0) }
     }
 
     func stop() async {
@@ -174,6 +182,22 @@ private extension StdioAdapter {
             let deadline = Deadline.fromNow(requestTimeout, clock: shutdownPolicy.clock)
             let replayPolicy = replayPolicy(for: envelope)
             let authority = authority
+            if requiresOrderedHandshake(envelope) {
+                do {
+                    try await authority.send(MCPClientOperation(
+                        envelope: envelope,
+                        deadline: deadline,
+                        replayPolicy: replayPolicy
+                    ))
+                } catch {
+                    guard error is CancellationError == false, lifecycle == .running else {
+                        continue
+                    }
+                    logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
+                    await emitError(for: requestEnvelope, message: adapterErrorMessage(error))
+                }
+                continue
+            }
             let task = Task { [weak self] in
                 do {
                     try await authority.send(MCPClientOperation(
@@ -233,6 +257,17 @@ private extension StdioAdapter {
         }
     }
 
+    func requiresOrderedHandshake(_ envelope: MCPClientEnvelope) -> Bool {
+        switch envelope.kind {
+        case .request(_, let method):
+            method == "initialize"
+        case .notification(let method):
+            method == "notifications/initialized"
+        case .response:
+            false
+        }
+    }
+
     func startAuthorityEventTask() {
         guard authorityEventTask == nil else { return }
         let events = authority.events
@@ -267,7 +302,10 @@ private extension StdioAdapter {
             lifecycle = .closing
         }
 
-        if cancelReadTask { readTask?.cancel() }
+        if cancelReadTask {
+            readTask?.cancel()
+            try? inputHandle.close()
+        }
         for task in requestTasks.values { task.cancel() }
         await authority.close()
         await drainRequestTasks()
@@ -360,9 +398,4 @@ private extension StdioAdapter {
         return total.overflow ? .max : total.partialValue
     }
 
-    static func duration(fromRequestTimeout requestTimeout: TimeInterval) -> Duration? {
-        guard requestTimeout > 0, requestTimeout.isFinite else { return nil }
-        let nanoseconds = (requestTimeout * 1_000_000_000).rounded(.up)
-        return .nanoseconds(nanoseconds >= Double(Int64.max) ? .max : Int64(nanoseconds))
-    }
 }

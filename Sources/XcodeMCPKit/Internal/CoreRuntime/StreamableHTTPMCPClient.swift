@@ -38,14 +38,10 @@ package final class StreamableHTTPMCPClient: Sendable {
     package init(
         endpoint: URL,
         urlSession: URLSession,
-        requestTimeout: Duration? = nil,
-        automaticallyStartsEventStream: Bool = false,
         eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
         }
     ) {
-        _ = requestTimeout
-        _ = automaticallyStartsEventStream
         let eventPair = AsyncStream.makeStream(of: Data.self)
         let expirationPair = AsyncStream.makeStream(of: String.self)
         self.endpoint = endpoint

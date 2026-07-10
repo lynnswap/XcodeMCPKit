@@ -13,8 +13,6 @@ enum CLIError: Error, CustomStringConvertible {
 }
 
 struct CLIParser {
-    private static let defaultStdioUpstream = "http://localhost:8765/mcp"
-    private static let stdioEndpointEnv = "XCODE_MCP_PROXY_ENDPOINT"
     private static let refreshCodeIssuesModeEnv = "MCP_XCODE_REFRESH_CODE_ISSUES_MODE"
     static let configPathEnv = "MCP_XCODE_CONFIG"
     static let removedLazyInitMessage =
@@ -23,20 +21,6 @@ struct CLIParser {
         "Xcode PID support has been removed; --xcode-pid is no longer supported."
 
     static func parse(args: [String], environment: [String: String]) throws -> ProxyConfig {
-        return try parse(
-            args: args,
-            environment: environment,
-            discoveryOverrideURL: ProxyFilesystemLocations.discoveryFileURL(environment: environment),
-            discoveryClient: .liveValue
-        )
-    }
-
-    static func parse(
-        args: [String],
-        environment: [String: String],
-        discoveryOverrideURL: URL?,
-        discoveryClient: DiscoveryClient = .liveValue
-    ) throws -> ProxyConfig {
         var listenHost = "localhost"
         var listenPort = 0
         let defaultBridgeInvocation = MCPBridgeInvocation.defaultMCPBridge
@@ -47,8 +31,6 @@ struct CLIParser {
         var maxBodyBytes = 1_048_576
         var requestTimeout: TimeInterval = 300
         var configPath: String?
-        var stdioUpstreamURL: URL?
-        var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
         var autoApproveXcodeDialog = false
         var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode = .proxy
         var hasExplicitRefreshCodeIssuesMode = false
@@ -157,24 +139,6 @@ struct CLIParser {
                 index += 2
             case .lazyInit:
                 throw CLIError.message(Self.removedLazyInitMessage)
-            case .stdio:
-                if index + 1 < args.count {
-                    let candidate = args[index + 1]
-                    if !candidate.hasPrefix("-") {
-                        stdioUpstreamURL = try parseHTTPURL(candidate, label: "--stdio")
-                        stdioUpstreamSource = .explicit
-                        index += 2
-                        break
-                    }
-                }
-                let resolved = try resolveDefaultStdioUpstream(
-                    environment: environment,
-                    discoveryOverrideURL: discoveryOverrideURL,
-                    discoveryClient: discoveryClient
-                )
-                stdioUpstreamURL = resolved.url
-                stdioUpstreamSource = resolved.source
-                index += 1
             case .helpShort, .help, .version, .url, .printURL, .dryRun, .forceRestart,
                  .prefix, .bindir:
                 throw CLIError.message("Unknown argument: \(arg)")
@@ -197,8 +161,6 @@ struct CLIParser {
         if configPath == nil, let value = nonEmpty(environment[configPathEnv]) {
             configPath = value
         }
-        let transport: ProxyConfig.Transport = stdioUpstreamURL == nil ? .http : .stdio
-
         return ProxyConfig(
             listenHost: listenHost,
             listenPort: listenPort,
@@ -209,10 +171,9 @@ struct CLIParser {
             maxBodyBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
             configPath: configPath,
-            transport: transport,
-            stdioUpstreamURL: stdioUpstreamURL,
-            stdioUpstreamSource: stdioUpstreamSource,
-            discoveryFileURL: discoveryOverrideURL,
+            discoveryFileURL: ProxyFilesystemLocations.discoveryFileURL(
+                environment: environment
+            ),
             autoApproveXcodeDialog: autoApproveXcodeDialog,
             refreshCodeIssuesMode: refreshCodeIssuesMode
         )
@@ -229,33 +190,6 @@ struct CLIParser {
         }
         let host = hostPart.isEmpty ? "localhost" : hostPart
         return (host, port)
-    }
-
-    private static func parseHTTPURL(_ value: String, label: String) throws -> URL {
-        guard let url = URL(string: value),
-              let scheme = url.scheme,
-              scheme == "http" || scheme == "https" else {
-            throw CLIError.message("\(label) must be an http/https URL")
-        }
-        return url
-    }
-
-    private static func resolveDefaultStdioUpstream(
-        environment: [String: String],
-        discoveryOverrideURL: URL? = nil,
-        discoveryClient: DiscoveryClient
-    ) throws -> (url: URL, source: ProxyConfig.StdioUpstreamSource) {
-        if let raw = nonEmpty(environment[Self.stdioEndpointEnv]) {
-            return (try parseHTTPURL(raw, label: Self.stdioEndpointEnv), .environment)
-        }
-        if let record = discoveryClient.read(discoveryOverrideURL),
-           let resolved = try? parseHTTPURL(record.url, label: "discovery") {
-            return (resolved, .discovery)
-        }
-        guard let defaultURL = URL(string: Self.defaultStdioUpstream) else {
-            throw CLIError.message("Default stdio upstream URL is invalid")
-        }
-        return (defaultURL, .fallback)
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

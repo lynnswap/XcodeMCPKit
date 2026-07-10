@@ -6,7 +6,34 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)
 struct StdioAdapterContractTests {
-    @Test func deinitCancelsReadAndEventTasksWithoutAStopTask() async {
+    @Test func startIsOneShotAndStopIsIdempotent() async throws {
+        let transport = StalledStdioAdapterTransport()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let adapter = StdioAdapter(
+            requestTimeout: nil,
+            input: inputPipe.fileHandleForReading,
+            output: outputPipe.fileHandleForWriting,
+            recipe: MCPTransportRecipe { transport },
+            shutdownPolicy: .live
+        )
+
+        #expect(await adapter.connectionState().phase == .initializing)
+        try await adapter.start()
+        await #expect(throws: XcodeMCPError.invalidRequest(
+            "STDIO adapter can only be started once"
+        )) {
+            try await adapter.start()
+        }
+        await adapter.stop()
+        await adapter.stop()
+        #expect(await adapter.connectionState().phase == .closed(.requested))
+
+        inputPipe.fileHandleForWriting.closeFile()
+        outputPipe.fileHandleForWriting.closeFile()
+    }
+
+    @Test func deinitCancelsReadAndEventTasksWithoutAStopTask() async throws {
         let transport = StalledStdioAdapterTransport()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
@@ -19,7 +46,7 @@ struct StdioAdapterContractTests {
         )
         weak let weakAdapter = adapter
 
-        await adapter?.start()
+        try await adapter?.start()
         adapter = nil
         for _ in 0..<100 where weakAdapter != nil {
             await Task.yield()
@@ -52,10 +79,10 @@ struct StdioAdapterContractTests {
             shutdownPolicy: shutdownClocks.policy
         )
 
-        await adapter.start()
+        try await adapter.start()
         let waitCompleted = AsyncGate()
         let waitTask = Task {
-            await adapter.wait()
+            await adapter.waitUntilStopped()
             await waitCompleted.signal()
         }
         var inputClosed = false
@@ -127,10 +154,10 @@ struct StdioAdapterContractTests {
             shutdownPolicy: .live
         )
 
-        await adapter.start()
+        try await adapter.start()
         let waitCompleted = AsyncGate()
         let waitTask = Task {
-            await adapter.wait()
+            await adapter.waitUntilStopped()
             await waitCompleted.signal()
         }
         var inputClosed = false

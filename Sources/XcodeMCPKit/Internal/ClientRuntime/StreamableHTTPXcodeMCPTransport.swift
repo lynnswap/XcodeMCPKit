@@ -3,26 +3,14 @@ import Foundation
 package struct StreamableHTTPDiscoveryResolver: Sendable {
     private let readRecord: @Sendable (_ discoveryFile: URL) -> DiscoveryRecord?
 
-    package static let liveValue = Self(processControl: .liveValue)
+    package static let liveValue = Self()
 
     package init(
-        processControl: ProcessControlClient,
         readRecord: @escaping @Sendable (_ discoveryFile: URL) -> DiscoveryRecord? = {
             Discovery.read(overrideURL: $0)
         }
     ) {
         self.readRecord = readRecord
-        _ = processControl
-    }
-
-    package init(
-        readRecord: @escaping @Sendable (_ discoveryFile: URL) -> DiscoveryRecord? = {
-            Discovery.read(overrideURL: $0)
-        },
-        isProcessAlive: @escaping @Sendable (_ processID: Int) -> Bool
-    ) {
-        self.readRecord = readRecord
-        _ = isProcessAlive
     }
 
     package func endpoint(from discoveryFile: URL) -> URL? {
@@ -86,7 +74,6 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
         let client = StreamableHTTPMCPClient(
             endpoint: endpoint,
             urlSession: urlSession,
-            requestTimeout: requestTimeout,
             eventStreamReconnectSleep: eventStreamReconnectSleep
         )
 

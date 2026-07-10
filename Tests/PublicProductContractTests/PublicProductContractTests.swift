@@ -939,14 +939,9 @@ func compileOnlyProxyConfigurationSurface() {
     let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
     let upstreamMode = XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode.upstream
     let server = XcodeMCPProxyServer(configuration: config)
-    let endpointConfig = XcodeMCPProxyAdapterEndpointResolutionOptions(
-        explicitURL: "http://localhost:8765/mcp",
-        environment: [:]
-    )
-    let endpoint = try? XcodeMCPProxyAdapterEndpointResolver().resolve(endpointConfig)
     let adapterConfig = XcodeMCPProxyStdioAdapterConfiguration(
-        endpoint: endpointConfig,
-        requestTimeout: 30
+        endpoint: .url(URL(string: "http://localhost:8765/mcp")!),
+        requestTimeout: .seconds(30)
     )
     let installer = XcodeMCPProxyInstaller(
         configuration: .init(prefix: "/tmp/xcode-mcp", binaryDirectory: nil, dryRun: true)
@@ -954,9 +949,7 @@ func compileOnlyProxyConfigurationSurface() {
     let plan = installer.plan(
         executableURL: URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-proxy-install")
     )
-    let adapter = endpoint.map {
-        XcodeMCPProxyStdioAdapter(endpoint: $0, requestTimeout: 30)
-    }
+    let adapter = try? XcodeMCPProxyStdioAdapter(configuration: adapterConfig)
 
     _ = (
         config,
@@ -968,7 +961,6 @@ func compileOnlyProxyConfigurationSurface() {
         upstreamMode,
         server,
         adapterConfig,
-        endpoint,
         adapter,
         plan
     )
@@ -996,18 +988,6 @@ func compileOnlyProxyLaunchSurface() async throws {
         port: 8765,
         processIdentifiers: [123]
     )
-    let adapterPlan = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
-        arguments: [
-            "xcode-mcp-proxy",
-            "--url", "http://localhost:8765/mcp",
-            "--request-timeout", "12",
-        ],
-        environment: [:]
-    )
-    let rewrittenAdapterArgs = try XcodeMCPProxyStdioAdapter.rewriteURLFlagToStdio([
-        "xcode-mcp-proxy",
-        "--url=http://localhost:8765/mcp",
-    ])
     let installPlan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
         arguments: [
             "xcode-mcp-proxy-install",
@@ -1058,13 +1038,6 @@ func compileOnlyProxyLaunchSurface() async throws {
         metadata.version,
         versionLine,
         portError.description,
-        adapterPlan.action,
-        adapterPlan.configuration,
-        adapterPlan.endpoint,
-        adapterPlan.options.requestTimeout,
-        adapterPlan.usage,
-        adapterPlan.versionLine,
-        rewrittenAdapterArgs,
         installPlan.action,
         installPlan.configuration,
         installPlan.options.executableName,
@@ -1074,6 +1047,15 @@ func compileOnlyProxyLaunchSurface() async throws {
         adapterExitCode,
         installerExitCode
     )
+}
+
+func compileOnlyAdapterLifecycleSurface(
+    adapter: XcodeMCPProxyStdioAdapter
+) async throws {
+    try await adapter.start()
+    _ = await adapter.connectionState()
+    await adapter.stop()
+    await adapter.waitUntilStopped()
 }
 
 func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws {

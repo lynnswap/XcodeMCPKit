@@ -677,23 +677,14 @@ struct XcodeMCPTests {
         )
         try Discovery.write(record: record, overrideURL: fileURL)
 
-        let liveness = DiscoveryLivenessProbe(isAlive: false)
-        let resolver = StreamableHTTPDiscoveryResolver(
-            isProcessAlive: { pid in
-                liveness.isProcessAlive(pid)
-            }
-        )
+        let resolver = StreamableHTTPDiscoveryResolver()
 
         #expect(resolver.endpoint(from: fileURL)?.absoluteString == record.url)
-        #expect(liveness.checkedProcessIDs().isEmpty)
     }
 
     @Test func missingDiscoveryRecordIsTransportUnavailable() async throws {
         let fileURL = URL(fileURLWithPath: "/tmp/missing-xcode-mcp-endpoint.json")
-        let resolver = StreamableHTTPDiscoveryResolver(
-            readRecord: { _ in nil },
-            isProcessAlive: { _ in false }
-        )
+        let resolver = StreamableHTTPDiscoveryResolver(readRecord: { _ in nil })
         await #expect(throws: XcodeMCPError.transportUnavailable(
             "Streamable HTTP discovery file is missing, stale, or invalid: \(fileURL.path)"
         )) {
@@ -1646,29 +1637,6 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
 }
 
 private final class DeinitProbe: @unchecked Sendable {}
-
-private final class DiscoveryLivenessProbe: @unchecked Sendable {
-    private let lock = NSLock()
-    private let isAlive: Bool
-    private var processIDs: [Int] = []
-
-    init(isAlive: Bool) {
-        self.isAlive = isAlive
-    }
-
-    func isProcessAlive(_ processID: Int) -> Bool {
-        lock.withLock {
-            processIDs.append(processID)
-        }
-        return isAlive
-    }
-
-    func checkedProcessIDs() -> [Int] {
-        lock.withLock {
-            processIDs
-        }
-    }
-}
 
 private actor HangingSendXcodeMCPTransport: XcodeMCPTransport {
     nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
