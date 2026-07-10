@@ -205,22 +205,38 @@ struct JSONRPCResponseRouterTests {
         #expect(succeeded.withLockedValue { $0 } == false)
     }
 
-    @Test func responseRouterEnforcesNotificationBufferLimit() async throws {
+    @Test func responseRouterCountsDropsAndRateLimitsOverflowWarnings() async throws {
+        let uptimeNanoseconds = NIOLockedValueBox<UInt64>(0)
+        let warningCounts = NIOLockedValueBox<[UInt64]>([])
         let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(5),
             notificationBufferLimit: 2,
+            notificationOverflowWarningInterval: .seconds(10),
+            uptimeNanoseconds: { uptimeNanoseconds.withLockedValue { $0 } },
             hasActiveClients: { false },
-            sendNotification: { _ in }
+            sendNotification: { _ in },
+            onNotificationBufferOverflow: { droppedNotificationCount in
+                warningCounts.withLockedValue { $0.append(droppedNotificationCount) }
+            }
         )
 
         router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n1\"}".utf8))
         router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n2\"}".utf8))
         router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n3\"}".utf8))
+        router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n4\"}".utf8))
+
+        #expect(router.droppedNotificationCount() == 2)
+        #expect(warningCounts.withLockedValue { $0 } == [1])
+
+        uptimeNanoseconds.withLockedValue { $0 = 10_000_000_000 }
+        router.handleIncoming(Data("{\"jsonrpc\":\"2.0\",\"method\":\"n5\"}".utf8))
 
         let buffered = router.drainBufferedNotifications()
         #expect(buffered.count == 2)
-        #expect(String(data: buffered[0], encoding: .utf8)?.contains("n2") == true)
-        #expect(String(data: buffered[1], encoding: .utf8)?.contains("n3") == true)
+        #expect(String(data: buffered[0], encoding: .utf8)?.contains("n4") == true)
+        #expect(String(data: buffered[1], encoding: .utf8)?.contains("n5") == true)
+        #expect(router.droppedNotificationCount() == 3)
+        #expect(warningCounts.withLockedValue { $0 } == [1, 3])
     }
 
     private func bufferString(_ buffer: ByteBuffer) -> String {

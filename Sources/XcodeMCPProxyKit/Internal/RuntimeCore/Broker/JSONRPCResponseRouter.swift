@@ -22,6 +22,8 @@ final class JSONRPCResponseRouter: Sendable {
         var pendingByID: [String: Pending] = [:]
         var pendingBatches: [Pending] = []
         var notificationBuffer: [Data] = []
+        var droppedNotificationCount: UInt64 = 0
+        var lastNotificationOverflowWarningUptimeNanoseconds: UInt64?
     }
 
     private let state = NIOLockedValueBox(State())
@@ -29,17 +31,34 @@ final class JSONRPCResponseRouter: Sendable {
     private let requestTimeout: TimeAmount?
     private let hasActiveClients: @Sendable () -> Bool
     private let sendNotification: @Sendable (Data) -> Void
+    private let notificationOverflowWarningIntervalNanoseconds: UInt64
+    private let uptimeNanoseconds: @Sendable () -> UInt64
+    private let onNotificationBufferOverflow: @Sendable (_ droppedNotificationCount: UInt64) -> Void
 
     init(
         requestTimeout: TimeAmount?,
         notificationBufferLimit: Int = 50,
+        notificationOverflowWarningInterval: TimeAmount = .seconds(30),
+        uptimeNanoseconds: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
         hasActiveClients: @escaping @Sendable () -> Bool,
-        sendNotification: @escaping @Sendable (Data) -> Void
+        sendNotification: @escaping @Sendable (Data) -> Void,
+        onNotificationBufferOverflow: @escaping @Sendable (
+            _ droppedNotificationCount: UInt64
+        ) -> Void = { _ in }
     ) {
+        precondition(notificationBufferLimit >= 0)
+        precondition(notificationOverflowWarningInterval.nanoseconds >= 0)
         self.requestTimeout = requestTimeout
         self.notificationBufferLimit = notificationBufferLimit
+        self.notificationOverflowWarningIntervalNanoseconds = UInt64(
+            notificationOverflowWarningInterval.nanoseconds
+        )
+        self.uptimeNanoseconds = uptimeNanoseconds
         self.hasActiveClients = hasActiveClients
         self.sendNotification = sendNotification
+        self.onNotificationBufferOverflow = onNotificationBufferOverflow
     }
 
     func registerRequest(
@@ -205,6 +224,10 @@ final class JSONRPCResponseRouter: Sendable {
         }
     }
 
+    func droppedNotificationCount() -> UInt64 {
+        state.withLockedValue(\.droppedNotificationCount)
+    }
+
     private func failTimeout(idKey: String, token: UUID) {
         let pending = state.withLockedValue { state -> Pending? in
             guard state.pendingByID[idKey]?.token == token else { return nil }
@@ -273,11 +296,31 @@ final class JSONRPCResponseRouter: Sendable {
     }
 
     private func bufferNotification(_ data: Data) {
-        state.withLockedValue { state in
+        let warningCount = state.withLockedValue { state -> UInt64? in
             state.notificationBuffer.append(data)
-            if state.notificationBuffer.count > notificationBufferLimit {
-                state.notificationBuffer.removeFirst(state.notificationBuffer.count - notificationBufferLimit)
+            let overflowCount = state.notificationBuffer.count - notificationBufferLimit
+            guard overflowCount > 0 else {
+                return nil
             }
+
+            state.notificationBuffer.removeFirst(overflowCount)
+            let (nextDroppedCount, overflowed) = state.droppedNotificationCount.addingReportingOverflow(
+                UInt64(overflowCount)
+            )
+            precondition(!overflowed, "notification drop counter overflow")
+            state.droppedNotificationCount = nextDroppedCount
+
+            let now = uptimeNanoseconds()
+            if let lastWarning = state.lastNotificationOverflowWarningUptimeNanoseconds,
+                now &- lastWarning < notificationOverflowWarningIntervalNanoseconds
+            {
+                return nil
+            }
+            state.lastNotificationOverflowWarningUptimeNanoseconds = now
+            return nextDroppedCount
+        }
+        if let warningCount {
+            onNotificationBufferOverflow(warningCount)
         }
     }
 
