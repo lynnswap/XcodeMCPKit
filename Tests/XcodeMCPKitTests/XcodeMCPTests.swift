@@ -1502,13 +1502,16 @@ struct XcodeMCPTests {
 
         firstInitialize.cancel()
         try await factory.waitUntilCancelled()
-        await factory.release()
         do {
-            try await firstInitialize.value
+            try await waitWithTimeout(
+                "cancelled forwarded initialize did not leave its active attempt"
+            ) {
+                try await firstInitialize.value
+            }
             Issue.record("expected cancelled forwarded initialize")
         } catch is CancellationError {
         }
-        #expect(await cancelledCandidate.closeCount() == 1)
+        #expect(await cancelledCandidate.closeCount() == 0)
         #expect(await cancelledCandidate.sentMessages().isEmpty)
         #expect(await cancelledCandidate.eventStreamStartCount() == 0)
 
@@ -1520,7 +1523,21 @@ struct XcodeMCPTests {
         #expect(
             await retryCandidate.sentMessages().filter { $0.method == "initialize" }.count == 1
         )
-        await authority.close()
+
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        _ = try await retryCandidate.nextCloseCount()
+        #expect(await closeCompletions.count() == 0)
+
+        await factory.release()
+        await close.value
+        #expect(await closeCompletions.count() == 1)
+        #expect(await cancelledCandidate.closeCount() == 1)
+        #expect(await cancelledCandidate.sentMessages().isEmpty)
+        #expect(await cancelledCandidate.eventStreamStartCount() == 0)
         #expect(await retryCandidate.closeCount() == 1)
     }
 

@@ -412,7 +412,14 @@ package actor MCPClientSessionAuthority {
     private struct FreshConnectionAttempt {
         let id: UUID
         let factoryTask: Task<any XcodeMCPTransport, Error>
-        var candidateCleanupTask: Task<Void, Never>?
+        let resultContinuation:
+            AsyncThrowingStream<any XcodeMCPTransport, Error>.Continuation
+    }
+
+    private struct RetiredFreshConnectionAttempt {
+        let id: UUID
+        let factoryTask: Task<any XcodeMCPTransport, Error>
+        let monitorTask: Task<Void, Never>
     }
 
     private struct RecoveryPlan: Sendable {
@@ -472,6 +479,7 @@ package actor MCPClientSessionAuthority {
     private var recovery: RecoveryState?
     private var retiredRecoveries: [UUID: RetiredRecovery] = [:]
     private var freshConnectionAttempt: FreshConnectionAttempt?
+    private var retiredFreshConnectionAttempts: [UUID: RetiredFreshConnectionAttempt] = [:]
     private var cancellationNotificationTasks: [UUID: Task<Void, Never>] = [:]
 
     private init(
@@ -664,8 +672,14 @@ package actor MCPClientSessionAuthority {
             return
         }
         isClosed = true
-        let freshAttempt = freshConnectionAttempt
-        freshAttempt?.factoryTask.cancel()
+        if let freshConnectionAttempt {
+            retireFreshConnectionAttempt(id: freshConnectionAttempt.id)
+        }
+        let retiredFreshAttempts = Array(retiredFreshConnectionAttempts.values)
+        retiredFreshConnectionAttempts.removeAll()
+        for attempt in retiredFreshAttempts {
+            attempt.factoryTask.cancel()
+        }
         let recoveryState = recovery
         recoveryState?.task.cancel()
         recoveryState?.backgroundLease?.task.cancel()
@@ -701,9 +715,7 @@ package actor MCPClientSessionAuthority {
         if let connection {
             await Self.closeConnection(connection, headers: headers)
         }
-        if let freshAttempt {
-            await closeFreshConnectionAttempt(freshAttempt)
-        }
+        for attempt in retiredFreshAttempts { await attempt.monitorTask.value }
         await recoveryState?.backgroundLease?.task.value
         await recoveryState?.task.value
         for state in retired {
@@ -726,7 +738,11 @@ package actor MCPClientSessionAuthority {
     }
 
     isolated deinit {
+        freshConnectionAttempt?.resultContinuation.finish(throwing: CancellationError())
         freshConnectionAttempt?.factoryTask.cancel()
+        for attempt in retiredFreshConnectionAttempts.values {
+            attempt.factoryTask.cancel()
+        }
         recovery?.task.cancel()
         recovery?.backgroundLease?.task.cancel()
         for state in retiredRecoveries.values {
@@ -909,84 +925,103 @@ private extension MCPClientSessionAuthority {
         )
         let attemptID = UUID()
         let recipe = recipe
-        let factoryTask = Task<any XcodeMCPTransport, Error> {
-            let transport = try await recipe.makeTransport()
-            guard Task.isCancelled == false else {
-                let cleanupTask = Task.detached {
-                    await transport.close(headers: MCPConnectionHeaders())
+        let resultPair = AsyncThrowingStream.makeStream(
+            of: (any XcodeMCPTransport).self,
+            throwing: Error.self
+        )
+        let factoryTask = Task<any XcodeMCPTransport, Error>.detached {
+            do {
+                let transport = try await recipe.makeTransport()
+                guard Task.isCancelled == false else {
+                    let cleanupTask = Task.detached {
+                        await transport.close(headers: MCPConnectionHeaders())
+                    }
+                    await cleanupTask.value
+                    throw CancellationError()
                 }
-                await cleanupTask.value
-                throw CancellationError()
+                resultPair.continuation.yield(transport)
+                resultPair.continuation.finish()
+                return transport
+            } catch {
+                resultPair.continuation.finish(throwing: error)
+                throw error
             }
-            return transport
         }
         freshConnectionAttempt = FreshConnectionAttempt(
             id: attemptID,
             factoryTask: factoryTask,
-            candidateCleanupTask: nil
+            resultContinuation: resultPair.continuation
         )
-        let transport: any XcodeMCPTransport
         do {
-            transport = try await withTaskCancellationHandler {
-                try await factoryTask.value
-            } onCancel: {
-                factoryTask.cancel()
+            let transport = try await Self.waitForFreshConnectionCandidate(
+                stream: resultPair.stream,
+                continuation: resultPair.continuation
+            )
+            // Close may have retired and disposed this attempt before this waiter resumes.
+            guard freshConnectionAttempt?.id == attemptID else {
+                try Task.checkCancellation()
+                throw MCPBridgeRuntimeError.closed
             }
+            try Task.checkCancellation()
+            guard isClosed == false else { throw MCPBridgeRuntimeError.closed }
+            clearFreshConnectionAttempt(id: attemptID)
+            return installConnection(transport, phase: phase)
+        } catch is CancellationError {
+            retireFreshConnectionAttempt(id: attemptID)
+            throw CancellationError()
         } catch {
             clearFreshConnectionAttempt(id: attemptID)
             throw error
         }
-        // Close may have won the actor race and completed the shared candidate cleanup.
-        guard freshConnectionAttempt?.id == attemptID else {
+    }
+
+    private nonisolated static func waitForFreshConnectionCandidate(
+        stream: AsyncThrowingStream<any XcodeMCPTransport, Error>,
+        continuation: AsyncThrowingStream<any XcodeMCPTransport, Error>.Continuation
+    ) async throws -> any XcodeMCPTransport {
+        try await withTaskCancellationHandler {
+            for try await transport in stream { return transport }
             try Task.checkCancellation()
-            throw MCPBridgeRuntimeError.closed
-        }
-        do {
-            try Task.checkCancellation()
-            guard isClosed == false else { throw MCPBridgeRuntimeError.closed }
-        } catch {
-            await closeFreshConnectionCandidate(
-                transport,
-                attemptID: attemptID
+            throw MCPBridgeRuntimeError.transportUnavailable(
+                "fresh connection attempt ended without a candidate"
             )
-            throw error
+        } onCancel: {
+            continuation.finish(throwing: CancellationError())
         }
+    }
+
+    private func retireFreshConnectionAttempt(id: UUID) {
+        guard let attempt = freshConnectionAttempt, attempt.id == id else { return }
         freshConnectionAttempt = nil
-        return installConnection(transport, phase: phase)
-    }
-
-    private func closeFreshConnectionAttempt(_ attempt: FreshConnectionAttempt) async {
-        do {
-            let transport = try await attempt.factoryTask.value
-            await closeFreshConnectionCandidate(transport, attemptID: attempt.id)
-        } catch {
-            clearFreshConnectionAttempt(id: attempt.id)
-        }
-    }
-
-    private func closeFreshConnectionCandidate(
-        _ transport: any XcodeMCPTransport,
-        attemptID: UUID
-    ) async {
-        guard var attempt = freshConnectionAttempt, attempt.id == attemptID else {
-            return
-        }
-        let cleanupTask: Task<Void, Never>
-        if let existing = attempt.candidateCleanupTask {
-            cleanupTask = existing
-        } else {
-            cleanupTask = Task.detached {
-                await transport.close(headers: MCPConnectionHeaders())
+        attempt.resultContinuation.finish(throwing: CancellationError())
+        attempt.factoryTask.cancel()
+        let factoryTask = attempt.factoryTask
+        let monitorTask = Task.detached { [weak self] in
+            do {
+                let transport = try await factoryTask.value
+                let cleanupTask = Task.detached {
+                    await transport.close(headers: MCPConnectionHeaders())
+                }
+                await cleanupTask.value
+            } catch {
+                // A cancelled factory task closes a late candidate before it fails.
             }
-            attempt.candidateCleanupTask = cleanupTask
-            freshConnectionAttempt = attempt
+            await self?.retiredFreshConnectionAttemptDidFinish(id: id)
         }
-        await cleanupTask.value
-        clearFreshConnectionAttempt(id: attemptID)
+        retiredFreshConnectionAttempts[id] = RetiredFreshConnectionAttempt(
+            id: id,
+            factoryTask: factoryTask,
+            monitorTask: monitorTask
+        )
+    }
+
+    private func retiredFreshConnectionAttemptDidFinish(id: UUID) {
+        retiredFreshConnectionAttempts.removeValue(forKey: id)
     }
 
     private func clearFreshConnectionAttempt(id: UUID) {
-        guard freshConnectionAttempt?.id == id else { return }
+        guard let attempt = freshConnectionAttempt, attempt.id == id else { return }
+        attempt.resultContinuation.finish()
         freshConnectionAttempt = nil
     }
 
