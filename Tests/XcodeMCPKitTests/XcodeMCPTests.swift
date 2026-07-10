@@ -1437,6 +1437,91 @@ struct XcodeMCPTests {
         }
         #expect(await transport.sentMessages().filter { $0.method == "initialize" }.count == 1)
         await authority.close()
+        #expect(await transport.closeCount() == 1)
+    }
+
+    @Test func forwardedCloseJoinsGatedInitialConnectionAttemptBeforeClosing() async throws {
+        let candidate = LifecycleContractTransport(name: "forwarded-close-first-candidate")
+        let factory = GatedForwardedTransportFactory(candidate: candidate)
+        let authority = MCPClientSessionAuthority.makeForwarded(
+            recipe: MCPTransportRecipe { try await factory.make() }
+        )
+        let initialize = Task {
+            try await authority.send(try lifecycleOperation(
+                method: "initialize",
+                id: 9,
+                deadline: nil
+            ))
+        }
+        try await factory.waitUntilStarted()
+
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        try await factory.waitUntilCancelled()
+        #expect(await closeCompletions.count() == 0)
+        #expect(await candidate.sentMessages().isEmpty)
+
+        await factory.release()
+        await close.value
+        do {
+            try await initialize.value
+            Issue.record("expected cancelled forwarded initialize")
+        } catch is CancellationError {
+        }
+
+        #expect(await closeCompletions.count() == 1)
+        #expect(await candidate.closeCount() == 1)
+        #expect(await candidate.sentMessages().isEmpty)
+        #expect(await candidate.eventStreamStartCount() == 0)
+        #expect(await authority.connectionState().phase == .closed(.requested))
+    }
+
+    @Test func cancelledForwardedInitialAttemptClosesCandidateAndAllowsRetry() async throws {
+        let cancelledCandidate = LifecycleContractTransport(
+            name: "forwarded-cancelled-candidate"
+        )
+        let retryCandidate = LifecycleContractTransport(name: "forwarded-retry-candidate")
+        let factory = GatedForwardedTransportFactory(
+            gatedCandidate: cancelledCandidate,
+            retryCandidate: retryCandidate
+        )
+        let authority = MCPClientSessionAuthority.makeForwarded(
+            recipe: MCPTransportRecipe { try await factory.make() }
+        )
+        let firstInitialize = Task {
+            try await authority.send(try lifecycleOperation(
+                method: "initialize",
+                id: 9,
+                deadline: nil
+            ))
+        }
+        try await factory.waitUntilStarted()
+
+        firstInitialize.cancel()
+        try await factory.waitUntilCancelled()
+        await factory.release()
+        do {
+            try await firstInitialize.value
+            Issue.record("expected cancelled forwarded initialize")
+        } catch is CancellationError {
+        }
+        #expect(await cancelledCandidate.closeCount() == 1)
+        #expect(await cancelledCandidate.sentMessages().isEmpty)
+        #expect(await cancelledCandidate.eventStreamStartCount() == 0)
+
+        try await authority.send(try lifecycleOperation(
+            method: "initialize",
+            id: 10,
+            deadline: nil
+        ))
+        #expect(
+            await retryCandidate.sentMessages().filter { $0.method == "initialize" }.count == 1
+        )
+        await authority.close()
+        #expect(await retryCandidate.closeCount() == 1)
     }
 
     @Test func connectionStateSubscribersAreIndependentAndCloseIsTerminal() async throws {
@@ -1786,6 +1871,74 @@ struct XcodeMCPTests {
         await replacement.releaseEventStreamStart()
         await close.value
 
+        #expect(await closeCompletions.count() == 1)
+        #expect(await replacement.eventStreamStartCount() == 1)
+        #expect(await replacement.closeCount() == 1)
+    }
+
+    @Test func cancelledDisabledReconnectLeavesRetiredCleanupOwnedByClose() async throws {
+        let recoveryClock = ManualSessionTimeoutClock()
+        let clock = await recoveryClock.client()
+        let expired = LifecycleContractTransport(
+            name: "expired-cancelled-disabled-reconnect",
+            expirations: ["tools/list": 1]
+        )
+        let replacement = HangingSendXcodeMCPTransport(
+            stallsEventStreamUntilReleased: true
+        )
+        let factory = MixedRecoveryTransportFactory(first: expired, replacement: replacement)
+        let authority = try await MCPClientSessionAuthority.startManaged(
+            recipe: MCPTransportRecipe { try await factory.make() },
+            initialize: lifecycleInitializeContext,
+            defaultTimeout: .seconds(2),
+            clock: clock
+        )
+        let sleepBaseline = await recoveryClock.requestedSleepCount()
+        let operation = try lifecycleOperation(
+            method: "tools/list",
+            deadline: Deadline.fromNow(.seconds(2), clock: clock)
+        )
+        let request = Task { try await authority.send(operation) }
+
+        _ = try await replacement.nextEventStreamStart()
+        _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline)
+        await recoveryClock.advanceUptime(by: .seconds(3))
+        await recoveryClock.resumeSleep(at: sleepBaseline)
+        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(
+            method: "session recovery"
+        )) {
+            try await request.value
+        }
+        _ = try await replacement.nextCloseCount()
+
+        let reconnect = Task { try await authority.reconnect(deadline: nil) }
+        reconnect.cancel()
+        do {
+            try await waitWithTimeout("cancelled reconnect did not leave cleanup wait") {
+                try await reconnect.value
+            }
+            Issue.record("expected cancelled reconnect")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("expected CancellationError, got \(error)")
+        }
+
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        try await waitWithTimeout("authority close did not join retired cleanup") {
+            try await waitUntilAuthorityCloseStarts(
+                authority,
+                expiredOperation: operation
+            )
+        }
+        #expect(await closeCompletions.count() == 0)
+
+        await replacement.releaseEventStreamStart()
+        await close.value
+        _ = try? await reconnect.value
         #expect(await closeCompletions.count() == 1)
         #expect(await replacement.eventStreamStartCount() == 1)
         #expect(await replacement.closeCount() == 1)
@@ -2156,6 +2309,8 @@ private func waitUntilAuthorityCloseStarts(
             return
         } catch MCPBridgeRuntimeError.requestTimedOut {
             await Task.yield()
+        } catch MCPClientSessionFailure.sessionRecoveryFailed {
+            await Task.yield()
         }
     }
 }
@@ -2217,6 +2372,54 @@ private actor LifecycleTransportFactory {
 
     func makeCount() -> Int {
         index
+    }
+}
+
+private actor GatedForwardedTransportFactory {
+    private let candidates: [LifecycleContractTransport]
+    private let gate = NonCooperativeSendGate()
+    private let starts = RecordedValues<Void>()
+    private let cancellations = RecordedValues<Void>()
+    private var callCount = 0
+
+    init(candidate: LifecycleContractTransport) {
+        self.candidates = [candidate]
+    }
+
+    init(
+        gatedCandidate: LifecycleContractTransport,
+        retryCandidate: LifecycleContractTransport
+    ) {
+        self.candidates = [gatedCandidate, retryCandidate]
+    }
+
+    func make() async throws -> any XcodeMCPTransport {
+        guard candidates.indices.contains(callCount) else {
+            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
+        }
+        let index = callCount
+        callCount += 1
+        guard index == 0 else { return candidates[index] }
+        await starts.append(())
+        let cancellations = cancellations
+        await withTaskCancellationHandler {
+            await gate.wait()
+        } onCancel: {
+            Task { await cancellations.append(()) }
+        }
+        return candidates[index]
+    }
+
+    func waitUntilStarted() async throws {
+        _ = try await starts.nextValue()
+    }
+
+    func waitUntilCancelled() async throws {
+        _ = try await cancellations.nextValue()
+    }
+
+    func release() async {
+        await gate.release()
     }
 }
 
@@ -2335,6 +2538,7 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
     private var messages: [SentMessage] = []
     private var closes = 0
     private var closed = false
+    private var eventStreamStarts = 0
     private var listRequestCounts: [String: Int] = [:]
 
     init(
@@ -2428,6 +2632,7 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
 
     func startEventStream(headers: MCPConnectionHeaders) async {
         _ = headers
+        eventStreamStarts += 1
     }
 
     func close(headers: MCPConnectionHeaders) async {
@@ -2450,6 +2655,10 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
 
     func closeCount() -> Int {
         closes
+    }
+
+    func eventStreamStartCount() -> Int {
+        eventStreamStarts
     }
 
     func emitSessionExpired() {
