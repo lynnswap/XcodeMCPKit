@@ -7,12 +7,16 @@ struct ServerLauncherIntegrationTests {
     @Test func serverRunnerDryRunUsesEnvironmentDerivedDefaults() async throws {
         let output = CapturedLines()
         let errors = CapturedLines()
+        let configURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("server-config-\(UUID().uuidString).toml")
+        try "".write(to: configURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: configURL) }
 
         let exitCode = await XcodeMCPProxyServer.run(
             arguments: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: [
                 "LISTEN": "127.0.0.1:7777",
-                "MCP_XCODE_CONFIG": "/tmp/proxy-config.toml",
+                "MCP_XCODE_CONFIG": configURL.path,
             ],
             stdout: { output.append($0) },
             stderr: { errors.append($0) }
@@ -21,7 +25,10 @@ struct ServerLauncherIntegrationTests {
         #expect(exitCode == 0)
         #expect(errors.snapshot().isEmpty)
         let line = try #require(output.snapshot().first)
-        #expect(line == "xcode-mcp-proxy-server --listen 127.0.0.1:7777 --config /tmp/proxy-config.toml")
+        #expect(
+            line ==
+                "xcode-mcp-proxy-server --listen 127.0.0.1:7777 --config \(configURL.path)"
+        )
     }
 
     @Test func serverLauncherStartsInjectedProxyServer() async throws {
@@ -32,8 +39,8 @@ struct ServerLauncherIntegrationTests {
                 restarted.append("\(host):\(port)")
                 return true
             },
-            makeServer: { config in
-                fakeServer.record(config: config)
+            makeServer: { preparedConfiguration in
+                fakeServer.record(config: preparedConfiguration.configuration)
                 return fakeServer
             }
         )
@@ -55,7 +62,7 @@ struct ServerLauncherIntegrationTests {
         let config = try #require(fakeServer.recordedConfig())
         #expect(config.bindAddress.host == "127.0.0.1")
         #expect(config.bindAddress.port == 8766)
-        #expect(config.limits.requestTimeout == 12)
+        #expect(config.requestTimeout == .seconds(12))
         #expect(fakeServer.startCount() == 1)
         #expect(fakeServer.waitCount() == 1)
     }
@@ -65,7 +72,8 @@ private func makeIntegrationServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
-    makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any XcodeMCPProxyServer.LaunchServer = { _ in
+    makeServer: @escaping (XcodeMCPProxyServer.PreparedConfiguration) ->
+        any XcodeMCPProxyServer.LaunchServer = { _ in
         IntegrationRecordingProxyServer()
     }
 ) -> XcodeMCPProxyServer.Launcher {
@@ -79,7 +87,7 @@ private func makeIntegrationServerLauncher(
     )
 }
 
-private final class IntegrationRecordingProxyServer: XcodeMCPProxyServer.LaunchServer {
+private final class IntegrationRecordingProxyServer: @unchecked Sendable, XcodeMCPProxyServer.LaunchServer {
     private let lock = NSLock()
     private var config: XcodeMCPProxyServerConfiguration?
     private var started = 0
@@ -91,16 +99,18 @@ private final class IntegrationRecordingProxyServer: XcodeMCPProxyServer.LaunchS
         }
     }
 
-    func startAndWriteDiscovery() throws -> XcodeMCPProxyServer.Endpoint {
+    func start() async throws -> XcodeMCPProxyServer.Endpoint {
         withLock {
             started += 1
         }
         return XcodeMCPProxyServer.Endpoint(host: "127.0.0.1", port: 8766)
     }
 
-    func wait() async throws {
+    func waitUntilShutdown() async throws {
         incrementWaitCount()
     }
+
+    func shutdown() async throws {}
 
     func recordedConfig() -> XcodeMCPProxyServerConfiguration? {
         withLock { config }

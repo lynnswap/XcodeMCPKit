@@ -25,14 +25,11 @@ extension HTTPHandlerTests {
         disabled = ["OtherTool"]
         """.write(to: configURL, atomically: true, encoding: .utf8)
 
-        let publicServer = XcodeMCPProxyServer(
-            configuration: .init(
-                configurationFilePath: configURL.path,
-                toolPolicy: .init(disabledToolNames: [" RunAllTests ", ""])
-            )
+        let publicConfiguration = XcodeMCPProxyServerConfiguration(
+            configurationFileURL: configURL,
+            toolPolicy: .init(disabledToolNames: [" RunAllTests ", ""])
         )
-        let config = publicServer.config
-        try await publicServer.shutdown()
+        let config = try ProxyConfig.resolving(publicConfiguration)
 
         #expect(config.disabledToolNames == ["RunAllTests"])
 

@@ -49,6 +49,42 @@ struct CLIParserTests {
         #expect(config.listenPort == 0)
     }
 
+    @Test func cliTreatsOnlyZeroRequestTimeoutAsDisabled() throws {
+        let disabled = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--request-timeout", "0"],
+            environment: [:]
+        )
+        #expect(disabled.requestTimeout == 0)
+
+        for invalid in ["-1", "nan", "inf", "-inf", "not-a-number"] {
+            #expect(throws: CLIError.self) {
+                _ = try CLIParser.parse(
+                    args: ["xcode-mcp-proxy", "--request-timeout", invalid],
+                    environment: [:]
+                )
+            }
+        }
+    }
+
+    @Test func cliRejectsInvalidExplicitPortAndBodyLimit() throws {
+        for invalidPort in ["-1", "65536", "not-a-port"] {
+            #expect(throws: CLIError.self) {
+                _ = try CLIParser.parse(
+                    args: ["xcode-mcp-proxy", "--port", invalidPort],
+                    environment: [:]
+                )
+            }
+        }
+        for invalidBodyLimit in ["0", "-1", "not-a-size"] {
+            #expect(throws: CLIError.self) {
+                _ = try CLIParser.parse(
+                    args: ["xcode-mcp-proxy", "--max-body-bytes", invalidBodyLimit],
+                    environment: [:]
+                )
+            }
+        }
+    }
+
     @Test func cliRejectsRemovedLazyInit() async throws {
         #expect(throws: CLIError.self) {
             _ = try CLIParser.parse(
@@ -123,9 +159,13 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = try CLIParser.parse(
+        let parsed = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", configPath],
             environment: [:]
+        )
+        #expect(parsed.disabledToolNames.isEmpty)
+        let config = try ProxyConfig.resolving(
+            XcodeMCPProxyServerConfiguration(serverProxyConfig: parsed)
         )
 
         #expect(config.disabledToolNames == ["RunAllTests", "RunSomeTests"])
@@ -140,15 +180,18 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = try CLIParser.parse(
+        let parsed = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", configPath],
             environment: [:]
+        )
+        let config = try ProxyConfig.resolving(
+            XcodeMCPProxyServerConfiguration(serverProxyConfig: parsed)
         )
 
         #expect(config.disabledToolNames == ["RunAllTests", "RunSomeTests"])
     }
 
-    @Test func cliIgnoresInvalidDisabledToolNamesConfig() async throws {
+    @Test func strictServerConfigRejectsInvalidDisabledToolNames() async throws {
         let configPath = try makeTempConfigFile(
             """
             [tools]
@@ -157,12 +200,17 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = try CLIParser.parse(
+        let parsed = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", configPath],
             environment: [:]
         )
 
-        #expect(config.disabledToolNames.isEmpty)
+        #expect(parsed.disabledToolNames.isEmpty)
+        #expect(throws: ProxyConfig.File.LoadError.self) {
+            _ = try ProxyConfig.resolving(
+                XcodeMCPProxyServerConfiguration(serverProxyConfig: parsed)
+            )
+        }
     }
 
     @Test func configLoadsHandshakeOverrideWhenDisabledToolsAreExplicit() throws {
@@ -177,7 +225,7 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = ProxyConfig(
+        var config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 0,
             upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
@@ -187,6 +235,12 @@ struct CLIParserTests {
             configPath: configPath,
             disabledToolNames: ["ExplicitTool"]
         )
+        let loaded = try ProxyConfig.File.Loader.loadStrict(
+            configURL: URL(fileURLWithPath: configPath)
+        )
+        let explicitDisabledToolNames = config.disabledToolNames
+        config.applyFileConfiguration(loaded)
+        config.disabledToolNames = explicitDisabledToolNames
 
         #expect(config.disabledToolNames == ["ExplicitTool"])
         #expect(config.initializeParamsOverride?.clientName == "custom-client")
@@ -201,7 +255,7 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = ProxyConfig(
+        var config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 0,
             upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
@@ -209,6 +263,11 @@ struct CLIParserTests {
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             configPath: configPath
+        )
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
         )
 
         #expect(config.initializeParamsOverride?.protocolVersion == "2025-03-26")

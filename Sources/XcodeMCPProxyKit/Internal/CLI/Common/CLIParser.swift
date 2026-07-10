@@ -70,6 +70,9 @@ struct CLIParser {
                     listenHost = parsed.host
                     listenPort = parsed.port
                 } else if let port = Int(value) {
+                    guard (0...65_535).contains(port) else {
+                        throw CLIError.message("--listen port must be in 0...65535")
+                    }
                     listenPort = port
                 } else {
                     listenHost = value
@@ -85,7 +88,11 @@ struct CLIParser {
                 guard index + 1 < args.count else {
                     throw CLIError.message("--port requires a value")
                 }
-                listenPort = Int(args[index + 1]) ?? listenPort
+                guard let parsed = Int(args[index + 1]),
+                      (0...65_535).contains(parsed) else {
+                    throw CLIError.message("--port must be an integer in 0...65535")
+                }
+                listenPort = parsed
                 index += 2
             case .upstreamCommand:
                 guard index + 1 < args.count else {
@@ -128,13 +135,23 @@ struct CLIParser {
                 guard index + 1 < args.count else {
                     throw CLIError.message("--max-body-bytes requires a value")
                 }
-                maxBodyBytes = Int(args[index + 1]) ?? maxBodyBytes
+                guard let parsed = Int(args[index + 1]), parsed > 0 else {
+                    throw CLIError.message("--max-body-bytes must be a positive integer")
+                }
+                maxBodyBytes = parsed
                 index += 2
             case .requestTimeout:
                 guard index + 1 < args.count else {
                     throw CLIError.message("--request-timeout requires seconds")
                 }
-                requestTimeout = TimeInterval(args[index + 1]) ?? requestTimeout
+                guard let parsed = TimeInterval(args[index + 1]),
+                      parsed.isFinite,
+                      parsed >= 0 else {
+                    throw CLIError.message(
+                        "--request-timeout must be a finite number greater than or equal to zero"
+                    )
+                }
+                requestTimeout = parsed
                 index += 2
             case .config:
                 guard index + 1 < args.count else {
@@ -224,7 +241,7 @@ struct CLIParser {
         }
         let hostPart = String(value[..<colonIndex])
         let portPart = String(value[value.index(after: colonIndex)...])
-        guard let port = Int(portPart), port >= 0 else {
+        guard let port = Int(portPart), (0...65_535).contains(port) else {
             throw CLIError.message("--listen expects host:port (got \(value))")
         }
         let host = hostPart.isEmpty ? "localhost" : hostPart

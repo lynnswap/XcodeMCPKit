@@ -2,26 +2,25 @@ import Darwin
 import Foundation
 
 extension XcodeMCPProxyServer {
-    /// Diagnostic error for a listen port already owned by another process.
-    public struct PortInUseError: Error, CustomStringConvertible, Equatable, Sendable {
+    package struct PortInUseError: Error, CustomStringConvertible, Equatable, Sendable {
         /// Requested listen host.
-        public let host: String
+        package let host: String
 
         /// Requested listen port.
-        public let port: Int
+        package let port: Int
 
         /// Detected `xcode-mcp-proxy-server` process identifiers.
-        public let processIdentifiers: [Int]
+        package let processIdentifiers: [Int]
 
         /// Creates a port-in-use diagnostic.
-        public init(host: String, port: Int, processIdentifiers: [Int] = []) {
+        package init(host: String, port: Int, processIdentifiers: [Int] = []) {
             self.host = host
             self.port = port
             self.processIdentifiers = processIdentifiers
         }
 
         /// User-facing diagnostic message.
-        public var description: String {
+        package var description: String {
             let displayHost: String = {
                 if host.contains(":"), !host.hasPrefix("[") {
                     return "[\(host)]"

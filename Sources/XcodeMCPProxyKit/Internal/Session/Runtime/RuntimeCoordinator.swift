@@ -121,6 +121,7 @@ enum ServerRequestResponseForwardingResult: Sendable, Equatable {
 protocol RuntimeSessionLifecyclePort: Sendable {
     func start()
     func debugReset()
+    func cancelForDeinit()
     func shutdown() async
 }
 
@@ -261,6 +262,7 @@ protocol RuntimeCoordinating:
 
 extension RuntimeSessionLifecyclePort {
     func start() {}
+    func cancelForDeinit() {}
 }
 
 extension RuntimeSessionRegistryPort {
@@ -920,6 +922,26 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         await upstreamEventTasks.shutdown()
         await controlPlaneDrain.wait()
         await runtimeDrain.wait()
+    }
+
+    func cancelForDeinit() {
+        let shutdownState = initializeManager.beginShutdown()
+        shutdownState.timeout?.cancel()
+        for timeout in upstreamHealthManager.clearInitTimeoutsForShutdown() {
+            timeout?.cancel()
+        }
+        let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue { taskBox in
+            let task = taskBox
+            taskBox = nil
+            return task
+        }
+        documentationPrewarmTask?.cancel()
+        upstreamReadinessCoordinator.shutdown()
+        xcodeProcessEventMonitor.stop()
+        cancelAllScheduledProcessToolsCatalogRetries()
+        processRouteReadinessStore.removeAllPendingCatalogRefreshes()
+        _ = runtimeTasks.beginShutdown()
+        _ = upstreamEventTasks.beginShutdown()
     }
 
     func isInitialized() -> Bool {

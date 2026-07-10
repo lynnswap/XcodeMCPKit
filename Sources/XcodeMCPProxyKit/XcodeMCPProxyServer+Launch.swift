@@ -1,21 +1,15 @@
 import Foundation
 
-/// Product metadata exposed by `XcodeMCPProxyKit`.
-public struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
-    /// Product name shown in startup summaries.
-    public let name: String
+package struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
+    package let name: String
+    package let version: String
 
-    /// Resolved package version.
-    public let version: String
-
-    /// Creates product metadata.
-    public init(name: String = "XcodeMCPProxyKit", version: String) {
+    package init(name: String = "XcodeMCPProxyKit", version: String) {
         self.name = name
         self.version = version
     }
 
-    /// Formats a CLI-compatible version line.
-    public func versionLine(arguments: [String], defaultExecutableName: String) -> String {
+    package func versionLine(arguments: [String], defaultExecutableName: String) -> String {
         "\(executableName(arguments: arguments, defaultExecutableName: defaultExecutableName)) \(version)"
     }
 
@@ -30,104 +24,28 @@ public struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
 }
 
 extension XcodeMCPProxyServer {
-    /// Resolved top-level action for a server launch invocation.
-    public enum LaunchAction: Equatable, Sendable {
-        /// Print usage and exit.
-        case showHelp
-
-        /// Print version information and exit.
-        case showVersion
-
-        /// Print the resolved dry-run command and exit.
-        case dryRun
-
-        /// Start the proxy server.
-        case start
+    package enum LaunchAction: Sendable {
+        case showHelp(String)
+        case showVersion(String)
+        case dryRun(String)
+        case start(preparedConfiguration: PreparedConfiguration, forceRestart: Bool)
     }
 
-    /// Normalized server launch options.
-    public struct LaunchOptions: Equatable, Sendable {
-        /// Executable name resolved from argv.
-        public let executableName: String
-
-        /// Whether the invocation should dry-run instead of starting.
-        public let dryRun: Bool
-
-        /// Whether an existing proxy server should be terminated before start.
-        public let forceRestart: Bool
-
-        /// Creates normalized server launch options.
-        public init(executableName: String, dryRun: Bool, forceRestart: Bool) {
-            self.executableName = executableName
-            self.dryRun = dryRun
-            self.forceRestart = forceRestart
-        }
-    }
-
-    /// Resolved launch plan for `xcode-mcp-proxy-server`.
-    public struct LaunchPlan: Equatable, Sendable {
-        /// Top-level action to execute.
-        public let action: LaunchAction
-
-        /// Public server configuration. This is present for `.start` and
-        /// `.dryRun` plans and absent for display-only plans.
-        public let configuration: XcodeMCPProxyServerConfiguration?
-
-        /// Normalized launch options.
-        public let options: LaunchOptions
-
-        /// Stable dry-run command line derived from the resolved plan.
-        public let resolvedDryRunCommandLine: String?
-
-        /// Usage text for help or validation failures.
-        public let usage: String
-
-        /// Version line for version display.
-        public let versionLine: String
-
-        /// Creates a launch plan.
-        public init(
-            action: LaunchAction,
-            configuration: XcodeMCPProxyServerConfiguration?,
-            options: LaunchOptions,
-            resolvedDryRunCommandLine: String?,
-            usage: String,
-            versionLine: String
-        ) {
-            self.action = action
-            self.configuration = configuration
-            self.options = options
-            self.resolvedDryRunCommandLine = resolvedDryRunCommandLine
-            self.usage = usage
-            self.versionLine = versionLine
-        }
-    }
-
-    /// Error raised while resolving server launch arguments.
-    public struct LaunchResolutionError: Error, CustomStringConvertible, Equatable, Sendable {
-        /// Preferred command-line presentation for the error.
-        public enum Presentation: Equatable, Sendable {
-            /// Print `error: <message>` and a short help hint.
+    package struct LaunchResolutionError: Error, CustomStringConvertible, Equatable, Sendable {
+        package enum Presentation: Equatable, Sendable {
             case conciseUsageHint
-
-            /// Print `<message>` followed by full usage.
             case fullUsage
         }
 
-        /// Human-readable error message.
-        public let message: String
+        package let message: String
+        package let presentation: Presentation
 
-        /// Preferred command-line presentation.
-        public let presentation: Presentation
-
-        /// Creates a launch resolution error.
-        public init(message: String, presentation: Presentation) {
+        package init(message: String, presentation: Presentation) {
             self.message = message
             self.presentation = presentation
         }
 
-        /// User-facing error description.
-        public var description: String { message }
+        package var description: String { message }
     }
 
     package struct ParsedLaunchOptions {
@@ -144,13 +62,11 @@ extension XcodeMCPProxyServer {
         var dryRun: Bool
     }
 
-    /// Resolved XcodeMCPProxyKit product metadata.
-    public static var productMetadata: XcodeMCPProxyProductMetadata {
+    package static var productMetadata: XcodeMCPProxyProductMetadata {
         XcodeMCPProxyProductMetadata(version: ProxyBuildInfo.version)
     }
 
-    /// CLI usage for `xcode-mcp-proxy-server`.
-    public static var serverUsage: String {
+    package static var serverUsage: String {
         """
         Usage:
           xcode-mcp-proxy-server [options]
@@ -178,49 +94,40 @@ extension XcodeMCPProxyServer {
         """
     }
 
-    /// Formats a CLI-compatible server version line.
-    public static func serverVersionLine(arguments: [String]) -> String {
+    package static func serverVersionLine(arguments: [String]) -> String {
         productMetadata.versionLine(
             arguments: arguments,
             defaultExecutableName: "xcode-mcp-proxy-server"
         )
     }
 
-    /// Resolves argv and environment into a server launch plan.
-    public static func resolveLaunchPlan(
+    package static func resolveLaunchAction(
         arguments: [String],
         environment: [String: String]
-    ) throws -> LaunchPlan {
+    ) throws -> LaunchAction {
+        try resolveLaunchAction(
+            arguments: arguments,
+            environment: environment,
+            loadFileConfiguration: {
+                try ProxyConfig.File.Loader.loadStrict(configURL: $0)
+            }
+        )
+    }
+
+    static func resolveLaunchAction(
+        arguments: [String],
+        environment: [String: String],
+        loadFileConfiguration: @Sendable (URL) throws ->
+            ProxyConfig.File.LoadedConfiguration
+    ) throws -> LaunchAction {
         var parsed = try parseLaunchOptions(arguments: arguments)
         let versionLine = serverVersionLine(arguments: arguments)
-        let displayOptions = LaunchOptions(
-            executableName: executableName(
-                arguments: arguments,
-                defaultExecutableName: "xcode-mcp-proxy-server"
-            ),
-            dryRun: parsed.dryRun,
-            forceRestart: parsed.forceRestart
-        )
 
         if parsed.showHelp {
-            return LaunchPlan(
-                action: .showHelp,
-                configuration: nil,
-                options: displayOptions,
-                resolvedDryRunCommandLine: nil,
-                usage: serverUsage,
-                versionLine: versionLine
-            )
+            return .showHelp(serverUsage)
         }
         if parsed.showVersion {
-            return LaunchPlan(
-                action: .showVersion,
-                configuration: nil,
-                options: displayOptions,
-                resolvedDryRunCommandLine: nil,
-                usage: serverUsage,
-                versionLine: versionLine
-            )
+            return .showVersion(versionLine)
         }
 
         try applyLaunchDefaults(from: environment, to: &parsed)
@@ -243,21 +150,31 @@ extension XcodeMCPProxyServer {
         }
 
         let configuration = XcodeMCPProxyServerConfiguration(serverProxyConfig: proxyConfig)
+        let resolved: ProxyConfig
+        do {
+            resolved = try ProxyConfig.resolving(
+                configuration,
+                loadFileConfiguration: loadFileConfiguration
+            )
+            try resolved.validateModernProtocolConfiguration()
+        } catch {
+            throw LaunchResolutionError(
+                message: String(describing: error),
+                presentation: .fullUsage
+            )
+        }
         let dryRun = parsed.dryRun || isTruthy(environment["DRY_RUN"])
-        let options = LaunchOptions(
-            executableName: displayOptions.executableName,
-            dryRun: dryRun,
-            forceRestart: parsed.forceRestart
-        )
         let dryRunCommandLine = resolvedDryRunCommandLine(options: parsed, configuration: configuration)
 
-        return LaunchPlan(
-            action: dryRun ? .dryRun : .start,
-            configuration: configuration,
-            options: options,
-            resolvedDryRunCommandLine: dryRunCommandLine,
-            usage: serverUsage,
-            versionLine: versionLine
+        if dryRun {
+            return .dryRun(dryRunCommandLine)
+        }
+        return .start(
+            preparedConfiguration: PreparedConfiguration(
+                configuration: configuration,
+                proxyConfig: resolved
+            ),
+            forceRestart: parsed.forceRestart
         )
     }
 
@@ -331,8 +248,8 @@ extension XcodeMCPProxyServer {
         configuration: XcodeMCPProxyServerConfiguration
     ) -> String {
         var parts = ["xcode-mcp-proxy-server"] + options.forwardedArguments
-        if options.hasConfigFlag == false, let configPath = configuration.configurationFilePath {
-            parts += ["--config", configPath]
+        if options.hasConfigFlag == false, let configURL = configuration.configurationFileURL {
+            parts += ["--config", configURL.path]
         }
         if options.hasRefreshCodeIssuesModeFlag == false,
            configuration.featurePolicy.refreshCodeIssuesMode != .proxy {

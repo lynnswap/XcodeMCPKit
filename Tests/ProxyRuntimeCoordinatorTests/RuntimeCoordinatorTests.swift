@@ -11936,7 +11936,11 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
-        config.loadFileConfig()
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        )
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -11968,22 +11972,19 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let publicServer = XcodeMCPProxyServer(
-            configuration: .init(
-                configurationFilePath: configPath,
-                featurePolicy: .init(prewarmToolsList: false),
-                initializeHandshake: .init(
-                    clientInfo: .init(name: "typed-proxy"),
-                    capabilities: [
-                        "sampling": [
-                            "enabled": true,
-                        ],
-                    ]
-                )
-            )
+        let publicConfiguration = XcodeMCPProxyServerConfiguration(
+            configurationFileURL: URL(fileURLWithPath: configPath),
+            initializeHandshake: .init(
+                clientInfo: .init(name: "typed-proxy"),
+                capabilities: [
+                    "sampling": [
+                        "enabled": true,
+                    ],
+                ]
+            ),
+            featurePolicy: .init(prewarmToolsList: false)
         )
-        let config = publicServer.config
-        try await publicServer.shutdown()
+        let config = try ProxyConfig.resolving(publicConfiguration)
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
@@ -12021,7 +12022,11 @@ struct RuntimeCoordinatorTests {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.configPath = configPath
-        config.loadFileConfig()
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        )
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -12057,9 +12062,7 @@ struct RuntimeCoordinatorTests {
         #expect(version == "1.2.3")
     }
 
-    @Test func sessionManagerFallsBackToDefaultInitializeParamsWhenConfigFileIsInvalid()
-        async throws
-    {
+    @Test func strictConfigLoaderRejectsInvalidInitializeConfiguration() async throws {
         let configPath = try makeTempProxyConfigFile(
             """
             [upstream_handshake
@@ -12068,24 +12071,11 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        var config = makeConfig(requestTimeout: 5)
-        config.configPath = configPath
-        config.loadFileConfig()
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
-        defer { manager.shutdownAndWait() }
-
-        let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
-        let params = try #require(object?["params"] as? [String: Any])
-        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
-
-        #expect(params["protocolVersion"] as? String == "2025-06-18")
-        #expect(clientInfo["name"] as? String == InitializeHandshakeParams.defaultProxyClientName())
-        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
+        #expect(throws: ProxyConfig.File.LoadError.self) {
+            _ = try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        }
     }
 
     @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
@@ -12107,7 +12097,11 @@ struct RuntimeCoordinatorTests {
         let initializeCleanupCompleted = TestSignal()
         var config = makeConfig(requestTimeout: 0.1)
         config.configPath = configPath
-        config.loadFileConfig()
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
+        )
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,

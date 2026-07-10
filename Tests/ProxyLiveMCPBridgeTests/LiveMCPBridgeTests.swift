@@ -141,7 +141,7 @@ struct LiveMCPBridgeTests {
         }
 
         do {
-            let address = try server.startAndWriteDiscovery()
+            let address = try await server.start()
             let discoveryRecord = try readDiscoveryRecord(from: discoveryFile)
             #expect(discoveryRecord.port == address.port)
 

@@ -1,8 +1,26 @@
 import Foundation
-import Logging
 import TOMLDecoder
 
 extension ProxyConfig.File {
+    struct LoadedConfiguration: Sendable {
+        let disabledToolNames: Set<String>
+        let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
+    }
+
+    enum LoadError: Error, CustomStringConvertible, Sendable {
+        case readFailed(URL, String)
+        case decodeFailed(URL, String)
+
+        var description: String {
+            switch self {
+            case .readFailed(let url, let detail):
+                return "Failed to read proxy config at \(url.path): \(detail)"
+            case .decodeFailed(let url, let detail):
+                return "Failed to decode proxy config at \(url.path): \(detail)"
+            }
+        }
+    }
+
     enum Number: Sendable, Equatable {
         case int(Int64)
         case double(Double)
@@ -172,133 +190,65 @@ private struct ProxyToolsConfig: Decodable, Sendable, Equatable {
 
 extension ProxyConfig.File {
     enum Loader {
-        static func loadInitializeParamsOverride(
-            configPath: String?,
-            logger: Logger
-        ) -> ProxyConfig.File.InitializeHandshakeOverride? {
-            guard let loaded = loadConfig(
-                configPath: configPath,
-                logger: logger,
-                readFailureMessage: "Failed to read proxy config; using built-in initialize params",
-                decodeFailureMessage: "Failed to decode proxy config; using built-in initialize params"
-            ) else {
-                return nil
-            }
-            let expandedPath = loaded.path
-            switch loaded.config.upstreamHandshake {
-            case .missing:
-                logger.warning(
-                    "Proxy config does not define upstream_handshake; using built-in initialize params",
-                    metadata: ["path": .string(expandedPath)]
-                )
-                return nil
-            case .invalid(let error):
-                logger.warning(
-                    "Proxy config upstream_handshake is invalid; using built-in initialize params",
-                    metadata: [
-                        "path": .string(expandedPath),
-                        "error": .string(error),
-                    ]
-                )
-                return nil
-            case .decoded(let fileConfig):
-                let override: ProxyConfig.File.InitializeHandshakeOverride
-                do {
-                    override = try ProxyConfig.File.InitializeHandshakeOverride(fileConfig: fileConfig)
-                } catch {
-                    logger.warning(
-                        "Proxy config capabilities are not JSON-compatible; using built-in initialize params",
-                        metadata: [
-                            "path": .string(expandedPath),
-                            "error": .string(String(describing: error)),
-                        ]
-                    )
-                    return nil
-                }
-                return override.isEmpty ? nil : override
-            }
-        }
-
-        static func loadDisabledToolNames(
-            configPath: String?,
-            logger: Logger
-        ) -> Set<String> {
-            guard let loaded = loadConfig(
-                configPath: configPath,
-                logger: logger,
-                readFailureMessage: "Failed to read proxy config; ignoring disabled tools",
-                decodeFailureMessage: "Failed to decode proxy config; ignoring disabled tools"
-            ) else {
-                return []
-            }
-            let expandedPath = loaded.path
-            switch loaded.config.tools {
-            case .missing:
-                return []
-            case .invalid(let error):
-                logger.warning(
-                    "Proxy config tools is invalid; ignoring disabled tools",
-                    metadata: [
-                        "path": .string(expandedPath),
-                        "error": .string(error),
-                    ]
-                )
-                return []
-            case .decoded(let tools):
-                guard let disabled = tools.disabled else {
-                    return []
-                }
-                return ProxyConfig.normalizedToolNames(disabled)
-            }
-        }
-
-        private static func nonEmpty(_ value: String?) -> String? {
-            guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !raw.isEmpty else {
-                return nil
-            }
-            return raw
-        }
-
-        private static func loadConfig(
-            configPath: String?,
-            logger: Logger,
-            readFailureMessage: String,
-            decodeFailureMessage: String
-        ) -> (path: String, config: ProxyFileConfig)? {
-            guard let rawPath = nonEmpty(configPath) else { return nil }
-            let expandedPath = NSString(string: rawPath).expandingTildeInPath
-            let url = URL(fileURLWithPath: expandedPath)
-
+        static func loadStrict(configURL: URL) throws -> ProxyConfig.File.LoadedConfiguration {
             let data: Data
             do {
-                data = try Data(contentsOf: url)
+                data = try Data(contentsOf: configURL)
             } catch {
-                logger.warning(
-                    "\(readFailureMessage)",
-                    metadata: [
-                        "path": .string(expandedPath),
-                        "error": .string(String(describing: error)),
-                    ]
+                throw ProxyConfig.File.LoadError.readFailed(
+                    configURL,
+                    String(describing: error)
                 )
-                return nil
             }
 
             let config: ProxyFileConfig
             do {
                 config = try TOMLDecoder(isLenient: false).decode(ProxyFileConfig.self, from: data)
             } catch {
-                logger.warning(
-                    "\(decodeFailureMessage)",
-                    metadata: [
-                        "path": .string(expandedPath),
-                        "error": .string(String(describing: error)),
-                    ]
+                throw ProxyConfig.File.LoadError.decodeFailed(
+                    configURL,
+                    String(describing: error)
                 )
-                return nil
             }
 
-            return (expandedPath, config)
+            let disabledToolNames: Set<String>
+            switch config.tools {
+            case .missing:
+                disabledToolNames = []
+            case .invalid(let detail):
+                throw ProxyConfig.File.LoadError.decodeFailed(configURL, "tools: \(detail)")
+            case .decoded(let tools):
+                disabledToolNames = ProxyConfig.normalizedToolNames(tools.disabled ?? [])
+            }
+
+            let initializeParamsOverride: ProxyConfig.File.InitializeHandshakeOverride?
+            switch config.upstreamHandshake {
+            case .missing:
+                initializeParamsOverride = nil
+            case .invalid(let detail):
+                throw ProxyConfig.File.LoadError.decodeFailed(
+                    configURL,
+                    "upstream_handshake: \(detail)"
+                )
+            case .decoded(let fileConfig):
+                do {
+                    let value = try ProxyConfig.File.InitializeHandshakeOverride(
+                        fileConfig: fileConfig
+                    )
+                    initializeParamsOverride = value.isEmpty ? nil : value
+                } catch {
+                    throw ProxyConfig.File.LoadError.decodeFailed(
+                        configURL,
+                        String(describing: error)
+                    )
+                }
+            }
+
+            return ProxyConfig.File.LoadedConfiguration(
+                disabledToolNames: disabledToolNames,
+                initializeParamsOverride: initializeParamsOverride
+            )
         }
+
     }
 }

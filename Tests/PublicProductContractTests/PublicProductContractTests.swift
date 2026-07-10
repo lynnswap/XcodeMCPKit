@@ -53,6 +53,19 @@ struct PublicProductContractTests {
             targetName: runtimeHelperLeakCheck.targetName,
             expectedFragments: runtimeHelperLeakCheck.expectedFragments
         )
+
+        let removedServerSurfaceResult = try runSwiftBuild(
+            packageURL: fixture.url,
+            logURL: fixture.url.appendingPathComponent(
+                "\(removedServerSurfaceCheck.targetName)-swift-build.log"
+            ),
+            targets: [removedServerSurfaceCheck.targetName]
+        )
+        expectBuildFailed(
+            removedServerSurfaceResult,
+            targetName: removedServerSurfaceCheck.targetName,
+            expectedFragments: removedServerSurfaceCheck.expectedFragments
+        )
     }
 
     private func makeFixturePackage(at packageURL: URL, repositoryRoot: URL) throws {
@@ -62,7 +75,8 @@ struct PublicProductContractTests {
             "XcodeMCPProxyKitOnlyClient",
             "XcodeMCPKitTestingClient",
         ] + lowLevelImportChecks.map(\.targetName) + [
-            runtimeHelperLeakCheck.targetName
+            runtimeHelperLeakCheck.targetName,
+            removedServerSurfaceCheck.targetName,
         ]
 
         for target in fixtureTargets {
@@ -113,6 +127,14 @@ struct PublicProductContractTests {
         try runtimeHelperLeakClientSource
             .write(
                 to: packageURL.appendingPathComponent("Sources/\(runtimeHelperLeakCheck.targetName)/Contract.swift"),
+                atomically: true,
+                encoding: .utf8
+            )
+        try removedServerSurfaceClientSource
+            .write(
+                to: packageURL.appendingPathComponent(
+                    "Sources/\(removedServerSurfaceCheck.targetName)/Contract.swift"
+                ),
                 atomically: true,
                 encoding: .utf8
             )
@@ -218,6 +240,16 @@ struct PublicProductContractTests {
                     name: "XcodeMCPKitClientUsesProtocolHelper",
                     dependencies: [
                         .product(name: "XcodeMCPKit", package: "XcodeMCPKit")
+                    ],
+                    swiftSettings: [
+                        .swiftLanguageMode(.v6),
+                        .defaultIsolation(nil),
+                    ]
+                ),
+                .target(
+                    name: "XcodeMCPProxyKitClientUsesRemovedServerSurface",
+                    dependencies: [
+                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -600,6 +632,16 @@ private let runtimeHelperLeakCheck = (
     ]
 )
 
+private let removedServerSurfaceCheck = (
+    targetName: "XcodeMCPProxyKitClientUsesRemovedServerSurface",
+    expectedFragments: [
+        "productMetadata' is inaccessible",
+        "productMetadata is inaccessible",
+        "has no member 'startAndWriteDiscovery'",
+        "cannot find 'XcodeMCPProxyInstaller' in scope",
+    ]
+)
+
 private struct CommandResult {
     let exitCode: Int32
     let output: String
@@ -875,13 +917,10 @@ import XcodeMCPProxyKit
 func compileOnlyProxyProductOnlySurface() {
     let config = XcodeMCPProxyServerConfiguration()
     let server = XcodeMCPProxyServer(configuration: config)
-    let installer = XcodeMCPProxyInstaller()
 
     _ = (
         config,
-        server,
-        installer,
-        XcodeMCPProxyInstaller.binaryNames
+        server
     )
 }
 """
@@ -898,14 +937,9 @@ func compileOnlyProxyConfigurationSurface() {
             processesPerXcode: 1,
             sessionID: "session-1"
         ),
-        limits: .init(maxBodyBytes: 1_048_576, requestTimeout: 120),
-        configurationFilePath: "/tmp/xcode-mcp-config.toml",
-        discovery: .init(fileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
-        approvalPolicy: .manual,
-        featurePolicy: .init(
-            prewarmToolsList: false,
-            refreshCodeIssuesMode: .proxy
-        ),
+        maxBodyBytes: 1_048_576,
+        requestTimeout: .seconds(120),
+        configurationFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-config.toml"),
         toolPolicy: .init(
             disabledToolNames: ["RunAllTests", "RunSomeTests"]
         ),
@@ -922,6 +956,12 @@ func compileOnlyProxyConfigurationSurface() {
                     "metadata": .null,
                 ],
             ]
+        ),
+        discovery: .file(URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
+        approvalPolicy: .manual,
+        featurePolicy: .init(
+            prewarmToolsList: false,
+            refreshCodeIssuesMode: .proxy
         )
     )
     let customUpstreamConfig = XcodeMCPProxyServerConfiguration(
@@ -948,12 +988,6 @@ func compileOnlyProxyConfigurationSurface() {
         endpoint: endpointConfig,
         requestTimeout: 30
     )
-    let installer = XcodeMCPProxyInstaller(
-        configuration: .init(prefix: "/tmp/xcode-mcp", binaryDirectory: nil, dryRun: true)
-    )
-    let plan = installer.plan(
-        executableURL: URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-proxy-install")
-    )
     let adapter = endpoint.map {
         XcodeMCPProxyStdioAdapter(endpoint: $0, requestTimeout: 30)
     }
@@ -969,33 +1003,11 @@ func compileOnlyProxyConfigurationSurface() {
         server,
         adapterConfig,
         endpoint,
-        adapter,
-        plan
+        adapter
     )
-    _ = XcodeMCPProxyInstaller.binaryNames
 }
 
 func compileOnlyProxyLaunchSurface() async throws {
-    let plan = try XcodeMCPProxyServer.resolveLaunchPlan(
-        arguments: [
-            "xcode-mcp-proxy-server",
-            "--listen", "127.0.0.1:0",
-            "--dry-run",
-        ],
-        environment: [
-            "MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream",
-        ]
-    )
-    let metadata = XcodeMCPProxyServer.productMetadata
-    let versionLine = metadata.versionLine(
-        arguments: ["/usr/local/bin/xcode-mcp-proxy-server"],
-        defaultExecutableName: "xcode-mcp-proxy-server"
-    )
-    let portError = XcodeMCPProxyServer.PortInUseError(
-        host: "localhost",
-        port: 8765,
-        processIdentifiers: [123]
-    )
     let adapterPlan = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
         arguments: [
             "xcode-mcp-proxy",
@@ -1008,14 +1020,6 @@ func compileOnlyProxyLaunchSurface() async throws {
         "xcode-mcp-proxy",
         "--url=http://localhost:8765/mcp",
     ])
-    let installPlan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
-        arguments: [
-            "xcode-mcp-proxy-install",
-            "--prefix", "/tmp/xcode-mcp",
-            "--dry-run",
-        ],
-        environment: [:]
-    )
     let runnerStdout: @Sendable (String) -> Void = { _ in }
     let runnerStderr: @Sendable (String) -> Void = { _ in }
     let serverExitCode = await XcodeMCPProxyServer.run(
@@ -1036,28 +1040,7 @@ func compileOnlyProxyLaunchSurface() async throws {
         stdout: runnerStdout,
         stderr: runnerStderr
     )
-    let installerExitCode = XcodeMCPProxyInstaller.run(
-        arguments: [
-            "xcode-mcp-proxy-install",
-            "--version",
-        ],
-        environment: [:],
-        stdout: runnerStdout,
-        stderr: runnerStderr
-    )
-
     _ = (
-        plan.action,
-        plan.configuration,
-        plan.options.dryRun,
-        plan.options.forceRestart,
-        plan.resolvedDryRunCommandLine,
-        plan.usage,
-        plan.versionLine,
-        metadata.name,
-        metadata.version,
-        versionLine,
-        portError.description,
         adapterPlan.action,
         adapterPlan.configuration,
         adapterPlan.endpoint,
@@ -1065,25 +1048,27 @@ func compileOnlyProxyLaunchSurface() async throws {
         adapterPlan.usage,
         adapterPlan.versionLine,
         rewrittenAdapterArgs,
-        installPlan.action,
-        installPlan.configuration,
-        installPlan.options.executableName,
-        installPlan.usage,
-        installPlan.versionLine,
         serverExitCode,
-        adapterExitCode,
-        installerExitCode
+        adapterExitCode
     )
 }
 
 func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws {
-    let address = try server.start()
-    let discoveryAddress = try server.startAndWriteDiscovery()
-    try await server.wait()
+    let address = try await server.start()
+    let status = await server.snapshot()
+    try await server.waitUntilShutdown()
     try await server.shutdown()
 
-    _ = (address.host, address.port, discoveryAddress.host, discoveryAddress.port)
-    _ = (address.url, discoveryAddress.url)
+    _ = (address.host, address.port, address.url)
+    _ = (
+        status.phase,
+        status.endpoint,
+        status.proxyInitialized,
+        status.catalogAvailable,
+        status.queuedRequestCount,
+        status.upstreams,
+        status.generatedAt
+    )
 }
 """
 
@@ -1100,5 +1085,15 @@ import XcodeMCPKit
 
 func compileOnlyRuntimeProtocolHelperShouldNotBeVisible() {
     _ = MCP.ProtocolVersion.current
+}
+"""
+
+private let removedServerSurfaceClientSource = """
+import XcodeMCPProxyKit
+
+func removedServerSurfaceMustStayUnavailable(_ server: XcodeMCPProxyServer) throws {
+    _ = XcodeMCPProxyServer.productMetadata
+    _ = try server.startAndWriteDiscovery()
+    _ = XcodeMCPProxyInstaller()
 }
 """
