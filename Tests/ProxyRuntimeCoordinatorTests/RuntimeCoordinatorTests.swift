@@ -5766,6 +5766,47 @@ struct RuntimeCoordinatorTests {
         #expect(manager.processControlPlane.canonicalSourceProof() == nil)
     }
 
+    @Test func catalogSourceRebindRejectsSiblingClearedAfterSelection() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 80448, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "HealthBoundTool")]),
+            ]
+        )
+        let sourceProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        let siblingProof = manager.operationLeaseForTest(upstreamIndex: 1).proof
+        _ = try #require(manager.upstreamHealthManager.clearUpstreamState(siblingProof))
+
+        #expect(manager.commitCatalogSourceRebindIfCurrent(
+            processID: target.processID,
+            from: sourceProof,
+            to: siblingProof
+        ) == nil)
+        #expect(
+            manager.processControlPlane.catalog(forProcessID: target.processID)?.upstreamProof
+                == sourceProof
+        )
+
+        #expect(manager.clearUpstreamState(proof: sourceProof))
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalSourceProof() == nil)
+    }
+
     @Test func processRouteCatalogCooldownSurvivesRouteAvailabilitySuccess() async throws {
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 80423, xcodeVersion: "27.0")

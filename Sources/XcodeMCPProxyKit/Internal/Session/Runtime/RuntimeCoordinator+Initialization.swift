@@ -899,13 +899,11 @@ extension RuntimeCoordinator {
            let replacementProof = upstreamHealthManager.topologyProof(
                for: replacementUpstreamIndex
            ),
-           let transition = upstreamTopology.withValidated(replacementProof, {
-               processControlPlane.rebindCatalogSource(
-                    processID: route.target.processID,
-                    from: proof,
-                    to: replacementProof
-                )
-           }) {
+           let transition = commitCatalogSourceRebindIfCurrent(
+               processID: route.target.processID,
+               from: proof,
+               to: replacementProof
+           ) {
             applyProcessControlPlaneTransition(transition)
             return
         }
@@ -916,6 +914,28 @@ extension RuntimeCoordinator {
             )
         )
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
+    }
+
+    func commitCatalogSourceRebindIfCurrent(
+        processID: pid_t,
+        from oldProof: UpstreamTopologyProof,
+        to replacementProof: UpstreamTopologyProof
+    ) -> ProcessControlPlaneTransition? {
+        var transition: ProcessControlPlaneTransition?
+        guard upstreamTopology.withValidated(replacementProof, {
+            transition = upstreamHealthManager.withUsableInitializedSource(
+                replacementProof
+            ) {
+                processControlPlane.rebindCatalogSource(
+                    processID: processID,
+                    from: oldProof,
+                    to: replacementProof
+                )
+            }
+        }) != nil else {
+            return nil
+        }
+        return transition
     }
 
     @discardableResult

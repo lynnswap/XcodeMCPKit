@@ -22,7 +22,9 @@ extension RuntimeCoordinator {
         ), let activationProof = initializeClaim.topologyProof else {
             var catalogCommit: CatalogCommit?
             guard upstreamTopology.withValidated(completionProof, {
-                catalogCommit = upstreamHealthManager.withInitializedSource(completionProof) {
+                catalogCommit = upstreamHealthManager.withUsableInitializedSource(
+                    completionProof
+                ) {
                     processControlPlane.completeCatalog(
                         outcome,
                         lease: lease,
@@ -58,7 +60,9 @@ extension RuntimeCoordinator {
         case .notOwned:
             var fallbackCommit: CatalogCommit?
             guard upstreamTopology.withValidated(completionProof, {
-                fallbackCommit = upstreamHealthManager.withInitializedSource(completionProof) {
+                fallbackCommit = upstreamHealthManager.withUsableInitializedSource(
+                    completionProof
+                ) {
                     processControlPlane.completeCatalog(
                         outcome,
                         lease: lease,

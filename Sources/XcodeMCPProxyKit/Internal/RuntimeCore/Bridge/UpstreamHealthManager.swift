@@ -263,14 +263,12 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
-    func withInitializedSource<Result>(
+    func withUsableInitializedSource<Result>(
         _ proof: UpstreamTopologyProof,
         _ operation: () -> Result
     ) -> Result? {
         state.withLockedValue { state in
-            guard Self.isActive(proof, state: state),
-                  let source = state.upstreamStates[proof.slotID],
-                  source.isInitialized else {
+            guard Self.isUsableInitialized(proof, state: state) else {
                 return nil
             }
             return operation()
@@ -763,9 +761,7 @@ final class UpstreamHealthManager: Sendable {
             let upstreamIndex = claim.upstreamIndex
             guard Self.owns(claim, state: state),
                   state.upstreamStates[upstreamIndex].isInitialized,
-                  Self.isActive(sourceProof, state: state),
-                  let source = state.upstreamStates[sourceProof.slotID],
-                  source.isInitialized,
+                  Self.isUsableInitialized(sourceProof, state: state),
                   claim.owner == .processRouteActivation,
                   state.upstreamStates[upstreamIndex].initializeClaimPhase
                     == .initializedAwaitingCatalog else { return .notOwned }
@@ -942,6 +938,23 @@ final class UpstreamHealthManager: Sendable {
     private static func isActive(_ proof: UpstreamTopologyProof, state: State) -> Bool {
         state.topology?.proof(proof.slotID) == proof
             && state.upstreamStates[proof.slotID] != nil
+    }
+
+    private static func isUsableInitialized(
+        _ proof: UpstreamTopologyProof,
+        state: State
+    ) -> Bool {
+        guard isActive(proof, state: state),
+              let source = state.upstreamStates[proof.slotID],
+              source.isInitialized else {
+            return false
+        }
+        switch source.healthState {
+        case .healthy, .degraded:
+            return true
+        case .quarantined:
+            return false
+        }
     }
 
     private static func matches(_ claim: InitializeClaim, state: State) -> Bool {
