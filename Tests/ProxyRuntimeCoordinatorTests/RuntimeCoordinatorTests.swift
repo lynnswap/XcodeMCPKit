@@ -8,8 +8,8 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 
-@Suite(.serialized, .asyncTestCleanup)
-struct RuntimeCoordinatorTests {
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorProcessRoutingTests {
     @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
 
@@ -71,7 +71,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func defaultCoordinatorWithoutDiscoveryUsesStaticFallbackUpstream() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 0),
@@ -2017,6 +2017,10 @@ struct RuntimeCoordinatorTests {
         #expect(await oldUpstream.sentCount() == 0)
     }
 
+}
+
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorInitializationTests {
     @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOnIdleActiveRoute()
         async throws
     {
@@ -2839,7 +2843,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
@@ -2899,7 +2903,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerCancelsOriginalInitTimeoutBeforeRetryingInitializedNotificationOverload()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
@@ -2964,7 +2968,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerInitializeTimeoutStaysArmedWhileInitializedNotificationIsInFlight()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = BlockingInitializedNotificationUpstreamClient()
@@ -3011,7 +3015,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func duplicateInitializeResponseCannotClearAcceptedResponseOwnership() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = BlockingInitializedNotificationUpstreamClient()
@@ -3055,7 +3059,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func initializeManagerRearmsRetryTimeoutOnlyWhilePendingInitializesRemain() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let manager = InitializeManager(brokerState: CanonicalHandshakeState())
@@ -3107,7 +3111,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func initializeManagerAllowsOnlyOneCrossSourcePrimaryPublicationWinner() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let canonical = CanonicalHandshakeState()
@@ -3156,7 +3160,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRunsSecondaryWarmupAfterRecoveredInitializedNotification()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -3220,7 +3224,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerSecondaryWarmInitRetriesWhenInitializedNotificationSendOverloads()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -3278,7 +3282,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerBuffersUnmappedNotificationsAfterInitializeUntilNotificationClientConnects()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3337,7 +3341,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRoutesUnmappedNotificationsDuringInitializeHandshake() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3395,7 +3399,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerBuffersUnmappedNotificationsForCachedInitializeSessionsUntilClientConnects()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3449,7 +3453,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDoesNotRecreateRemovedSessionWhenInitializeCompletes() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3495,7 +3499,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDoesNotApplyRemovedInitializeStateToRecreatedSession() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3552,7 +3556,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerIgnoresRemovedInitializeResponseBeforeUpstreamStateClears() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3610,7 +3614,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerCancelsWaiterOwnedPrimaryRetryWhenSessionIsRemoved()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3665,7 +3669,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerCancelsOnlyRemovedInitializeReadinessWaiter() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3732,7 +3736,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRoutesUnmappedNotificationsToCachedInitializeSessionsUntilClientConnects()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -3814,7 +3818,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerTimeoutResetsInitState() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3863,7 +3867,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerShutdownFailsPendingInitializeRequests() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3888,7 +3892,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerTimeoutDoesNotClearRecreatedSessionInitializeRoutingState()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3927,10 +3931,14 @@ struct RuntimeCoordinatorTests {
         #expect(replacementSnapshotAfterTimeout.generation == replacementSnapshotBeforeTimeout.generation)
     }
 
+}
+
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorRecoveryTests {
     @Test func sessionManagerInitializeErrorDoesNotClearRecreatedSessionInitializeRoutingState()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -3989,7 +3997,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSharedToolsListTimeoutStartsFreshControlPlaneLoad() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4057,7 +4065,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSharedToolsListReusesInFlightPrewarm() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4116,7 +4124,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerSharedToolsListPromotesPartlyConsumedSharedTimeout()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4188,7 +4196,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSharedToolsListCancellationCancelsLastWaiterLoad() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4230,7 +4238,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSharedToolsListStopsPromotingAfterLoadBecomesShared() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4301,7 +4309,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerPromotedToolsListCancellationRemovesMigratedWaiter() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4379,7 +4387,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSharedToolsListTimeoutCancelsStalePrewarmLoad() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4454,7 +4462,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerLateToolsListResponseDoesNotReseedCanonicalCatalog() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4506,7 +4514,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func processRoutedToolsListRetriesSiblingUpstreamAfterExit() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -4561,7 +4569,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerLiveXcodeListWindowsTimeoutStartsFreshControlPlaneLoad()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -4628,7 +4636,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListWaitsForCompleteCatalogDespiteKnownOwner()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let olderUpstream = TestUpstreamClient()
@@ -4725,7 +4733,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListUnionsFallbackCatalogAfterOwnerIsLearned()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let fallbackUpstream = TestUpstreamClient()
@@ -4817,7 +4825,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListWaitsForStalledRouteBeforePublishingCompleteCatalog()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let olderUpstream = TestUpstreamClient()
@@ -4886,7 +4894,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListCompletesCachedProcessCatalogWithFreshRoutes()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let olderUpstream = TestUpstreamClient()
@@ -4976,7 +4984,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListKeepsCachedProcessCatalogWhenFreshRouteFails()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let olderUpstream = TestUpstreamClient()
@@ -5045,7 +5053,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetriesPendingProcessCatalogAfterQuarantinedRouteRecovers()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -5144,7 +5152,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListWaitsWhileCachedProcessCatalogIsIncomplete()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let olderUpstream = TestUpstreamClient()
@@ -5219,7 +5227,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerEmptyProcessCatalogPreservesExistingCatalogButInvalidatesIncompleteSurface()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let existingUpstream = TestUpstreamClient()
@@ -5301,7 +5309,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRecordsProcessCatalogBeforeDisabledToolFiltering()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -5372,7 +5380,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerTreatsSingleProcessEmptyToolsCatalogAsMissingSurface()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -5438,7 +5446,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerCancelsCatalogRetryButPreservesMissingRouteOnDebugReset()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -5504,7 +5512,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerCancelsStaleCatalogRetryAndKeepsMonotonicAttemptBackoff()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -5601,7 +5609,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerToolsListSkipsUnavailableProcessRouteCatalog() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let badUpstream = TestUpstreamClient()
@@ -5667,7 +5675,7 @@ struct RuntimeCoordinatorTests {
     @Test func clearingLastCatalogSourceInvalidatesCatalogBeforeSlotGenerationReplacement()
         throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 80446, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
@@ -5728,7 +5736,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func catalogSourceRebindRejectsSiblingProofReplacedBeforeCommit() throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 80447, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
@@ -5777,7 +5785,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func catalogSourceRebindRejectsSiblingClearedAfterSelection() throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 80448, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
@@ -5846,7 +5854,7 @@ struct RuntimeCoordinatorTests {
     @Test func processRouteCatalogCooldownExcludesSiblingSlotsFromScheduling()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let failedTarget = xcodeProcessTarget(processID: 80424, xcodeVersion: "27.0")
@@ -5928,7 +5936,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListRetriesSiblingBeforeDroppingProcessCatalog()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let unavailableUpstream = AlwaysUnavailableUpstreamClient(reason: .startFailed)
@@ -5981,7 +5989,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListSiblingRetryUsesSharedDeadline()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let firstUpstream = TestUpstreamClient()
@@ -6031,7 +6039,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerProcessToolsListPropagatesCancellation() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -6084,7 +6092,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerUnavailableUncatalogedRouteRecomputesRemainingProcessSurface()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let catalogedTarget = xcodeProcessTarget(processID: 80463, xcodeVersion: "27.0")
@@ -6121,7 +6129,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerForegroundProcessCatalogSucceedsAfterOverlappingActivationCatalogCompletes()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 80438, xcodeVersion: "27.0")
@@ -6218,7 +6226,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListClearsSiblingCanonicalCatalogWhenProcessRouteUnavailable()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 80431, xcodeVersion: "27.0")
@@ -6252,7 +6260,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenProcessRouteUnavailable()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let badTarget = xcodeProcessTarget(processID: 80432, xcodeVersion: "27.0")
@@ -6296,7 +6304,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenProcessRouteRetires()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let retiredUpstream = TestUpstreamClient()
@@ -6351,7 +6359,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetiringCatalogedProcessRoutePublishesToolsListChangedOnce()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -6405,7 +6413,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRouteUnavailableAfterUpstreamClearDoesNotRepublishToolsListChanged()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 80446, xcodeVersion: "27.0")
@@ -6460,7 +6468,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerMarkingSameProcessRouteUnavailableTwiceDoesNotRepublishToolsListChanged()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 80447, xcodeVersion: "27.0")
@@ -6516,10 +6524,14 @@ struct RuntimeCoordinatorTests {
         #expect(manager.cachedToolsListResult() == nil)
     }
 
+}
+
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorCatalogTests {
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUncatalogedProcessRouteRetires()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let uncatalogedUpstream = TestUpstreamClient()
@@ -6568,7 +6580,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListResyncsSurfaceAndInvalidatesCatalogWhenSourceClears()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let clearedTarget = xcodeProcessTarget(processID: 80434, xcodeVersion: "27.0")
@@ -6610,7 +6622,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerToolsListDoesNotFallbackWhenAllProcessRoutesUnavailable()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -6651,7 +6663,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerToolsListSkipsColdProcessRouteCatalog() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let coldUpstream = TestUpstreamClient()
@@ -6730,7 +6742,7 @@ struct RuntimeCoordinatorTests {
     @Test func documentationCandidatesIgnoreWorkspaceOwnersAndKeepUsableProcesses()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let badTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
@@ -6767,7 +6779,7 @@ struct RuntimeCoordinatorTests {
     @Test func runtimeDocumentationDiscoveryPreservesDiscoveryOrderExceptUnavailableProcessIDs()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let routeFirst = xcodeProcessTarget(processID: 80430, xcodeVersion: "26.6")
@@ -6817,7 +6829,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func documentationCandidatesSkipUnavailableWorkspaceOwner() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let badTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
@@ -6853,7 +6865,7 @@ struct RuntimeCoordinatorTests {
     @Test func runtimeDocumentationDiscoveryKeepsLiveTargetsOutsideUsableRouteCandidates()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let ownerTarget = xcodeProcessTarget(processID: 80428, xcodeVersion: "27.0")
@@ -6901,7 +6913,7 @@ struct RuntimeCoordinatorTests {
     @Test func runtimeDocumentationDiscoveryKeepsLiveTargetsOutsideRuntimeRoutes()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let staleTarget = xcodeProcessTarget(processID: 80424, xcodeVersion: "27.0")
@@ -6936,7 +6948,7 @@ struct RuntimeCoordinatorTests {
     @Test func runtimeDocumentationDiscoveryDoesNotReaddUnavailableRuntimeRouteTargets()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let unavailableTarget = xcodeProcessTarget(processID: 80426, xcodeVersion: "27.0")
@@ -6971,7 +6983,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerFansOutXcodeListWindowsAcrossProcessRoutesAndCachesOwners()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -7142,7 +7154,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerXcodeListWindowsRetriesSiblingBeforeDroppingProcessRoute()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let unavailableUpstream = AlwaysUnavailableUpstreamClient(reason: .startFailed)
@@ -7211,7 +7223,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerXcodeListWindowsRetriesSiblingAfterToolError()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let firstUpstream = TestUpstreamClient()
@@ -7288,7 +7300,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRejectsDuplicateWorkspaceOwnersAcrossProcesses() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -7447,7 +7459,7 @@ struct RuntimeCoordinatorTests {
     @Test func unavailableCachedWorkspaceOwnerDoesNotConflictWithAvailableOwner()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let unavailableTarget = xcodeProcessTarget(processID: 616, xcodeVersion: "27.0")
@@ -7517,7 +7529,7 @@ struct RuntimeCoordinatorTests {
     @Test func unusableCachedWorkspaceOwnerDoesNotConflictWithUsableOwner()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let unusableTarget = xcodeProcessTarget(processID: 636, xcodeVersion: "27.0")
@@ -7579,7 +7591,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func proxyTabIdentifierDisambiguatesDuplicateWorkspaceOwners() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target0 = xcodeProcessTarget(processID: 618, xcodeVersion: "27.0")
@@ -7650,7 +7662,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func proxyTabIdentifierDisambiguatesRawTabCollisionWithinProcess() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -7755,7 +7767,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerSkipsUninitializedProcessRoutesDuringWindowFanout()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -7900,8 +7912,12 @@ struct RuntimeCoordinatorTests {
         }
     }
 
+}
+
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorWindowCatalogTests {
     @Test func sessionManagerKeepsWindowlessProcessRouteAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -8004,7 +8020,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundRefreshSkipsUnavailableProcessRoutes() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -8079,7 +8095,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundRefreshUsesUsableSiblingWhenPrimaryUnavailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let primaryUpstream = TestUpstreamClient()
@@ -8140,7 +8156,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolWithoutOwnerHintRoutesWhenSingleProcess() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -8178,7 +8194,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolWithoutOwnerHintRoutesWhenSingleCatalogCandidate() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -8222,7 +8238,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolRoutesToCachedWindowOwner() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target0 = xcodeProcessTarget(processID: 610, xcodeVersion: "27.0")
@@ -8286,7 +8302,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func rawTabCollisionRequiresWorkspaceDisambiguation() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -8404,7 +8420,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func workspacePathTakesPrecedenceOverRawTabFallback() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
@@ -8460,7 +8476,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func proxyTabIdentifierIsRewrittenBeforeForwarding() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -8602,7 +8618,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerRoutingReResolvesWindowAndRouteSnapshotsWhenProofRouteChanges() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
         let managerBox = WeakRuntimeCoordinatorBox()
@@ -8670,7 +8686,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target0 = xcodeProcessTarget(processID: 628, xcodeVersion: "27.0")
@@ -8723,7 +8739,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolRoutesToUsableSlotInOwningProcess() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 612, xcodeVersion: "27.0")
@@ -8769,7 +8785,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundProcessRouteUsesIdleSiblingWhenPrimaryIsBusy() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 614, xcodeVersion: "27.0")
@@ -8859,7 +8875,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolKeepsProcessRouteWhenSiblingSlotExits() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
@@ -8909,7 +8925,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerProcessCatalogRebindsSourceAndInvalidatesAfterLastSlotExit()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 615, xcodeVersion: "27.0")
@@ -8948,7 +8964,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func nonOwnerUnionToolRoutesToCatalogOwnerProcess() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target0 = xcodeProcessTarget(processID: 613, xcodeVersion: "27.0")
@@ -8992,7 +9008,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func publicXcodeListWindowsRoutesToLocalAggregation() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target0 = xcodeProcessTarget(processID: 618, xcodeVersion: "27.0")
@@ -9035,7 +9051,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func liveXcodeListWindowsAggregatesOnlyCatalogAdvertisedRoutes() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9098,7 +9114,7 @@ struct RuntimeCoordinatorTests {
     @Test func pinnedLiveXcodeListWindowsReturnsClientProxyTabIdentifiers()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -9171,7 +9187,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func liveXcodeListWindowsIgnoresCatalogsFromUnavailableRoutes() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9235,8 +9251,12 @@ struct RuntimeCoordinatorTests {
         #expect(message.contains("/Work/B.xcworkspace"))
     }
 
+}
+
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorWindowRoutingTests {
     @Test func liveXcodeListWindowsClearsOwnersForCatalogFilteredRoutes() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9317,7 +9337,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func liveXcodeListWindowsSkipsCatalogedRoutesWithoutTool() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9356,7 +9376,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolRefreshesWindowsOnCacheMissBeforeRouting() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9440,7 +9460,7 @@ struct RuntimeCoordinatorTests {
     @Test func ownerBoundToolRefreshesStaleWorkspaceConflictBeforeRejecting()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9553,7 +9573,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundRefreshUsesUncatalogedRoutesForOwnerDiscovery() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9611,7 +9631,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolRejectsWhenOwnerCannotBeResolvedAfterRefresh() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -9697,7 +9717,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func ownerBoundToolRejectsWhenOwnerProcessLacksTool() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target0 = xcodeProcessTarget(processID: 640, xcodeVersion: "27.0")
@@ -9753,7 +9773,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerLiveXcodeListWindowsCancellationCancelsLastWaiterLoad()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -9803,7 +9823,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPromotedLiveXcodeListWindowsCancellationRemovesMigratedWaiter()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -9881,7 +9901,7 @@ struct RuntimeCoordinatorTests {
     @Test func shutdownDrainsCancelledLiveXcodeListWindowsLoadWithoutUpstreamResponse()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10016,7 +10036,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerEagerInitializeRestartsAfterExit() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10049,7 +10069,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerStillAutoInitializesWhenRequestTimeoutIsDisabled() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10075,7 +10095,7 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10131,7 +10151,7 @@ struct RuntimeCoordinatorTests {
         )
         let config = try ProxyConfig.resolving(publicConfiguration)
 
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10161,7 +10181,7 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10234,7 +10254,7 @@ struct RuntimeCoordinatorTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10304,7 +10324,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSendsInitializedOnce() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10339,7 +10359,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerSendsInitializedBeforeQueuedRequestAfterWarmInit() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -10439,7 +10459,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerPrimaryExitClearsCachedInitializeResult() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10492,7 +10512,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerPrimaryEagerRetryClearsCanonicalToolsCatalog() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10520,7 +10540,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerKeepsQueuedRequestsWaitingWhileReinitializeIsInFlight() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -10620,7 +10640,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerSecondaryExitClearsCachedInitializeResultWhenPrimaryAlreadyDown()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -10703,7 +10723,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerEagerInitializeRerunsPrimaryInitWhenLastInitializedUpstreamExits()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -10782,7 +10802,7 @@ struct RuntimeCoordinatorTests {
         sessionManagerRetiresStaticUpstreamAfterPrimaryWarmInitErrorWhenLastInitializedUpstreamExited()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -10867,7 +10887,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerPinsSessionsRoundRobinAcrossUpstreams() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -10951,7 +10971,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDropsUnmappedNotificationsAfterInitializeRoutingEnds() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11003,7 +11023,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerDropsUnmappedNotificationsWhenNoPinnedTargetsExist()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11048,7 +11068,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDropsUnmappedResponsesEvenWhenPinnedTargetsExist() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -11076,7 +11096,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDebugSnapshotCapturesTrafficAndStderr() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -11180,7 +11200,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerReturnsNilWhenAllUpstreamsAreQuarantined() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11274,7 +11294,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerEnqueueOnUpstreamSlotStartsRecoveryProbeWhenAllUpstreamsAreQuarantined() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -11341,7 +11361,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerQueuedRequestStartsProbeForExpiredQuarantinedUpstream() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11462,10 +11482,14 @@ struct RuntimeCoordinatorTests {
         activePromise.fail(CancellationError())
     }
 
+}
+
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+struct RuntimeCoordinatorSchedulingTests {
     @Test func sessionManagerQueuedPreferredRequestDoesNotBlockLaterGenericDispatch()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11569,7 +11593,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPreferredRequestFailsWhenAllPreferredUpstreamsUnusable()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let uptimeClock = TestUptimeClock(nowUptimeNanoseconds: 20_000_000_000)
@@ -11622,7 +11646,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRepinsAfterUpstreamExit() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11680,7 +11704,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRepinsWhenPinnedUpstreamIsQuarantinedByTimeouts() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -11721,7 +11745,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerExitClearsMappingsAndKeepsServingOnOtherUpstreams() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let timeoutEventLoop = NIOAsyncTestingEventLoop()
@@ -11810,7 +11834,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerReturnsOverloadedErrorWhenUpstreamRejectsSend() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = AlwaysOverloadedUpstreamClient()
@@ -11850,7 +11874,7 @@ struct RuntimeCoordinatorTests {
 
     @Test func sessionManagerInitializeReturnsOverloadedErrorWhenUpstreamRejectsSend() async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = AlwaysOverloadedUpstreamClient()
@@ -11879,7 +11903,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerRepinsWhenPinnedUpstreamBecomesOverloaded() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -11952,7 +11976,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerRetiresStaticUpstreamWhenInitializedNotificationSendOverloads()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
@@ -11975,7 +11999,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPrimaryInitializedNotificationOverloadClearsSecondaryStateAndToolsCache()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -12005,7 +12029,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerPrimaryWarmReinitOverloadKeepsHealthySecondaryAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -12051,7 +12075,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPrimaryWarmReinitOverloadReturnsPendingInitializeAndRetiresStaticPrimary()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -12124,7 +12148,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPrimaryWarmReinitOverloadRetiresStaticPrimaryWhenSecondaryIsQuarantined()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -12179,7 +12203,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerIgnoresStaleSecondaryInitializedNotificationAfterReset()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -12220,7 +12244,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerShutdownStopsUpstreamsBeforeDrainingRuntimeTasks() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
@@ -12297,7 +12321,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerPrimaryWarmReinitOverloadFallsBackToEagerInitAfterWarmRetryFailure()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
@@ -12456,7 +12480,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerAbandonQueuedRequestFailsPendingFuture() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12530,7 +12554,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerAbandonRequestLeaseDropsLateResponseAndReleasesSlot() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
@@ -12591,7 +12615,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDoesNotReactivateAbandonedLease() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12631,7 +12655,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerProtocolViolationReleasesActiveLeaseAndAllowsNextRequest() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
@@ -12717,7 +12741,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerProtocolViolationQuarantinesBrokenUpstream() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12757,7 +12781,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerUpstreamExitClearsCanonicalToolsCatalogImmediately() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12787,7 +12811,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerProtocolViolationClearsCanonicalToolsCatalogImmediately()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12822,7 +12846,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerProtocolViolationRestartsWarmInitializeForPrimary() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12860,7 +12884,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerProtocolViolationFailsQueuedRequestsWhenNoHealthyUpstreamRemains() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -12941,7 +12965,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerFailsQueuedRequestsWhenHealthProbeRecoveryFails() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -13002,7 +13026,7 @@ struct RuntimeCoordinatorTests {
     @Test func sessionManagerTimeoutQuarantineFailsQueuedRequestsWhenNoHealthyUpstreamRemains()
         async throws
     {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -13087,7 +13111,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDebugResetClearsSessionsLeasesAndCache() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
@@ -13122,7 +13146,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDebugResetClearsProcessRouteCooldowns() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 523, xcodeVersion: "27.0")
@@ -13150,7 +13174,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDebugResetClearsXcodeWindowOwners() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 522, xcodeVersion: "27.0")
@@ -13194,7 +13218,7 @@ struct RuntimeCoordinatorTests {
     }
 
     @Test func sessionManagerDebugResetCancelsQueuedRequests() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
@@ -13590,26 +13614,26 @@ struct RuntimeCoordinatorTests {
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 
-    private func waitForProcessRouteActivationInitialized(
-        _ manager: RuntimeCoordinator,
-        processID: pid_t,
-        upstreamIndex expectedUpstreamIndex: Int,
-        attempt expectedAttempt: Int,
-        message: String
-    ) async throws {
-        _ = try await waitWithTimeout(message, timeout: .seconds(2)) {
-            while true {
-                if let snapshot = manager.processControlPlane.attemptSnapshot(processID: processID),
-                   [.initialized, .loadingCatalog].contains(snapshot.phase),
-                   snapshot.upstreamID.rawValue == expectedUpstreamIndex,
-                   snapshot.attemptID.rawValue == expectedAttempt {
-                    return
-                }
-                try await Task.sleep(for: .milliseconds(10))
+}
+
+private func waitForProcessRouteActivationInitialized(
+    _ manager: RuntimeCoordinator,
+    processID: pid_t,
+    upstreamIndex expectedUpstreamIndex: Int,
+    attempt expectedAttempt: Int,
+    message: String
+) async throws {
+    _ = try await waitWithTimeout(message, timeout: .seconds(2)) {
+        while true {
+            if let snapshot = manager.processControlPlane.attemptSnapshot(processID: processID),
+               [.initialized, .loadingCatalog].contains(snapshot.phase),
+               snapshot.upstreamID.rawValue == expectedUpstreamIndex,
+               snapshot.attemptID.rawValue == expectedAttempt {
+                return
             }
+            try await Task.sleep(for: .milliseconds(10))
         }
     }
-
 }
 
 private actor AutoToolsListUpstreamClient: UpstreamSlotControlling {

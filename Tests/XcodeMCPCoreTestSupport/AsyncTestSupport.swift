@@ -153,11 +153,18 @@ package actor RecordedValues<Value: Sendable> {
 
 package enum TestResourceGate {
     private static let processHeavyStdioAdapterGate = AsyncResourceGate()
+    private static let proxyRuntimeSuiteGate = AsyncResourceGate()
 
     package static func withProcessHeavyStdioAdapterAccess<T>(
         _ operation: () async throws -> T
     ) async throws -> T {
         try await processHeavyStdioAdapterGate.withAccess(operation)
+    }
+
+    package static func withProxyRuntimeSuiteAccess<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        try await proxyRuntimeSuiteGate.withAccess(operation)
     }
 }
 

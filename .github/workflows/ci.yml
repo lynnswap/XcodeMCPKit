@@ -41,10 +41,24 @@ jobs:
 
       - name: Run package tests
         run: |
-          # Keep the large serialized runtime suite in its own Swift Testing process.
+          # Bound each Swift Testing process below the runner's observed stall threshold.
+          for suite in \
+            RuntimeCoordinatorProcessRoutingTests \
+            RuntimeCoordinatorInitializationTests \
+            RuntimeCoordinatorRecoveryTests \
+            RuntimeCoordinatorCatalogTests \
+            RuntimeCoordinatorWindowCatalogTests \
+            RuntimeCoordinatorWindowRoutingTests \
+            RuntimeCoordinatorSchedulingTests
+          do
+            ./scripts/ci-test-watchdog.sh swift test \
+              --no-parallel \
+              --filter "${suite}" \
+              -Xswiftc -strict-concurrency=minimal
+          done
           ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \
-            --filter ProxyRuntimeCoordinatorTests \
+            --filter 'ControlPlaneAuthorityTests|JSONRPCResponseRouterTests|ManagedUpstreamSlotTests|ProxyUpstreamRequestRuntimeTests|ToolCatalogStartupLogFormatterTests|UpstreamReadinessTests' \
             -Xswiftc -strict-concurrency=minimal
           ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \

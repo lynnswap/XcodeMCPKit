@@ -35,8 +35,25 @@ package struct AsyncTestCleanupTrait: SuiteTrait, TestTrait, TestScoping {
     }
 }
 
+/// Serializes sibling proxy runtime suites through their complete cleanup scope.
+package struct ProxyRuntimeSuiteSerialTrait: SuiteTrait, TestScoping {
+    package init() {}
+
+    package func provideScope(
+        for test: Test,
+        testCase: Test.Case?,
+        performing function: @Sendable () async throws -> Void
+    ) async throws {
+        try await TestResourceGate.withProxyRuntimeSuiteAccess(function)
+    }
+}
+
 extension Trait where Self == AsyncTestCleanupTrait {
     package static var asyncTestCleanup: Self { Self() }
+}
+
+extension Trait where Self == ProxyRuntimeSuiteSerialTrait {
+    package static var proxyRuntimeSuiteSerial: Self { Self() }
 }
 
 private final class AsyncTestCleanupContext: @unchecked Sendable {
@@ -389,8 +406,17 @@ package func shutdown(_ group: EventLoopGroup, timeout: Duration = .seconds(5)) 
     }
 }
 
+/// Borrows NIO's process-owned group for serialized tests that only inject an event loop.
+package func borrowSharedTestEventLoopGroup() -> MultiThreadedEventLoopGroup {
+    MultiThreadedEventLoopGroup.singleton
+}
+
 /// Test-only `defer` hook that requires an ``AsyncTestCleanupTrait`` scope.
 package func shutdownAndWait(_ group: EventLoopGroup) {
+    if let group = group as? MultiThreadedEventLoopGroup,
+       group === MultiThreadedEventLoopGroup.singleton {
+        return
+    }
     precondition(
         registerAsyncTestCleanup(
             description: "event loop group shutdown failed",

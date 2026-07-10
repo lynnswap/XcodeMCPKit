@@ -8,7 +8,7 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 
-@Suite(.serialized, .asyncTestCleanup)
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
 struct UpstreamReadinessTests {
     @discardableResult
     private func waitForReadinessPollSleep(

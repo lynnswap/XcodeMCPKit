@@ -21,7 +21,7 @@ func testOperationLease(_ upstreamIndex: Int, generation: UInt64 = 1) -> Upstrea
     )
 }
 
-@Suite(.serialized, .asyncTestCleanup)
+@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
 struct ControlPlaneAuthorityTests {
     @Test func catalogCommitPublishesProcessAndCanonicalStateAtomically() throws {
         let target = xcodeProcessTarget(processID: 41001, xcodeVersion: "27.0")
@@ -169,7 +169,7 @@ struct ControlPlaneAuthorityTests {
     }
 
     @Test func catalogCommitUsesActualFallbackResponseProof() throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 41016, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
@@ -369,7 +369,7 @@ struct ControlPlaneAuthorityTests {
     }
 
     @Test func catalogCommitRejectsTopologicallyCurrentButClearedResponseSource() throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 41020, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
@@ -414,7 +414,7 @@ struct ControlPlaneAuthorityTests {
     }
 
     @Test func catalogCommitRejectsActualResponseFromReplacedGeneration() throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 41017, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
@@ -741,7 +741,7 @@ struct ControlPlaneAuthorityTests {
     }
 
     @Test func observerCannotBindRetiredSlotEventsToCurrentGeneration() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 1),
@@ -782,7 +782,7 @@ struct ControlPlaneAuthorityTests {
     @Test func serverResponseFromOldGenerationCannotSendThroughReplacementSlot() async throws {
         let oldSlot = TestUpstreamClient()
         let replacementSlot = TestUpstreamClient()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let manager = RuntimeCoordinator(
@@ -978,7 +978,7 @@ struct ControlPlaneAuthorityTests {
     @Test func sendBoundaryRejectsRouteReplacedWhileRuntimeTaskIsSuspended() async throws {
         let target = xcodeProcessTarget(processID: 41011, xcodeVersion: "27.0")
         let upstream = StartGateUpstreamClient()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 1),
