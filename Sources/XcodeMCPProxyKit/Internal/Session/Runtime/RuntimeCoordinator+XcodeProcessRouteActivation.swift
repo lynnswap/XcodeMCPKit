@@ -20,19 +20,26 @@ extension RuntimeCoordinator {
         guard let initializeClaim = upstreamHealthManager.currentCatalogActivationClaim(
             upstreamIndex: lease.upstreamIndex
         ), let activationProof = initializeClaim.topologyProof else {
-            return upstreamTopology.withValidated(completionProof) {
-                processControlPlane.completeCatalog(
-                    outcome,
-                    lease: lease,
-                    nowUptimeNanoseconds: nowUptimeNanoseconds
-                )
-            } ?? .discarded(.upstreamReplaced, .none)
+            var catalogCommit: CatalogCommit?
+            guard upstreamTopology.withValidated(completionProof, {
+                catalogCommit = upstreamHealthManager.withInitializedSource(completionProof) {
+                    processControlPlane.completeCatalog(
+                        outcome,
+                        lease: lease,
+                        nowUptimeNanoseconds: nowUptimeNanoseconds
+                    )
+                }
+            }) != nil, let catalogCommit else {
+                return .discarded(.upstreamReplaced, .none)
+            }
+            return catalogCommit
         }
         var catalogCommit: CatalogCommit?
         var activationCommit: UpstreamHealthManager.CatalogActivationCommit?
         guard upstreamTopology.withValidated([completionProof, activationProof], {
             activationCommit = upstreamHealthManager.commitCatalogActivation(
-                initializeClaim
+                initializeClaim,
+                sourceProof: completionProof
             ) { _ in
                 let result = processControlPlane.completeCatalog(
                     outcome,
@@ -49,13 +56,19 @@ extension RuntimeCoordinator {
         }
         switch activationCommit {
         case .notOwned:
-            return upstreamTopology.withValidated(completionProof) {
-                processControlPlane.completeCatalog(
-                    outcome,
-                    lease: lease,
-                    nowUptimeNanoseconds: nowUptimeNanoseconds
-                )
-            } ?? .discarded(.upstreamReplaced, .none)
+            var fallbackCommit: CatalogCommit?
+            guard upstreamTopology.withValidated(completionProof, {
+                fallbackCommit = upstreamHealthManager.withInitializedSource(completionProof) {
+                    processControlPlane.completeCatalog(
+                        outcome,
+                        lease: lease,
+                        nowUptimeNanoseconds: nowUptimeNanoseconds
+                    )
+                }
+            }) != nil, let fallbackCommit else {
+                return .discarded(.upstreamReplaced, .none)
+            }
+            return fallbackCommit
         case .kept:
             return preconditionedCatalogCommit(catalogCommit)
         case .completed(let timeout):

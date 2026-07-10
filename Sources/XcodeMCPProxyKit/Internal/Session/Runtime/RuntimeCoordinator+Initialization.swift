@@ -891,22 +891,31 @@ extension RuntimeCoordinator {
             )
         }
         debugRecorder.resetUpstream(upstreamIndex)
-        if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-           let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route),
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+            removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
+            return
+        }
+        if let replacementUpstreamIndex = firstUsableInitializedUpstreamIndex(in: route),
            let replacementProof = upstreamHealthManager.topologyProof(
                for: replacementUpstreamIndex
-           )
-        {
-            applyProcessControlPlaneTransition(
-                processControlPlane.rebindCatalogSource(
+           ),
+           let transition = upstreamTopology.withValidated(replacementProof, {
+               processControlPlane.rebindCatalogSource(
                     processID: route.target.processID,
                     from: proof,
                     to: replacementProof
                 )
-            )
-        } else {
-            removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
+           }) {
+            applyProcessControlPlaneTransition(transition)
+            return
         }
+        applyProcessControlPlaneTransition(
+            processControlPlane.invalidateCatalogSource(
+                processID: route.target.processID,
+                source: proof
+            )
+        )
+        removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
     }
 
     @discardableResult

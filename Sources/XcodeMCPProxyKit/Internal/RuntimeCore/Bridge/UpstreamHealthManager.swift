@@ -263,6 +263,20 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
+    func withInitializedSource<Result>(
+        _ proof: UpstreamTopologyProof,
+        _ operation: () -> Result
+    ) -> Result? {
+        state.withLockedValue { state in
+            guard Self.isActive(proof, state: state),
+                  let source = state.upstreamStates[proof.slotID],
+                  source.isInitialized else {
+                return nil
+            }
+            return operation()
+        }
+    }
+
     func primaryInitInFlight() -> Bool {
         state.withLockedValue { state in
             guard let primary = Self.activeIndices(in: state).first else { return false }
@@ -742,12 +756,16 @@ final class UpstreamHealthManager: Sendable {
 
     func commitCatalogActivation(
         _ claim: InitializeClaim,
+        sourceProof: UpstreamTopologyProof,
         commit: (InitializeClaim) -> CatalogActivationDisposition
     ) -> CatalogActivationCommit {
         state.withLockedValue { state in
             let upstreamIndex = claim.upstreamIndex
             guard Self.owns(claim, state: state),
                   state.upstreamStates[upstreamIndex].isInitialized,
+                  Self.isActive(sourceProof, state: state),
+                  let source = state.upstreamStates[sourceProof.slotID],
+                  source.isInitialized,
                   claim.owner == .processRouteActivation,
                   state.upstreamStates[upstreamIndex].initializeClaimPhase
                     == .initializedAwaitingCatalog else { return .notOwned }

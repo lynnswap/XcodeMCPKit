@@ -413,15 +413,27 @@ extension RuntimeCoordinator {
         let upstreamIndex = operationLease.upstreamIndex
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            _ = upstreamTopology.withValidated(operationLease.proof) {
-                clearUpstreamState(proof: operationLease.proof)
-                if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex)
-                    == false {
-                    markXcodeProcessRouteUnavailable(
-                        upstreamIndex: upstreamIndex,
-                        reason: "upstream_\(reason)"
-                    )
-                }
+            var cleared: (
+                timeout: RuntimeScheduledTimeout?,
+                initUpstreamID: Int64?,
+                didReceiveInitializeResponse: Bool,
+                didSendInitialized: Bool
+            )?
+            guard upstreamTopology.withValidated(operationLease.proof, {
+                cleared = upstreamHealthManager.clearUpstreamState(operationLease.proof)
+            }) != nil else { return }
+            if let cleared {
+                finishClearingUpstreamState(
+                    proof: operationLease.proof,
+                    cleared: cleared,
+                    resetsProcessRouteActivation: true
+                )
+            }
+            if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
+                markXcodeProcessRouteUnavailable(
+                    upstreamIndex: upstreamIndex,
+                    reason: "upstream_\(reason)"
+                )
             }
         case .shuttingDown:
             break

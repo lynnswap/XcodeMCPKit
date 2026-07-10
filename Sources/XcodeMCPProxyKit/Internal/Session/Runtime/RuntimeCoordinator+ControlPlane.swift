@@ -683,7 +683,13 @@ extension RuntimeCoordinator {
                     rpcHandle.cancel()
                 }
             } catch is CancellationError {
-                throw CancellationError()
+                guard Task.isCancelled == false else {
+                    throw CancellationError()
+                }
+                lastFailure = (
+                    upstreamIndex,
+                    UpstreamSlotScheduler.AcquisitionError.unavailable
+                )
             } catch is TimeoutError {
                 lastFailure = (upstreamIndex, TimeoutError())
             } catch {

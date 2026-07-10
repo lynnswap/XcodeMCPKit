@@ -182,6 +182,8 @@ struct ControlPlaneAuthorityTests {
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
         let preferredProof = try #require(
             manager.upstreamTopology.operationLease(
                 for: UpstreamSlotID(rawValue: 0)
@@ -252,12 +254,46 @@ struct ControlPlaneAuthorityTests {
         #expect(staleTransition.publishesToolsListChanged == false)
         #expect(authority.canonicalSourceProof() == oldProof)
 
+        let (lateLease, lateTransition) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: replacementProof,
+            nowUptimeNanoseconds: 3
+        ))
+        #expect(lateTransition.effects.isEmpty)
+        let lateRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(lateRPC), to: lateLease)
+        #expect(lateRPC.markRegistered(
+            registrationToken: UUID(),
+            operationLease: UpstreamOperationLease(
+                proof: oldProof,
+                slot: TestUpstreamClient()
+            )
+        ))
+
         let rebindTransition = authority.rebindCatalogSource(
             processID: target.processID,
             from: oldProof,
             to: replacementProof
         )
         #expect(rebindTransition.publishesToolsListChanged == false)
+        #expect(rebindTransition.effects.count == 1)
+        #expect(authority.validateCatalogLoad(lateLease))
+        for effect in rebindTransition.effects {
+            guard case .cancelRPC(let handle) = effect else {
+                Issue.record("source rebind must cancel the RPC bound to the cleared proof")
+                return
+            }
+            handle.cancel()
+        }
+        #expect(lateRPC.isCancelled())
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("FreshSiblingTool"), source: replacementProof),
+            lease: lateLease,
+            nowUptimeNanoseconds: 4
+        ) else {
+            Issue.record("source rebind must preserve the logical load for sibling fallback")
+            return
+        }
         #expect(
             authority.catalog(forProcessID: target.processID)?.upstreamProof
                 == replacementProof
@@ -274,6 +310,107 @@ struct ControlPlaneAuthorityTests {
         #expect(foreignTransition.effects.isEmpty)
         #expect(foreignTransition.publishesToolsListChanged == false)
         #expect(authority.canonicalSourceProof() == replacementProof)
+    }
+
+    @Test func catalogSourceInvalidationRequiresExactProof() throws {
+        let target = xcodeProcessTarget(processID: 41019, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let sourceProof = testTopologyProof(0)
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: sourceProof,
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("SourceBoundTool"), source: sourceProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected catalog commit to be accepted")
+            return
+        }
+
+        let staleTransition = authority.invalidateCatalogSource(
+            processID: target.processID,
+            source: testTopologyProof(0, generation: 2)
+        )
+        #expect(staleTransition.publishesToolsListChanged == false)
+        #expect(authority.catalog(forProcessID: target.processID) != nil)
+        #expect(authority.canonicalSourceProof() == sourceProof)
+
+        let (lateLease, lateTransition) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: sourceProof,
+            nowUptimeNanoseconds: 3
+        ))
+        #expect(lateTransition.effects.isEmpty)
+        let lateRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(lateRPC), to: lateLease)
+
+        let invalidation = authority.invalidateCatalogSource(
+            processID: target.processID,
+            source: sourceProof
+        )
+        #expect(invalidation.publishesToolsListChanged)
+        #expect(invalidation.effects.count == 1)
+        #expect(authority.validateCatalogLoad(lateLease) == false)
+        guard case .discarded(.attemptSuperseded, _) = authority.completeCatalog(
+            .usable(catalog("LateStaleTool"), source: sourceProof),
+            lease: lateLease,
+            nowUptimeNanoseconds: 4
+        ) else {
+            Issue.record("source invalidation must reject a late load from the cleared proof")
+            return
+        }
+        #expect(authority.catalog(forProcessID: target.processID) == nil)
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(authority.canonicalSourceProof() == nil)
+    }
+
+    @Test func catalogCommitRejectsTopologicallyCurrentButClearedResponseSource() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 41020, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let clearedProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        let preferredProof = manager.operationLeaseForTest(upstreamIndex: 1).proof
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: preferredProof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        _ = try #require(manager.upstreamHealthManager.clearUpstreamState(clearedProof))
+
+        guard case .discarded(let reason, _) = manager.commitProcessCatalog(
+            .usable(catalog("LateClearedTool"), source: clearedProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("cleared source must not commit a late catalog response")
+            return
+        }
+
+        #expect(reason == .upstreamReplaced)
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalToolsCatalogRaw() == nil)
     }
 
     @Test func catalogCommitRejectsActualResponseFromReplacedGeneration() throws {
@@ -710,9 +847,11 @@ struct ControlPlaneAuthorityTests {
         DispatchQueue.concurrentPerform(iterations: 2) { contender in
             _ = topology.withValidated(proof) {
                 if contender == 0 {
-                    switch health.commitCatalogActivation(claim, commit: { _ in
-                        .complete
-                    }) {
+                    switch health.commitCatalogActivation(
+                        claim,
+                        sourceProof: proof,
+                        commit: { _ in .complete }
+                    ) {
                     case .completed:
                         terminalWinners.withLockedValue { $0.append("success") }
                     case .notOwned, .kept:

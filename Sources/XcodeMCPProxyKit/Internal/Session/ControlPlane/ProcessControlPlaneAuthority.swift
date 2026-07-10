@@ -334,6 +334,23 @@ final class ProcessControlPlaneAuthority: Sendable {
             }
             return effects
         }
+
+        func sourceBoundEffects(
+            to proof: UpstreamTopologyProof
+        ) -> [ProcessControlPlaneEffect] {
+            loads.values.flatMap { load in
+                load.rpcHandles.compactMap { handle in
+                    handle.isBound(to: proof) ? .cancelRPC(handle) : nil
+                }
+            }
+        }
+
+        func mustInvalidateWhenSourceIsLost(_ proof: UpstreamTopologyProof) -> Bool {
+            guard [.pending, .attaching, .initialized, .loadingCatalog].contains(phase) else {
+                return false
+            }
+            return upstreamProof == proof || sourceBoundEffects(to: proof).isEmpty == false
+        }
     }
 
     private struct RouteRecord: Sendable {
@@ -1293,13 +1310,25 @@ final class ProcessControlPlaneAuthority: Sendable {
     ) -> ProcessControlPlaneTransition {
         state.withLockedValue { state in
             guard oldProof != newProof,
-                  let catalog = state.catalogsByProcessID[processID],
-                  catalog.upstreamProof == oldProof,
-                  let record = Self.record(routeID: catalog.routeID, in: state),
-                  record.route.target.processID == processID,
+                  let key = Self.activeRecords(in: state).first(where: {
+                      $0.route.target.processID == processID
+                  })?.key,
+                  let record = state.recordsByKey[key],
                   record.route.upstreamIndices.contains(newProof.slotID.rawValue)
             else {
                 return .none
+            }
+
+            let effects = record.attempt?.sourceBoundEffects(to: oldProof) ?? []
+            guard let catalog = state.catalogsByProcessID[processID],
+                  catalog.routeID == record.route.id,
+                  catalog.upstreamProof == oldProof else {
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: false
+                )
             }
 
             let previousCanonicalRaw = state.canonicalToolsCatalogRaw
@@ -1312,9 +1341,47 @@ final class ProcessControlPlaneAuthority: Sendable {
             return ProcessControlPlaneTransition(
                 addedRoutes: [],
                 retiredRoutes: [],
-                effects: [],
+                effects: effects,
                 publishesToolsListChanged:
                     previousCanonicalRaw != state.canonicalToolsCatalogRaw
+            )
+        }
+    }
+
+    func invalidateCatalogSource(
+        processID: pid_t,
+        source proof: UpstreamTopologyProof
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            var effects: [ProcessControlPlaneEffect] = []
+            if let key = Self.activeRecords(in: state).first(where: {
+                $0.route.target.processID == processID
+            })?.key,
+               var record = state.recordsByKey[key],
+               let attempt = record.attempt,
+               attempt.mustInvalidateWhenSourceIsLost(proof) {
+                effects = attempt.detachedEffects()
+                record.attempt = nil
+                state.recordsByKey[key] = record
+            }
+            guard let catalog = state.catalogsByProcessID[processID],
+                  catalog.upstreamProof == proof else {
+                guard effects.isEmpty == false else { return .none }
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: false
+                )
+            }
+
+            Self.removeCatalog(processID: processID, from: &state)
+            let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
+            return ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: effects,
+                publishesToolsListChanged: projectionChanged
             )
         }
     }

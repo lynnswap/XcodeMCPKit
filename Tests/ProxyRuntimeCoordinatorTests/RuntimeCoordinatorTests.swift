@@ -5654,6 +5654,118 @@ struct RuntimeCoordinatorTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
     }
 
+    @Test func clearingLastCatalogSourceInvalidatesCatalogBeforeSlotGenerationReplacement()
+        throws
+    {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 80446, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let sourceProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: sourceProof,
+                nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+            .usable(
+                try jsonValue([
+                    "tools": [toolDescriptor(name: "GenerationBoundTool")],
+                ]),
+                source: sourceProof
+            ),
+            lease: lease,
+            nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+        ))
+        #expect(
+            manager.processControlPlane.catalog(forProcessID: target.processID)?.upstreamProof
+                == sourceProof
+        )
+
+        #expect(manager.clearUpstreamState(proof: sourceProof))
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalSourceProof() == nil)
+
+        let topologyTransition = try #require(
+            manager.upstreamTopology.replace(sourceProof, with: TestUpstreamClient())
+        )
+        manager.publishUpstreamTopology(topologyTransition.snapshot)
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalToolsCatalogRaw() == nil)
+        #expect(
+            manager.processControlPlane.pendingCatalogProcessIDs(
+                nowUptimeNs: manager.nowUptimeNanoseconds()
+            ).contains(target.processID)
+        )
+    }
+
+    @Test func catalogSourceRebindRejectsSiblingProofReplacedBeforeCommit() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 80447, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let sourceProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        let siblingProof = manager.operationLeaseForTest(upstreamIndex: 1).proof
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: sourceProof,
+                nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+            .usable(
+                try jsonValue([
+                    "tools": [toolDescriptor(name: "TopologyBoundTool")],
+                ]),
+                source: sourceProof
+            ),
+            lease: lease,
+            nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+        ))
+
+        _ = try #require(
+            manager.upstreamTopology.replace(siblingProof, with: TestUpstreamClient())
+        )
+        #expect(manager.clearUpstreamState(proof: sourceProof))
+
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalSourceProof() == nil)
+    }
+
     @Test func processRouteCatalogCooldownSurvivesRouteAvailabilitySuccess() async throws {
         let upstream = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 80423, xcodeVersion: "27.0")
@@ -6402,7 +6514,7 @@ struct RuntimeCoordinatorTests {
     }
 
 
-    @Test func sessionManagerToolsListResyncsSurfaceAndRetainsCatalogWhenUpstreamStateClears()
+    @Test func sessionManagerToolsListResyncsSurfaceAndInvalidatesCatalogWhenSourceClears()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -6439,7 +6551,7 @@ struct RuntimeCoordinatorTests {
         ])
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
-                == [clearedTarget.processID, remainingTarget.processID]
+                == [remainingTarget.processID]
         )
         #expect(manager.processControlPlane.canonicalSourceUpstream() == 1)
     }
@@ -8743,7 +8855,7 @@ struct RuntimeCoordinatorTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
-    @Test func sessionManagerProcessCatalogRebindsSourceAndSurvivesLastSlotExit()
+    @Test func sessionManagerProcessCatalogRebindsSourceAndInvalidatesAfterLastSlotExit()
         async throws
     {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -8781,9 +8893,7 @@ struct RuntimeCoordinatorTests {
 
         snapshot = manager.debugSnapshot()
         #expect(manager.cachedToolsListResult() == nil)
-        let retainedCatalog = try #require(snapshot.processToolCatalogs.first)
-        #expect(retainedCatalog.upstreamIndex == 1)
-        #expect(retainedCatalog.isCanonicalSource == false)
+        #expect(snapshot.processToolCatalogs.isEmpty)
     }
 
     @Test func nonOwnerUnionToolRoutesToCatalogOwnerProcess() async throws {

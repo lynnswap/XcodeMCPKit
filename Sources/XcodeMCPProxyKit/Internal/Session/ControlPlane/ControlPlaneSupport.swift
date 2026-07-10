@@ -311,5 +311,19 @@ extension ControlPlane {
                 return false
             }
         }
+
+        func isBound(to proof: UpstreamTopologyProof) -> Bool {
+            state.withLockedValue { state in
+                switch state.state {
+                case .registered(_, let operationLease),
+                     .assigned(_, let operationLease, _):
+                    return operationLease.proof == proof
+                case .cancelled(let snapshot):
+                    return snapshot.operationLease?.proof == proof
+                case .queued, .finished:
+                    return false
+                }
+            }
+        }
     }
 }
