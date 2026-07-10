@@ -16,6 +16,7 @@
   - `scripts/check.sh`(フル)
 - Git: `lynnswap` owner なので push/PR は明示依頼時のみ。着手前に `git status --short` と元 HEAD の SHA を記録。成果が複数になる作業は task branch に commit して SHA で受け渡す(未コミット差分を積み上げない)。
 - Apple/Swift API・MCP spec の事実は記憶で断定せず一次情報で確認(Xcode DocumentationSearch / ios-dev-docs / Apple Developer Docs、MCP は modelcontextprotocol.io の 2025-06-18)。
+- 設計契約: [design-contracts.md](design-contracts.md)(修正で採用する契約パターンとアンチパターン)。各タスクの該当節を実装前に読むこと。
 - **won't-fix リスト(README「反証済み」節)に載っている項目は再修正・再指摘しない。** 特に: 旧 surface 返却 branch を「バグ」として guard 追加しない(到達不能 dead code なので削除のみ)、`proxyTabIdentifier` 合成を「第二 truth」として直さない、`?? 0` を単独で「捏造」として直さない(current-primary owner 統合の一部としてのみ扱う)。
 
 ---
@@ -64,6 +65,7 @@
 - `git show 2c677e05:Docs/process-route-rearchitecture.md`(監査とほぼ同じ診断を下した、一度作られ削除された設計ノート)。
 - `Docs/design-audit-2026-07/evidence/session-owner-map.md`(owner map・guard inventory G1–G5・fallback 経路)。
 - `Docs/design-audit-2026-07/verification/staleness-guards.md` `generation-tripleduty.md`(load-bearing / duplicated の切り分けと失敗トレース)。
+- [design-contracts.md §3](design-contracts.md)(at-most-once 分類器を 1 箇所に置く形、stale 処理の単一経路、cache 意味論の明示契約化、揮発状態の validity scope 宣言、**staleness は「検知するか明示的に disclaim するか」の二択** — 中間解を作らない)。
 
 ---
 
@@ -77,8 +79,10 @@
    - timeout 時の `notifications/cancelled` 送出(spec SHOULD)。
    - `callTool`/`request` に per-request timeout override(spec は per-request 設定可能性を SHOULD)。
    - progress-after-return race: 最終 result complete 前に該当 token の delivery チェーンを await するか、完了時に cancel してポスト完了配送を契約上禁止。
+   - 設計契約: [design-contracts.md §1](design-contracts.md)(到達不明を独立 case にし side-effecting は auto-resend しない、typed kind + 次アクション情報の 2 チャネル分離、LocalizedError witness 罠のテスト観点)。
 3. **protocol-version 欠如の扱い**(F8)。現状の無条件 400 は over-strict。**要ユーザー判断**: (a) negotiated version への fallback を実装(spec 準拠寄り)、(b) over-strict を意図として維持し `Docs/architecture.md:87` に「spec より厳格」と明記。曖昧なまま実装しない。
 4. **観測性の表面化**(F6/F8): SSE buffer の 50 件 drop を warning ログ化、未処理 server 通知を debug ログ化、discovery file 書込失敗を `startAndWriteDiscovery` の戻り値/例外で embedder に届ける。
+   - 設計契約: [design-contracts.md §2](design-contracts.md)(3 層 liveness ladder =「discovery 記録はヒント、接続が判定、handshake が確定」、handshake payload に identity+version、facts-not-verdicts の死活 advisory、doctor `--check` は実処理と同一経路の途中下車)。stale discovery の誤分類(F7)の再設計はこの層構造を前提に。
 
 ### タスク B のテスト観点
 
@@ -97,6 +101,7 @@
    - `XcodeMCPProxyInstaller`(40 decls)を install executable 側か非 product target へ。
 2. **XcodeMCPProxyServer lifecycle**(F6): async `start()` の追加(または sync start の deprecate)、ELG の lazy 化 or deinit、embedder 向け health snapshot / event stream の公開。
 3. **SDK ergonomics**(F7): `XcodeMCPError` の `LocalizedError` 準拠 + 「consumer が取るべき次アクション」軸での再分類(setup 不備 / proxy 未起動 / セッション断 / timeout / server error)、stale discovery を `invalidRequest` から適切な case へ。`MCPContent.text(_:)` の raw 合成 factory と `MCPToolResult` のテキスト連結 accessor、`MCPJSONValue` の subscript と unlabeled 変換 init、`intValue` deprecate、`listTools` の `nextCursor` 追走 or fail fast、TestRuntime の `configuration.transport` 無視の明示化と `recordedToolCalls()` 公開。
+   - 設計契約: [design-contracts.md §1](design-contracts.md)(outcome-vs-failure 分離 =「見つからなかった」を error にしない基準、staleness エラーへの provenance 埋め込み、version 不整合の case 分割)と**アンチパターン節**(文字列 substring 分類は採らない — kind は throw site で型に)。surface の名前を消す/動かす場合は §4 の typo redirect(暫定層と明示)。
 
 ---
 

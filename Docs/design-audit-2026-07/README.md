@@ -164,5 +164,6 @@ P1 は `rearchitect` スキルの design gate に乗せる規模。`git show 2c6
 | [evidence/mcp-contract.md](evidence/mcp-contract.md) | MCP spec 2025-06-18 契約テーブル(全 verdict 付き) |
 | [evidence/module-boundaries.md](evidence/module-boundaries.md) | target 構成・package 宣言・test topology 監査 |
 | [verification/*.md](verification/) | 上記への adversarial 検証(CONFIRMED/WEAKENED/REFUTED + 失敗トレース) |
+| [design-contracts.md](design-contracts.md) | 修正設計で適用する契約パターン集(2026-07-10 追補)— F7/lifecycle/P1 向けの推奨契約とアンチパターン |
 
 注意: evidence/ は検証前の収集レポートであり、一部の主張は verification/ で反証・弱化されている。**単独で引用せず、必ず verification/ の verdict と突き合わせること。**
