@@ -77,8 +77,8 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
         /// Connect to the Streamable HTTP endpoint recorded in a proxy
         /// discovery file.
         ///
-        /// The discovery file uses the same shape written by
-        /// `xcode-mcp-proxy-server startAndWriteDiscovery()`.
+        /// The discovery file uses the same shape written by a proxy server
+        /// configured with discovery enabled.
         public static func streamableHTTP(discoveryFile: URL) -> Self {
             Self(storage: .streamableHTTPDiscoveryFile(discoveryFile))
         }
@@ -315,7 +315,7 @@ public actor XcodeMCP {
                 "tools/list",
                 params: params,
                 options: pageOptions,
-                deadline: deadline,
+                resolvedDeadline: deadline,
                 onProgress: nil
             )
             let generation = await session.connectionState().generation
@@ -372,6 +372,7 @@ public actor XcodeMCP {
         guard name.isEmpty == false else {
             throw XcodeMCPError.invalidRequest("tool name must not be empty")
         }
+        let resolvedDeadline = try operationDeadline(options.timeout)
 
         let params: [String: MCPJSONValue] = [
             "name": .string(name),
@@ -393,6 +394,7 @@ public actor XcodeMCP {
             "tools/call",
             params: .object(params),
             options: options,
+            resolvedDeadline: resolvedDeadline,
             onProgress: progressHandler
         )
         return try MCPToolResult(json: result)
@@ -418,24 +420,13 @@ public actor XcodeMCP {
         params: MCPJSONValue? = nil,
         options: XcodeMCPRequestOptions = .init()
     ) async throws -> MCPJSONValue {
-        try await request(method, params: params, options: options, onProgress: nil)
-    }
-
-    /// Sends an arbitrary MCP notification.
-    ///
-    /// Use this escape hatch for dynamic MCP notifications. The client still
-    /// owns JSON-RPC framing, transport session headers, and transport error
-    /// mapping, but no response is expected from the server.
-    ///
-    /// - Parameters:
-    ///   - method: MCP notification method name to send.
-    ///   - params: Optional raw MCP params.
-    public func notify(_ method: String, params: MCPJSONValue? = nil) async throws {
-        do {
-            try await session.notify(method, params: params?.jsonValue)
-        } catch {
-            throw Self.publicError(from: error)
-        }
+        try await request(
+            method,
+            params: params,
+            options: options,
+            resolvedDeadline: try operationDeadline(options.timeout),
+            onProgress: nil
+        )
     }
 
     /// Returns the current atomic connection snapshot.
@@ -473,14 +464,14 @@ extension XcodeMCP {
         _ method: String,
         params: MCPJSONValue? = nil,
         options: XcodeMCPRequestOptions = .init(),
-        deadline: Deadline? = nil,
+        resolvedDeadline: Deadline?,
         onProgress: InitializedMCPClientSession.ProgressHandler?
     ) async throws -> MCPJSONValue {
         do {
             let result = try await session.request(
                 method,
                 params: params?.jsonValue,
-                deadline: deadline ?? (try operationDeadline(options.timeout)),
+                deadline: resolvedDeadline,
                 replayPolicy: options.replayPolicy == .never
                     ? .never
                     : .onceWhenRejectedBeforeProcessing,
@@ -548,6 +539,11 @@ private extension XcodeMCP {
                 code: code,
                 message: message,
                 data: data.map(MCPJSONValue.init)
+            )
+        case .httpStatus(let code, let body):
+            let suffix = body.isEmpty ? "" : ": \(body)"
+            return XcodeMCPError.transportUnavailable(
+                "Streamable HTTP request failed with status \(code)\(suffix)"
             )
         case .transportUnavailable(let reason):
             return XcodeMCPError.transportUnavailable(reason)

@@ -4,6 +4,7 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import NIOHTTP1
+import Synchronization
 import Testing
 import XcodeMCPProxyTestSupport
 
@@ -120,11 +121,12 @@ struct StdioAdapterFacadeIntegrationTests {
     }
 
     @Test func stdioAdapterFacadeBoundsDeleteOnShutdownWhenTimeoutIsDisabled() async throws {
-        let shutdownClocks = makeStdioAdapterShutdownClocks()
+        let deleteGrace = Duration.milliseconds(251)
+        let shutdownClocks = makeStdioAdapterShutdownClocks(deleteSessionGrace: deleteGrace)
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: .json,
             hangsDELETE: true,
-            stdinLines: [initializeRequest],
+            stdinLines: [initializeRequest, initializedNotification],
             proxyArguments: ["--request-timeout", "0"],
             timeoutDescription: "STDIO adapter should not hang waiting for best-effort DELETE",
             adapterShutdownPolicy: shutdownClocks.policy,
@@ -134,12 +136,21 @@ struct StdioAdapterFacadeIntegrationTests {
                     try await server.recorder.nextRequest { $0.httpMethod == "GET" }
                 }
             },
-            afterInputClosed: { server in
+            onInputClosing: { server, activate in
+                let waiterRegistrations = LockedRecordedValues<Void>()
+                let sleeperObserver = Task.detached {
+                    try await shutdownClocks.timeoutClock.sleep(
+                        untilSuspendedFor: deleteGrace,
+                        onWaiterRegistered: { waiterRegistrations.append(()) }
+                    )
+                }
+                _ = try await waiterRegistrations.nextValue(at: 0)
+                activate()
+                try await sleeperObserver.value
                 _ = try await waitWithTimeout("waiting for hanging DELETE") {
                     try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
                 }
-                try await waitForSuspendedSleepers(on: shutdownClocks.timeoutClock)
-                advanceStdioAdapterShutdownClocks(shutdownClocks, by: .milliseconds(250))
+                advanceStdioAdapterShutdownClocks(shutdownClocks, by: deleteGrace)
             }
         )
 
@@ -223,6 +234,35 @@ struct StdioAdapterFacadeIntegrationTests {
         #expect(errorObject["message"] as? String == "upstream HTTP 500")
     }
 
+    @Test func stdioAdapterFacadeRejectsUnmatchedJSONRPCErrorFromHTTPErrorStatus() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
+            responseMode: .json,
+            httpErrorResponsesByMethod: [
+                "tools/list": StubMCPHTTPErrorResponse(
+                    status: .badGateway,
+                    body: [
+                        "jsonrpc": "2.0",
+                        "id": 999,
+                        "error": [
+                            "code": -32002,
+                            "message": "foreign response",
+                        ],
+                    ]
+                )
+            ],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
+            timeoutDescription: "STDIO adapter should reject an unmatched HTTP error response"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.outputObjects.count == 2)
+        let response = try #require(result.outputObjects.last)
+        #expect((response["id"] as? NSNumber)?.intValue == 2)
+        let errorObject = try #require(response["error"] as? [String: Any])
+        #expect(errorObject["message"] as? String == "upstream HTTP 502")
+    }
+
     @Test func stdioAdapterFacadeSendsDeleteAfterTimedOutDrainWithLongRunningRequest() async throws {
         let shutdownClocks = makeStdioAdapterShutdownClocks()
         let longRunningCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#
@@ -275,6 +315,57 @@ struct StdioAdapterFacadeIntegrationTests {
         #expect(delete.protocolVersion == nil)
     }
 
+    @Test func stdioAdapterRecoversAfterProxySessionRestartWithoutLeakingHiddenInitialize()
+        async throws
+    {
+        let result = try await StdioAdapterFacadeHarness.run(
+            responseMode: .json,
+            expiresSessionOnceForMethod: "tools/list",
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest],
+            timeoutDescription: "STDIO adapter should recover a restarted proxy session"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(try result.outputIDs() == [1, 2])
+        #expect(result.outputObjects.count == 2)
+
+        let initializes = result.requests.filter { $0.bodyMethod == "initialize" }
+        #expect(initializes.count == 2)
+        let listRequests = result.requests.filter { $0.bodyMethod == "tools/list" }
+        #expect(listRequests.map(\.sessionID) == ["server-session-1", "server-session-2"])
+    }
+
+    @Test func stdioAdapterRejectsPreInitializeRequestWithoutHTTPIO() async throws {
+        let result = try await StdioAdapterFacadeHarness.run(
+            responseMode: .json,
+            stdinLines: [toolsListRequest],
+            timeoutDescription: "pre-initialize request should fail without HTTP I/O"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.requests.isEmpty)
+        let error = try #require(result.outputObjects.first?["error"] as? [String: Any])
+        #expect((result.outputObjects.first?["id"] as? NSNumber)?.intValue == 2)
+        #expect(error["message"] as? String == "invalid upstream response")
+    }
+
+    @Test func stdioAdapterRejectsSecondInitializeWithoutForwardingIt() async throws {
+        let secondInitialize =
+            #"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+        let result = try await StdioAdapterFacadeHarness.run(
+            responseMode: .json,
+            stdinLines: [initializeRequest, secondInitialize],
+            timeoutDescription: "second initialize should be rejected"
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.requests.filter { $0.bodyMethod == "initialize" }.count == 1)
+        #expect(try result.outputIDs() == [1, 3])
+        let error = try #require(result.outputObjects.last?["error"] as? [String: Any])
+        #expect(error["message"] as? String == "invalid upstream response")
+    }
+
     private func runStdioAdapterFacadeRoundTrip(responseMode: StubMCPHTTPResponseMode) async throws {
         let result = try await StdioAdapterFacadeHarness.run(
             responseMode: responseMode,
@@ -288,7 +379,8 @@ struct StdioAdapterFacadeIntegrationTests {
                     try await server.recorder.nextRequest { $0.httpMethod == "GET" }
                 }
             },
-            afterInputClosed: { server in
+            onInputClosing: { server, activate in
+                activate()
                 _ = try await waitWithTimeout("waiting for session DELETE") {
                     try await server.recorder.nextRequest { $0.httpMethod == "DELETE" }
                 }
@@ -341,7 +433,9 @@ private struct ControlledStdioAdapterShutdownClocks: Sendable {
     let uptimeClock: TestUptimeClock
 }
 
-private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownClocks {
+private func makeStdioAdapterShutdownClocks(
+    deleteSessionGrace: Duration = .milliseconds(250)
+) -> ControlledStdioAdapterShutdownClocks {
     let timeoutClock = TestClock()
     let uptimeClock = TestUptimeClock()
     let clock = ClockClient(
@@ -355,7 +449,10 @@ private func makeStdioAdapterShutdownClocks() -> ControlledStdioAdapterShutdownC
         sleepForTimeInterval: { _ in }
     )
     return ControlledStdioAdapterShutdownClocks(
-        policy: StdioAdapterShutdownPolicy(clock: clock),
+        policy: StdioAdapterShutdownPolicy(
+            deleteSessionGrace: deleteSessionGrace,
+            clock: clock
+        ),
         timeoutClock: timeoutClock,
         uptimeClock: uptimeClock
     )
@@ -400,6 +497,7 @@ private struct StdioAdapterFacadeHarness {
         gatedResponseMethods: Set<String> = [],
         hangingResponseMethod: String? = nil,
         initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
+        expiresSessionOnceForMethod: String? = nil,
         hangsDELETE: Bool = false,
         httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse] = [:],
         openPostSSEMethods: Set<String> = [],
@@ -412,8 +510,11 @@ private struct StdioAdapterFacadeHarness {
         environment: [String: String] = [:],
         adapterShutdownPolicy: StdioAdapterShutdownPolicy = .live,
         closeInputBeforeRunning: Bool = true,
-        whileRunning: ((StubMCPHTTPServer) async throws -> Void)? = nil,
-        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)? = nil
+        whileRunning: (@Sendable (StubMCPHTTPServer) async throws -> Void)? = nil,
+        onInputClosing: (@Sendable (
+            StubMCPHTTPServer,
+            @Sendable () -> Void
+        ) async throws -> Void)? = nil
     ) async throws -> StdioAdapterFacadeRunResult {
         // Avoid false 5s timeouts when nested swift build contract tests run concurrently.
         try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
@@ -422,6 +523,7 @@ private struct StdioAdapterFacadeHarness {
                 gatedResponseMethods: gatedResponseMethods,
                 hangingResponseMethod: hangingResponseMethod,
                 initializeProtocolVersion: initializeProtocolVersion,
+                expiresSessionOnceForMethod: expiresSessionOnceForMethod,
                 hangsDELETE: hangsDELETE,
                 httpErrorResponsesByMethod: httpErrorResponsesByMethod,
                 openPostSSEMethods: openPostSSEMethods,
@@ -435,7 +537,7 @@ private struct StdioAdapterFacadeHarness {
                 adapterShutdownPolicy: adapterShutdownPolicy,
                 closeInputBeforeRunning: closeInputBeforeRunning,
                 whileRunning: whileRunning,
-                afterInputClosed: afterInputClosed
+                onInputClosing: onInputClosing
             )
         }
     }
@@ -445,6 +547,7 @@ private struct StdioAdapterFacadeHarness {
         gatedResponseMethods: Set<String>,
         hangingResponseMethod: String?,
         initializeProtocolVersion: String?,
+        expiresSessionOnceForMethod: String?,
         hangsDELETE: Bool,
         httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse],
         openPostSSEMethods: Set<String>,
@@ -457,14 +560,18 @@ private struct StdioAdapterFacadeHarness {
         environment: [String: String],
         adapterShutdownPolicy: StdioAdapterShutdownPolicy,
         closeInputBeforeRunning: Bool,
-        whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
-        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
+        whileRunning: (@Sendable (StubMCPHTTPServer) async throws -> Void)?,
+        onInputClosing: (@Sendable (
+            StubMCPHTTPServer,
+            @Sendable () -> Void
+        ) async throws -> Void)?
     ) async throws -> StdioAdapterFacadeRunResult {
         let server = try StubMCPHTTPServer.start(
             responseMode: responseMode,
             gatedResponseMethods: gatedResponseMethods,
             hangingResponseMethod: hangingResponseMethod,
             initializeProtocolVersion: initializeProtocolVersion,
+            expiresSessionOnceForMethod: expiresSessionOnceForMethod,
             hangsDELETE: hangsDELETE,
             httpErrorResponsesByMethod: httpErrorResponsesByMethod,
             openPostSSEMethods: openPostSSEMethods,
@@ -483,7 +590,7 @@ private struct StdioAdapterFacadeHarness {
                 adapterShutdownPolicy: adapterShutdownPolicy,
                 closeInputBeforeRunning: closeInputBeforeRunning,
                 whileRunning: whileRunning,
-                afterInputClosed: afterInputClosed
+                onInputClosing: onInputClosing
             )
             try await server.shutdown()
             return result
@@ -502,25 +609,23 @@ private struct StdioAdapterFacadeHarness {
         environment: [String: String],
         adapterShutdownPolicy: StdioAdapterShutdownPolicy,
         closeInputBeforeRunning: Bool,
-        whileRunning: ((StubMCPHTTPServer) async throws -> Void)?,
-        afterInputClosed: ((StubMCPHTTPServer) async throws -> Void)?
+        whileRunning: (@Sendable (StubMCPHTTPServer) async throws -> Void)?,
+        onInputClosing: (@Sendable (
+            StubMCPHTTPServer,
+            @Sendable () -> Void
+        ) async throws -> Void)?
     ) async throws -> StdioAdapterFacadeRunResult {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let serverURL = server.url
-        let plan = try XcodeMCPProxyStdioAdapter.resolveLaunchPlan(
-            arguments: [
-                "xcode-mcp-proxy",
-                "--url",
-                serverURL.absoluteString,
-            ] + proxyArguments,
-            environment: environment
-        )
-        #expect(plan.action == .start)
-        let endpoint = try #require(plan.endpoint)
-        let adapter = XcodeMCPProxyStdioAdapter(
-            endpoint: endpoint,
-            requestTimeout: plan.options.requestTimeout,
+        let requestTimeout: Duration? = proxyArguments == ["--request-timeout", "0"]
+            ? nil
+            : .seconds(300)
+        let adapter = try XcodeMCPProxyStdioAdapter(
+            configuration: .init(
+                endpoint: .url(serverURL),
+                requestTimeout: requestTimeout
+            ),
             input: inputPipe.fileHandleForReading,
             output: outputPipe.fileHandleForWriting,
             shutdownPolicy: adapterShutdownPolicy
@@ -538,22 +643,41 @@ private struct StdioAdapterFacadeHarness {
         }
 
         let adapterTask = Task {
-            await adapter.start()
-            await adapter.wait()
+            try await adapter.start()
+            await adapter.waitUntilStopped()
             return Int32(0)
         }
 
         do {
             try await whileRunning?(server)
             if !closeInputBeforeRunning {
-                closeInput()
+                if let onInputClosing {
+                    let observerActivations = LockedRecordedValues<Void>()
+                    let inputClosingObserver = Task.detached {
+                        try await onInputClosing(server) {
+                            observerActivations.append(())
+                        }
+                    }
+                    _ = try await observerActivations.nextValue(at: 0)
+                    inputClosed = true
+                    let inputWriter = inputPipe.fileHandleForWriting
+                    let inputCloseTask = Task.detached {
+                        inputWriter.closeFile()
+                    }
+                    let observerResult = await inputClosingObserver.result
+                    await inputCloseTask.value
+                    try observerResult.get()
+                } else {
+                    closeInput()
+                }
+            } else {
+                try await onInputClosing?(server, {})
             }
-            try await afterInputClosed?(server)
             let exitCode = try await waitWithTimeout(
                 timeoutDescription,
                 timeout: timeout
             ) {
-                await adapterTask.value
+                try await adapterTask.value
             }
             outputPipe.fileHandleForWriting.closeFile()
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
@@ -608,6 +732,7 @@ private struct StubMCPHTTPServer {
         gatedResponseMethods: Set<String> = [],
         hangingResponseMethod: String? = nil,
         initializeProtocolVersion: String? = MCP.ProtocolVersion.current,
+        expiresSessionOnceForMethod: String? = nil,
         hangsDELETE: Bool = false,
         httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse] = [:],
         openPostSSEMethods: Set<String> = [],
@@ -622,6 +747,9 @@ private struct StubMCPHTTPServer {
         let childChannelTracker = HTTPTestServerChannelTracker()
         let recorder = StubMCPHTTPRecorder()
         let responseGate = StubMCPHTTPResponseGate(gatedMethods: gatedResponseMethods)
+        let restartController = StubMCPRestartController(
+            expiresSessionOnceForMethod: expiresSessionOnceForMethod
+        )
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 32)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -634,6 +762,7 @@ private struct StubMCPHTTPServer {
                             responseMode: responseMode,
                             hangingResponseMethod: hangingResponseMethod,
                             initializeProtocolVersion: initializeProtocolVersion,
+                            restartController: restartController,
                             hangsDELETE: hangsDELETE,
                             httpErrorResponsesByMethod: httpErrorResponsesByMethod,
                             openPostSSEMethods: openPostSSEMethods,
@@ -921,6 +1050,39 @@ private final class StubMCPHTTPResponseGate: @unchecked Sendable {
     }
 }
 
+private final class StubMCPRestartController: Sendable {
+    private struct State {
+        var initializeCount = 0
+        var didExpire = false
+    }
+
+    private let expiresSessionOnceForMethod: String?
+    private let state = Mutex(State())
+
+    init(expiresSessionOnceForMethod: String?) {
+        self.expiresSessionOnceForMethod = expiresSessionOnceForMethod
+    }
+
+    func sessionIDForInitialize() -> String {
+        guard expiresSessionOnceForMethod != nil else { return "server-session" }
+        return state.withLock { state in
+            state.initializeCount += 1
+            return "server-session-\(state.initializeCount)"
+        }
+    }
+
+    func shouldExpire(method: String?, sessionID: String?) -> Bool {
+        guard let expiresSessionOnceForMethod,
+              method == expiresSessionOnceForMethod else { return false }
+        return state.withLock { state in
+            guard state.didExpire == false,
+                  sessionID == "server-session-1" else { return false }
+            state.didExpire = true
+            return true
+        }
+    }
+}
+
 private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -930,6 +1092,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
     private let responseMode: StubMCPHTTPResponseMode
     private let hangingResponseMethod: String?
     private let initializeProtocolVersion: String?
+    private let restartController: StubMCPRestartController
     private let hangsDELETE: Bool
     private let httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse]
     private let openPostSSEMethods: Set<String>
@@ -944,6 +1107,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         responseMode: StubMCPHTTPResponseMode,
         hangingResponseMethod: String?,
         initializeProtocolVersion: String?,
+        restartController: StubMCPRestartController,
         hangsDELETE: Bool,
         httpErrorResponsesByMethod: [String: StubMCPHTTPErrorResponse],
         openPostSSEMethods: Set<String>,
@@ -955,6 +1119,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
         self.responseMode = responseMode
         self.hangingResponseMethod = hangingResponseMethod
         self.initializeProtocolVersion = initializeProtocolVersion
+        self.restartController = restartController
         self.hangsDELETE = hangsDELETE
         self.httpErrorResponsesByMethod = httpErrorResponsesByMethod
         self.openPostSSEMethods = openPostSSEMethods
@@ -1040,6 +1205,19 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
                 context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
                 return
             }
+            if restartController.shouldExpire(
+                method: requestObject?["method"] as? String,
+                sessionID: requestHead.headers.first(name: "MCP-Session-Id")
+            ) {
+                let responseHead = HTTPResponseHead(
+                    version: requestHead.version,
+                    status: .notFound,
+                    headers: HTTPHeaders([("Content-Length", "0")])
+                )
+                context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+                return
+            }
             if requestObject?["method"] as? String == hangingResponseMethod {
                 return
             }
@@ -1075,7 +1253,10 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
 
             var headers = HTTPHeaders()
             if isInitialize {
-                headers.add(name: "MCP-Session-Id", value: "server-session")
+                headers.add(
+                    name: "MCP-Session-Id",
+                    value: restartController.sessionIDForInitialize()
+                )
             }
             let responseBody: Data
             let method = requestObject?["method"] as? String

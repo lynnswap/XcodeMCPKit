@@ -31,15 +31,24 @@ Behavior and symbol changes:
 | Per-call fixed configuration timeout only | `XcodeMCPRequestOptions.Timeout` with `.configurationDefault`, `.disabled`, or `.after(Duration)` |
 | No public replay choice | `XcodeMCPRequestOptions.ReplayPolicy`; replay remains limited to one request rejected before processing |
 | No typed connection state or explicit reconnect | `connectionState()`, `connectionStates()`, and `reconnect(options:)` |
+| Public `XcodeMCPConnectionSnapshot` memberwise initializer | Obtain authority-owned snapshots from `connectionState()` or `connectionStates()`; consumers no longer construct semantic connection state |
 | `listTools()` returned the first page | `listTools(options:)` returns the complete catalog within one logical deadline and never returns a partial catalog |
 | `callTool` without progress | `callTool(_:arguments:options:onProgress:)` |
+| Public `notify(_:params:)` escape hatch | Use the typed SDK operations or `request(_:params:options:)`; arbitrary client notifications are no longer part of the supported public surface |
 | `MCPJSONValue.init(encoding:)` | `MCPJSONValue.init(_:)` |
 | `MCPJSONValue.intValue` | `MCPJSONValue.integerValue` |
 | Manual text-content extraction | `MCPContent.text(_:)` and `MCPToolResult.text` |
+| Generic error text only | `XcodeMCPError` now conforms to `LocalizedError` and distinguishes `sessionRecoveryFailed` from transport unavailability |
 
 `close()` is the graceful completion boundary. Dropping a client without
 calling `close()` only requests synchronous cancellation; it does not promise a
 graceful protocol shutdown.
+
+`XcodeMCPKitTesting` now exposes `recordedToolCalls()` for decoded
+`tools/call` assertions. `XcodeMCPTestRuntime.makeClient(configuration:)`
+accepts only the default `.localBridge()` transport configuration; a different
+transport is rejected instead of being silently replaced by the test
+transport.
 
 ## Embedded proxy server
 

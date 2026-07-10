@@ -211,6 +211,113 @@ struct UpstreamProcessTests {
         #expect(snapshot.stopOutputCount == 1)
         #expect(snapshot.terminateCount == 1)
     }
+
+    @Test func concurrentStopsShareOutputDrainCompletion() async throws {
+        let fakeDriver = FakeUpstreamProcessDriver(finishesOutputOnStop: false)
+        let session = try await makeFakeUpstreamSession(fakeDriver)
+        let completedStops = RecordedValues<Int>()
+
+        let first = Task {
+            await session.stop()
+            await completedStops.append(1)
+        }
+        _ = try await fakeDriver.nextStopOutput()
+        let second = Task {
+            await session.stop()
+            await completedStops.append(2)
+        }
+
+        await Task.yield()
+        #expect(await completedStops.count() == 0)
+        fakeDriver.finishStdout()
+        fakeDriver.finishStderr()
+        await first.value
+        await second.value
+        #expect(Set(await completedStops.snapshot()) == Set([1, 2]))
+    }
+
+    @Test func stopCancelsEscalationDelayAfterDelayedTerminationAcknowledgement() async throws {
+        let scheduler = ControlledTerminationDelayScheduler()
+        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeUpstreamSession(
+            fakeDriver,
+            terminationSignalGrace: .seconds(30),
+            terminationDelayScheduler: scheduler
+        )
+        let completedStops = RecordedValues<Void>()
+        let stop = Task {
+            await session.stop()
+            await completedStops.append(())
+        }
+
+        let delay = try await scheduler.nextScheduledDelay()
+        #expect(fakeDriver.snapshot().terminateCount == 1)
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+        #expect(await completedStops.count() == 0)
+
+        fakeDriver.emitTermination(status: 0)
+        await stop.value
+
+        #expect(delay.isCancelled())
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+        #expect(await completedStops.count() == 1)
+    }
+
+    @Test func stopEscalatesIgnoredTerminationAndDrainsQueuedStdinCallbacks() async throws {
+        let scheduler = ControlledTerminationDelayScheduler()
+        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeUpstreamSession(
+            fakeDriver,
+            terminationSignalGrace: .seconds(30),
+            terminationDelayScheduler: scheduler
+        )
+        #expect(await session.send(Data("queued-write".utf8)) == .accepted)
+        let completedStops = RecordedValues<Void>()
+        let stop = Task {
+            await session.stop()
+            await completedStops.append(())
+        }
+
+        let delay = try await scheduler.nextScheduledDelay()
+        var snapshot = fakeDriver.snapshot()
+        #expect(snapshot.queuedStdinBytes > 0)
+        #expect(snapshot.stdinWriteCompletionCount == 0)
+        #expect(snapshot.forceTerminateCount == 0)
+        #expect(await completedStops.count() == 0)
+
+        delay.fire()
+        await stop.value
+
+        snapshot = fakeDriver.snapshot()
+        #expect(snapshot.terminateCount == 1)
+        #expect(snapshot.forceTerminateCount == 1)
+        #expect(snapshot.queuedStdinBytes == 0)
+        #expect(snapshot.stdinWriteCompletionCount == 1)
+        #expect(await completedStops.count() == 1)
+        for _ in 0..<100 { await Task.yield() }
+        #expect(fakeDriver.snapshot().stdinWriteCompletionCount == 1)
+    }
+
+    @Test func processTransportDeinitSynchronouslySignalsOwnedProcess() async throws {
+        let fakeDriver = FakeUpstreamProcessDriver()
+        let config = UpstreamProcess.Config(
+            command: "/fake/upstream",
+            args: [],
+            environment: [:],
+            maxQueuedWriteBytes: 1024,
+            driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
+        )
+        var transport: UpstreamProcessXcodeMCPTransport? = try await .start(config: config)
+        weak let weakTransport = transport
+
+        transport = nil
+
+        #expect(weakTransport == nil)
+        let snapshot = fakeDriver.snapshot()
+        #expect(snapshot.closeStdinCount == 1)
+        #expect(snapshot.stopOutputCount == 1)
+        #expect(snapshot.terminateCount == 1)
+    }
 }
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
@@ -267,6 +374,9 @@ private func makeFakeUpstreamSession(
     _ fakeDriver: FakeUpstreamProcessDriver,
     maxQueuedWriteBytes: Int = 1024,
     terminationDrainGrace: Duration = .milliseconds(250),
+    terminationSignalGrace: Duration = .seconds(1),
+    terminationDelayScheduler: any UpstreamTerminationDelayScheduling =
+        LiveUpstreamTerminationDelayScheduler(),
     clock: ClockClient = .liveValue
 ) async throws -> any UpstreamSession {
     let config = UpstreamProcess.Config(
@@ -275,6 +385,8 @@ private func makeFakeUpstreamSession(
         environment: [:],
         maxQueuedWriteBytes: maxQueuedWriteBytes,
         terminationDrainGrace: terminationDrainGrace,
+        terminationSignalGrace: terminationSignalGrace,
+        terminationDelayScheduler: terminationDelayScheduler,
         clock: clock,
         driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
     )
@@ -308,11 +420,78 @@ private struct StaticUpstreamProcessDriverFactory: UpstreamProcessDriverMaking {
     }
 }
 
+private final class ControlledTerminationDelay: @unchecked Sendable {
+    private struct State {
+        var isCancelled = false
+        var hasFired = false
+    }
+
+    private let lock = NSLock()
+    private let terminal = AsyncTerminalSignal()
+    private let operation: @Sendable () -> Void
+
+    init(operation: @escaping @Sendable () -> Void) {
+        self.operation = operation
+    }
+
+    func makeDelay() -> UpstreamTerminationDelay {
+        UpstreamTerminationDelay(terminal: terminal) { [weak self] in
+            self?.cancel()
+        }
+    }
+
+    func fire() {
+        let shouldFire = lock.withLock { () -> Bool in
+            guard state.isCancelled == false, state.hasFired == false else { return false }
+            state.hasFired = true
+            return true
+        }
+        guard shouldFire else { return }
+        operation()
+        terminal.signal()
+    }
+
+    func isCancelled() -> Bool {
+        lock.withLock { state.isCancelled }
+    }
+
+    private var state = State()
+
+    private func cancel() {
+        lock.withLock { state.isCancelled = true }
+        terminal.signal()
+    }
+}
+
+private final class ControlledTerminationDelayScheduler:
+    UpstreamTerminationDelayScheduling,
+    @unchecked Sendable
+{
+    private let scheduled = DeterministicRecorder<ControlledTerminationDelay>()
+
+    func schedule(
+        after delay: Duration,
+        operation: @escaping @Sendable () -> Void
+    ) -> UpstreamTerminationDelay {
+        _ = delay
+        let controlled = ControlledTerminationDelay(operation: operation)
+        scheduled.record(controlled)
+        return controlled.makeDelay()
+    }
+
+    func nextScheduledDelay() async throws -> ControlledTerminationDelay {
+        try await scheduled.nextValue(at: 0)
+    }
+}
+
 private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendable {
     struct Snapshot: Sendable {
         let closeStdinCount: Int
         let terminateCount: Int
+        let forceTerminateCount: Int
         let stopOutputCount: Int
+        let queuedStdinBytes: Int
+        let stdinWriteCompletionCount: Int
     }
 
     private struct State {
@@ -321,19 +500,37 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         var queuedStdinBytes = 0
         var closeStdinCount = 0
         var terminateCount = 0
+        var forceTerminateCount = 0
         var stopOutputCount = 0
         var onTermination: (@Sendable (Int32) -> Void)?
         var stdinWrites: [Data] = []
+        var queuedWriteSizes: [Int] = []
+        var isStdinClosing = false
+        var stdinWriteCompletionCount = 0
     }
 
     private let lock = NSLock()
     private var state = State()
+    private let finishesOutputOnStop: Bool
+    private let terminatesOnTerminate: Bool
+    private let terminatesOnForceTerminate: Bool
+    private let stopOutputRecorder = DeterministicRecorder<Void>()
+    private let stdinTerminal = AsyncTerminalSignal()
+    private let stdoutTerminal = AsyncTerminalSignal()
+    private let stderrTerminal = AsyncTerminalSignal()
     private let stdoutContinuation: AsyncStream<Data>.Continuation
     private let stderrContinuation: AsyncStream<Data>.Continuation
     private let stdoutChunks: AsyncStream<Data>
     private let stderrChunks: AsyncStream<Data>
 
-    init() {
+    init(
+        finishesOutputOnStop: Bool = true,
+        terminatesOnTerminate: Bool = true,
+        terminatesOnForceTerminate: Bool = true
+    ) {
+        self.finishesOutputOnStop = finishesOutputOnStop
+        self.terminatesOnTerminate = terminatesOnTerminate
+        self.terminatesOnForceTerminate = terminatesOnForceTerminate
         var stdoutContinuation: AsyncStream<Data>.Continuation!
         self.stdoutChunks = AsyncStream { continuation in
             stdoutContinuation = continuation
@@ -352,13 +549,11 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         args: [String],
         environment: [String: String],
         maxQueuedWriteBytes: Int,
-        onTermination: @escaping @Sendable (Int32) -> Void,
-        onStdinWriteComplete: @escaping @Sendable (Int, Error?) -> Void
+        onTermination: @escaping @Sendable (Int32) -> Void
     ) throws -> UpstreamProcessStartedIO {
         _ = command
         _ = args
         _ = environment
-        _ = onStdinWriteComplete
         lock.withLock {
             state.isRunning = true
             state.maxQueuedWriteBytes = maxQueuedWriteBytes
@@ -380,35 +575,74 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
             }
             state.queuedStdinBytes += payload.count
             state.stdinWrites.append(payload)
+            state.queuedWriteSizes.append(payload.count)
             return .accepted
         }
     }
 
     func closeStdin() {
-        lock.withLock {
+        let shouldSignal = lock.withLock {
             state.closeStdinCount += 1
+            state.isStdinClosing = true
+            return state.queuedStdinBytes == 0
         }
+        if shouldSignal { stdinTerminal.signal() }
     }
 
     func terminate() -> Bool {
-        let onTermination = lock.withLock { () -> (@Sendable (Int32) -> Void)? in
+        let result = lock.withLock { () -> ProcessExitCallbacks? in
             state.terminateCount += 1
             guard state.isRunning else {
                 return nil
             }
+            guard terminatesOnTerminate else {
+                return ProcessExitCallbacks(signalAccepted: true)
+            }
             state.isRunning = false
-            return state.onTermination
+            return takeExitCallbacksLocked(status: 143)
         }
-        onTermination?(143)
-        return onTermination != nil
+        perform(result)
+        return result?.signalAccepted == true
+    }
+
+    func forceTerminate() -> Bool {
+        let result = lock.withLock { () -> ProcessExitCallbacks? in
+            state.forceTerminateCount += 1
+            guard state.isRunning else {
+                return nil
+            }
+            guard terminatesOnForceTerminate else {
+                return ProcessExitCallbacks(signalAccepted: true)
+            }
+            state.isRunning = false
+            return takeExitCallbacksLocked(status: 137)
+        }
+        perform(result)
+        return result?.signalAccepted == true
     }
 
     func stopOutput() {
         lock.withLock {
             state.stopOutputCount += 1
         }
-        finishStdout()
-        finishStderr()
+        stopOutputRecorder.record(())
+        if finishesOutputOnStop {
+            finishStdout()
+            finishStderr()
+        }
+    }
+
+    func waitForStdinClosed() async {
+        await stdinTerminal.wait()
+    }
+
+    func waitForOutputStopped() async {
+        await stdoutTerminal.wait()
+        await stderrTerminal.wait()
+    }
+
+    func nextStopOutput() async throws {
+        _ = try await stopOutputRecorder.nextValue(at: 0)
     }
 
     func emitStdout(_ data: Data) {
@@ -420,25 +654,33 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
     }
 
     func emitTermination(status: Int32) {
-        let onTermination = lock.withLock { () -> (@Sendable (Int32) -> Void)? in
+        let result = lock.withLock { () -> ProcessExitCallbacks in
             state.isRunning = false
-            return state.onTermination
+            return takeExitCallbacksLocked(status: status)
         }
-        onTermination?(status)
+        perform(result)
     }
 
     func finishStdout() {
         stdoutContinuation.finish()
+        stdoutTerminal.signal()
     }
 
     func finishStderr() {
         stderrContinuation.finish()
+        stderrTerminal.signal()
     }
 
     func completeQueuedStdinWrite(bytes: Int) {
-        lock.withLock {
+        let shouldSignal = lock.withLock { () -> Bool in
             state.queuedStdinBytes = max(0, state.queuedStdinBytes - bytes)
+            if state.queuedWriteSizes.first == bytes {
+                state.queuedWriteSizes.removeFirst()
+            }
+            state.stdinWriteCompletionCount += 1
+            return state.isStdinClosing && state.queuedStdinBytes == 0
         }
+        if shouldSignal { stdinTerminal.signal() }
     }
 
     func stdinWrites() -> [Data] {
@@ -452,8 +694,51 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
             Snapshot(
                 closeStdinCount: state.closeStdinCount,
                 terminateCount: state.terminateCount,
-                stopOutputCount: state.stopOutputCount
+                forceTerminateCount: state.forceTerminateCount,
+                stopOutputCount: state.stopOutputCount,
+                queuedStdinBytes: state.queuedStdinBytes,
+                stdinWriteCompletionCount: state.stdinWriteCompletionCount
             )
+        }
+    }
+
+    private struct ProcessExitCallbacks {
+        let signalAccepted: Bool
+        let status: Int32?
+        let onTermination: (@Sendable (Int32) -> Void)?
+        let shouldSignalStdin: Bool
+
+        init(
+            signalAccepted: Bool,
+            status: Int32? = nil,
+            onTermination: (@Sendable (Int32) -> Void)? = nil,
+            shouldSignalStdin: Bool = false
+        ) {
+            self.signalAccepted = signalAccepted
+            self.status = status
+            self.onTermination = onTermination
+            self.shouldSignalStdin = shouldSignalStdin
+        }
+    }
+
+    private func takeExitCallbacksLocked(status: Int32) -> ProcessExitCallbacks {
+        let queuedWriteSizes = state.queuedWriteSizes
+        state.queuedWriteSizes.removeAll()
+        state.queuedStdinBytes = 0
+        state.stdinWriteCompletionCount += queuedWriteSizes.count
+        return ProcessExitCallbacks(
+            signalAccepted: true,
+            status: status,
+            onTermination: state.onTermination,
+            shouldSignalStdin: state.isStdinClosing
+        )
+    }
+
+    private func perform(_ callbacks: ProcessExitCallbacks?) {
+        guard let callbacks else { return }
+        if callbacks.shouldSignalStdin { stdinTerminal.signal() }
+        if let status = callbacks.status {
+            callbacks.onTermination?(status)
         }
     }
 }
