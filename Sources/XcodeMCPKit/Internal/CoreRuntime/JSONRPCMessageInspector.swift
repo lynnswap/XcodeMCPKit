@@ -102,9 +102,6 @@ extension JSONRPC {
             package static func isResponse(_ object: [String: Any]) -> Bool {
                 responseID(from: object) != nil
             }
-
         }
     }
-
-    package enum Request {}
 }

@@ -218,16 +218,11 @@ private extension StdioAdapter {
         let result = framer.append(data)
         for message in result.messages {
             let requestID = UUID()
-            let requestEnvelope = JSONRPC.Request.Envelope.inspect(message)
             let envelope: MCPClientEnvelope
             do {
                 envelope = try MCPClientEnvelope(data: message)
             } catch {
-                enqueueErrorWrite(
-                    id: requestID,
-                    requestEnvelope: requestEnvelope,
-                    message: "invalid upstream response"
-                )
+                enqueueInvalidRequestWrite(id: requestID)
                 continue
             }
             let deadline = Deadline.fromNow(requestTimeout, clock: shutdownPolicy.clock)
@@ -245,13 +240,13 @@ private extension StdioAdapter {
                     ))
                     await self?.operationFinished(
                         id: requestID,
-                        requestEnvelope: requestEnvelope,
+                        envelope: envelope,
                         error: nil
                     )
                 } catch {
                     await self?.operationFinished(
                         id: requestID,
-                        requestEnvelope: requestEnvelope,
+                        envelope: envelope,
                         error: error
                     )
                 }
@@ -276,13 +271,13 @@ private extension StdioAdapter {
 
     func operationFinished(
         id: UUID,
-        requestEnvelope: JSONRPC.Request.Envelope,
+        envelope: MCPClientEnvelope,
         error: (any Error)?
     ) async {
         if let error, error is CancellationError == false, lifecycle == .running {
             logger.error("STDIO upstream request failed", metadata: ["error": "\(error)"])
             if await emitError(
-                for: requestEnvelope,
+                for: envelope,
                 message: adapterErrorMessage(error)
             ) == false {
                 _ = beginClose(cancelReadTask: true)
@@ -446,34 +441,28 @@ private extension StdioAdapter {
         return "upstream unavailable"
     }
 
-    func emitError(for envelope: JSONRPC.Request.Envelope, message: String) async -> Bool {
-        guard envelope.expectsResponse else { return true }
+    func emitError(for envelope: MCPClientEnvelope, message: String) async -> Bool {
+        guard let requestID = envelope.requestID else { return true }
         guard let payload = try? JSONRPC.Wire.errorResponseData(
-            idValues: envelope.ids,
+            id: requestID,
             code: -32000,
             message: message
-        ) else { return true }
+        ) else { return false }
         return await outputWriter.send(payload)
     }
 
-    func enqueueErrorWrite(
-        id: UUID,
-        requestEnvelope: JSONRPC.Request.Envelope,
-        message: String
-    ) {
+    func enqueueInvalidRequestWrite(id: UUID) {
         let writer = outputWriter
-        let payload = try? JSONRPC.Wire.errorResponseData(
-            idValues: requestEnvelope.ids,
-            code: -32000,
-            message: message
-        )
+        guard let payload = try? JSONRPC.Wire.errorResponseData(
+            id: nil,
+            code: -32600,
+            message: "invalid request"
+        ) else {
+            _ = beginClose(cancelReadTask: true)
+            return
+        }
         let task = Task { [weak self] in
-            let succeeded: Bool
-            if let payload {
-                succeeded = await writer.send(payload)
-            } else {
-                succeeded = true
-            }
+            let succeeded = await writer.send(payload)
             await self?.standaloneOutputFinished(id: id, succeeded: succeeded)
         }
         requestTasks[id] = task

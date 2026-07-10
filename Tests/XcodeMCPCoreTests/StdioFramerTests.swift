@@ -29,7 +29,7 @@ struct StdioFramerTests {
         #expect(String(data: result.messages[1], encoding: .utf8) == json2)
     }
 
-    @Test func stdioFramerEmitsBatchArray() async throws {
+    @Test func stdioFramerEmitsTopLevelJSONArrayForBoundaryValidation() async throws {
         let framer = StdioFramer()
         let json = #"[{"jsonrpc":"2.0","id":1},{"jsonrpc":"2.0","method":"notifications/progress"}]"#
 

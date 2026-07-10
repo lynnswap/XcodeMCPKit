@@ -350,6 +350,35 @@ struct StdioAdapterFacadeIntegrationTests {
         #expect(error["message"] as? String == "invalid upstream response")
     }
 
+    @Test func stdioAdapterRejectsTopLevelArraysWithOneInvalidRequestErrorAndNoHTTPIO()
+        async throws
+    {
+        let arrays = [
+            #"[]"#,
+            #"[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]"#,
+            #"[{"jsonrpc":"2.0","id":"a","method":"tools/list"},{"jsonrpc":"2.0","method":"notifications/initialized"},true]"#,
+        ]
+
+        for (index, array) in arrays.enumerated() {
+            let result = try await StdioAdapterFacadeHarness.run(
+                responseMode: .json,
+                stdinLines: [array],
+                timeoutDescription: "top-level array \(index) should fail without HTTP I/O"
+            )
+
+            #expect(result.exitCode == 0)
+            #expect(result.stderr.isEmpty)
+            #expect(result.requests.isEmpty)
+            #expect(result.outputObjects.count == 1)
+            let response = try #require(result.outputObjects.first)
+            let error = try #require(response["error"] as? [String: Any])
+            #expect(response["jsonrpc"] as? String == "2.0")
+            #expect(response["id"] is NSNull)
+            #expect((error["code"] as? NSNumber)?.intValue == -32600)
+            #expect(error["message"] as? String == "invalid request")
+        }
+    }
+
     @Test func stdioAdapterRejectsSecondInitializeWithoutForwardingIt() async throws {
         let secondInitialize =
             #"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#

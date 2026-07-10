@@ -1403,13 +1403,19 @@ struct XcodeMCPTests {
         await xcode.close()
     }
 
-    @Test func clientEnvelopeRejectsBatchInput() throws {
-        #expect(throws: MCPBridgeRuntimeError.invalidRequest(
-            "JSON-RPC message must be one object"
-        )) {
-            _ = try MCPClientEnvelope(data: Data(
-                #"[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]"#.utf8
-            ))
+    @Test func clientEnvelopeRejectsTopLevelArrays() throws {
+        let arrays = [
+            #"[]"#,
+            #"[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]"#,
+            #"[{"jsonrpc":"2.0","id":"a","method":"tools/list"},{"jsonrpc":"2.0","method":"notifications/initialized"},true]"#,
+        ]
+
+        for array in arrays {
+            #expect(throws: MCPBridgeRuntimeError.invalidRequest(
+                "JSON-RPC message must be one object"
+            )) {
+                _ = try MCPClientEnvelope(data: Data(array.utf8))
+            }
         }
     }
 

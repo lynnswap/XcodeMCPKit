@@ -75,5 +75,18 @@ struct JSONRPCWireContractTests {
         #expect((rewritten["id"] as? NSNumber)?.intValue == 7)
         #expect(parsedError.code == -32002)
         #expect(parsedError.message == "upstream overloaded")
+
+        let invalidRequestData = try JSONRPC.Wire.errorResponseData(
+            id: nil,
+            code: -32600,
+            message: "invalid request"
+        )
+        let invalidRequest = try #require(
+            JSONSerialization.jsonObject(with: invalidRequestData) as? [String: Any]
+        )
+        let invalidRequestError = try #require(invalidRequest["error"] as? [String: Any])
+        #expect(invalidRequest["id"] is NSNull)
+        #expect((invalidRequestError["code"] as? NSNumber)?.intValue == -32600)
+        #expect(invalidRequestError["message"] as? String == "invalid request")
     }
 }

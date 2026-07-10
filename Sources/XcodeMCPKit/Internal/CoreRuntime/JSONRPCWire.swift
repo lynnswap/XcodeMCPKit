@@ -211,39 +211,6 @@ extension JSONRPC {
             return try data(from: object)
         }
 
-        package static func errorResponseData(
-            idValues: [JSONValue],
-            code: Int,
-            message: String,
-            data errorData: JSONValue? = nil,
-            includeNullIDWhenEmpty: Bool = false
-        ) throws -> Data? {
-            guard idValues.isEmpty == false else {
-                guard includeNullIDWhenEmpty else {
-                    return nil
-                }
-                return try errorResponseData(
-                    idValue: nil,
-                    code: code,
-                    message: message,
-                    data: errorData
-                )
-            }
-            let error = ErrorPayload(code: code, message: message, data: errorData)
-            let objects = idValues.map {
-                errorResponseObject(idValue: $0, error: error)
-            }
-            return try responsePayloadData(objects: objects)
-        }
-
-        package static func responsePayloadData(objects: [[String: Any]]) throws -> Data? {
-            guard objects.isEmpty == false else {
-                return nil
-            }
-            let payload: Any = objects.count > 1 ? objects : objects[0]
-            return try data(from: payload)
-        }
-
         package static func objectByReplacingID(
             in object: [String: Any],
             with id: JSONRPC.ID
