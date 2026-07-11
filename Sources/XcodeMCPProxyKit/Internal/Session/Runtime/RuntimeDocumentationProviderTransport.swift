@@ -3,6 +3,12 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPKit
 
+enum RuntimeDocumentationProviderRouteResolution {
+    case ready(DocumentationProviderRoute)
+    case pending
+    case unmanaged
+}
+
 final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting {
     private struct State: Sendable {
         var initializeParamsByRouteID: [String: [String: JSONValue]] = [:]
@@ -29,13 +35,18 @@ final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting 
         requestTimeout: TimeAmount?,
         initializeParams: [String: JSONValue]
     ) async throws -> DocumentationProviderRoute {
-        if let runtime = runtimeBox.value,
-            let route = runtime.documentationProviderRoute(for: target)
-        {
-            state.withLockedValue { state in
-                state.initializeParamsByRouteID[route.id] = initializeParams
+        if let runtime = runtimeBox.value {
+            switch runtime.resolveDocumentationProviderRoute(for: target) {
+            case .ready(let route):
+                state.withLockedValue { state in
+                    state.initializeParamsByRouteID[route.id] = initializeParams
+                }
+                return route
+            case .pending:
+                throw UpstreamSlotScheduler.AcquisitionError.unavailable
+            case .unmanaged:
+                break
             }
-            return route
         }
         return try await fallback.openRoute(
             for: target,
@@ -260,17 +271,25 @@ struct UnavailableRuntimeDocumentationProviderTransport: DocumentationProviderRo
 }
 
 extension RuntimeCoordinator {
-    func documentationProviderRoute(
+    func resolveDocumentationProviderRoute(
         for target: XcodeProcessTarget
-    ) -> DocumentationProviderRoute? {
-        guard let upstreamIndex = documentationUpstreamIndex(for: target) else {
-            return nil
+    ) -> RuntimeDocumentationProviderRouteResolution {
+        guard processRoutingEnabled else {
+            return .unmanaged
         }
-        return DocumentationProviderRoute(
+        guard xcodeProcessRoutes.contains(where: {
+            $0.target.processID == target.processID
+        }) else {
+            return .pending
+        }
+        guard let upstreamIndex = documentationUpstreamIndex(for: target) else {
+            return .pending
+        }
+        return .ready(DocumentationProviderRoute(
             id: "upstream-\(upstreamIndex)-pid-\(target.processID)",
             target: target,
             upstreamIndex: upstreamIndex
-        )
+        ))
     }
 
     func documentationProviderToolsList(

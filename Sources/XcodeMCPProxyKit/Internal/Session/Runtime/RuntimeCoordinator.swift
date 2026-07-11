@@ -1091,6 +1091,19 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func prewarmDocumentationProvider() {
         guard let documentationProviderManager else { return }
+        let initializedUpstreamIndices = Set(
+            upstreamHealthManager.activeStatesSnapshot().compactMap { id, state in
+                state.isInitialized ? id.rawValue : nil
+            }
+        )
+        guard processRoutingEnabled == false
+            || xcodeProcessRoutes.contains(where: {
+                $0.upstreamIndices.contains(where: initializedUpstreamIndices.contains)
+            })
+        else {
+            cancelDocumentationProviderDiscovery()
+            return
+        }
         let timeoutSeconds =
             config.requestTimeout > 0
             ? min(config.requestTimeout, 30)

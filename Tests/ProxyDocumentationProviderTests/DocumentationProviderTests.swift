@@ -1324,6 +1324,46 @@ struct DocumentationProviderTests {
         #expect(await upstream.sentCount() == 2)
     }
 
+    @Test func runtimeDocumentationTransportDoesNotFallbackWhileUpstreamRouteIsInitializing()
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 739, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let openStarted = TestSignal()
+        let openGate = AsyncGate()
+        await openGate.signal()
+        let fallback = BlockingFallbackDocumentationProviderTransport(
+            openStarted: openStarted,
+            openGate: openGate
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                fallback: fallback
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { fixture.shutdownAndWait() }
+
+        let update = await providerManager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+
+        guard case .unavailable = update else {
+            Issue.record("expected unavailable update while the upstream route initializes")
+            return
+        }
+        #expect(await fallback.openCount() == 0)
+        #expect(await upstream.startCount() == 0)
+    }
+
     @Test func runtimeDocumentationTransportFallsBackForReusedRouteToolsListFailure()
         async throws
     {
@@ -2768,6 +2808,36 @@ struct DocumentationProviderTests {
         #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
+    @Test func processRoutingDefersStartupDocumentationPrewarmUntilUpstreamIsInitialized()
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 752, xcodeVersion: "27.0")
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+        defer { fixture.shutdownAndWait() }
+
+        #expect(fixture.manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.task == nil && state.retryTimeout == nil
+        })
+        #expect(await documentationProvider.prewarmCount() == 0)
+
+        try await fixture.completeInitialize(on: upstream)
+
+        try await waitWithTimeout("waiting for initialized-route documentation prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
+        }
+        #expect(await documentationProvider.prewarmCount() == 1)
+    }
+
     @Test func unavailableDocumentationProviderRetriesWithoutProcessRescan() async throws {
         let upstream = TestUpstreamClient()
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
@@ -2891,10 +2961,12 @@ struct DocumentationProviderTests {
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
         let processEventMonitor = StubDocumentationProcessEventMonitor()
+        let target = xcodeProcessTarget(processID: 753, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 300),
             eventLoop: group.next(),
             upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
             processRoutingEnabled: true,
             xcodeProcessEventMonitor: processEventMonitor,
             documentationProviderManager: documentationProvider,
@@ -2902,7 +2974,18 @@ struct DocumentationProviderTests {
         )
         defer { manager.shutdownAndWait() }
 
-        try await waitWithTimeout("waiting for initial documentation provider prewarm") {
+        #expect(manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.task == nil && state.retryTimeout == nil
+        })
+        #expect(await documentationProvider.prewarmCount() == 0)
+
+        let initializeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeRequestID = try extractUpstreamID(from: initializeRequest)
+        await yieldMessage(
+            try makeInitializeResponse(id: initializeRequestID),
+            to: upstream
+        )
+        try await waitWithTimeout("waiting for initialized-route documentation prewarm") {
             try await documentationProvider.waitForPrewarmCount(1)
         }
         await documentationProvider.setToolListUpdate(
