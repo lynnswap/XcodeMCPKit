@@ -98,3 +98,13 @@ flowchart LR
 - The discovery record is a URL hint, not proof that a server is reachable. PID liveness is not used as a second source of truth.
 - Reachability is established only by connecting to the endpoint and completing the standard initialize handshake.
 - When discovery is enabled, writing the record is part of server startup. A write failure unwinds listener/runtime resources and makes startup fail.
+
+## Xcode Process Observation Contract
+
+- The proxy observes `NSWorkspace.runningApplications` with KVO using an initial callback. Every callback reads the current atomic property once instead of treating the KVO change payload as a full snapshot. This is the only live process-inventory owner.
+- Process-bound routing, upstream readiness, DocumentationSearch discovery, startup summaries, and permission-dialog automation read the same cached snapshot. Permission automation covers the known helper applications exposed by `NSWorkspace`; it does not claim an inventory of every OS process.
+- The runtime does not run `pgrep`, enumerate all PIDs, or periodically rescan Xcode membership. Route reconciliation runs only for the initial snapshot and inventory-change events.
+- Auto-approve still polls AX windows while enabled because AppKit has no permission-dialog appearance event. This loop reads cached process IDs; child-process lookup is deferred until a structurally eligible permission dialog needs ownership validation.
+- A route cooldown uses a route-identity-fenced one-shot timer. Its expiry retries the existing route without querying the OS process list.
+- An unavailable DocumentationProvider attempt schedules exactly one generation-fenced retry after two seconds. The retry uses the cached Xcode snapshot and never queries the OS process inventory; success, replacement, reset, and shutdown cancel the pending work.
+- Apple delivers `runningApplications` KVO changes while the main run loop runs in a common mode. The shipped Darwin async-main executable and normal AppKit hosts satisfy this; embedding hosts must use the public async lifecycle rather than block the main thread.

@@ -2768,14 +2768,162 @@ struct DocumentationProviderTests {
         #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
-    @Test func startupPollsDocumentationProviderUntilAvailable() async throws {
-        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
+    @Test func unavailableDocumentationProviderRetriesWithoutProcessRescan() async throws {
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for documentation provider retry") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout == nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(
+            timeoutScheduler.delay(at: 0)?.nanoseconds
+                == TimeAmount.seconds(2).nanoseconds
+        )
+
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        #expect(timeoutScheduler.fire(at: 0))
+        try await waitWithTimeout("waiting for documentation provider retry recovery") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout != nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        #expect(await documentationProvider.prewarmCount() == 2)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+    }
+
+    @Test func staleDocumentationProviderRetryCannotReplaceNewerSuccess() async throws {
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for stale documentation provider retry") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout == nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for newer documentation provider success") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout != nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: 0))
+        #expect(await documentationProvider.prewarmCount() == 2)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(fixture.manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.task == nil && state.retryTimeout == nil
+        })
+    }
+
+    @Test func shutdownRejectsDeliveredDocumentationProviderRetry() async throws {
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for documentation provider retry before shutdown") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout == nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        await fixture.manager.shutdown()
+
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: 0))
+        #expect(await documentationProvider.prewarmCount() == 1)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(fixture.manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.isClosed && state.task == nil && state.retryTimeout == nil
+        })
+    }
+
+    @Test func xcodeInventoryChangePrewarmsUnavailableDocumentationProviderAgain() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let processEventMonitor = StubDocumentationProcessEventMonitor()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 300),
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            processRoutingEnabled: true,
+            xcodeProcessEventMonitor: processEventMonitor,
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+        defer { manager.shutdownAndWait() }
+
+        try await waitWithTimeout("waiting for initial documentation provider prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
+        }
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        processEventMonitor.emitInventoryChange()
+        try await waitWithTimeout("waiting for inventory-change documentation prewarm") {
+            try await documentationProvider.waitForPrewarmCount(2)
+        }
+
+        let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
+        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
+    }
+
+    @Test func upstreamInitializationPrewarmsUnavailableDocumentationProviderAgain() async throws {
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [upstream],
-            clock: clock,
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
@@ -2787,18 +2935,14 @@ struct DocumentationProviderTests {
         await documentationProvider.setToolListUpdate(
             .available(documentationDescriptor(version: "27.0"))
         )
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: timeoutClock,
-            uptimeClock: uptimeClock,
-            by: RuntimeCoordinator.documentationProviderDiscoveryPollInterval
-        )
-        try await waitWithTimeout("waiting for documentation provider poll") {
+
+        fixture.manager.noteUpstreamInitializationSucceeded()
+
+        try await waitWithTimeout("waiting for initialized-upstream documentation prewarm") {
             try await documentationProvider.waitForPrewarmCount(2)
         }
-
         let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(10).nanoseconds)
-        #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
     @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
@@ -5824,6 +5968,45 @@ struct DocumentationProviderTests {
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"after-cancel\"}")
         #expect(await factory.startedPIDs() == [xcode.processID])
         #expect(await factory.documentationQueries(for: xcode.processID) == ["UIView", "SwiftUI"])
+    }
+}
+
+private final class StubDocumentationProcessEventMonitor:
+    XcodeProcessEventMonitoring,
+    @unchecked Sendable
+{
+    private let changeHandler =
+        NIOLockedValueBox<(@Sendable (_ reason: String) -> Void)?>(nil)
+
+    func start() {}
+
+    func setChangeHandler(
+        _ handler: @escaping @Sendable (_ reason: String) -> Void
+    ) {
+        changeHandler.withLockedValue { $0 = handler }
+    }
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
+        []
+    }
+
+    func permissionDialogProcessIDs() -> [pid_t] {
+        []
+    }
+
+    func readinessSnapshot() -> UpstreamReadinessSnapshot {
+        UpstreamReadinessSnapshot(isReady: false, generation: 0)
+    }
+
+    func waitForReadinessChange(after _: UInt64) async {}
+
+    func stop() {
+        changeHandler.withLockedValue { $0 = nil }
+    }
+
+    func emitInventoryChange() {
+        let handler = changeHandler.withLockedValue { $0 }
+        handler?("test_inventory_changed")
     }
 }
 

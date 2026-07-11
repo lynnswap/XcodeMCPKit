@@ -411,6 +411,7 @@ struct XcodePermissionDialogAutoApproverTests {
         let approver = XcodePermissionDialog.AutoApprover(
             dependencies: .init(
                 axClient: axClient,
+                permissionDialogProcessIDs: { axClient.recordedProcessIDs() },
                 agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
                 assistantNameCandidates: { ["XcodeMCPKit"] },
                 serverProcessIDCandidates: { [6119] },
@@ -427,6 +428,57 @@ struct XcodePermissionDialogAutoApproverTests {
         let snapshot = axClient.snapshot()
         #expect(snapshot.promptCalls == 1)
         #expect(snapshot.windowScanCalls == 0)
+    }
+
+    @Test func autoApproverDoesNotEnumerateChildProcessesDuringOrdinaryWindowPolling()
+        async throws
+    {
+        let processID: pid_t = 4316
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [
+                processID: [
+                    XcodePermissionDialog.AXWindow(
+                        processID: processID,
+                        snapshot: makeSnapshot(
+                            processBundleIdentifier: "com.apple.dt.Xcode",
+                            title: "Workspace",
+                            textValues: [],
+                            subrole: "AXStandardWindow"
+                        ),
+                        defaultButton: AXUIElementCreateSystemWide()
+                    )
+                ]
+            ]
+        )
+        let childProcessScanCount = CallCounter()
+        let approver = XcodePermissionDialog.AutoApprover(
+            dependencies: .init(
+                axClient: axClient,
+                permissionDialogProcessIDs: { axClient.recordedProcessIDs() },
+                agentPathCandidates: { [] },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                serverProcessIDCandidates: {
+                    childProcessScanCount.increment()
+                    return []
+                },
+                sleep: { _ in
+                    try? await Task.sleep(for: .milliseconds(1))
+                },
+                pollInterval: .milliseconds(1),
+                logger: ProxyLogging.make("tests.permission")
+            )
+        )
+        defer { approver.stop() }
+
+        approver.start()
+        let deadline = Date().addingTimeInterval(2)
+        while axClient.snapshot().windowScanCalls < 3, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(axClient.snapshot().windowScanCalls >= 3)
+        #expect(childProcessScanCount.value() == 0)
     }
 
     @Test func autoApproverRefreshesAgentPathCandidatesWhileMonitoring() async throws {
@@ -454,6 +506,7 @@ struct XcodePermissionDialogAutoApproverTests {
         let approver = XcodePermissionDialog.AutoApprover(
             dependencies: .init(
                 axClient: axClient,
+                permissionDialogProcessIDs: { axClient.recordedProcessIDs() },
                 agentPathCandidates: {
                     candidateCounter.nextCandidateSet(first: [], later: [bridgePath])
                 },
@@ -552,7 +605,7 @@ private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialo
         }
     }
 
-    func runningXcodeProcessIDs() -> [pid_t] {
+    func recordedProcessIDs() -> [pid_t] {
         lock.withLock {
             windowScanCalls += 1
             return windowsByProcessID.keys.sorted()
@@ -585,6 +638,21 @@ private final class CandidateCounter: @unchecked Sendable {
             count += 1
             return count == 1 ? first : later
         }
+    }
+}
+
+private final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.withLock {
+            count += 1
+        }
+    }
+
+    func value() -> Int {
+        lock.withLock { count }
     }
 }
 

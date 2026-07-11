@@ -34,6 +34,18 @@
   - Handshake state is independent from catalog/window epochs. The coordinator
     owns shared load tasks and waiters, but writes semantic state only through
     authority leases and transitions.
+- `XcodeProcessEventMonitor`
+  - Owns the KVO subscription and cached snapshots derived from
+    `NSWorkspace.runningApplications`. Each callback reads the current atomic
+    property; it does not treat the KVO change payload as a full snapshot.
+    Process routing, readiness,
+    DocumentationSearch, and auto-approve consume this cache; they must not add
+    independent `pgrep`, libproc, or periodic membership scans.
+  - Readiness changes are generation-fenced. Route cooldown recovery is a
+    route-identity-fenced one-shot timer, not a process rescan.
+  - DocumentationProvider discovery schedules one generation-fenced retry per
+    unavailable attempt. It consumes the same cached snapshot and is cancelled
+    by success, replacement, reset, or shutdown; it never rescans OS processes.
 - `XcodeMCPProxyKit` HTTP gateway internals
   - `HTTPRequestSecurityPolicy` validates Origin for every route before any
     side effect. The gateway also owns server-issued session IDs, negotiated

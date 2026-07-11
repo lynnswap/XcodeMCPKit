@@ -112,7 +112,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         case initialization
     }
 
-    enum CooldownScope: Sendable {
+    enum CooldownScope: Sendable, Hashable {
         case route
         case catalog
     }

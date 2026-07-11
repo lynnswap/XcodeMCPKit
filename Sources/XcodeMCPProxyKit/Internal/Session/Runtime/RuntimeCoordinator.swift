@@ -84,9 +84,26 @@ struct XcodeProcessReconcileScheduleState: Sendable {
     var pendingReasons: [String] = []
 }
 
-struct XcodeProcessReconciliationLoopState: Sendable {
+struct XcodeProcessStartupReconcileState: Sendable {
+    var isReconciling = true
+    var didObserveChange = false
+}
+
+struct XcodeProcessCooldownKey: Hashable, Sendable {
+    let routeID: ProcessRouteID
+    let scope: ProcessControlPlaneAuthority.CooldownScope
+}
+
+struct XcodeProcessCooldownSchedule: Sendable {
+    let deadlineUptimeNanoseconds: UInt64
+    let timeout: RuntimeScheduledTimeout
+}
+
+struct DocumentationProviderDiscoveryState: Sendable {
     var generation: UInt64 = 0
-    var isRunning = false
+    var task: Task<DocumentationProvider.ToolListUpdate, Never>?
+    var retryTimeout: RuntimeScheduledTimeout?
+    var isClosed = false
 }
 
 typealias XcodeProcessUpstreamFactory =
@@ -355,8 +372,7 @@ extension RuntimeDebugSnapshotPort {
 
 final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     static let redactedDebugText = "<redacted>"
-    static let documentationProviderDiscoveryPollInterval: Duration = .seconds(2)
-
+    static let documentationProviderDiscoveryRetryInterval: TimeAmount = .seconds(2)
     struct TestSnapshot: Sendable {
         struct Upstream: Sendable {
             let id: Int
@@ -384,13 +400,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let initializeManager: InitializeManager
     let upstreamEventTasks = AsyncTaskSupervisor()
     let runtimeTasks = AsyncTaskSupervisor()
-    let xcodeProcessReconciliationLoopState =
-        NIOLockedValueBox(XcodeProcessReconciliationLoopState())
     let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
-    let documentationPrewarmTaskBox =
-        NIOLockedValueBox<Task<DocumentationProvider.ToolListUpdate, Never>?>(nil)
+    let documentationProviderDiscoveryState =
+        NIOLockedValueBox(DocumentationProviderDiscoveryState())
     let toolCatalogSummaryLoggedBox = NIOLockedValueBox(false)
     let debugRecorder: ProxyDebugRecorder
     let leaseManager: LeaseManager
@@ -424,7 +438,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let processRoutingEnabled: Bool
     let xcodeProcessReconcileScheduleState =
         NIOLockedValueBox(XcodeProcessReconcileScheduleState())
-    let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
+    let xcodeProcessCooldownSchedules =
+        NIOLockedValueBox<[XcodeProcessCooldownKey: XcodeProcessCooldownSchedule]>([:])
+    let xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)?
     let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
     let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?
     var xcodeProcessRoutes: [XcodeProcessRoute] {
@@ -444,6 +460,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         eventLoop: EventLoop,
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
+        xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)? = nil,
         startImmediately: Bool = true
     ) {
         let bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
@@ -498,6 +515,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
             processRoutingEnabled: xcodeProcessRoutingEnabled,
             xcodeTargetDiscovery: xcodeTargetDiscovery,
+            xcodeProcessEventMonitor: xcodeProcessEventMonitor,
             dynamicUpstreamFactory: { target in
                 MCPBridgeRuntime.makeProcessBoundUpstreamSlots(
                     config: bridgeRuntimeConfig,
@@ -554,6 +572,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
         processRoutingEnabled: Bool? = nil,
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
+        xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)? = nil,
         dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
@@ -615,12 +634,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         self.processControlPlane = processControlPlane
         self.xcodeTargetDiscovery = xcodeTargetDiscovery
+        self.xcodeProcessEventMonitor = xcodeProcessEventMonitor
         self.dynamicUpstreamFactory = dynamicUpstreamFactory
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         self.testHooks = testHooks
         let resolvedReadinessGate =
             upstreamReadinessGate
-            ?? .alwaysReady(uptimeNanoseconds: runtimeClock.uptimeNanoseconds)
+            ?? .alwaysReady()
         self.upstreamReadinessGate = resolvedReadinessGate
         self.upstreamReadinessCoordinator = UpstreamReadinessCoordinator(
             gate: resolvedReadinessGate,
@@ -746,19 +766,67 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         guard shouldStart else { return }
         if processRoutingEnabled {
-            xcodeProcessEventMonitor.startWorkspaceNotifications { [weak self] reason in
-                self?.triggerXcodeProcessReconcile(reason: reason)
-            }
-            for route in xcodeProcessRoutes {
-                xcodeProcessEventMonitor.observeExit(processID: route.target.processID) {
-                    [weak self] reason in
-                    self?.triggerXcodeProcessReconcile(reason: reason)
+            if let xcodeProcessEventMonitor {
+                let startupReconcileState = NIOLockedValueBox(
+                    XcodeProcessStartupReconcileState()
+                )
+                xcodeProcessEventMonitor.setChangeHandler { [weak self] reason in
+                    guard let self else { return }
+                    let shouldSchedule = startupReconcileState.withLockedValue { state in
+                        if state.isReconciling {
+                            state.didObserveChange = true
+                            return false
+                        }
+                        return true
+                    }
+                    guard shouldSchedule else { return }
+                    self.handleXcodeProcessInventoryChange(reason: reason)
                 }
+                if let xcodeTargetDiscovery {
+                    reconcileStartupXcodeProcessSnapshotUntilCurrent(
+                        discovery: xcodeTargetDiscovery,
+                        state: startupReconcileState
+                    )
+                } else {
+                    startupReconcileState.withLockedValue { state in
+                        state.isReconciling = false
+                    }
+                }
+            } else {
+                triggerXcodeProcessReconcile(reason: "startup")
             }
-            triggerXcodeProcessReconcile(reason: "startup")
-            startXcodeProcessReconciliationLoop()
         }
         startEagerInitializePrimary()
+        if prewarmDocumentationProviderOnStartup {
+            prewarmDocumentationProvider()
+        }
+    }
+
+    private func reconcileStartupXcodeProcessSnapshotUntilCurrent(
+        discovery: any XcodeTargetDiscovering,
+        state startupState: NIOLockedValueBox<XcodeProcessStartupReconcileState>
+    ) {
+        while true {
+            reconcileXcodeProcessTargets(
+                discovery.runningXcodeTargets(),
+                reason: "startup_snapshot"
+            )
+            let isCurrent = startupState.withLockedValue { state in
+                if state.didObserveChange {
+                    state.didObserveChange = false
+                    return false
+                }
+                state.isReconciling = false
+                return true
+            }
+            if isCurrent {
+                return
+            }
+        }
+    }
+
+    private func handleXcodeProcessInventoryChange(reason: String) {
+        triggerXcodeProcessReconcile(reason: reason)
         if prewarmDocumentationProviderOnStartup {
             prewarmDocumentationProvider()
         }
@@ -878,6 +946,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
         resetAllProcessRouteActivations(reason: "debug_reset")
+        cancelAllXcodeProcessCooldownSchedules()
+        cancelDocumentationProviderDiscovery()
         clearXcodeWindowOwners()
         invalidateControlPlane(
             reason: "debug_reset",
@@ -885,7 +955,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clearToolsCatalog: false
         )
         applyProcessControlPlaneTransition(processControlPlane.reset())
-        restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset()
+        retryPendingProcessRouteReadiness(reason: "debug_reset")
     }
 
     func shutdown() async {
@@ -902,15 +972,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for timeout in upstreamTimeouts {
             timeout?.cancel()
         }
-        let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue { taskBox in
-            let task = taskBox
-            taskBox = nil
-            return task
-        }
-        documentationPrewarmTask?.cancel()
+        let documentationPrewarmTask = stopDocumentationProviderDiscovery()
         upstreamReadinessCoordinator.shutdown()
+        xcodeProcessEventMonitor?.stop()
         resetAllProcessRouteActivations(reason: "shutdown")
-        xcodeProcessEventMonitor.stop()
+        cancelAllXcodeProcessCooldownSchedules()
 
         let runtimeDrain = runtimeTasks.beginShutdown()
         applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
@@ -948,15 +1014,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         for timeout in upstreamHealthManager.clearInitTimeoutsForShutdown() {
             timeout?.cancel()
         }
-        let documentationPrewarmTask = documentationPrewarmTaskBox.withLockedValue { taskBox in
-            let task = taskBox
-            taskBox = nil
-            return task
-        }
-        documentationPrewarmTask?.cancel()
+        _ = stopDocumentationProviderDiscovery()
         upstreamReadinessCoordinator.shutdown()
-        xcodeProcessEventMonitor.stop()
+        xcodeProcessEventMonitor?.stop()
         resetAllProcessRouteActivations(reason: "deinit")
+        cancelAllXcodeProcessCooldownSchedules()
         applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
         _ = runtimeTasks.beginShutdown()
         _ = upstreamEventTasks.beginShutdown()
@@ -1040,45 +1102,143 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ? min(config.requestTimeout, 30)
             : 30
         let timeout = MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeoutSeconds)
-        let task = Task<DocumentationProvider.ToolListUpdate, Never> {
-            [weak self, documentationProviderManager, logger] in
-            guard !Task.isCancelled else { return .unavailable }
-            logger.debug(
-                "Prewarming documentation provider",
-                metadata: [
-                    "timeout_seconds": .string("\(timeoutSeconds)")
-                ]
-            )
-            let update = await documentationProviderManager.startBackgroundDiscovery(
-                requestTimeout: timeout
-            )
-            self?.recordDocumentationToolListUpdate(update)
-            guard !Task.isCancelled else { return .unavailable }
-            self?.scheduleDocumentationProviderDiscoveryPollIfNeeded(after: update)
-            logger.debug("Documentation provider prewarm completed")
-            return update
-        }
-        let previous = documentationPrewarmTaskBox.withLockedValue { taskBox in
-            let previous = taskBox
-            taskBox = task
-            return previous
-        }
-        previous?.cancel()
+        startDocumentationProviderDiscovery(
+            manager: documentationProviderManager,
+            requestTimeout: timeout,
+            timeoutSeconds: timeoutSeconds,
+            expectedGeneration: nil
+        )
     }
 
-    private func scheduleDocumentationProviderDiscoveryPollIfNeeded(
-        after update: DocumentationProvider.ToolListUpdate
+    private func startDocumentationProviderDiscovery(
+        manager: any DocumentationProviderManaging,
+        requestTimeout: TimeAmount?,
+        timeoutSeconds: TimeInterval,
+        expectedGeneration: UInt64?
     ) {
-        guard documentationProviderManager != nil else { return }
-        guard case .available = update else {
-            addRuntimeTask { [weak self] in
-                guard let self else { return }
-                await self.clock.sleep(Self.documentationProviderDiscoveryPollInterval)
-                guard !Task.isCancelled else { return }
-                self.prewarmDocumentationProvider()
+        let previous = documentationProviderDiscoveryState.withLockedValue { state -> (
+            task: Task<DocumentationProvider.ToolListUpdate, Never>?,
+            retryTimeout: RuntimeScheduledTimeout?
+        )? in
+            guard state.isClosed == false else { return nil }
+            if let expectedGeneration {
+                guard state.generation == expectedGeneration else { return nil }
             }
+
+            let previous = (task: state.task, retryTimeout: state.retryTimeout)
+            state.generation &+= 1
+            let generation = state.generation
+            state.retryTimeout = nil
+            state.task = Task<DocumentationProvider.ToolListUpdate, Never> {
+                [weak self, manager, logger] in
+                guard !Task.isCancelled else { return .unavailable }
+                logger.debug(
+                    "Prewarming documentation provider",
+                    metadata: [
+                        "timeout_seconds": .string("\(timeoutSeconds)")
+                    ]
+                )
+                let update = await manager.startBackgroundDiscovery(
+                    requestTimeout: requestTimeout
+                )
+                guard !Task.isCancelled else { return .unavailable }
+                self?.completeDocumentationProviderDiscovery(
+                    generation: generation,
+                    update: update
+                )
+                logger.debug("Documentation provider prewarm completed")
+                return update
+            }
+            return previous
+        }
+        guard let previous else { return }
+        previous.task?.cancel()
+        previous.retryTimeout?.cancel()
+    }
+
+    private func completeDocumentationProviderDiscovery(
+        generation: UInt64,
+        update: DocumentationProvider.ToolListUpdate
+    ) {
+        let accepted = documentationProviderDiscoveryState.withLockedValue { state in
+            guard state.isClosed == false,
+                  state.generation == generation else {
+                return false
+            }
+            state.task = nil
+            return true
+        }
+        guard accepted else { return }
+        recordDocumentationToolListUpdate(update)
+        guard case .available = update else {
+            scheduleDocumentationProviderDiscoveryRetry(generation: generation)
             return
         }
+    }
+
+    private func scheduleDocumentationProviderDiscoveryRetry(generation: UInt64) {
+        let timeout = scheduleRuntimeTimeout(
+            Self.documentationProviderDiscoveryRetryInterval
+        ) { [weak self] in
+            self?.retryDocumentationProviderDiscovery(generation: generation)
+        }
+        let shouldKeep = documentationProviderDiscoveryState.withLockedValue { state in
+            guard state.isClosed == false,
+                  state.generation == generation,
+                  state.task == nil,
+                  state.retryTimeout == nil else {
+                return false
+            }
+            state.retryTimeout = timeout
+            return true
+        }
+        if shouldKeep == false {
+            timeout.cancel()
+        }
+    }
+
+    private func retryDocumentationProviderDiscovery(generation: UInt64) {
+        guard let documentationProviderManager else { return }
+        let timeoutSeconds =
+            config.requestTimeout > 0
+            ? min(config.requestTimeout, 30)
+            : 30
+        startDocumentationProviderDiscovery(
+            manager: documentationProviderManager,
+            requestTimeout: MCP.MethodDispatcher.timeoutForControlPlane(
+                defaultSeconds: timeoutSeconds
+            ),
+            timeoutSeconds: timeoutSeconds,
+            expectedGeneration: generation
+        )
+    }
+
+    private func cancelDocumentationProviderDiscovery() {
+        let pending = documentationProviderDiscoveryState.withLockedValue { state in
+            state.generation &+= 1
+            let pending = (task: state.task, retryTimeout: state.retryTimeout)
+            state.task = nil
+            state.retryTimeout = nil
+            return pending
+        }
+        pending.task?.cancel()
+        pending.retryTimeout?.cancel()
+    }
+
+    private func stopDocumentationProviderDiscovery()
+        -> Task<DocumentationProvider.ToolListUpdate, Never>?
+    {
+        let pending = documentationProviderDiscoveryState.withLockedValue { state in
+            state.isClosed = true
+            state.generation &+= 1
+            let pending = (task: state.task, retryTimeout: state.retryTimeout)
+            state.task = nil
+            state.retryTimeout = nil
+            return pending
+        }
+        pending.task?.cancel()
+        pending.retryTimeout?.cancel()
+        return pending.task
     }
 
     func chooseUpstreamOperationLease() -> UpstreamOperationLease? {

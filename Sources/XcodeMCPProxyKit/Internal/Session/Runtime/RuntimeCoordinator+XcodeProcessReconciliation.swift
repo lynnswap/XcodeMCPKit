@@ -37,85 +37,6 @@ extension RuntimeCoordinator {
         }
     }
 
-    func startXcodeProcessReconciliationLoop() {
-        guard processRoutingEnabled, xcodeTargetDiscovery != nil else {
-            return
-        }
-        let generation = xcodeProcessReconciliationLoopState.withLockedValue { state -> UInt64? in
-            guard state.isRunning == false else {
-                return nil
-            }
-            state.generation &+= 1
-            state.isRunning = true
-            return state.generation
-        }
-        guard let generation else { return }
-        let accepted = addRuntimeTask { [weak self, generation] in
-            guard let self else { return }
-            await self.runXcodeProcessReconciliationLoop(generation: generation)
-        }
-        if accepted == false {
-            finishXcodeProcessReconciliationLoop(generation: generation)
-        }
-    }
-
-    func restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset() {
-        guard processRoutingEnabled else {
-            return
-        }
-        invalidateXcodeProcessReconciliationLoop()
-        startXcodeProcessReconciliationLoop()
-    }
-
-    private func runXcodeProcessReconciliationLoop(generation: UInt64) async {
-        defer {
-            finishXcodeProcessReconciliationLoop(generation: generation)
-        }
-        while !Task.isCancelled, isCurrentXcodeProcessReconciliationLoop(generation: generation) {
-            let hasPendingProcessToolsCatalogRefresh =
-                processControlPlane.pendingCatalogProcessIDs(
-                    nowUptimeNs: nowUptimeNanoseconds()
-                ).isEmpty == false
-            let isRecovering =
-                activeInitializedHealthyishCount() == 0
-                || anyActiveRecoveryInFlight()
-                || hasPendingProcessToolsCatalogRefresh
-            let interval: Duration = xcodeProcessRoutes.isEmpty
-                || isRecovering
-                ? .seconds(2)
-                : .seconds(30)
-            await clock.sleep(interval)
-            guard !Task.isCancelled,
-                  isCurrentXcodeProcessReconciliationLoop(generation: generation)
-            else {
-                return
-            }
-            triggerXcodeProcessReconcile(reason: "periodic_scan")
-        }
-    }
-
-    private func invalidateXcodeProcessReconciliationLoop() {
-        xcodeProcessReconciliationLoopState.withLockedValue { state in
-            state.generation &+= 1
-            state.isRunning = false
-        }
-    }
-
-    private func isCurrentXcodeProcessReconciliationLoop(generation: UInt64) -> Bool {
-        xcodeProcessReconciliationLoopState.withLockedValue { state in
-            state.isRunning && state.generation == generation
-        }
-    }
-
-    private func finishXcodeProcessReconciliationLoop(generation: UInt64) {
-        xcodeProcessReconciliationLoopState.withLockedValue { state in
-            guard state.generation == generation else {
-                return
-            }
-            state.isRunning = false
-        }
-    }
-
     private func runScheduledXcodeProcessReconciles(
         discovery: any XcodeTargetDiscovering
     ) {
@@ -190,9 +111,6 @@ extension RuntimeCoordinator {
         }
 
         if result.addedRoutes.isEmpty == false {
-            for route in result.addedRoutes {
-                observeXcodeProcessExit(route.target.processID)
-            }
             startInitializationForAddedProcessRoutes(result.addedRoutes)
         }
 
@@ -237,7 +155,7 @@ extension RuntimeCoordinator {
         _ route: XcodeProcessRoute,
         reason: String
     ) {
-        xcodeProcessEventMonitor.removeExitObserver(processID: route.target.processID)
+        cancelXcodeProcessCooldownSchedules(routeID: route.id)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
 
         var resetInitialize = false
@@ -363,7 +281,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func retryPendingProcessRouteReadiness(reason: String) {
+    func retryPendingProcessRouteReadiness(reason: String) {
         let activeRoutes = xcodeProcessRoutes
         let activeProcessIDs = Set(activeRoutes.map(\.target.processID))
         let unavailableProcessIDs = unavailableXcodeProcessIDs()
@@ -447,9 +365,4 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func observeXcodeProcessExit(_ processID: pid_t) {
-        xcodeProcessEventMonitor.observeExit(processID: processID) { [weak self] reason in
-            self?.triggerXcodeProcessReconcile(reason: reason)
-        }
-    }
 }

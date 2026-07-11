@@ -1958,98 +1958,121 @@ actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
 }
 
 actor ReadinessFlag {
-    private struct Waiter {
+    private struct CheckWaiter {
+        let id: UUID
         let index: Int
         let continuation: CheckedContinuation<Int, Error>
     }
 
+    private struct ChangeWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private var ready: Bool
+    private var generation: UInt64 = 0
     private var checks = 0
-    private var waiters: [Waiter] = []
+    private var checkWaiters: [CheckWaiter] = []
+    private var changeWaiters: [ChangeWaiter] = []
+    private let observedChangeWaits = LockedRecordedValues<UInt64>()
 
     init(isReady: Bool) {
         self.ready = isReady
     }
 
     func setReady(_ value: Bool) {
+        guard ready != value else { return }
         ready = value
+        generation &+= 1
+        let waiters = changeWaiters
+        changeWaiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume()
+        }
     }
 
-    func isReady() -> Bool {
+    func snapshot() -> UpstreamReadinessSnapshot {
         checks += 1
-        resumeReadyWaiters()
-        return ready
+        resumeCheckWaiters()
+        return UpstreamReadinessSnapshot(isReady: ready, generation: generation)
+    }
+
+    func waitForChange(after observedGeneration: UInt64) async {
+        guard generation == observedGeneration, Task.isCancelled == false else { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard generation == observedGeneration,
+                      Task.isCancelled == false
+                else {
+                    continuation.resume()
+                    return
+                }
+                changeWaiters.append(
+                    ChangeWaiter(
+                        id: id,
+                        continuation: continuation
+                    )
+                )
+                observedChangeWaits.append(observedGeneration)
+            }
+        } onCancel: {
+            Task { await self.cancelChangeWaiter(id: id) }
+        }
     }
 
     func checkCount() -> Int {
         checks
     }
 
-    func nextCheck(at index: Int) async throws -> Int {
-        if checks > index {
-            return checks
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append(Waiter(index: index, continuation: continuation))
-        }
-    }
-
-    private func resumeReadyWaiters() {
-        var remaining: [Waiter] = []
-        for waiter in waiters {
-            if checks > waiter.index {
-                waiter.continuation.resume(returning: checks)
-            } else {
-                remaining.append(waiter)
-            }
-        }
-        waiters = remaining
-    }
-}
-
-actor AvailabilityFlag {
-    private struct Waiter {
-        let index: Int
-        let continuation: CheckedContinuation<Int, Error>
-    }
-
-    private var available: Bool
-    private var checks = 0
-    private var waiters: [Waiter] = []
-
-    init(isAvailable: Bool) {
-        self.available = isAvailable
-    }
-
-    func setAvailable(_ value: Bool) {
-        available = value
-    }
-
-    func isAvailable() -> Bool {
-        checks += 1
-        resumeReadyWaiters()
-        return available
+    func nextChangeWait(at index: Int) async throws -> UInt64 {
+        try await observedChangeWaits.nextValue(at: index)
     }
 
     func nextCheck(at index: Int) async throws -> Int {
         if checks > index {
             return checks
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append(Waiter(index: index, continuation: continuation))
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if checks > index {
+                    continuation.resume(returning: checks)
+                    return
+                }
+                guard Task.isCancelled == false else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                checkWaiters.append(
+                    CheckWaiter(id: id, index: index, continuation: continuation)
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelCheckWaiter(id: id) }
         }
     }
 
-    private func resumeReadyWaiters() {
-        var remaining: [Waiter] = []
-        for waiter in waiters {
+    private func resumeCheckWaiters() {
+        var remaining: [CheckWaiter] = []
+        for waiter in checkWaiters {
             if checks > waiter.index {
                 waiter.continuation.resume(returning: checks)
             } else {
                 remaining.append(waiter)
             }
         }
-        waiters = remaining
+        checkWaiters = remaining
+    }
+
+    private func cancelCheckWaiter(id: UUID) {
+        guard let index = checkWaiters.firstIndex(where: { $0.id == id }) else { return }
+        checkWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelChangeWaiter(id: UUID) {
+        guard let index = changeWaiters.firstIndex(where: { $0.id == id }) else { return }
+        changeWaiters.remove(at: index).continuation.resume()
     }
 }
 
@@ -2198,10 +2221,7 @@ actor XcodeLaunchRecorder {
 
 func makeTestReadinessGate(
     readiness: ReadinessFlag,
-    availability: AvailabilityFlag? = nil,
     sleepRecorder: ControlledReadinessSleep? = nil,
-    recordPollSleeps: Bool = false,
-    launchRetryIntervalNanoseconds: UInt64 = 5_000_000_000,
     launchRecorder: XcodeLaunchRecorder? = nil
 ) -> UpstreamReadinessGate {
     let launchIfUnavailable: (@Sendable () async -> Bool)?
@@ -2213,39 +2233,23 @@ func makeTestReadinessGate(
         launchIfUnavailable = nil
     }
 
-    let isAvailable: (@Sendable () async -> Bool)?
-    if let availability {
-        isAvailable = {
-            await availability.isAvailable()
-        }
-    } else {
-        isAvailable = nil
-    }
-
     return UpstreamReadinessGate(
         isEnabled: true,
         targetName: "mcpbridge",
-        pollIntervalNanoseconds: 1_000_000,
-        progressLogIntervalNanoseconds: 5_000_000_000,
-        launchRetryIntervalNanoseconds: launchRetryIntervalNanoseconds,
         initialRetryBackoffNanoseconds: 1_000_000_000,
         maxRetryBackoffNanoseconds: 8_000_000_000,
-        uptimeNanoseconds: {
-            DispatchTime.now().uptimeNanoseconds
-        },
         sleepNanoseconds: { nanoseconds in
             guard let sleepRecorder else {
-                preconditionFailure("Readiness tests must control sleep explicitly")
-            }
-            guard recordPollSleeps || nanoseconds >= 1_000_000_000 else {
-                preconditionFailure("Readiness poll sleeps must be recorded explicitly")
+                preconditionFailure("Readiness backoff tests must control sleep explicitly")
             }
             await sleepRecorder.sleep(nanoseconds: nanoseconds)
         },
-        isAvailable: isAvailable,
         launchIfUnavailable: launchIfUnavailable,
-        isReady: {
-            await readiness.isReady()
+        snapshot: {
+            await readiness.snapshot()
+        },
+        waitForChange: { generation in
+            await readiness.waitForChange(after: generation)
         }
     )
 }
@@ -2570,6 +2574,21 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
             guard operations.indices.contains(index), operations[index].isCancelled == false else {
                 return nil
             }
+            return operations[index].operation
+        }
+        guard let operation else {
+            return false
+        }
+        operation()
+        return true
+    }
+
+    /// Delivers a recorded callback even after cancellation, modeling an already-enqueued timer
+    /// callback that races with its owner's lifecycle transition.
+    @discardableResult
+    func fireIgnoringCancellation(at index: Int) -> Bool {
+        let operation: (@Sendable () -> Void)? = operations.withLockedValue { operations in
+            guard operations.indices.contains(index) else { return nil }
             return operations[index].operation
         }
         guard let operation else {

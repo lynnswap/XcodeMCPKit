@@ -527,11 +527,11 @@ public final class XcodeMCPProxyServer: Sendable {
 
         static var live: Self {
             let executableLookupClient = ExecutableLookupClient.liveValue
-            let xcodeTargetDiscovery = LiveXcodeTargetDiscovery()
+            let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
             return Self(
                 executableLookupClient: executableLookupClient,
                 runningXcodeTargets: {
-                    xcodeTargetDiscovery.runningXcodeTargets()
+                    xcodeProcessEventMonitor.runningXcodeTargets()
                 },
                 makeAutoApprover: { config in
                     let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
@@ -540,8 +540,11 @@ public final class XcodeMCPProxyServer: Sendable {
                     )
                     return XcodePermissionDialog.AutoApprover(
                         dependencies: .live(
+                            permissionDialogProcessIDs: {
+                                xcodeProcessEventMonitor.permissionDialogProcessIDs()
+                            },
                             agentPathCandidates: {
-                                let processBoundCandidates = xcodeTargetDiscovery
+                                let processBoundCandidates = xcodeProcessEventMonitor
                                     .runningXcodeTargets()
                                     .map(\.mcpbridgePath)
                                 return XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
@@ -556,11 +559,17 @@ public final class XcodeMCPProxyServer: Sendable {
                     )
                 },
                 makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
+                    xcodeProcessEventMonitor.start()
+                    return RuntimeCoordinator(
                         config: config,
                         eventLoop: eventLoop,
-                        upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue),
-                        xcodeTargetDiscovery: xcodeTargetDiscovery,
+                        upstreamReadinessGate: .liveDefault(
+                            config: config,
+                            clock: .liveValue,
+                            processEventMonitor: xcodeProcessEventMonitor
+                        ),
+                        xcodeTargetDiscovery: xcodeProcessEventMonitor,
+                        xcodeProcessEventMonitor: xcodeProcessEventMonitor,
                         startImmediately: false
                     )
                 }
@@ -585,12 +594,13 @@ public final class XcodeMCPProxyServer: Sendable {
         configuration: XcodeMCPProxyServerConfiguration =
             XcodeMCPProxyServerConfiguration()
     ) {
+        let dependencies = Dependencies.live
         self.configuration = configuration
-        self.dependencies = .live
+        self.dependencies = dependencies
         self.lifecycle = Lifecycle(
             configuration: configuration,
             preparedProxyConfig: nil,
-            dependencies: .live,
+            dependencies: dependencies,
             logger: logger
         )
     }

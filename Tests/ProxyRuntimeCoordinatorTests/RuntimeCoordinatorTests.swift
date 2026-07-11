@@ -39,15 +39,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
     @Test func processRoutingWithoutInitialTargetsRunsReadinessAutoLaunch() async throws {
         let readiness = ReadinessFlag(isReady: false)
-        let sleepRecorder = ControlledReadinessSleep()
         let launchRecorder = XcodeLaunchRecorder()
         let discovery = RecordingXcodeTargetDiscovery(targets: [])
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             upstreamReadinessGate: makeTestReadinessGate(
                 readiness: readiness,
-                sleepRecorder: sleepRecorder,
-                recordPollSleeps: true,
                 launchRecorder: launchRecorder
             ),
             processRoutingEnabled: true,
@@ -58,14 +55,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
         _ = try await waitWithTimeout("waiting for no-target Xcode launch", timeout: .seconds(2)) {
             try await launchRecorder.nextLaunch(at: 0)
         }
-        let sleep = try await waitWithTimeout(
-            "waiting for no-target readiness poll",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 0)
-        }
+        let generation = try await readiness.nextChangeWait(at: 0)
 
-        #expect(sleep == 1_000_000)
+        #expect(generation == 0)
         #expect(fixture.manager.debugSnapshot().upstreams.isEmpty)
         #expect(fixture.manager.debugSnapshot().processRoutes.isEmpty)
     }
@@ -339,6 +331,31 @@ struct RuntimeCoordinatorProcessRoutingTests {
             olderTarget.processID,
         ])
         #expect(processRoutes.map(\.state) == ["active", "retired"])
+    }
+
+    @Test func processRoutingStartupConsumesInventoryChangeBeforeEagerInitialization() {
+        let olderTarget = xcodeProcessTarget(processID: 27045, xcodeVersion: "26.6")
+        let newerTarget = xcodeProcessTarget(processID: 27046, xcodeVersion: "27.0")
+        let monitor = StartupChangingXcodeProcessMonitor(
+            firstTargets: [olderTarget],
+            latestTargets: [newerTarget]
+        )
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: MultiThreadedEventLoopGroup.singleton.next(),
+            upstreams: [],
+            processRoutingEnabled: true,
+            xcodeTargetDiscovery: monitor,
+            xcodeProcessEventMonitor: monitor,
+            dynamicUpstreamFactory: { _ in [] },
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        manager.start()
+
+        #expect(monitor.discoveryCallCount() == 2)
+        #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
     }
 
     @Test func processRoutingReschedulesQueuedReconcileAfterWorkerCancellation() async throws {
@@ -1005,17 +1022,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
     @Test func processRouteActivationOwnsInitializeWhileReadinessWaits() async throws {
         let readiness = ReadinessFlag(isReady: false)
-        let sleepRecorder = ControlledReadinessSleep()
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let target = xcodeProcessTarget(processID: 27010, xcodeVersion: "27.0")
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                sleepRecorder: sleepRecorder,
-                recordPollSleeps: true
-            ),
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
@@ -1030,7 +1042,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         manager.reconcileXcodeProcessTargets([target], reason: "test_activation_waiting")
         let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
-        _ = try await sleepRecorder.nextSleep(at: 0)
+        _ = try await readiness.nextChangeWait(at: 0)
 
         let initializeFuture = fixture.registerInitialize(
             requestID: 1,
@@ -1040,8 +1052,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(timeoutScheduler.scheduledCount() == 1)
 
         await readiness.setReady(true)
-        await sleepRecorder.resumeNext()
-        await sleepRecorder.resumeNext()
         let initialize = try await upstream.nextSent(at: 0)
         #expect(methodName(from: initialize) == "initialize")
         await upstream.yield(
@@ -1200,12 +1210,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
     }
 
-    @Test func processRoutingDebugResetRestartsPeriodicReconcileLoop() async throws {
-        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+    @Test func processRoutingDebugResetDoesNotRescanXcodeProcesses() async throws {
         let discovery = RecordingXcodeTargetDiscovery(targets: [])
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            clock: clocks.clock,
             processRoutingEnabled: true,
             xcodeTargetDiscovery: discovery,
             startImmediately: false
@@ -1221,19 +1229,11 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 description: "waiting for startup process reconcile"
             ) == 1
         )
-        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
 
         manager.debugReset()
-        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
-        clocks.timeoutClock.advance(by: .seconds(2))
+        await manager.drainRuntimeTasksForTesting()
 
-        #expect(
-            try await waitForRecordedValue(
-                discovery.calls,
-                at: 1,
-                description: "waiting for periodic process reconcile after debug reset"
-            ) == 2
-        )
+        #expect(discovery.calls.count() == 1)
     }
 
 
@@ -1477,12 +1477,14 @@ struct RuntimeCoordinatorProcessRoutingTests {
         async throws
     {
         let uptimeClock = TestUptimeClock()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let upstream = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
         let target = xcodeProcessTarget(processID: 27013, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             nowUptimeNanoseconds: uptimeClock.now,
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
             ],
@@ -1503,6 +1505,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ]
         )
 
+        let timeoutCountBeforeExit = timeoutScheduler.scheduledCount()
         let exitEventIndex = upstreamEvents.count()
         await upstream.yield(.exit(1))
         _ = try await waitForRecordedValue(
@@ -1513,12 +1516,17 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let sentCountAfterExit = await upstream.sentCount()
         #expect(manager.testStateSnapshot().hasInitResult == false)
         #expect(manager.debugSnapshot().processToolCatalogs.isEmpty)
+        #expect(timeoutScheduler.scheduledCount() == timeoutCountBeforeExit + 1)
+        #expect(
+            timeoutScheduler.delay(at: timeoutCountBeforeExit)?.nanoseconds
+                == TimeAmount.seconds(2).nanoseconds
+        )
 
         manager.reconcileXcodeProcessTargets([target], reason: "test_before_cooldown")
         #expect(await upstream.sentCount() == sentCountAfterExit)
 
-        uptimeClock.advance(by: .seconds(3))
-        manager.reconcileXcodeProcessTargets([target], reason: "test_after_cooldown")
+        uptimeClock.advance(by: .seconds(2))
+        #expect(timeoutScheduler.fire(at: timeoutCountBeforeExit))
         let restartedInitialize = try await upstream.nextSent(at: sentCountAfterExit)
         #expect(methodName(from: restartedInitialize) == "initialize")
 
@@ -1531,6 +1539,41 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         #expect(manager.testStateSnapshot().hasInitResult)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 0)
+    }
+
+    @Test func processRoutingCooldownTimersFollowRouteLifecycle() {
+        let uptimeClock = TestUptimeClock()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let target = xcodeProcessTarget(processID: 27014, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [TestUpstreamClient()],
+            nowUptimeNanoseconds: uptimeClock.now,
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        manager.markXcodeProcessRouteUnavailable(upstreamIndex: 0, reason: "first")
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.isCancelled(at: 0) == false)
+
+        uptimeClock.advance(by: .seconds(1))
+        manager.markXcodeProcessRouteUnavailable(upstreamIndex: 0, reason: "extended")
+        #expect(timeoutScheduler.scheduledCount() == 2)
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fire(at: 0) == false)
+
+        manager.markXcodeProcessRouteAvailable(upstreamIndex: 0)
+        #expect(timeoutScheduler.isCancelled(at: 1))
+
+        manager.markXcodeProcessRouteUnavailable(upstreamIndex: 0, reason: "retired")
+        #expect(timeoutScheduler.scheduledCount() == 3)
+        manager.reconcileXcodeProcessTargets([], reason: "test_retire_cooldown")
+        #expect(timeoutScheduler.isCancelled(at: 2))
     }
 
     @Test func processRoutingRetiresCrashedPIDAndAddsRelaunchedPID() async throws {
@@ -1980,14 +2023,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let oldUpstream = TestUpstreamClient()
         let oldTarget = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
         let readiness = ReadinessFlag(isReady: false)
-        let sleepRecorder = ControlledReadinessSleep()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [oldUpstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                sleepRecorder: sleepRecorder,
-                recordPollSleeps: true
-            ),
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: oldTarget, upstreamIndices: [0]),
             ],
@@ -1996,19 +2034,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        _ = try await readiness.nextCheck(at: 0)
-        _ = try await waitWithTimeout(
-            "waiting for primary readiness poll",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 0)
-        }
+        _ = try await readiness.nextChangeWait(at: 0)
 
         manager.reconcileXcodeProcessTargets([], reason: "test_retire_waiting_primary")
         _ = try await oldUpstream.nextStopCount()
 
         await readiness.setReady(true)
-        await sleepRecorder.resumeNext()
         _ = try await readiness.nextCheck(at: 1)
         await Task.yield()
         await manager.drainRuntimeTasksForTesting()
@@ -3674,17 +3705,12 @@ struct RuntimeCoordinatorInitializationTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let readiness = ReadinessFlag(isReady: false)
-        let sleepRecorder = ControlledReadinessSleep()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                sleepRecorder: sleepRecorder,
-                recordPollSleeps: true
-            ),
+            upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -3696,7 +3722,7 @@ struct RuntimeCoordinatorInitializationTests {
             requestObject: makeInitializeRequest(id: 1),
             on: eventLoop
         )
-        _ = try await sleepRecorder.nextSleep(at: 0)
+        _ = try await readiness.nextChangeWait(at: 0)
 
         let context = manager.sessionRegistry.removeSession(id: removedSessionID)
         context?.notificationHub.closeAll()
@@ -3726,7 +3752,6 @@ struct RuntimeCoordinatorInitializationTests {
         }
 
         await readiness.setReady(true)
-        await sleepRecorder.resumeNext()
         let replacementInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let replacementID = try extractUpstreamID(from: replacementInitialize)
         await upstream.yield(.message(try makeInitializeResponse(id: replacementID)))
@@ -7314,27 +7339,33 @@ struct RuntimeCoordinatorCatalogTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target0, upstreamIndices: [0]),
                 XcodeProcessRoute(target: target1, upstreamIndices: [1]),
-            ]
+            ],
+            startImmediately: false
         )
         defer { manager.shutdownAndWait() }
-
-        let initFuture = manager.registerInitialize(
-            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            requestObject: makeInitializeRequest(id: 1),
-            on: eventLoop
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (
+                    target0,
+                    0,
+                    [
+                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+                (
+                    target1,
+                    1,
+                    [
+                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
+                        toolDescriptor(name: "XcodeListWindows"),
+                    ]
+                ),
+            ]
         )
-        let init0 = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
-        await upstream0.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init0)))
-        )
-        _ = try await initFuture.get()
-        try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
-
-        let init1 = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
-        await upstream1.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: init1)))
-        )
-        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
         let task = Task {
             try await manager.liveXcodeListWindowsResult(
@@ -7343,8 +7374,20 @@ struct RuntimeCoordinatorCatalogTests {
             )
         }
 
-        let request0 = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
-        let request1 = try await sentValue(from: upstream1, at: 2, timeout: .seconds(2))
+        let request0 = try await upstream0.nextSent(
+            startingAt: 0,
+            matching: {
+                methodName(from: $0) == "tools/call"
+                    && toolCallName(from: $0) == "XcodeListWindows"
+            }
+        )
+        let request1 = try await upstream1.nextSent(
+            startingAt: 0,
+            matching: {
+                methodName(from: $0) == "tools/call"
+                    && toolCallName(from: $0) == "XcodeListWindows"
+            }
+        )
         let workspacePath = "/Work/Shared.xcworkspace"
         let message0 = "* tabIdentifier: tab-a, workspacePath: \(workspacePath)"
         let message1 = "* tabIdentifier: tab-b, workspacePath: \(workspacePath)"
@@ -7374,28 +7417,6 @@ struct RuntimeCoordinatorCatalogTests {
         }
         #expect(mergedMessage.components(separatedBy: "xcode-mcpkit:").count == 3)
         #expect(mergedMessage.contains(workspacePath))
-
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (
-                    target0,
-                    0,
-                    [
-                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
-                        toolDescriptor(name: "XcodeListWindows"),
-                    ]
-                ),
-                (
-                    target1,
-                    1,
-                    [
-                        ownerBoundToolDescriptor(name: "XcodeSomeWorkspaceScopedTool"),
-                        toolDescriptor(name: "XcodeListWindows"),
-                    ]
-                ),
-            ]
-        )
 
         let workspaceRequest: [String: Any] = [
             "method": "tools/call",
@@ -13754,6 +13775,69 @@ private final class BlockingSequencedXcodeTargetDiscovery:
         lock.withLock {
             callCountValue += 1
             return callCountValue
+        }
+    }
+}
+
+private final class StartupChangingXcodeProcessMonitor:
+    XcodeProcessEventMonitoring,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let firstTargets: [XcodeProcessTarget]
+    private let latestTargets: [XcodeProcessTarget]
+    private var changeHandler: (@Sendable (String) -> Void)?
+    private var callCount = 0
+
+    init(
+        firstTargets: [XcodeProcessTarget],
+        latestTargets: [XcodeProcessTarget]
+    ) {
+        self.firstTargets = firstTargets
+        self.latestTargets = latestTargets
+    }
+
+    func start() {}
+
+    func setChangeHandler(
+        _ handler: @escaping @Sendable (String) -> Void
+    ) {
+        lock.withLock {
+            changeHandler = handler
+        }
+    }
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
+        let result = lock.withLock { () -> (
+            targets: [XcodeProcessTarget],
+            handler: (@Sendable (String) -> Void)?
+        ) in
+            callCount += 1
+            return callCount == 1
+                ? (firstTargets, changeHandler)
+                : (latestTargets, nil)
+        }
+        result.handler?("inventory_changed_during_startup")
+        return result.targets
+    }
+
+    func discoveryCallCount() -> Int {
+        lock.withLock { callCount }
+    }
+
+    func permissionDialogProcessIDs() -> [pid_t] {
+        []
+    }
+
+    func readinessSnapshot() -> UpstreamReadinessSnapshot {
+        UpstreamReadinessSnapshot(isReady: true, generation: 0)
+    }
+
+    func waitForReadinessChange(after _: UInt64) async {}
+
+    func stop() {
+        lock.withLock {
+            changeHandler = nil
         }
     }
 }

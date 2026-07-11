@@ -7,6 +7,7 @@
 - Design baseline: 4d60f711f11bd39e93e133afac81f5f1814035a4
 - Toolchain: Swift 6.3.3 / language mode 6 / strict memory safety / macOS 15.4+
 - Baseline: swift test -Xswiftc -strict-concurrency=minimal — 840 tests / 52 suites passed
+- Current verification (2026-07-11): `scripts/check.sh` — 904 default tests / 59 suites、24 process tests / 5 suites、7 stdio tests / 1 suite passed
 
 このファイルを修正実装の唯一の design source of truth とする。実装結果と現行 owner は [README.md の「実装結果」](README.md#実装結果) および `Docs/architecture.md` / `Docs/maintainer-architecture.md` に記録する。README.md の残りは監査時点の結果、design-contracts.md は候補規範、handoff-prompt.md は発見時点の引き継ぎ資料であり、設計判断が競合する場合は本書を優先する。
 
@@ -46,6 +47,7 @@ XcodeMCPProxyKit → XcodeMCPKit の既存一方向依存を維持する。SDK �
 | initialize result / source / incompatibility | CanonicalHandshakeState | catalog/window epoch から独立 |
 | shared tools/window load taskとwaiter | ControlPlaneCoordinator actor | semantic stateを書かず、authority ticketを開始・完了へ受け渡す |
 | actual upstream slot objects、stable ID、membership/order | UpstreamTopologyAuthority | immutable topology snapshotの単一truth。router/health/schedulerはmembershipを複製しない |
+| running Xcode / known permission-helper application inventory | XcodeProcessEventMonitor | `NSWorkspace.runningApplications` のKVO snapshotを所有し、route discovery、readiness、DocumentationSearch、auto-approveへ同じcacheを提供 |
 | HTTP request security | HTTPRequestSecurityPolicy | route 解決や副作用より前に全 requestへ適用 |
 | server listener/runtime/discovery resource lifecycle | XcodeMCPProxyServer lifecycle state | async start、idempotent async shutdown、sanitized snapshot |
 | discovery record | filesystem hint | 接続と標準 initialize handshakeだけが到達性を確定する |
@@ -196,7 +198,19 @@ final class UpstreamTopologyAuthority: Sendable {
 
 Transitionは新snapshotを1回publishし、componentsへの逐次membership mutationを含まない。call siteのupstreamsBoxとrouter/health/debugへの3連appendを削除する。exposure readは純粋で、prune/reconcileだけがmutationする。
 
-### 5.7 Task A deletion list
+### 5.7 Xcode process observation
+
+Xcode process inventory の外部I/O ownerは `XcodeProcessEventMonitor` だけとする。`NSWorkspace.runningApplications` を `.initial` 付きKVOで購読し、各callbackをtriggerとしてatomicなcurrent propertyを1回読む。KVO change payloadを全snapshotとは解釈しない。初期状態と以後の変更を同じevent streamから得て、launch/terminate notificationのbackground app / `LSUIElement` 例外、observer登録前のgap、polling間隔内の取りこぼしを個別fallbackで補わない。
+
+monitorはcompatible Xcode targetと、`NSWorkspace`が公開する既知のpermission dialog helper application PIDのimmutable cacheを発行する。route reconciliation、upstream readiness、DocumentationProvider、auto-approveはこのcacheだけを読む。`pgrep`、全PID `proc_listpids`、周期的なroute discoveryは削除する。auto-approveの250ms loopはAX window inspectionだけを行い、子PID列挙は構造的にeligibleなpermission dialogを実際に観測した時のownership検証に限定する。
+
+Appleの契約上、`runningApplications` のKVO更新にはmain run loopのcommon modeが動作している必要がある。repoのDarwin async-main executableと通常のAppKit hostはこの条件を満たす。embedding hostがmain threadをblocking waitで占有する形はprocess-observation contract外とし、public async lifecycleを使う。
+
+readiness waitは`(isReady, generation)` snapshotとgeneration change waitでlost wakeupを防ぐ。Xcodeが無い場合の自動launchは1回だけで、その後はprocess eventを待つ。route cooldown後の再activationはprocess再走査に相乗りさせず、`routeID + scope + deadline`でfenceしたone-shot timerが既存routeを再試行する。retire/reset/shutdownはtimerをcancelする。
+
+DocumentationProvider discoveryがunavailableを返した場合は、そのattemptがgeneration-fencedな2秒後のretryを1つだけ発行する。retryはmonitorのcached Xcode snapshotを再利用し、OS process inventoryを問い合わせない。success、より新しいprewarm、reset、shutdownはtaskとtimerを同じowner stateで無効化し、stale completionやcancel済みcallbackがretryを再武装できないようにする。
+
+### 5.8 Task A deletion list
 
 - mutable ProcessRouteStore
 - mutable ProcessRouteReadinessStore
