@@ -2747,12 +2747,30 @@ struct RuntimeCoordinatorInitializationTests {
         )
         let initializedNotification = try await activeUpstream.nextSent(at: 1)
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        let toolsRequest = try await waitWithTimeout(
+            "waiting for restarted primary route tools/list",
+            timeout: .seconds(2)
+        ) {
+            try await activeUpstream.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await activeUpstream.yield(
+            .message(try makeDocumentationToolsListResponse(
+                id: try extractUpstreamID(from: toolsRequest),
+                tools: [ownerBoundToolDescriptor(name: "BuildProject")]
+            ))
+        )
         await manager.drainRuntimeTasksForTesting()
 
         #expect(manager.testStateSnapshot().hasInitResult)
         #expect(manager.testStateSnapshot().upstreams.count == 1)
         #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
+        #expect(
+            manager.processControlPlane.catalog(forProcessID: activeTarget.processID) != nil
+        )
     }
 
     @Test func processRoutingRetiringCachedInitializeSourceKeepsIndependentWarmRoute()
