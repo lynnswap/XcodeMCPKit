@@ -8,6 +8,30 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyInternalTestSupport
 import XcodeMCPProxyTestSupport
 
+private func seedCanonicalInitializeForTesting(
+    on manager: RuntimeCoordinator,
+    result: JSONValue,
+    sourceUpstream: Int
+) {
+    let slotID = UpstreamSlotID(rawValue: sourceUpstream)
+    guard let health = manager.upstreamHealthManager.state(for: slotID),
+          health.isInitialized,
+          case .healthy = health.healthState else {
+        preconditionFailure("canonical initialize fixture requires a healthy initialized source")
+    }
+    let proof = manager.operationLeaseForTest(upstreamIndex: sourceUpstream).proof
+    guard case .accepted(let participant) = manager.canonicalHandshakeState
+        .offerInitializeResult(result, sourceProof: proof) else {
+        preconditionFailure("canonical initialize fixture result is incompatible")
+    }
+    switch manager.canonicalHandshakeState.commitInitializeParticipant(participant) {
+    case .published, .joined:
+        return
+    case .incompatible, .stale:
+        preconditionFailure("canonical initialize fixture commit was rejected")
+    }
+}
+
 @Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
     @Test func httpConcurrentInitializeRequests() async throws {
@@ -198,8 +222,9 @@ struct HTTPConcurrencyTests {
             negotiatedProtocolVersion: MCP.ProtocolVersion.current
         )
         sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        sessionManager.canonicalHandshakeState.syncCanonicalInitialize(
-            try #require(
+        seedCanonicalInitializeForTesting(
+            on: sessionManager,
+            result: try #require(
                 JSONValue(any: [
                     "protocolVersion": MCP.ProtocolVersion.current,
                     "capabilities": [String: Any](),
@@ -291,8 +316,9 @@ struct HTTPConcurrencyTests {
             negotiatedProtocolVersion: MCP.ProtocolVersion.current
         )
         sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        sessionManager.canonicalHandshakeState.syncCanonicalInitialize(
-            try #require(
+        seedCanonicalInitializeForTesting(
+            on: sessionManager,
+            result: try #require(
                 JSONValue(any: [
                     "protocolVersion": MCP.ProtocolVersion.current,
                     "capabilities": [String: Any](),

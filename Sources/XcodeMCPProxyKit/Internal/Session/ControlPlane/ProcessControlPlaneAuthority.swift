@@ -220,6 +220,8 @@ final class ProcessControlPlaneAuthority: Sendable {
         let exposureEpoch: UInt64
         let activeRoutes: [XcodeProcessRoute]
         let catalogProcessIDs: Set<pid_t>
+        let catalogEligibilityEstablishedProcessIDs: Set<pid_t>
+        let catalogRequiredProcessIDs: Set<pid_t>
         let canonicalToolsCatalogRaw: JSONValue?
         let canonicalSourceProof: UpstreamTopologyProof?
         let attempts: [AttemptSnapshot]
@@ -266,10 +268,22 @@ final class ProcessControlPlaneAuthority: Sendable {
         let activationLease: ActivationLease
     }
 
+    struct CooldownLease: Sendable, Hashable {
+        let routeID: ProcessRouteID
+        let scope: CooldownScope
+        let generation: UInt64
+        let deadlineUptimeNs: UInt64
+    }
+
     struct MarkUnavailableResult: Sendable {
         let route: XcodeProcessRoute
-        let didChangeExposure: Bool
+        let cooldownLease: CooldownLease
         let transition: ProcessControlPlaneTransition
+    }
+
+    struct SupportEligibilityResult: Sendable {
+        let transition: ProcessControlPlaneTransition
+        let catalogTimeout: AttemptTimeout?
     }
 
     private enum RouteState: String, Sendable {
@@ -346,10 +360,68 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
 
         func mustInvalidateWhenSourceIsLost(_ proof: UpstreamTopologyProof) -> Bool {
+            if upstreamProof == proof {
+                return phase != .abandoned
+            }
             guard [.pending, .attaching, .initialized, .loadingCatalog].contains(phase) else {
                 return false
             }
-            return upstreamProof == proof || sourceBoundEffects(to: proof).isEmpty == false
+            return sourceBoundEffects(to: proof).isEmpty == false
+        }
+    }
+
+    private struct Cooldown: Sendable {
+        var generation: UInt64 = 0
+        var deadlineUptimeNs: UInt64?
+        var timeout: RuntimeScheduledTimeout?
+
+        var isUnavailable: Bool { deadlineUptimeNs != nil }
+
+        mutating func begin(
+            deadlineUptimeNs: UInt64
+        ) -> (generation: UInt64, effects: [ProcessControlPlaneEffect])? {
+            let updatedDeadline = max(self.deadlineUptimeNs ?? 0, deadlineUptimeNs)
+            guard updatedDeadline != self.deadlineUptimeNs else { return nil }
+            generation &+= 1
+            self.deadlineUptimeNs = updatedDeadline
+            let effects = timeout.map { [ProcessControlPlaneEffect.cancelTimeout($0)] } ?? []
+            timeout = nil
+            return (generation, effects)
+        }
+
+        func matches(_ lease: CooldownLease) -> Bool {
+            generation == lease.generation
+                && deadlineUptimeNs == lease.deadlineUptimeNs
+        }
+
+        mutating func attach(
+            _ timeout: RuntimeScheduledTimeout
+        ) -> [ProcessControlPlaneEffect] {
+            let effects = self.timeout.map {
+                [ProcessControlPlaneEffect.cancelTimeout($0)]
+            } ?? []
+            self.timeout = timeout
+            return effects
+        }
+
+        mutating func clear() -> (
+            didChange: Bool,
+            effects: [ProcessControlPlaneEffect]
+        ) {
+            guard deadlineUptimeNs != nil || timeout != nil else { return (false, []) }
+            generation &+= 1
+            deadlineUptimeNs = nil
+            let effects = timeout.map { [ProcessControlPlaneEffect.cancelTimeout($0)] } ?? []
+            timeout = nil
+            return (true, effects)
+        }
+
+        mutating func invalidateTimer() -> [ProcessControlPlaneEffect] {
+            guard deadlineUptimeNs != nil || timeout != nil else { return [] }
+            generation &+= 1
+            let effects = timeout.map { [ProcessControlPlaneEffect.cancelTimeout($0)] } ?? []
+            timeout = nil
+            return effects
         }
     }
 
@@ -362,33 +434,48 @@ final class ProcessControlPlaneAuthority: Sendable {
         var lastSeenUptimeNs: UInt64?
         var missingSinceUptimeNs: UInt64?
         var lastReconcileReason: String
-        var routeUnavailableUntilUptimeNs: UInt64?
-        var catalogUnavailableUntilUptimeNs: UInt64?
+        var routeCooldown: Cooldown
+        var catalogCooldown: Cooldown
         var admissionRevision: UInt64
+        var catalogEligibilityEstablished: Bool
         var nextAttemptID: Int
         var attempt: Attempt?
 
-        var unavailableUntilUptimeNs: UInt64 {
-            max(routeUnavailableUntilUptimeNs ?? 0, catalogUnavailableUntilUptimeNs ?? 0)
+        func cooldown(_ scope: CooldownScope) -> Cooldown {
+            switch scope {
+            case .route: routeCooldown
+            case .catalog: catalogCooldown
+            }
         }
 
-        mutating func pruneExpiredUnavailable(nowUptimeNs: UInt64) -> Bool {
-            var didChange = false
-            if let routeUnavailableUntilUptimeNs,
-               routeUnavailableUntilUptimeNs <= nowUptimeNs {
-                self.routeUnavailableUntilUptimeNs = nil
-                didChange = true
+        mutating func withCooldown<Result>(
+            _ scope: CooldownScope,
+            _ update: (inout Cooldown) -> Result
+        ) -> Result {
+            switch scope {
+            case .route: update(&routeCooldown)
+            case .catalog: update(&catalogCooldown)
             }
-            if let catalogUnavailableUntilUptimeNs,
-               catalogUnavailableUntilUptimeNs <= nowUptimeNs {
-                self.catalogUnavailableUntilUptimeNs = nil
-                didChange = true
-            }
-            return didChange
         }
 
-        func isUnavailable(nowUptimeNs: UInt64) -> Bool {
-            unavailableUntilUptimeNs > nowUptimeNs
+        mutating func clearAllCooldowns() -> (
+            didChange: Bool,
+            effects: [ProcessControlPlaneEffect]
+        ) {
+            let route = routeCooldown.clear()
+            let catalog = catalogCooldown.clear()
+            return (
+                route.didChange || catalog.didChange,
+                route.effects + catalog.effects
+            )
+        }
+
+        mutating func invalidateAllCooldownTimers() -> [ProcessControlPlaneEffect] {
+            routeCooldown.invalidateTimer() + catalogCooldown.invalidateTimer()
+        }
+
+        func isUnavailable(nowUptimeNs _: UInt64) -> Bool {
+            routeCooldown.isUnavailable || catalogCooldown.isUnavailable
         }
     }
 
@@ -483,6 +570,95 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
+    /// Applies handshake-source eligibility and removes every catalog artifact
+    /// tied to a newly unusable exact channel proof. Raw initialize evidence is
+    /// retained by CanonicalHandshakeState, but a recovered channel must load a
+    /// fresh tools catalog before routing can expose it again.
+    func applySupportEligibility(
+        usability: UpstreamUsabilitySnapshot,
+        newlyIneligibleProofs: Set<UpstreamTopologyProof>,
+        nowUptimeNs: UInt64,
+        catalogTimeoutProof: UpstreamTopologyProof? = nil
+    ) -> SupportEligibilityResult {
+        state.withLockedValue { state in
+            state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+            let didChangeRouteUsability = Self.updateAdmissionRevisions(
+                from: state.usability,
+                to: usability,
+                in: &state
+            )
+            state.usability = usability
+            if didChangeRouteUsability {
+                state.exposureEpoch &+= 1
+            }
+
+            var effects: [ProcessControlPlaneEffect] = []
+            if newlyIneligibleProofs.isEmpty == false {
+                for key in state.order {
+                    guard var record = state.recordsByKey[key],
+                          var attempt = record.attempt else { continue }
+                    let lostProofs = newlyIneligibleProofs.filter {
+                        attempt.mustInvalidateWhenSourceIsLost($0)
+                    }
+                    guard lostProofs.isEmpty == false else { continue }
+                    let routeUpstreamIDs = Set(
+                        record.route.upstreamIndices.map(UpstreamSlotID.init(rawValue:))
+                    )
+                    let hasUsableFallback = routeUpstreamIDs.isDisjoint(
+                        with: usability.recoveryAwareUsableUpstreamIDs
+                    ) == false
+                    if hasUsableFallback {
+                        for proof in lostProofs {
+                            effects.append(contentsOf: attempt.sourceBoundEffects(to: proof))
+                        }
+                        continue
+                    }
+                    effects.append(contentsOf: attempt.detachedEffects())
+                    attempt.phase = .abandoned
+                    attempt.readinessToken = nil
+                    attempt.retryTimeout = nil
+                    attempt.retryKind = nil
+                    attempt.loads.removeAll()
+                    record.attempt = attempt
+                    state.recordsByKey[key] = record
+                }
+                let invalidCatalogProcessIDs = state.catalogsByProcessID.compactMap {
+                    processID, catalog in
+                    newlyIneligibleProofs.contains(catalog.upstreamProof) ? processID : nil
+                }
+                for processID in invalidCatalogProcessIDs {
+                    Self.removeCatalog(processID: processID, from: &state)
+                }
+                if let unboundSource = state.unboundCatalogSource,
+                   newlyIneligibleProofs.contains(unboundSource) {
+                    state.unboundCatalogRaw = nil
+                    state.unboundCatalogSource = nil
+                }
+            }
+            // Invalidate the timed-out channel's old proof-bound attempt and
+            // catalog first. The timeout transition then creates the fresh
+            // backoff attempt that owns retry; eligibility invalidation must
+            // not immediately abandon that replacement attempt.
+            let catalogTimeout = catalogTimeoutProof.flatMap {
+                Self.handleCatalogChannelTimeout(
+                    upstreamProof: $0,
+                    nowUptimeNs: nowUptimeNs,
+                    state: &state
+                )
+            }
+            let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
+            return SupportEligibilityResult(
+                transition: ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: projectionChanged
+                ),
+                catalogTimeout: catalogTimeout
+            )
+        }
+    }
+
     func reconcileRoutes(
         _ observed: [XcodeProcessRoute],
         reason: String,
@@ -520,6 +696,8 @@ final class ProcessControlPlaneAuthority: Sendable {
                     if membershipChanged {
                         state.routeGeneration &+= 1
                         state.exposureEpoch &+= 1
+                        let clearedCooldowns = record.clearAllCooldowns()
+                        effects.append(contentsOf: clearedCooldowns.effects)
                         if let attempt = record.attempt {
                             effects.append(contentsOf: attempt.detachedEffects())
                             record.attempt = nil
@@ -536,6 +714,16 @@ final class ProcessControlPlaneAuthority: Sendable {
                             target: target,
                             upstreamIndices: observedRoute.upstreamIndices
                         )
+                        if record.catalogEligibilityEstablished == false {
+                            let replacementIDs = Set(
+                                observedRoute.upstreamIndices.map(
+                                    UpstreamSlotID.init(rawValue:)
+                                )
+                            )
+                            record.catalogEligibilityEstablished = replacementIDs.isDisjoint(
+                                with: usability.recoveryAwareUsableUpstreamIDs
+                            ) == false
+                        }
                         record.lastSeenGeneration = state.routeGeneration
                     } else {
                         record.route = XcodeProcessRoute(
@@ -569,6 +757,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 record.lastSeenGeneration = state.routeGeneration
                 record.missingSinceUptimeNs = nowUptimeNs
                 record.lastReconcileReason = reason
+                effects.append(contentsOf: record.clearAllCooldowns().effects)
                 if let attempt = record.attempt {
                     effects.append(contentsOf: attempt.detachedEffects())
                     record.attempt = nil
@@ -669,22 +858,22 @@ final class ProcessControlPlaneAuthority: Sendable {
             guard let key = Self.activeKey(upstreamIndex: upstreamIndex, in: state),
                   var record = state.recordsByKey[key] else { return nil }
             let wasUnavailable = record.isUnavailable(nowUptimeNs: nowUptimeNs)
-            switch scope {
-            case .route:
-                let previous = record.routeUnavailableUntilUptimeNs
-                record.routeUnavailableUntilUptimeNs = max(previous ?? 0, unavailableUntilUptimeNs)
-                guard previous != record.routeUnavailableUntilUptimeNs else { return nil }
-            case .catalog:
-                let previous = record.catalogUnavailableUntilUptimeNs
-                record.catalogUnavailableUntilUptimeNs = max(previous ?? 0, unavailableUntilUptimeNs)
-                guard previous != record.catalogUnavailableUntilUptimeNs else { return nil }
-            }
+            guard let cooldown = record.withCooldown(scope, { cooldown in
+                cooldown.begin(deadlineUptimeNs: unavailableUntilUptimeNs)
+            }) else { return nil }
             state.routeGeneration &+= 1
             state.exposureEpoch &+= 1
             record.lastSeenGeneration = state.routeGeneration
             record.admissionRevision &+= 1
             let effects = record.attempt?.detachedEffects() ?? []
-            record.attempt = nil
+            if var attempt = record.attempt {
+                attempt.phase = .abandoned
+                attempt.readinessToken = nil
+                attempt.retryTimeout = nil
+                attempt.retryKind = nil
+                attempt.loads.removeAll()
+                record.attempt = attempt
+            }
             state.recordsByKey[key] = record
             if wasUnavailable == false {
                 Self.removeCatalog(
@@ -695,13 +884,70 @@ final class ProcessControlPlaneAuthority: Sendable {
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
             return MarkUnavailableResult(
                 route: record.route,
-                didChangeExposure: wasUnavailable == false,
+                cooldownLease: CooldownLease(
+                    routeID: record.route.id,
+                    scope: scope,
+                    generation: cooldown.generation,
+                    deadlineUptimeNs: unavailableUntilUptimeNs
+                ),
                 transition: ProcessControlPlaneTransition(
                     addedRoutes: [],
                     retiredRoutes: [],
-                    effects: effects,
+                    effects: cooldown.effects + effects,
                     publishesToolsListChanged: projectionChanged
                 )
+            )
+        }
+    }
+
+    func attachCooldownTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        to lease: CooldownLease
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  record.cooldown(lease.scope).matches(lease) else {
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: [.cancelTimeout(timeout)],
+                    publishesToolsListChanged: false
+                )
+            }
+            let effects = record.withCooldown(lease.scope) { cooldown in
+                cooldown.attach(timeout)
+            }
+            state.recordsByKey[key] = record
+            return ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: effects,
+                publishesToolsListChanged: false
+            )
+        }
+    }
+
+    func expireCooldown(
+        _ lease: CooldownLease,
+        nowUptimeNs: UInt64
+    ) -> ProcessControlPlaneTransition? {
+        state.withLockedValue { state in
+            state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+            guard nowUptimeNs >= lease.deadlineUptimeNs,
+                  let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  record.cooldown(lease.scope).matches(lease) else { return nil }
+            let cleared = record.withCooldown(lease.scope) { $0.clear() }
+            state.exposureEpoch &+= 1
+            record.admissionRevision &+= 1
+            state.recordsByKey[key] = record
+            let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
+            return ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: cleared.effects,
+                publishesToolsListChanged: projectionChanged
             )
         }
     }
@@ -716,29 +962,56 @@ final class ProcessControlPlaneAuthority: Sendable {
             guard let key = Self.activeKey(upstreamIndex: upstreamIndex, in: state),
                   var record = state.recordsByKey[key] else { return .none }
             let before = record.isUnavailable(nowUptimeNs: nowUptimeNs)
+            var effects: [ProcessControlPlaneEffect] = []
+            var didClear = false
             switch scope {
             case .route:
-                record.routeUnavailableUntilUptimeNs = nil
-                _ = record.pruneExpiredUnavailable(nowUptimeNs: nowUptimeNs)
+                let cleared = record.withCooldown(.route) { $0.clear() }
+                didClear = cleared.didChange
+                effects = cleared.effects
             case .catalog:
-                record.routeUnavailableUntilUptimeNs = nil
-                record.catalogUnavailableUntilUptimeNs = nil
+                let cleared = record.clearAllCooldowns()
+                didClear = cleared.didChange
+                effects = cleared.effects
             }
             let after = record.isUnavailable(nowUptimeNs: nowUptimeNs)
-            guard before != after else {
+            guard didClear else { return .none }
+            record.admissionRevision &+= 1
+            if before == after {
                 state.recordsByKey[key] = record
-                return .none
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: false
+                )
             }
             state.routeGeneration &+= 1
             state.exposureEpoch &+= 1
-            record.admissionRevision &+= 1
             state.recordsByKey[key] = record
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
             return ProcessControlPlaneTransition(
                 addedRoutes: [],
                 retiredRoutes: [],
-                effects: [],
+                effects: effects,
                 publishesToolsListChanged: projectionChanged
+            )
+        }
+    }
+
+    func detachAllCooldownTimeouts() -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            var effects: [ProcessControlPlaneEffect] = []
+            for key in state.order {
+                guard var record = state.recordsByKey[key] else { continue }
+                effects.append(contentsOf: record.invalidateAllCooldownTimers())
+                state.recordsByKey[key] = record
+            }
+            return ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: effects,
+                publishesToolsListChanged: false
             )
         }
     }
@@ -1173,6 +1446,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             var effects: [ProcessControlPlaneEffect] = []
             var removesAttempt = false
             let hadCatalog = state.catalogsByProcessID[record.route.target.processID] != nil
+            let wasUnavailable = record.isUnavailable(nowUptimeNs: state.nowUptimeNs)
             switch outcome {
             case .usable(let rawResult, let source):
                 effects.append(contentsOf: attempt.detachedEffects())
@@ -1193,8 +1467,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.processIDByUpstreamID[UpstreamSlotID(rawValue: upstreamIndex)] =
                         record.route.target.processID
                 }
-                record.routeUnavailableUntilUptimeNs = nil
-                record.catalogUnavailableUntilUptimeNs = nil
+                effects.append(contentsOf: record.clearAllCooldowns().effects)
                 attempt.phase = .cataloged
             case .unusable:
                 effects = attempt.loads.removeValue(forKey: lease.loadID)?
@@ -1226,6 +1499,11 @@ final class ProcessControlPlaneAuthority: Sendable {
                 record.attempt = nil
             } else {
                 record.attempt = attempt
+            }
+            if wasUnavailable && record.isUnavailable(nowUptimeNs: state.nowUptimeNs) == false {
+                state.routeGeneration &+= 1
+                state.exposureEpoch &+= 1
+                record.admissionRevision &+= 1
             }
             state.recordsByKey[key] = record
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
@@ -1267,7 +1545,7 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func reset() -> ProcessControlPlaneTransition {
         state.withLockedValue { state in
-            let effects = Self.invalidateAttempts(in: &state)
+            var effects = Self.invalidateAttempts(in: &state)
             state.catalogEpoch = CatalogEpoch(rawValue: state.catalogEpoch.rawValue &+ 1)
             state.exposureEpoch &+= 1
             state.catalogsByProcessID.removeAll()
@@ -1276,11 +1554,12 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.canonicalSourceProof = nil
             state.unboundCatalogRaw = nil
             state.unboundCatalogSource = nil
+            state.usability = .empty
             for key in state.order {
                 guard var record = state.recordsByKey[key] else { continue }
-                record.routeUnavailableUntilUptimeNs = nil
-                record.catalogUnavailableUntilUptimeNs = nil
+                effects.append(contentsOf: record.clearAllCooldowns().effects)
                 record.attempt = nil
+                record.catalogEligibilityEstablished = false
                 record.admissionRevision &+= 1
                 state.recordsByKey[key] = record
             }
@@ -1301,51 +1580,6 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func catalog(forProcessID processID: pid_t) -> Catalog? {
         state.withLockedValue { $0.catalogsByProcessID[processID] }
-    }
-
-    func rebindCatalogSource(
-        processID: pid_t,
-        from oldProof: UpstreamTopologyProof,
-        to newProof: UpstreamTopologyProof
-    ) -> ProcessControlPlaneTransition {
-        state.withLockedValue { state in
-            guard oldProof != newProof,
-                  let key = Self.activeRecords(in: state).first(where: {
-                      $0.route.target.processID == processID
-                  })?.key,
-                  let record = state.recordsByKey[key],
-                  record.route.upstreamIndices.contains(newProof.slotID.rawValue)
-            else {
-                return .none
-            }
-
-            let effects = record.attempt?.sourceBoundEffects(to: oldProof) ?? []
-            guard let catalog = state.catalogsByProcessID[processID],
-                  catalog.routeID == record.route.id,
-                  catalog.upstreamProof == oldProof else {
-                return ProcessControlPlaneTransition(
-                    addedRoutes: [],
-                    retiredRoutes: [],
-                    effects: effects,
-                    publishesToolsListChanged: false
-                )
-            }
-
-            let previousCanonicalRaw = state.canonicalToolsCatalogRaw
-            state.catalogsByProcessID[processID] = Self.makeCatalog(
-                route: record.route,
-                upstreamProof: newProof,
-                rawResult: catalog.rawResult
-            )
-            _ = Self.recomputeCanonicalProjection(in: &state)
-            return ProcessControlPlaneTransition(
-                addedRoutes: [],
-                retiredRoutes: [],
-                effects: effects,
-                publishesToolsListChanged:
-                    previousCanonicalRaw != state.canonicalToolsCatalogRaw
-            )
-        }
     }
 
     func invalidateCatalogSource(
@@ -1576,7 +1810,8 @@ final class ProcessControlPlaneAuthority: Sendable {
             record.missingSinceUptimeNs = nowUptimeNs
             record.lastReconcileReason = reason
             record.admissionRevision &+= 1
-            let effects = record.attempt?.detachedEffects() ?? []
+            var effects = record.attempt?.detachedEffects() ?? []
+            effects.append(contentsOf: record.clearAllCooldowns().effects)
             record.attempt = nil
             state.recordsByKey[key] = record
             Self.removeCatalog(processID: record.route.target.processID, from: &state)
@@ -1599,65 +1834,64 @@ final class ProcessControlPlaneAuthority: Sendable {
         )
     }
 
-    func handleCatalogChannelTimeout(
+    private static func handleCatalogChannelTimeout(
         upstreamProof: UpstreamTopologyProof,
-        nowUptimeNs: UInt64
+        nowUptimeNs: UInt64,
+        state: inout State
     ) -> AttemptTimeout? {
-        state.withLockedValue { state in
-            state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
-            let upstreamIndex = upstreamProof.slotID.rawValue
-            guard let key = Self.activeKey(upstreamIndex: upstreamIndex, in: state),
-                  var record = state.recordsByKey[key] else { return nil }
+        state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+        let upstreamIndex = upstreamProof.slotID.rawValue
+        guard let key = activeKey(upstreamIndex: upstreamIndex, in: state),
+              var record = state.recordsByKey[key] else { return nil }
 
-            let effects: [ProcessControlPlaneEffect]
-            let retryOrdinal: Int
-            let attempt: Attempt
-            if var current = record.attempt,
-               current.upstreamProof == upstreamProof,
-               [.pending, .attaching, .initialized, .loadingCatalog, .backoff]
-                .contains(current.phase) {
-                effects = current.detachedEffects()
-                retryOrdinal = current.id.rawValue
-                current.readinessToken = nil
-                current.retryTimeout = nil
-                current.retryKind = .activation
-                current.loads.removeAll()
-                current.phase = .backoff
-                attempt = current
-            } else {
-                effects = record.attempt?.detachedEffects() ?? []
-                retryOrdinal = max(1, record.nextAttemptID)
-                record.nextAttemptID &+= 1
-                attempt = Attempt(
-                    id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                    upstreamProof: upstreamProof,
-                    startedAtUptimeNs: nowUptimeNs,
-                    phase: .backoff,
-                    readinessToken: nil,
-                    retryTimeout: nil,
-                    retryKind: .activation,
-                    nextLoadID: 0,
-                    loads: [:]
-                )
-            }
-            record.attempt = attempt
-            state.recordsByKey[key] = record
-            let lease = ActivationLease(
-                routeID: record.route.id,
-                attemptID: attempt.id,
-                upstreamProof: attempt.upstreamProof
-            )
-            return AttemptTimeout(
-                transition: ProcessControlPlaneTransition(
-                    addedRoutes: [],
-                    retiredRoutes: [],
-                    effects: effects,
-                    publishesToolsListChanged: false
-                ),
-                retry: Self.retry(forAttempt: retryOrdinal),
-                activationLease: lease
+        let effects: [ProcessControlPlaneEffect]
+        let retryOrdinal: Int
+        let attempt: Attempt
+        if var current = record.attempt,
+           current.upstreamProof == upstreamProof,
+           [.pending, .attaching, .initialized, .loadingCatalog, .backoff]
+            .contains(current.phase) {
+            effects = current.detachedEffects()
+            retryOrdinal = current.id.rawValue
+            current.readinessToken = nil
+            current.retryTimeout = nil
+            current.retryKind = .activation
+            current.loads.removeAll()
+            current.phase = .backoff
+            attempt = current
+        } else {
+            effects = record.attempt?.detachedEffects() ?? []
+            retryOrdinal = max(1, record.nextAttemptID)
+            record.nextAttemptID &+= 1
+            attempt = Attempt(
+                id: CatalogAttemptID(rawValue: record.nextAttemptID),
+                upstreamProof: upstreamProof,
+                startedAtUptimeNs: nowUptimeNs,
+                phase: .backoff,
+                readinessToken: nil,
+                retryTimeout: nil,
+                retryKind: .activation,
+                nextLoadID: 0,
+                loads: [:]
             )
         }
+        record.attempt = attempt
+        state.recordsByKey[key] = record
+        let lease = ActivationLease(
+            routeID: record.route.id,
+            attemptID: attempt.id,
+            upstreamProof: attempt.upstreamProof
+        )
+        return AttemptTimeout(
+            transition: ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: effects,
+                publishesToolsListChanged: false
+            ),
+            retry: retry(forAttempt: retryOrdinal),
+            activationLease: lease
+        )
     }
 
     func handleRetryFired(_ lease: CatalogLease) -> Bool {
@@ -1864,9 +2098,12 @@ final class ProcessControlPlaneAuthority: Sendable {
             lastSeenUptimeNs: nowUptimeNs,
             missingSinceUptimeNs: nil,
             lastReconcileReason: reason,
-            routeUnavailableUntilUptimeNs: nil,
-            catalogUnavailableUntilUptimeNs: nil,
+            routeCooldown: Cooldown(),
+            catalogCooldown: Cooldown(),
             admissionRevision: 0,
+            catalogEligibilityEstablished: Set(
+                route.upstreamIndices.map(UpstreamSlotID.init(rawValue:))
+            ).isDisjoint(with: state.usability.recoveryAwareUsableUpstreamIDs) == false,
             nextAttemptID: 0,
             attempt: nil
         )
@@ -1904,8 +2141,15 @@ final class ProcessControlPlaneAuthority: Sendable {
             let nextSnapshot = routeIDs.intersection(next.snapshotUsableUpstreamIDs)
             let previousRecovery = routeIDs.intersection(previous.recoveryAwareUsableUpstreamIDs)
             let nextRecovery = routeIDs.intersection(next.recoveryAwareUsableUpstreamIDs)
-            guard previousSnapshot != nextSnapshot || previousRecovery != nextRecovery else {
+            let establishesCatalogEligibility =
+                record.catalogEligibilityEstablished == false && nextRecovery.isEmpty == false
+            guard previousSnapshot != nextSnapshot
+                    || previousRecovery != nextRecovery
+                    || establishesCatalogEligibility else {
                 continue
+            }
+            if establishesCatalogEligibility {
+                record.catalogEligibilityEstablished = true
             }
             record.admissionRevision &+= 1
             state.recordsByKey[key] = record
@@ -2046,24 +2290,42 @@ final class ProcessControlPlaneAuthority: Sendable {
         )
     }
 
+    private static func catalogEligibilityEstablishedProcessIDs(
+        in state: State
+    ) -> Set<pid_t> {
+        Set(activeRecords(in: state).compactMap { record in
+            record.catalogEligibilityEstablished
+                ? record.route.target.processID
+                : nil
+        })
+    }
+
+    private static func catalogRequiredProcessIDs(in state: State) -> Set<pid_t> {
+        Set(activeRecords(in: state).compactMap { record in
+            record.catalogEligibilityEstablished
+                && record.isUnavailable(nowUptimeNs: state.nowUptimeNs) == false
+                ? record.route.target.processID
+                : nil
+        })
+    }
+
     @discardableResult
     private static func recomputeCanonicalProjection(in state: inout State) -> Bool {
         let previousRaw = state.canonicalToolsCatalogRaw
         let previousSource = state.canonicalSourceProof
         let activeRoutes = activeRoutes(in: state)
-        let exposed = exposedProcessIDs(
-            policy: .toolsCatalog,
-            nowUptimeNs: state.nowUptimeNs,
-            state: state
-        )
+        let requiredProcessIDs = catalogRequiredProcessIDs(in: state)
         if activeRoutes.isEmpty,
            let raw = state.unboundCatalogRaw,
            let source = state.unboundCatalogSource {
             state.canonicalToolsCatalogRaw = raw
             state.canonicalSourceProof = source
-        } else if exposed.isEmpty == false,
-           let surface = availableToolCatalogSurface(in: state, processIDs: exposed),
-           surface.processIDs == exposed,
+        } else if requiredProcessIDs.isEmpty == false,
+           let surface = availableToolCatalogSurface(
+               in: state,
+               processIDs: requiredProcessIDs
+           ),
+           surface.processIDs == requiredProcessIDs,
            let source = surface.sourceProof {
             state.canonicalToolsCatalogRaw = surface.rawResult
             state.canonicalSourceProof = source
@@ -2096,6 +2358,9 @@ final class ProcessControlPlaneAuthority: Sendable {
             exposureEpoch: state.exposureEpoch,
             activeRoutes: activeRoutes(in: state),
             catalogProcessIDs: Set(state.catalogsByProcessID.keys),
+            catalogEligibilityEstablishedProcessIDs:
+                catalogEligibilityEstablishedProcessIDs(in: state),
+            catalogRequiredProcessIDs: catalogRequiredProcessIDs(in: state),
             canonicalToolsCatalogRaw: state.canonicalToolsCatalogRaw,
             canonicalSourceProof: state.canonicalSourceProof,
             attempts: activeRecords(in: state).compactMap { record in

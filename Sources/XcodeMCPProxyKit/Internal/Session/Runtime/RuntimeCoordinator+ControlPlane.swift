@@ -405,10 +405,17 @@ extension RuntimeCoordinator {
         reason: String,
         processIDs requestedProcessIDs: Set<pid_t>? = nil
     ) {
-        guard processRoutingEnabled, isInitialized() else {
+        guard processRoutingEnabled else {
             return
         }
         let exposure = processRouteExposure(policy: .toolsCatalog)
+        // Exposure evaluation is also the health-probe trigger for expired
+        // quarantines. Run it before requiring an exposed handshake so a
+        // temporarily hidden raw supporter can validate itself and restore
+        // the canonical initialize result.
+        guard isInitialized() else {
+            return
+        }
         let missingExposures = exposure.routes.filter {
             if let requestedProcessIDs,
                requestedProcessIDs.contains($0.route.target.processID) == false {
@@ -1286,29 +1293,18 @@ extension RuntimeCoordinator {
                 ]
             )
         }
-    }
-
-    func jsonValuesEquivalent(_ lhs: JSONValue, _ rhs: JSONValue) -> Bool {
-        canonicalJSONData(for: lhs) == canonicalJSONData(for: rhs)
-    }
-
-    func initializeResultsEquivalent(_ lhs: JSONValue, _ rhs: JSONValue) -> Bool {
-        canonicalJSONData(for: normalizedInitializeResult(lhs))
-            == canonicalJSONData(for: normalizedInitializeResult(rhs))
-    }
-
-    private func canonicalJSONData(for value: JSONValue) -> Data? {
-        let object = value.foundationObject
-        guard JSONSerialization.isValidJSONObject(object) else { return nil }
-        return try? JSONSerialization.data(
-            withJSONObject: object,
-            options: [.sortedKeys]
+        guard processRoutingEnabled,
+              let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+            return
+        }
+        abandonProcessRouteActivation(
+            processID: route.target.processID,
+            reason: reason
+        )
+        markXcodeProcessRouteUnavailable(
+            upstreamIndex: upstreamIndex,
+            reason: reason
         )
     }
 
-    private func normalizedInitializeResult(_ value: JSONValue) -> JSONValue {
-        guard case .object(var object) = value else { return value }
-        object.removeValue(forKey: "serverInfo")
-        return .object(object)
-    }
 }

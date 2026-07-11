@@ -89,16 +89,6 @@ struct XcodeProcessStartupReconcileState: Sendable {
     var didObserveChange = false
 }
 
-struct XcodeProcessCooldownKey: Hashable, Sendable {
-    let routeID: ProcessRouteID
-    let scope: ProcessControlPlaneAuthority.CooldownScope
-}
-
-struct XcodeProcessCooldownSchedule: Sendable {
-    let deadlineUptimeNanoseconds: UInt64
-    let timeout: RuntimeScheduledTimeout
-}
-
 struct DocumentationProviderDiscoveryState: Sendable {
     var generation: UInt64 = 0
     var task: Task<DocumentationProvider.ToolListUpdate, Never>?
@@ -438,8 +428,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let processRoutingEnabled: Bool
     let xcodeProcessReconcileScheduleState =
         NIOLockedValueBox(XcodeProcessReconcileScheduleState())
-    let xcodeProcessCooldownSchedules =
-        NIOLockedValueBox<[XcodeProcessCooldownKey: XcodeProcessCooldownSchedule]>([:])
     let xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)?
     let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
     let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?
@@ -796,9 +784,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             } else {
                 triggerXcodeProcessReconcile(reason: "startup")
             }
-            startProcessRouteAttachments(
-                xcodeProcessRoutes.filter { preexistingRouteIDs.contains($0.id) }
-            )
+            let preexistingRoutes = xcodeProcessRoutes.filter {
+                preexistingRouteIDs.contains($0.id)
+            }
+            startProcessRouteAttachments(preexistingRoutes)
+            for route in preexistingRoutes {
+                startProcessRouteActivation(for: route)
+            }
         }
         startEagerInitializePrimary()
         if prewarmDocumentationProviderOnStartup {
@@ -902,6 +894,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         context?.notificationHub.closeAll()
         let pendingInitializes = initializeManager.removePendingInitializes(sessionID: id)
         pendingInitializes.timeout?.cancel()
+        pendingInitializes.recoveryTimeout?.cancel()
         if let upstreamIndex = pendingInitializes.cancelledPrimaryUpstreamIndex {
             if let upstreamID = pendingInitializes.cancelledPrimaryUpstreamID {
                 if let claim = upstreamHealthManager.currentInitializeClaim(
@@ -925,6 +918,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func debugReset() {
         let initializeReset = initializeManager.resetForDebug()
         initializeReset.timeout?.cancel()
+        initializeReset.recoveryTimeout?.cancel()
         for pending in initializeReset.pending {
             pending.eventLoop.execute {
                 pending.promise.fail(CancellationError())
@@ -950,14 +944,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         debugRecorder.resetAll()
         upstreamStderrLogLimiter.reset()
         resetAllProcessRouteActivations(reason: "debug_reset")
-        cancelAllXcodeProcessCooldownSchedules()
         cancelDocumentationProviderDiscovery()
         clearXcodeWindowOwners()
-        invalidateControlPlane(
-            reason: "debug_reset",
-            clearInitialize: true,
-            clearToolsCatalog: false
-        )
         applyProcessControlPlaneTransition(processControlPlane.reset())
         retryPendingProcessRouteReadiness(reason: "debug_reset")
     }
@@ -971,6 +959,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         }
         shutdownState.timeout?.cancel()
+        shutdownState.recoveryTimeout?.cancel()
 
         let upstreamTimeouts = upstreamHealthManager.clearInitTimeoutsForShutdown()
         for timeout in upstreamTimeouts {
@@ -980,7 +969,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
         xcodeProcessEventMonitor?.stop()
         resetAllProcessRouteActivations(reason: "shutdown")
-        cancelAllXcodeProcessCooldownSchedules()
+        applyProcessControlPlaneTransition(processControlPlane.detachAllCooldownTimeouts())
 
         let runtimeDrain = runtimeTasks.beginShutdown()
         applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
@@ -1015,6 +1004,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func cancelForDeinit() {
         let shutdownState = initializeManager.beginShutdown()
         shutdownState.timeout?.cancel()
+        shutdownState.recoveryTimeout?.cancel()
         for timeout in upstreamHealthManager.clearInitTimeoutsForShutdown() {
             timeout?.cancel()
         }
@@ -1022,7 +1012,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
         xcodeProcessEventMonitor?.stop()
         resetAllProcessRouteActivations(reason: "deinit")
-        cancelAllXcodeProcessCooldownSchedules()
+        applyProcessControlPlaneTransition(processControlPlane.detachAllCooldownTimeouts())
         applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
         _ = runtimeTasks.beginShutdown()
         _ = upstreamEventTasks.beginShutdown()
@@ -1381,7 +1371,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         } else {
             primaryUpstreamIndex = candidatePrimaryUpstreamIndex
         }
-        guard primaryUpstreamIndex != nil || initializeManager.isInitialized() || processRoutingEnabled else {
+        let canRecoverQuarantinedInitialize =
+            upstreamHealthManager.earliestInitializedQuarantineRecovery() != nil
+        guard primaryUpstreamIndex != nil
+                || initializeManager.isInitialized()
+                || processRoutingEnabled
+                || canRecoverQuarantinedInitialize else {
             return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
 
@@ -1423,6 +1418,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
         if pendingPromise != nil {
             _ = session(id: sessionID)
+            schedulePendingInitializeQuarantineRecovery()
         }
 
         if shouldSend {
@@ -1729,17 +1725,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
     }
 
-    func invalidateControlPlane(
-        reason: String,
-        clearInitialize: Bool,
-        clearToolsCatalog: Bool
-    ) {
-        if clearInitialize {
-            canonicalHandshakeState.clearInitialize()
-        }
-        if clearToolsCatalog {
-            applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
-        }
+    func invalidateToolsCatalog(reason: String) {
+        applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
         logger.debug("control_plane_invalidated", metadata: ["reason": .string(reason)])
     }
 

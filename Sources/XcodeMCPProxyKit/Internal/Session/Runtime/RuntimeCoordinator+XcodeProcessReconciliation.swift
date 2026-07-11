@@ -155,18 +155,16 @@ extension RuntimeCoordinator {
         _ route: XcodeProcessRoute,
         reason: String
     ) {
-        cancelXcodeProcessCooldownSchedules(routeID: route.id)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
 
-        var resetInitialize = false
+        let hadGlobalInitialize = isInitialized()
         for upstreamIndex in route.upstreamIndices {
             guard let operationLease = upstreamTopology.operationLease(
                 for: UpstreamSlotID(rawValue: upstreamIndex)
             ) else { continue }
             retireProcessBoundUpstream(
                 operationLease: operationLease,
-                reason: reason,
-                resetInitialize: &resetInitialize
+                reason: reason
             )
         }
         let topologyTransition = upstreamTopology.retire(
@@ -174,12 +172,12 @@ extension RuntimeCoordinator {
         )
         publishUpstreamTopology(topologyTransition.snapshot)
 
-        invalidateControlPlane(
-            reason: "xcode_process_removed",
-            clearInitialize: resetInitialize,
-            clearToolsCatalog: false
-        )
+        let resetInitialize = hadGlobalInitialize
+            && canonicalHandshakeState.initializeResult() == nil
+            && canonicalHandshakeState.hasInitializeParticipants() == false
+            && anyActiveRecoveryInFlight() == false
         if resetInitialize {
+            initializeManager.resetWarmSecondaryForRetry()
             restartPrimaryInitializeAfterRetiringCachedProcessRoute()
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
@@ -196,8 +194,7 @@ extension RuntimeCoordinator {
 
     private func retireProcessBoundUpstream(
         operationLease: UpstreamOperationLease,
-        reason: String,
-        resetInitialize: inout Bool
+        reason: String
     ) {
         let upstreamIndex = operationLease.upstreamIndex
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
@@ -216,11 +213,6 @@ extension RuntimeCoordinator {
         )
         addRuntimeTask {
             await operationLease.slot.stop()
-        }
-
-        if globalInit?.hadGlobalInit == true, anyActiveInitializedUpstream() == false {
-            resetInitialize = true
-            initializeManager.resetWarmSecondaryForRetry()
         }
 
         let retiredPrimaryInitialize =
@@ -244,27 +236,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        clearActiveWarmInitializesBeforePrimaryRestart()
         startEagerInitializePrimary(applyBackoff: true)
-    }
-
-    private func clearActiveWarmInitializesBeforePrimaryRestart() {
-        let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
-        for upstreamIndex in activeProcessBoundUpstreamIndices().sorted() {
-            guard upstreamIndex != activePrimaryUpstreamIndex,
-                  let state = upstreamHealthManager.state(
-                    for: UpstreamSlotID(rawValue: upstreamIndex)
-                  ) else {
-                continue
-            }
-            guard state.initInFlight, state.isInitialized == false else {
-                continue
-            }
-            guard let proof = upstreamTopology.operationLease(
-                for: UpstreamSlotID(rawValue: upstreamIndex)
-            )?.proof else { continue }
-            clearUpstreamState(proof: proof)
-        }
     }
 
     private func startInitializationForAddedProcessRoutes(_ routes: [XcodeProcessRoute]) {
@@ -273,18 +245,15 @@ extension RuntimeCoordinator {
             return
         }
         startProcessRouteAttachments(routesWithUpstreams)
-        guard isInitialized() else {
-            startProcessRouteActivation(for: routesWithUpstreams[0])
-            return
-        }
         for route in routesWithUpstreams {
             startProcessRouteActivation(for: route)
         }
     }
 
     func startProcessRouteAttachments(_ routes: [XcodeProcessRoute]) {
-        // Route membership starts one bridge per Xcode independently. The
-        // canonical initialize result remains serialized by InitializeManager.
+        // Route membership starts one bridge per Xcode independently. Each
+        // route then owns its own protocol activation; only the compatible
+        // canonical result publication is globally arbitrated.
         for route in routes {
             guard let upstreamIndex = route.primaryUpstreamIndex else { continue }
             runWhenUpstreamReady(
@@ -329,21 +298,10 @@ extension RuntimeCoordinator {
             return
         }
 
-        guard isInitialized() else {
-            guard initializeManager.snapshot().initInFlight == false else {
-                return
-            }
-            if let route = activeRoutes.first(where: {
-                pendingProcessIDs.contains($0.target.processID)
-            }) {
-                startProcessRouteActivation(for: route)
-            }
-            return
-        }
-
         for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
             startProcessRouteActivation(for: route)
         }
+        guard isInitialized() else { return }
         refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",
             processIDs: pendingProcessIDs

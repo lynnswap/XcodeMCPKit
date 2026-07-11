@@ -263,6 +263,10 @@ extension RuntimeCoordinator {
             attempt: attempt,
             initializeClaim: initializeClaim
         )
+        refreshPendingProcessToolsCatalogForReadyUpstream(
+            upstreamIndex: upstreamIndex,
+            reason: "route_activation_initialized_\(upstreamIndex)"
+        )
     }
 
     func abandonProcessRouteActivation(processID: pid_t, reason: String) {
@@ -409,33 +413,43 @@ extension RuntimeCoordinator {
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
         guard let proof = initializeClaim.topologyProof else { return }
-        var timeout: ProcessControlPlaneAuthority.AttemptTimeout?
         var cleared: (
             timeout: RuntimeScheduledTimeout?,
             initUpstreamID: Int64?,
             didReceiveInitializeResponse: Bool,
             didSendInitialized: Bool
         )?
-        guard upstreamTopology.withValidated(proof, {
-            cleared = upstreamHealthManager.timeoutCatalogActivation(
-                initializeClaim,
-                commit: { _ in
-                    timeout = processControlPlane.handleCatalogChannelTimeout(
-                        upstreamProof: proof,
-                        nowUptimeNs: nowUptimeNanoseconds()
-                    )
-                    return true
-                }
-            )
-        }) != nil, let cleared else { return }
+        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        let eligibility = initializeManager.finishSupportEligibilityUpdate {
+            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
+            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
+                cleared = upstreamHealthManager.timeoutCatalogActivation(
+                    initializeClaim,
+                    commit: { _ in true }
+                )
+                guard cleared != nil else { return false }
+                update = commitSupportEligibilityAfterHealthMutation(
+                    topologySnapshot: topologySnapshot,
+                    detachedProof: proof,
+                    catalogTimeoutProof: proof,
+                    processEligibility: &processEligibility
+                )
+                return true
+            }) == true else { return nil }
+            return update
+        }
+        guard let eligibility, let cleared, let processEligibility else { return }
+        let timeout = processEligibility.catalogTimeout
+        if let timeout {
+            applyProcessControlPlaneTransition(timeout.transition)
+        }
+        applyProcessControlPlaneTransition(processEligibility.transition)
+        applySupportEligibilityCompletion(eligibility)
         finishClearingUpstreamState(
             proof: proof,
             cleared: cleared,
             resetsProcessRouteActivation: false
         )
-        if let timeout {
-            applyProcessControlPlaneTransition(timeout.transition)
-        }
         guard replaceOrRetireInitializeChannel(initializeClaim) else { return }
         guard let timeout else { return }
 

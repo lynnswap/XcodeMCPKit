@@ -32,10 +32,15 @@ extension RuntimeCoordinator {
 
     private func markRequestTimedOut(_ proof: UpstreamTopologyProof) {
         let nowUptimeNs = nowUptimeNanoseconds()
-        let result = upstreamHealthManager.markRequestTimedOut(
-            proof,
-            nowUptimeNs: nowUptimeNs
-        )
+        guard let result = commitVerifiedHealthSupportMutation(
+            proof: proof,
+            mutation: {
+                .some(upstreamHealthManager.markRequestTimedOut(
+                    proof,
+                    nowUptimeNs: nowUptimeNs
+                ))
+            }
+        ) else { return }
         let timeoutCount = result.timeoutCount
 
         if result.shouldClearPins {
@@ -47,6 +52,7 @@ extension RuntimeCoordinator {
                 ]
             )
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            schedulePendingInitializeQuarantineRecovery()
         }
     }
 
@@ -54,7 +60,10 @@ extension RuntimeCoordinator {
         let upstreamIndex = probe.upstreamIndex
         guard let operationLease = upstreamTopology.operationLease(
             for: probe.topologyProof
-        ) else { return }
+        ) else {
+            schedulePendingInitializeQuarantineRecovery()
+            return
+        }
         let internalSessionID = controlPlaneSessionID(for: "health_probe", route: nil)
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
@@ -71,6 +80,7 @@ extension RuntimeCoordinator {
             operationLease: operationLease
         ) else {
             _ = probeSession.router.cancelPending(token: registration.token)
+            finishHealthProbe(probe, success: false, reason: "assign_request_id_failed")
             return
         }
 
@@ -92,7 +102,10 @@ extension RuntimeCoordinator {
             onRejected: {
                 _ = probeSession.router.cancelPending(token: registration.token)
             }
-        ) else { return }
+        ) else {
+            finishHealthProbe(probe, success: false, reason: "send_rejected")
+            return
+        }
 
         addRuntimeTask { [weak self, probeSession, registration] in
             guard let self else { return }
@@ -110,7 +123,9 @@ extension RuntimeCoordinator {
                     let object = try JSONSerialization.jsonObject(with: responseData, options: [])
                         as? [String: Any],
                     object["error"] == nil,
-                    object["result"] != nil
+                    let resultValue = object["result"],
+                    let result = JSONValue(any: resultValue),
+                    self.isValidToolsListResult(result)
                 else {
                     self.upstreamRouter.remove(
                         proof: operationLease.proof,
@@ -134,6 +149,11 @@ extension RuntimeCoordinator {
                         proof: operationLease.proof,
                         upstreamID: upstreamID
                     )
+                    self.finishHealthProbe(
+                        probe,
+                        success: false,
+                        reason: "cancelled"
+                    )
                     return
                 }
                 self.upstreamRouter.remove(
@@ -156,11 +176,21 @@ extension RuntimeCoordinator {
     ) {
         let upstreamIndex = probe.upstreamIndex
         let nowUptimeNs = nowUptimeNanoseconds()
-        upstreamHealthManager.finishHealthProbe(
-            probe,
-            success: success,
-            nowUptimeNs: nowUptimeNs
+        let committed: Void? = commitVerifiedHealthSupportMutation(
+            proof: probe.topologyProof,
+            mutation: { () -> Void? in
+                guard upstreamHealthManager.finishHealthProbe(
+                    probe,
+                    success: success,
+                    nowUptimeNs: nowUptimeNs
+                ) else { return nil }
+                return ()
+            }
         )
+        guard committed != nil else {
+            schedulePendingInitializeQuarantineRecovery()
+            return
+        }
         if success {
             upstreamSlotScheduler.wake()
             refreshPendingProcessToolsCatalogForReadyUpstream(
@@ -169,6 +199,7 @@ extension RuntimeCoordinator {
             )
         } else {
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            schedulePendingInitializeQuarantineRecovery()
         }
         logger.debug(
             "Upstream health probe completed",
@@ -185,7 +216,17 @@ extension RuntimeCoordinator {
         nowUptimeNs: UInt64
     ) {
         let upstreamIndex = proof.slotID.rawValue
-        upstreamHealthManager.markToolsListRefreshSucceeded(proof, nowUptimeNs: nowUptimeNs)
+        let committed: Void? = commitVerifiedHealthSupportMutation(
+            proof: proof,
+            mutation: { () -> Void? in
+                guard upstreamHealthManager.markToolsListRefreshSucceeded(
+                    proof,
+                    nowUptimeNs: nowUptimeNs
+                ) else { return nil }
+                return ()
+            }
+        )
+        guard committed != nil else { return }
         testHooks.toolsListRefreshCompleted?(upstreamIndex, true)
     }
 
@@ -196,9 +237,14 @@ extension RuntimeCoordinator {
     )
     {
         let upstreamIndex = proof.slotID.rawValue
-        guard let result = upstreamHealthManager.markToolsListRefreshFailed(
-            proof,
-            nowUptimeNs: nowUptimeNs
+        guard let result = commitVerifiedHealthSupportMutation(
+            proof: proof,
+            mutation: {
+                upstreamHealthManager.markToolsListRefreshFailed(
+                    proof,
+                    nowUptimeNs: nowUptimeNs
+                )
+            }
         ) else { return }
         let failures = result.failures
         let quarantineUntil = result.quarantineUntil
@@ -214,6 +260,95 @@ extension RuntimeCoordinator {
             ]
         )
         testHooks.toolsListRefreshCompleted?(upstreamIndex, false)
+        schedulePendingInitializeQuarantineRecovery()
+    }
+
+    func schedulePendingInitializeQuarantineRecovery() {
+        guard let preparation = initializeManager.preparePendingQuarantineRecovery(
+            recovery: { upstreamHealthManager.earliestInitializedQuarantineRecovery() }
+        ) else { return }
+        preparation.replacedTimeout?.cancel()
+
+        let nowUptimeNs = nowUptimeNanoseconds()
+        let remaining = preparation.recovery.deadlineUptimeNs > nowUptimeNs
+            ? preparation.recovery.deadlineUptimeNs - nowUptimeNs
+            : 0
+        let boundedRemaining = min(remaining, UInt64(Int64.max))
+        let timeout = scheduleRuntimeTimeout(
+            .nanoseconds(Int64(boundedRemaining))
+        ) { [weak self] in
+            self?.handlePendingInitializeQuarantineRecovery(preparation)
+        }
+        let attachment = initializeManager.attachPendingQuarantineRecoveryTimeout(
+            timeout,
+            lease: preparation.lease
+        )
+        attachment.replaced?.cancel()
+        if attachment.accepted == false {
+            timeout.cancel()
+        }
+    }
+
+    private func handlePendingInitializeQuarantineRecovery(
+        _ preparation: InitializeManager.PendingRecoveryPreparation
+    ) {
+        var probe: UpstreamHealthManager.ProbeRequest?
+        let began: Bool? = initializeManager.withPendingQuarantineRecovery(
+            preparation.lease
+        ) {
+            guard upstreamTopology.withValidated(
+                preparation.recovery.topologyProof,
+                {
+                    probe = upstreamHealthManager.beginQuarantineRecovery(
+                        preparation.recovery,
+                        nowUptimeNs: nowUptimeNanoseconds()
+                    )
+                    return true
+                }
+            ) == true else { return false }
+            return probe != nil
+        }
+        guard let began else { return }
+        if began, let probe {
+            probeUpstreamHealth(probe)
+            schedulePendingInitializeQuarantineRecovery()
+            return
+        }
+        schedulePendingInitializeQuarantineRecovery()
+    }
+
+    /// Commits a verified health transition and its initialize/catalog
+    /// eligibility projection under the shared lock order:
+    /// InitializeManager -> authoritative topology -> health -> canonical ->
+    /// process control plane. Effects are applied only after all locks release.
+    func commitVerifiedHealthSupportMutation<Result>(
+        proof: UpstreamTopologyProof,
+        detachedProof: UpstreamTopologyProof? = nil,
+        mutation: () -> Result?
+    ) -> Result? {
+        var mutationResult: Result?
+        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        let eligibility = initializeManager.finishSupportEligibilityUpdate {
+            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
+            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
+                guard let result = mutation() else { return false }
+                mutationResult = result
+                update = commitSupportEligibilityAfterHealthMutation(
+                    topologySnapshot: topologySnapshot,
+                    detachedProof: detachedProof,
+                    processEligibility: &processEligibility
+                )
+                return true
+            }) == true else { return nil }
+            return update
+        }
+        guard let eligibility, let mutationResult, let processEligibility else { return nil }
+        applyProcessControlPlaneTransition(processEligibility.transition)
+        for ineligibleProof in eligibility.update.newlyIneligibleProofs {
+            removeXcodeWindowOwners(forUpstreamIndex: ineligibleProof.slotID.rawValue)
+        }
+        applySupportEligibilityCompletion(eligibility)
+        return mutationResult
     }
 
     func isValidToolsListResult(_ value: JSONValue) -> Bool {

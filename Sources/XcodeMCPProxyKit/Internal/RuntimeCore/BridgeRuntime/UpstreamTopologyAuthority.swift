@@ -212,6 +212,20 @@ final class UpstreamTopologyAuthority: Sendable {
         }
     }
 
+    /// Holds the authoritative topology lock while exposing the exact snapshot
+    /// used to validate a handshake-state mutation.
+    func withValidatedSnapshot<Result>(
+        _ proof: UpstreamTopologyProof,
+        _ operation: (Snapshot) -> Result
+    ) -> Result? {
+        state.withLockedValue { state in
+            guard state.entriesByID[proof.slotID]?.generation == proof.slotGeneration else {
+                return nil
+            }
+            return operation(Self.snapshot(state))
+        }
+    }
+
     func contains(_ id: UpstreamSlotID) -> Bool {
         state.withLockedValue { $0.entriesByID[id] != nil }
     }

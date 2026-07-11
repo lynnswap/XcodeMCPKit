@@ -7,7 +7,7 @@
 - Design baseline: 4d60f711f11bd39e93e133afac81f5f1814035a4
 - Toolchain: Swift 6.3.3 / language mode 6 / strict memory safety / macOS 15.4+
 - Baseline: swift test -Xswiftc -strict-concurrency=minimal — 840 tests / 52 suites passed
-- Current verification (2026-07-11): `scripts/check.sh` — 904 default tests / 59 suites、24 process tests / 5 suites、7 stdio tests / 1 suite passed
+- Current verification (2026-07-11): `scripts/check.sh` — 924 default tests / 59 suites、24 process tests / 5 suites、7 stdio tests / 1 suite passed
 
 このファイルを修正実装の唯一の design source of truth とする。実装結果と現行 owner は [README.md の「実装結果」](README.md#実装結果) および `Docs/architecture.md` / `Docs/maintainer-architecture.md` に記録する。README.md の残りは監査時点の結果、design-contracts.md は候補規範、handoff-prompt.md は発見時点の引き継ぎ資料であり、設計判断が競合する場合は本書を優先する。
 
@@ -112,13 +112,13 @@ actor にしない。現在の NIO callback/read path を無意味に async 化�
 
 State は次を同じ isolation 内で所有する。
 
-- active/retired route identity、target、cooldown、upstream membership
+- active/retired route identity、target、scope別cooldown generation/deadline/timeout handle、upstream membership
 - policy別 exposure と exposureEpoch
 - catalogEpoch
 - routeごとの catalog attempt ID、phase、deadline/retry/RPC/timeout/waiter resource token
 - process catalog、upstream↔process mapping、canonical tools projectionとsource
 
-initialize result/source/incompatibility は CanonicalHandshakeState と initializeEpoch に分離する。actual upstream process/channel object は UpstreamTopologyAuthority が所有し、control-plane stateにはstable slot IDだけを置く。
+initialize result/source/incompatibility、並行participant、initialized supporterは CanonicalHandshakeState と initializeEpoch に分離する。participant/supporter identityはstable slot IDだけでなくslot generationを含むUpstreamTopologyProofに束縛する。actual upstream process/channel object は UpstreamTopologyAuthority が所有する。
 
 ### 5.3 Catalog transaction
 
@@ -204,11 +204,17 @@ Xcode process inventory の外部I/O ownerは `XcodeProcessEventMonitor` だけ�
 
 monitorはcompatible Xcode targetと、`NSWorkspace`が公開する既知のpermission dialog helper application PIDのimmutable cacheを発行する。route reconciliation、upstream readiness、DocumentationProvider、auto-approveはこのcacheだけを読む。`pgrep`、全PID `proc_listpids`、周期的なroute discoveryは削除する。auto-approveの250ms loopはAX window inspectionだけを行い、子PID列挙は構造的にeligibleなpermission dialogを実際に観測した時のownership検証に限定する。
 
-cache内のcompatible Xcode targetはPIDごとに独立したrouteを持つ。inventory membership成立時に各routeのprimary bridge processを起動し、別routeのcanonical initialize完了をprocess attachの前提にしない。一方、canonical initialize resultのpublishはsingle-writerのままとし、先頭routeのresult公開後に残るrouteを明示的なactivationとcatalog loadへ進める。workspace/tab owner resolutionはcataloged route集合から対象PIDを選ぶ。この進行はinventoryの周期的再走査に依存しない。
+cache内のcompatible Xcode targetはPIDごとに独立したrouteを持つ。inventory membership成立時に各routeのprimary bridge processを起動し、全routeのprotocol `initialize`を、別routeのresponse、permission approval、`notifications/initialized`送信、catalog loadの完了を待たずに開始する。各responseはUpstreamTopologyProof付きparticipantとしてCanonicalHandshakeStateへofferする。最初にinitialized notificationとhealth commitを完了したparticipantだけがcanonical resultをpublishし、`serverInfo`を除くsemantic resultが同値のparticipantはjoinする。意味のあるresult mismatchはそのrouteのcurrent activation attemptをterminalにする。route自体はcooldown後に再試行でき、再度compatibilityを通過しなければならない。
+
+CanonicalHandshakeStateはinitialized compatible supporterごとのproofとraw resultを、現在のhealth eligibilityとは別に所有する。canonical source proofがquarantineまたは退場した時はeligible survivorのproofとraw resultへrebindする。raw supporterが全てquarantineされた時はclient向けinitialize resultを非公開にするが、raw evidence由来のsemantic baselineは保持し、不一致offerをrejectし続ける。eligibilityを戻せるのはgeneration検証済みhealth probeまたは妥当な`tools/list`成功だけで、通常request成功はquarantineを解除しない。topologyから最後のraw supporterがdetachした時だけsemantic baselineをclearする。旧slot generationの遅延completion/clearはreplacement generationのparticipant/supporterを変更できない。
+
+quarantine、detach、slot replacementでは対象exact proof由来のprocess catalogを削除し、そのproofに束縛されたRPC/resourceをcancelする。同じprocess routeに別のrecovery-aware usable siblingがあり、そのsiblingで進行中のlogical catalog loadがある場合はattemptを保持してfresh responseのcommitを待ち、usable siblingが無い場合だけattemptをabandonedへ進める。validated recoveryでraw initialize resultを再公開できても、fresh `tools/list`が新しいcatalogをcommitするまではtool routeとして露出しない。各joined/recovered routeのcatalog開始はroute activation ownerが行い、初回canonical publication時だけのwarmup flagに依存しない。workspace/tab owner resolutionはcataloged route集合から対象PIDを選ぶ。この進行はinventoryの周期的再走査に依存しない。
+
+downstream initializeがpendingでquarantine中のraw supporterしか残らない場合、InitializeManagerはearliest quarantine deadlineのexact topology proofとhealth probe generationを含むone-shot leaseを1本だけ所有する。callbackはpending generation、proof、health generation、deadlineを再検証してprobeを開始し、失敗時はcurrent health stateから次deadlineをrearmする。canonical publication、last waiter removal、debug reset、shutdownはleaseをinvalidateしてtimeoutをcancelする。この回復は既存topologyだけを使い、process inventoryを再走査しない。
 
 Appleの契約上、`runningApplications` のKVO更新にはmain run loopのcommon modeが動作している必要がある。repoのDarwin async-main executableと通常のAppKit hostはこの条件を満たす。embedding hostがmain threadをblocking waitで占有する形はprocess-observation contract外とし、public async lifecycleを使う。
 
-readiness waitは`(isReady, generation)` snapshotとgeneration change waitでlost wakeupを防ぐ。Xcodeが無い場合の自動launchは1回だけで、その後はprocess eventを待つ。route cooldown後の再activationはprocess再走査に相乗りさせず、`routeID + scope + deadline`でfenceしたone-shot timerが既存routeを再試行する。retire/reset/shutdownはtimerをcancelする。
+readiness waitは`(isReady, generation)` snapshotとgeneration change waitでlost wakeupを防ぐ。Xcodeが無い場合の自動launchは1回だけで、その後はprocess eventを待つ。route cooldown後の再activationはprocess再走査に相乗りさせない。ProcessControlPlaneAuthorityの同じroute recordがscope別のmonotonic generation、deadline、timeout handleを所有し、`routeID + scope + generation + deadline`でfenceしたone-shot timerだけが既存routeを再試行する。new cooldown、available、expiry、route replacement/retire、reset、shutdownは同じowner transitionでexact handleをdetachし、stale attach/callbackをrejectする。
 
 DocumentationProvider discoveryがunavailableを返した場合は、そのattemptがgeneration-fencedな2秒後のretryを1つだけ発行する。retryはmonitorのcached Xcode snapshotを再利用し、OS process inventoryを問い合わせない。success、より新しいprewarm、reset、shutdownはtaskとtimerを同じowner stateで無効化し、stale completionやcancel済みcallbackがretryを再武装できないようにする。
 

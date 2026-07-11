@@ -167,14 +167,6 @@ extension RuntimeCoordinator {
         return true
     }
 
-    /// The staleness rule for the canonical tools catalog: it must not
-    /// survive losing the upstream it came from unless another initialized
-    /// upstream can still vouch for an equivalent catalog.
-    func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
-        processControlPlane.canonicalSourceUpstream() == upstreamIndex
-            && !anyActiveInitializedUpstream()
-    }
-
     func handleUpstreamExit(
         _ status: Int32,
         upstreamIndex: Int,
@@ -218,9 +210,12 @@ extension RuntimeCoordinator {
             ) {
                 return
             }
-            globalInit.timeout?.cancel()
-            _ = initializeManager.completePrimaryInitializeFailure()
-            for item in globalInit.pending {
+            guard let failure = initializeManager.completePrimaryInitializeFailure() else {
+                return
+            }
+            failure.timeout?.cancel()
+            failure.recoveryTimeout?.cancel()
+            for item in failure.pending {
                 removePendingInitializeSessionIfCurrent(item)
                 item.eventLoop.execute {
                     item.promise.fail(TimeoutError())
@@ -230,20 +225,14 @@ extension RuntimeCoordinator {
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
-            shouldResetGlobalInit = !anyActiveInitializedUpstream()
+            shouldResetGlobalInit = canonicalHandshakeState.initializeResult() == nil
+                && canonicalHandshakeState.hasInitializeParticipants() == false
+                && anyActiveRecoveryInFlight() == false
         } else {
             shouldResetGlobalInit = false
         }
-        let shouldClearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
-        if shouldResetGlobalInit || shouldClearToolsCatalog {
-            if shouldResetGlobalInit {
-                initializeManager.resetWarmSecondaryForRetry()
-            }
-            invalidateControlPlane(
-                reason: "upstream_exit_\(upstreamIndex)",
-                clearInitialize: shouldResetGlobalInit,
-                clearToolsCatalog: shouldClearToolsCatalog
-            )
+        if shouldResetGlobalInit {
+            initializeManager.resetWarmSecondaryForRetry()
         }
 
         let primaryUpstreamIndex = globalInit.primaryInitUpstreamIndex
@@ -413,22 +402,7 @@ extension RuntimeCoordinator {
         let upstreamIndex = operationLease.upstreamIndex
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            var cleared: (
-                timeout: RuntimeScheduledTimeout?,
-                initUpstreamID: Int64?,
-                didReceiveInitializeResponse: Bool,
-                didSendInitialized: Bool
-            )?
-            guard upstreamTopology.withValidated(operationLease.proof, {
-                cleared = upstreamHealthManager.clearUpstreamState(operationLease.proof)
-            }) != nil else { return }
-            if let cleared {
-                finishClearingUpstreamState(
-                    proof: operationLease.proof,
-                    cleared: cleared,
-                    resetsProcessRouteActivation: true
-                )
-            }
+            guard clearUpstreamState(proof: operationLease.proof) else { return }
             if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
                 markXcodeProcessRouteUnavailable(
                     upstreamIndex: upstreamIndex,
@@ -962,11 +936,19 @@ extension RuntimeCoordinator {
               upstreamTopology.validate(proof) else { return }
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = nowUptimeNanoseconds()
-        guard let transition = upstreamHealthManager.markProtocolViolation(
-            proof,
-            nowUptimeNs: nowUptimeNs
-        ) else { return }
         let initSnapshot = initializeManager.snapshot()
+        let wasCanonicalSource = canonicalHandshakeState.initializeSourceUpstream()
+            == upstreamIndex
+        guard let transition = commitVerifiedHealthSupportMutation(
+            proof: proof,
+            detachedProof: proof,
+            mutation: {
+                upstreamHealthManager.markProtocolViolation(
+                    proof,
+                    nowUptimeNs: nowUptimeNs
+                )
+            }
+        ) else { return }
         transition.cancelledInitTimeout?.cancel()
         let violatedActivePrimaryInitialize =
             initSnapshot.activePrimaryUpstreamIndex == upstreamIndex && initSnapshot.initInFlight
@@ -987,17 +969,10 @@ extension RuntimeCoordinator {
                 "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )
-        let clearInitialize = violatedActivePrimaryInitialize
-            && initSnapshot.hasInitResult == false
-        let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
-        if clearInitialize || clearToolsCatalog {
-            invalidateControlPlane(
-                reason: "protocol_violation_\(upstreamIndex)",
-                clearInitialize: clearInitialize,
-                clearToolsCatalog: clearToolsCatalog
-            )
+        if processRoutingEnabled,
+           let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
+            startProcessRouteActivation(for: route)
         }
-
         if violatedActivePrimaryInitialize {
             if retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
@@ -1009,11 +984,12 @@ extension RuntimeCoordinator {
             failInitPending(error: TimeoutError())
         }
 
-        let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex
-            ?? canonicalHandshakeState.initializeSourceUpstream()
-            ?? 0
+        if processRoutingEnabled {
+            return
+        }
+        let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex ?? 0
         if upstreamIndex == primaryUpstreamIndex {
-            if initSnapshot.hasInitResult {
+            if initSnapshot.hasInitResult || wasCanonicalSource {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             } else {
                 startEagerInitializePrimary(applyBackoff: true)

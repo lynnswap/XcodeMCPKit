@@ -291,9 +291,7 @@ extension RuntimeCoordinator {
         let route = unavailable.route
         applyProcessControlPlaneTransition(unavailable.transition)
         scheduleXcodeProcessCooldownExpiration(
-            routeID: route.id,
-            scope: scope,
-            deadlineUptimeNanoseconds: unavailableUntil,
+            lease: unavailable.cooldownLease,
             delayNanoseconds: cooldownNanoseconds
         )
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
@@ -312,106 +310,57 @@ extension RuntimeCoordinator {
     }
 
     func markXcodeProcessRouteAvailable(upstreamIndex: Int) {
-        let routeID = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.id
         applyProcessControlPlaneTransition(processControlPlane.markAvailable(
             upstreamIndex: upstreamIndex,
             scope: .route,
             nowUptimeNs: nowUptimeNanoseconds()
         ))
-        if let routeID {
-            cancelXcodeProcessCooldownSchedule(routeID: routeID, scope: .route)
-        }
         _ = processRouteExposure(policy: .toolsCatalog)
     }
 
     func markXcodeProcessRouteCatalogAvailable(upstreamIndex: Int) {
-        let routeID = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.id
         applyProcessControlPlaneTransition(processControlPlane.markAvailable(
             upstreamIndex: upstreamIndex,
             scope: .catalog,
             nowUptimeNs: nowUptimeNanoseconds()
         ))
-        if let routeID {
-            cancelXcodeProcessCooldownSchedules(routeID: routeID)
-        }
     }
 
     private func scheduleXcodeProcessCooldownExpiration(
-        routeID: ProcessRouteID,
-        scope: ProcessControlPlaneAuthority.CooldownScope,
-        deadlineUptimeNanoseconds: UInt64,
+        lease: ProcessControlPlaneAuthority.CooldownLease,
         delayNanoseconds: UInt64
     ) {
-        let key = XcodeProcessCooldownKey(routeID: routeID, scope: scope)
         let timeout = scheduleRuntimeTimeout(
             .nanoseconds(Int64(clamping: delayNanoseconds))
         ) { [weak self] in
-            self?.handleXcodeProcessCooldownExpiration(
-                key: key,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            )
+            self?.handleXcodeProcessCooldownExpiration(lease: lease)
         }
-        let previous = xcodeProcessCooldownSchedules.withLockedValue { schedules in
-            schedules.updateValue(
-                XcodeProcessCooldownSchedule(
-                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds,
-                    timeout: timeout
-                ),
-                forKey: key
-            )
-        }
-        previous?.timeout.cancel()
+        applyProcessControlPlaneTransition(
+            processControlPlane.attachCooldownTimeout(timeout, to: lease)
+        )
     }
 
     private func handleXcodeProcessCooldownExpiration(
-        key: XcodeProcessCooldownKey,
-        deadlineUptimeNanoseconds: UInt64
+        lease: ProcessControlPlaneAuthority.CooldownLease
     ) {
-        let isCurrent = xcodeProcessCooldownSchedules.withLockedValue { schedules in
-            guard schedules[key]?.deadlineUptimeNanoseconds == deadlineUptimeNanoseconds else {
-                return false
+        let nowUptimeNs = nowUptimeNanoseconds()
+        if nowUptimeNs < lease.deadlineUptimeNs {
+            let timeout = scheduleRuntimeTimeout(
+                .nanoseconds(Int64(clamping: lease.deadlineUptimeNs - nowUptimeNs))
+            ) { [weak self] in
+                self?.handleXcodeProcessCooldownExpiration(lease: lease)
             }
-            schedules.removeValue(forKey: key)
-            return true
-        }
-        guard isCurrent,
-              xcodeProcessRoutes.contains(where: { $0.id == key.routeID })
-        else {
+            applyProcessControlPlaneTransition(
+                processControlPlane.attachCooldownTimeout(timeout, to: lease)
+            )
             return
         }
+        guard let transition = processControlPlane.expireCooldown(
+            lease,
+            nowUptimeNs: nowUptimeNs
+        ) else { return }
+        applyProcessControlPlaneTransition(transition)
         retryPendingProcessRouteReadiness(reason: "cooldown_expired")
-    }
-
-    func cancelXcodeProcessCooldownSchedule(
-        routeID: ProcessRouteID,
-        scope: ProcessControlPlaneAuthority.CooldownScope
-    ) {
-        let timeout = xcodeProcessCooldownSchedules.withLockedValue { schedules in
-            schedules.removeValue(
-                forKey: XcodeProcessCooldownKey(routeID: routeID, scope: scope)
-            )?.timeout
-        }
-        timeout?.cancel()
-    }
-
-    func cancelXcodeProcessCooldownSchedules(routeID: ProcessRouteID) {
-        for scope in [
-            ProcessControlPlaneAuthority.CooldownScope.route,
-            .catalog,
-        ] {
-            cancelXcodeProcessCooldownSchedule(routeID: routeID, scope: scope)
-        }
-    }
-
-    func cancelAllXcodeProcessCooldownSchedules() {
-        let timeouts = xcodeProcessCooldownSchedules.withLockedValue { schedules in
-            let timeouts = schedules.values.map(\.timeout)
-            schedules.removeAll()
-            return timeouts
-        }
-        for timeout in timeouts {
-            timeout.cancel()
-        }
     }
 
     func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {

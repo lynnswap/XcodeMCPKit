@@ -224,92 +224,275 @@ struct ControlPlaneAuthorityTests {
         #expect(actualProof != preferredProof)
     }
 
-    @Test func catalogSourceRebindRequiresCurrentRouteMembershipAndExactOldProof() throws {
-        let target = xcodeProcessTarget(processID: 41018, xcodeVersion: "27.0")
+    @Test func supportEligibilityKeepsSiblingFallbackLoadAlive() throws {
+        let target = xcodeProcessTarget(processID: 41019, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1])])
         let route = try #require(authority.route(forProcessID: target.processID))
-        let oldProof = testTopologyProof(0)
-        let replacementProof = testTopologyProof(1)
+        let lostProof = testTopologyProof(0)
+        let fallbackProof = testTopologyProof(1)
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
-            preferredUpstreamProof: oldProof,
+            preferredUpstreamProof: lostProof,
             nowUptimeNanoseconds: 1
         ))
-        guard case .accepted = authority.completeCatalog(
-            .usable(catalog("SharedTool"), source: oldProof),
-            lease: lease,
-            nowUptimeNanoseconds: 2
-        ) else {
-            Issue.record("expected catalog commit to be accepted")
-            return
-        }
-
-        let staleTransition = authority.rebindCatalogSource(
-            processID: target.processID,
-            from: testTopologyProof(0, generation: 2),
-            to: replacementProof
-        )
-        #expect(staleTransition.didChangeRoutes == false)
-        #expect(staleTransition.effects.isEmpty)
-        #expect(staleTransition.publishesToolsListChanged == false)
-        #expect(authority.canonicalSourceProof() == oldProof)
-
-        let (lateLease, lateTransition) = try #require(authority.beginCatalogAttempt(
-            routeID: route.id,
-            preferredUpstreamProof: replacementProof,
-            nowUptimeNanoseconds: 3
-        ))
-        #expect(lateTransition.effects.isEmpty)
-        let lateRPC = ControlPlane.RPCHandle()
-        _ = authority.attach(.rpc(lateRPC), to: lateLease)
-        #expect(lateRPC.markRegistered(
+        let lostRPC = ControlPlane.RPCHandle()
+        let fallbackRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(lostRPC), to: lease)
+        _ = authority.attach(.rpc(fallbackRPC), to: lease)
+        #expect(lostRPC.markRegistered(
             registrationToken: UUID(),
-            operationLease: UpstreamOperationLease(
-                proof: oldProof,
-                slot: TestUpstreamClient()
-            )
+            operationLease: testOperationLease(0)
+        ))
+        #expect(fallbackRPC.markRegistered(
+            registrationToken: UUID(),
+            operationLease: testOperationLease(1)
         ))
 
-        let rebindTransition = authority.rebindCatalogSource(
-            processID: target.processID,
-            from: oldProof,
-            to: replacementProof
+        let eligibility = authority.applySupportEligibility(
+            usability: usability([1]),
+            newlyIneligibleProofs: [lostProof],
+            nowUptimeNs: 2
         )
-        #expect(rebindTransition.publishesToolsListChanged == false)
-        #expect(rebindTransition.effects.count == 1)
-        #expect(authority.validateCatalogLoad(lateLease))
-        for effect in rebindTransition.effects {
-            guard case .cancelRPC(let handle) = effect else {
-                Issue.record("source rebind must cancel the RPC bound to the cleared proof")
-                return
-            }
+        for effect in eligibility.transition.effects {
+            guard case .cancelRPC(let handle) = effect else { continue }
             handle.cancel()
         }
-        #expect(lateRPC.isCancelled())
+
+        #expect(lostRPC.isCancelled())
+        #expect(fallbackRPC.isCancelled() == false)
+        #expect(authority.validateCatalogLoad(lease))
         guard case .accepted = authority.completeCatalog(
-            .usable(catalog("FreshSiblingTool"), source: replacementProof),
-            lease: lateLease,
-            nowUptimeNanoseconds: 4
+            .usable(catalog("FallbackTool"), source: fallbackProof),
+            lease: lease,
+            nowUptimeNanoseconds: 3
         ) else {
-            Issue.record("source rebind must preserve the logical load for sibling fallback")
+            Issue.record("healthy sibling should complete the retained catalog load")
             return
         }
-        #expect(
-            authority.catalog(forProcessID: target.processID)?.upstreamProof
-                == replacementProof
-        )
-        #expect(authority.canonicalSourceProof() == replacementProof)
+        #expect(authority.catalog(forProcessID: target.processID)?.upstreamProof == fallbackProof)
+    }
 
-        let foreignProof = testTopologyProof(2)
-        let foreignTransition = authority.rebindCatalogSource(
-            processID: target.processID,
-            from: replacementProof,
-            to: foreignProof
+    @Test func catalogEligibilityMilestoneSurvivesQuarantineUntilRetireOrReset() throws {
+        let older = xcodeProcessTarget(processID: 41020, xcodeVersion: "26.6")
+        let latest = xcodeProcessTarget(processID: 41021, xcodeVersion: "27.0")
+        let authority = ProcessControlPlaneAuthority(initialRoutes: [
+            XcodeProcessRoute(target: older, upstreamIndices: [0]),
+            XcodeProcessRoute(target: latest, upstreamIndices: [1]),
+        ])
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs.isEmpty)
+        #expect(authority.snapshot().catalogRequiredProcessIDs.isEmpty)
+
+        _ = authority.updateUsability(usability([0]), nowUptimeNs: 1)
+        try commit(catalog("OlderTool"), processID: older.processID, upstream: 0, to: authority)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [older.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+
+        _ = authority.updateUsability(usability([0, 1]), nowUptimeNs: 2)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+
+        _ = authority.applySupportEligibility(
+            usability: usability([0]),
+            newlyIneligibleProofs: [testTopologyProof(1)],
+            nowUptimeNs: 3
         )
-        #expect(foreignTransition.didChangeRoutes == false)
-        #expect(foreignTransition.effects.isEmpty)
-        #expect(foreignTransition.publishesToolsListChanged == false)
-        #expect(authority.canonicalSourceProof() == replacementProof)
+
+        #expect(authority.catalog(forProcessID: older.processID) != nil)
+        #expect(authority.catalog(forProcessID: latest.processID) == nil)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(authority.canonicalSourceProof() == nil)
+
+        let latestRoute = try #require(authority.route(forProcessID: latest.processID))
+        _ = authority.retireRoute(
+            routeID: latestRoute.id,
+            reason: "test_retire_health_hidden_route",
+            nowUptimeNs: 4
+        )
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [older.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+
+        _ = authority.reset()
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs.isEmpty)
+        #expect(authority.snapshot().catalogRequiredProcessIDs.isEmpty)
+
+        _ = authority.updateUsability(usability([0]), nowUptimeNs: 5)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [older.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+    }
+
+    @Test func exactCooldownExpiryWithdrawsPartialProjectionUntilFreshCatalog() throws {
+        let older = xcodeProcessTarget(processID: 41022, xcodeVersion: "26.6")
+        let latest = xcodeProcessTarget(processID: 41023, xcodeVersion: "27.0")
+        let authority = makeAuthority([
+            (older, [0]),
+            (latest, [1]),
+        ])
+        try commit(catalog("OlderTool"), processID: older.processID, upstream: 0, to: authority)
+        try commit(catalog("LatestTool"), processID: latest.processID, upstream: 1, to: authority)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["LatestTool", "OlderTool"])
+
+        let unavailable = try #require(authority.markUnavailable(
+            upstreamIndex: 1,
+            scope: .catalog,
+            nowUptimeNs: 10,
+            unavailableUntilUptimeNs: 100
+        ))
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+        let extended = try #require(authority.markUnavailable(
+            upstreamIndex: 1,
+            scope: .catalog,
+            nowUptimeNs: 50,
+            unavailableUntilUptimeNs: 200
+        ))
+        #expect(authority.expireCooldown(
+            unavailable.cooldownLease,
+            nowUptimeNs: 100
+        ) == nil)
+        #expect(authority.unavailableProcessIDs(nowUptimeNs: 201).contains(latest.processID))
+        #expect(
+            authority.routingSnapshot(policy: .toolsCatalog, nowUptimeNs: 201)
+                .processIDs.contains(latest.processID) == false
+        )
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+
+        _ = try #require(authority.expireCooldown(
+            extended.cooldownLease,
+            nowUptimeNs: 200
+        ))
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(authority.canonicalSourceProof() == nil)
+
+        try commit(catalog("LatestFresh"), processID: latest.processID, upstream: 1, to: authority)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["LatestFresh", "OlderTool"])
+    }
+
+    @Test func cooldownTimerAttachmentBelongsToExactAuthorityLease() throws {
+        let target = xcodeProcessTarget(processID: 41026, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+
+        let first = try #require(authority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 0,
+            unavailableUntilUptimeNs: 100
+        ))
+        let firstCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { firstCancelled.withLockedValue { $0 = true } },
+            to: first.cooldownLease
+        ))
+        #expect(firstCancelled.withLockedValue { $0 } == false)
+
+        let extended = try #require(authority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 1,
+            unavailableUntilUptimeNs: 200
+        ))
+        applyEffects(extended.transition)
+        #expect(firstCancelled.withLockedValue { $0 })
+
+        let staleFirstCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { staleFirstCancelled.withLockedValue { $0 = true } },
+            to: first.cooldownLease
+        ))
+        #expect(staleFirstCancelled.withLockedValue { $0 })
+
+        let extendedCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { extendedCancelled.withLockedValue { $0 = true } },
+            to: extended.cooldownLease
+        ))
+        #expect(extendedCancelled.withLockedValue { $0 } == false)
+
+        // Detach the old timer, but deliberately delay delivery of its cancel effect.
+        let available = authority.markAvailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 2
+        )
+        let replacement = try #require(authority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 2,
+            unavailableUntilUptimeNs: 200
+        ))
+        #expect(replacement.cooldownLease.generation != extended.cooldownLease.generation)
+        let replacementCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { replacementCancelled.withLockedValue { $0 = true } },
+            to: replacement.cooldownLease
+        ))
+
+        applyEffects(available)
+        #expect(extendedCancelled.withLockedValue { $0 })
+        #expect(replacementCancelled.withLockedValue { $0 } == false)
+
+        let reset = authority.reset()
+        let preResetLeaseCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { preResetLeaseCancelled.withLockedValue { $0 = true } },
+            to: replacement.cooldownLease
+        ))
+        #expect(preResetLeaseCancelled.withLockedValue { $0 })
+        applyEffects(reset)
+        #expect(replacementCancelled.withLockedValue { $0 })
+    }
+
+    @Test func membershipReplacementEstablishesCatalogEligibilityFromNewUsableSlot() throws {
+        let target = xcodeProcessTarget(processID: 41024, xcodeVersion: "27.0")
+        let authority = ProcessControlPlaneAuthority(initialRoutes: [
+            XcodeProcessRoute(target: target, upstreamIndices: [0]),
+        ])
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs.isEmpty)
+
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            reason: "replace_with_usable_slot",
+            nowUptimeNs: 1,
+            usability: usability([1])
+        )
+
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [target.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [target.processID])
+    }
+
+    @Test func membershipReplacementPreservesEstablishedCatalogEligibility() throws {
+        let target = xcodeProcessTarget(processID: 41025, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            reason: "replace_with_unusable_slot",
+            nowUptimeNs: 1,
+            usability: usability([])
+        )
+
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [target.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [target.processID])
     }
 
     @Test func catalogSourceInvalidationRequiresExactProof() throws {
@@ -1052,6 +1235,7 @@ struct ControlPlaneAuthorityTests {
             "cancelLoadsStartedBeforeGeneration",
             "recordAvailableToolsCatalog",
             "func recordCatalog(",
+            "xcodeProcessCooldownSchedules",
         ]
         let manager = FileManager.default
         var source = ""
@@ -1155,6 +1339,14 @@ struct ControlPlaneAuthorityTests {
         ) else {
             Issue.record("failed to seed process catalog")
             return
+        }
+    }
+
+    private func applyEffects(_ transition: ProcessControlPlaneTransition) {
+        for effect in transition.effects {
+            if case .cancelTimeout(let timeout) = effect {
+                timeout.cancel()
+            }
         }
     }
 }

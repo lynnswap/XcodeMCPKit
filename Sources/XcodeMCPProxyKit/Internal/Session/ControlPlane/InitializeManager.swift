@@ -59,26 +59,43 @@ final class InitializeManager: Sendable {
         let isShuttingDown: Bool
     }
 
-    struct PrimarySuccessLease: Sendable, Hashable {
-        fileprivate let id: UInt64
-        let upstreamIndex: Int
-        let upstreamID: Int64
-    }
-
-    struct SuccessPreparation: Sendable {
-        let lease: PrimarySuccessLease
-        let publicationLease: CanonicalHandshakeState.InitializePublicationLease
+    struct SuccessCompletion: Sendable {
+        let pending: [PendingInitialize]
+        let result: JSONValue
+        let timeout: RuntimeScheduledTimeout?
+        let recoveryTimeout: RuntimeScheduledTimeout?
         let shouldWarmSecondary: Bool
     }
 
-    struct SuccessCompletion: Sendable {
-        let pending: [PendingInitialize]
-        let timeout: RuntimeScheduledTimeout?
+    struct ParticipantCompletion: Sendable {
+        let commit: CanonicalHandshakeState.InitializeCommit
+        let publication: SuccessCompletion?
+    }
+
+    struct SupportEligibilityCompletion: Sendable {
+        let update: CanonicalHandshakeState.SupportEligibilityUpdate
+        let publication: SuccessCompletion?
+    }
+
+    struct PendingRecoveryLease: Sendable, Hashable {
+        fileprivate let generation: UInt64
+    }
+
+    struct PendingRecoveryPreparation: Sendable {
+        let lease: PendingRecoveryLease
+        let recovery: UpstreamHealthManager.QuarantineRecoveryLease
+        let replacedTimeout: RuntimeScheduledTimeout?
+    }
+
+    struct PendingRecoveryTimeoutAttachment: Sendable {
+        let accepted: Bool
+        let replaced: RuntimeScheduledTimeout?
     }
 
     struct FailureResult: Sendable {
         let pending: [PendingInitialize]
         let timeout: RuntimeScheduledTimeout?
+        let recoveryTimeout: RuntimeScheduledTimeout?
         let upstreamIndex: Int?
         let upstreamID: Int64?
         let shouldRetryEagerInitialize: Bool
@@ -96,6 +113,7 @@ final class InitializeManager: Sendable {
     struct PendingRemovalResult: Sendable {
         let pending: [PendingInitialize]
         let timeout: RuntimeScheduledTimeout?
+        let recoveryTimeout: RuntimeScheduledTimeout?
         let cancelledPrimaryUpstreamIndex: Int?
         let cancelledPrimaryUpstreamID: Int64?
         let cancelledPrimaryReadinessToken: UpstreamReadinessWaiterToken?
@@ -115,13 +133,13 @@ final class InitializeManager: Sendable {
         var primaryInitializePhase: PrimaryInitializePhase = .idle
         var primaryInitializeRequiresPendingWaiter = false
         var primaryInitializeReadinessToken: UpstreamReadinessWaiterToken?
-        var nextPrimarySuccessLeaseID: UInt64 = 0
-        var primarySuccessPreparation: SuccessPreparation?
         var cancelledPrimaryInitializeAttempts: [CancelledPrimaryInitializeAttempt] = []
         var initTimeout: RuntimeScheduledTimeout?
         var isShuttingDown = false
         var didWarmSecondary = false
         var warmInitRecoveryIntent: WarmInitRecoveryIntent = .none
+        var pendingRecoveryGeneration: UInt64 = 0
+        var pendingRecoveryTimeout: RuntimeScheduledTimeout?
     }
 
     private struct CancelledPrimaryInitializeAttempt: Sendable, Equatable {
@@ -139,22 +157,23 @@ final class InitializeManager: Sendable {
         self.brokerState = brokerState
     }
 
-    func beginShutdown() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
+    func beginShutdown() -> (
+        pending: [PendingInitialize],
+        timeout: RuntimeScheduledTimeout?,
+        recoveryTimeout: RuntimeScheduledTimeout?
+    ) {
         state.withLockedValue { state in
+            let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             state.isShuttingDown = true
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
-            if let preparation = state.primarySuccessPreparation {
-                brokerState.cancelInitializePublication(preparation.publicationLease)
-            }
-            state.primarySuccessPreparation = nil
             state.cancelledPrimaryInitializeAttempts.removeAll()
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
             state.initTimeout = nil
-            return (pending, timeout)
+            return (pending, timeout, recoveryTimeout)
         }
     }
 
@@ -165,6 +184,7 @@ final class InitializeManager: Sendable {
                 return PendingRemovalResult(
                     pending: [],
                     timeout: nil,
+                    recoveryTimeout: nil,
                     cancelledPrimaryUpstreamIndex: nil,
                     cancelledPrimaryUpstreamID: nil,
                     cancelledPrimaryReadinessToken: nil
@@ -172,10 +192,12 @@ final class InitializeManager: Sendable {
             }
             state.initPending.removeAll { $0.sessionID == sessionID }
             let timeout: RuntimeScheduledTimeout?
+            let recoveryTimeout: RuntimeScheduledTimeout?
             let cancelledPrimaryUpstreamIndex: Int?
             let cancelledPrimaryUpstreamID: Int64?
             let cancelledPrimaryReadinessToken: UpstreamReadinessWaiterToken?
             if state.initPending.isEmpty {
+                recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
                 if state.primaryInitializeRequiresPendingWaiter {
                     switch state.primaryInitializePhase {
                     case .pendingSend(let upstreamIndex):
@@ -197,10 +219,6 @@ final class InitializeManager: Sendable {
                     state.primaryInitializePhase = .idle
                     state.primaryInitializeRequiresPendingWaiter = false
                     state.primaryInitializeReadinessToken = nil
-                    if let preparation = state.primarySuccessPreparation {
-                        brokerState.cancelInitializePublication(preparation.publicationLease)
-                    }
-                    state.primarySuccessPreparation = nil
                     timeout = state.initTimeout
                     state.initTimeout = nil
                 } else if state.primaryInitializePhase.isInFlight == false {
@@ -216,6 +234,7 @@ final class InitializeManager: Sendable {
                     timeout = nil
                 }
             } else {
+                recoveryTimeout = nil
                 cancelledPrimaryUpstreamIndex = nil
                 cancelledPrimaryUpstreamID = nil
                 cancelledPrimaryReadinessToken = nil
@@ -224,6 +243,7 @@ final class InitializeManager: Sendable {
             return PendingRemovalResult(
                 pending: removed,
                 timeout: timeout,
+                recoveryTimeout: recoveryTimeout,
                 cancelledPrimaryUpstreamIndex: cancelledPrimaryUpstreamIndex,
                 cancelledPrimaryUpstreamID: cancelledPrimaryUpstreamID,
                 cancelledPrimaryReadinessToken: cancelledPrimaryReadinessToken
@@ -424,131 +444,114 @@ final class InitializeManager: Sendable {
         }
     }
 
-    /// Success preparation must not disarm the init timeout: pending
-    /// initializes are only resolved later by the asynchronous
-    /// initialized-notification chain, and the timeout is the guarantee
-    /// that a stalled or stale-aborted chain surfaces as TimeoutError
-    /// instead of leaking the pending promises forever. The timeout is
-    /// released only at the points that actually resolve `initPending`.
-    func preparePrimaryInitializeSuccess(
-        upstreamIndex: Int,
-        upstreamID: Int64,
-        allowsPromotion: Bool
-    ) -> SuccessPreparation? {
+    /// Runs the topology/health/canonical commit while holding the same lock
+    /// that owns downstream initialize waiters. A timeout can win before this
+    /// transaction starts, or publication can win and drain the waiters, but
+    /// it cannot fail them between canonical publication and waiter delivery.
+    func finishInitializeParticipant(
+        commit: () -> CanonicalHandshakeState.InitializeCommit
+    ) -> ParticipantCompletion {
         state.withLockedValue { state in
-            guard !state.isShuttingDown,
-                  state.primarySuccessPreparation == nil,
-                  brokerState.initializeResult() == nil else { return nil }
-            switch state.primaryInitializePhase {
-            case .sent(let currentIndex, let currentID):
-                guard currentIndex == upstreamIndex,
-                      currentID == upstreamID else { return nil }
-            case .idle:
-                guard allowsPromotion else { return nil }
-                state.primaryInitializePhase = .sent(
-                    upstreamIndex: upstreamIndex,
-                    upstreamID: upstreamID
-                )
-            case .pendingSend:
-                return nil
+            guard !state.isShuttingDown else {
+                return ParticipantCompletion(commit: .stale, publication: nil)
             }
-            guard let publicationLease = brokerState.prepareInitializePublication(
-                sourceUpstream: upstreamIndex
-            ) else { return nil }
-            state.nextPrimarySuccessLeaseID &+= 1
-            let shouldWarmSecondary = !state.didWarmSecondary
-            let preparation = SuccessPreparation(
-                lease: PrimarySuccessLease(
-                    id: state.nextPrimarySuccessLeaseID,
-                    upstreamIndex: upstreamIndex,
-                    upstreamID: upstreamID
-                ),
-                publicationLease: publicationLease,
-                shouldWarmSecondary: shouldWarmSecondary
-            )
-            state.primarySuccessPreparation = preparation
-            return preparation
-        }
-    }
-
-    func finishPrimaryInitializeSuccess(
-        _ lease: PrimarySuccessLease,
-        commit: () -> Bool
-    ) -> SuccessCompletion? {
-        state.withLockedValue { state in
-            guard !state.isShuttingDown,
-                  state.primarySuccessPreparation?.lease == lease,
-                  commit() else { return nil }
-            state.primarySuccessPreparation = nil
+            let initializeCommit = commit()
+            guard case .published(let publishedResult, _) = initializeCommit else {
+                return ParticipantCompletion(
+                    commit: initializeCommit,
+                    publication: nil
+                )
+            }
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
             state.warmInitRecoveryIntent = .none
+            let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
+            let shouldWarmSecondary = !state.didWarmSecondary
+            state.didWarmSecondary = true
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
             state.initTimeout = nil
-            return SuccessCompletion(pending: pending, timeout: timeout)
+            return ParticipantCompletion(
+                commit: initializeCommit,
+                publication: SuccessCompletion(
+                    pending: pending,
+                    result: publishedResult,
+                    timeout: timeout,
+                    recoveryTimeout: recoveryTimeout,
+                    shouldWarmSecondary: shouldWarmSecondary
+                )
+            )
         }
     }
 
-    func cancelPrimaryInitializeSuccess(_ lease: PrimarySuccessLease) -> Bool {
+    /// Serializes health eligibility changes with downstream initialize
+    /// registration. The supplied closure must follow the established lock
+    /// order: authoritative topology -> health -> canonical handshake.
+    func finishSupportEligibilityUpdate(
+        commit: () -> CanonicalHandshakeState.SupportEligibilityUpdate?
+    ) -> SupportEligibilityCompletion? {
         state.withLockedValue { state in
-            guard let preparation = state.primarySuccessPreparation,
-                  preparation.lease == lease else { return false }
-            brokerState.cancelInitializePublication(preparation.publicationLease)
-            state.primarySuccessPreparation = nil
-            return true
+            guard !state.isShuttingDown, let update = commit() else { return nil }
+            guard update.becameAvailable,
+                  let exposedResult = update.exposedResult else {
+                return SupportEligibilityCompletion(update: update, publication: nil)
+            }
+            state.primaryInitializePhase = .idle
+            state.primaryInitializeRequiresPendingWaiter = false
+            state.primaryInitializeReadinessToken = nil
+            state.warmInitRecoveryIntent = .none
+            let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
+            let pending = state.initPending
+            state.initPending.removeAll()
+            let timeout = state.initTimeout
+            state.initTimeout = nil
+            return SupportEligibilityCompletion(
+                update: update,
+                publication: SuccessCompletion(
+                    pending: pending,
+                    result: exposedResult,
+                    timeout: timeout,
+                    recoveryTimeout: recoveryTimeout,
+                    shouldWarmSecondary: false
+                )
+            )
         }
     }
 
     func finishPrimaryInitializeUsingCachedResult() -> (
         pending: [PendingInitialize],
         result: JSONValue,
-        timeout: RuntimeScheduledTimeout?
+        timeout: RuntimeScheduledTimeout?,
+        recoveryTimeout: RuntimeScheduledTimeout?
     )? {
         state.withLockedValue { state in
             guard !state.isShuttingDown, let result = brokerState.initializeResult() else { return nil }
-            if let preparation = state.primarySuccessPreparation {
-                brokerState.cancelInitializePublication(preparation.publicationLease)
-            }
-            state.primarySuccessPreparation = nil
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
+            let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let pending = state.initPending
             state.initPending.removeAll()
             let timeout = state.initTimeout
             state.initTimeout = nil
-            return (pending, result, timeout)
+            return (pending, result, timeout, recoveryTimeout)
         }
     }
 
     func reopenPrimaryInitializeForRetry() {
         state.withLockedValue { state in
-            if let preparation = state.primarySuccessPreparation {
-                brokerState.cancelInitializePublication(preparation.publicationLease)
-            }
-            state.primarySuccessPreparation = nil
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
-        }
-    }
-
-    func markSecondaryWarmupStarted() {
-        state.withLockedValue { state in
-            state.didWarmSecondary = true
         }
     }
 
     func completePrimaryInitializeFailure() -> FailureResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
-            if let preparation = state.primarySuccessPreparation {
-                brokerState.cancelInitializePublication(preparation.publicationLease)
-            }
-            state.primarySuccessPreparation = nil
+            let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let shouldRetryEagerInitialize = consumeWarmInitRecoveryIntentLocked(
                 state: &state,
                 policy: .onlyWithoutCachedInitialize
@@ -565,6 +568,7 @@ final class InitializeManager: Sendable {
             return FailureResult(
                 pending: pending,
                 timeout: timeout,
+                recoveryTimeout: recoveryTimeout,
                 upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID,
                 shouldRetryEagerInitialize: shouldRetryEagerInitialize
@@ -619,11 +623,6 @@ final class InitializeManager: Sendable {
             if state.primaryInitializePhase.upstreamIndex == upstreamIndex,
                state.primaryInitializePhase.isInFlight
             {
-                if let preparation = state.primarySuccessPreparation,
-                   preparation.lease.upstreamIndex == upstreamIndex {
-                    brokerState.cancelInitializePublication(preparation.publicationLease)
-                    state.primarySuccessPreparation = nil
-                }
                 state.primaryInitializePhase = .idle
                 state.primaryInitializeRequiresPendingWaiter = false
                 state.primaryInitializeReadinessToken = nil
@@ -639,23 +638,86 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func resetForDebug() -> (pending: [PendingInitialize], timeout: RuntimeScheduledTimeout?) {
+    func resetForDebug() -> (
+        pending: [PendingInitialize],
+        timeout: RuntimeScheduledTimeout?,
+        recoveryTimeout: RuntimeScheduledTimeout?
+    ) {
         state.withLockedValue { state in
-            let result = (pending: state.initPending, timeout: state.initTimeout)
+            let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
+            let result = (
+                pending: state.initPending,
+                timeout: state.initTimeout,
+                recoveryTimeout: recoveryTimeout
+            )
             state.initPending.removeAll()
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
-            if let preparation = state.primarySuccessPreparation {
-                brokerState.cancelInitializePublication(preparation.publicationLease)
-            }
-            state.primarySuccessPreparation = nil
             state.cancelledPrimaryInitializeAttempts.removeAll()
             state.initTimeout = nil
             state.isShuttingDown = false
             state.didWarmSecondary = false
             state.warmInitRecoveryIntent = .none
+            // Debug reset must clear the cached result while initialize
+            // registration is still excluded by this lock. Clearing it later
+            // would let a concurrent registration observe the pre-reset cache.
+            brokerState.clearInitialize()
             return result
+        }
+    }
+
+    func preparePendingQuarantineRecovery(
+        recovery: () -> UpstreamHealthManager.QuarantineRecoveryLease?
+    ) -> PendingRecoveryPreparation? {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown,
+                  state.initPending.isEmpty == false,
+                  brokerState.initializeResult() == nil,
+                  let recovery = recovery() else { return nil }
+            state.pendingRecoveryGeneration &+= 1
+            let lease = PendingRecoveryLease(generation: state.pendingRecoveryGeneration)
+            let replacedTimeout = state.pendingRecoveryTimeout
+            state.pendingRecoveryTimeout = nil
+            return PendingRecoveryPreparation(
+                lease: lease,
+                recovery: recovery,
+                replacedTimeout: replacedTimeout
+            )
+        }
+    }
+
+    func attachPendingQuarantineRecoveryTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        lease: PendingRecoveryLease
+    ) -> PendingRecoveryTimeoutAttachment {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown,
+                  state.initPending.isEmpty == false,
+                  brokerState.initializeResult() == nil,
+                  state.pendingRecoveryGeneration == lease.generation else {
+                return PendingRecoveryTimeoutAttachment(accepted: false, replaced: nil)
+            }
+            let replaced = state.pendingRecoveryTimeout
+            state.pendingRecoveryTimeout = timeout
+            return PendingRecoveryTimeoutAttachment(accepted: true, replaced: replaced)
+        }
+    }
+
+    func withPendingQuarantineRecovery<Result>(
+        _ lease: PendingRecoveryLease,
+        operation: () -> Result?
+    ) -> Result? {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown,
+                  state.initPending.isEmpty == false,
+                  brokerState.initializeResult() == nil,
+                  state.pendingRecoveryGeneration == lease.generation else {
+                return nil
+            }
+            state.pendingRecoveryGeneration &+= 1
+            state.pendingRecoveryTimeout = nil
+            return operation()
         }
     }
 
@@ -705,6 +767,15 @@ final class InitializeManager: Sendable {
         }
         state.warmInitRecoveryIntent = .none
         return true
+    }
+
+    private static func invalidatePendingRecovery(
+        state: inout State
+    ) -> RuntimeScheduledTimeout? {
+        state.pendingRecoveryGeneration &+= 1
+        let timeout = state.pendingRecoveryTimeout
+        state.pendingRecoveryTimeout = nil
+        return timeout
     }
 
     private func recordCancelledPrimaryInitializeAttemptLocked(

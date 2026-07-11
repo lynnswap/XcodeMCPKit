@@ -33,6 +33,12 @@ final class UpstreamHealthManager: Sendable {
         var upstreamIndex: Int { upstreamID.rawValue }
     }
 
+    struct QuarantineRecoveryLease: Sendable {
+        let topologyProof: UpstreamTopologyProof
+        let healthProbeGeneration: UInt64
+        let deadlineUptimeNs: UInt64
+    }
+
     enum Effect: Sendable {
         case cancelInitTimeout(RuntimeScheduledTimeout)
         case startHealthProbe(UpstreamHealthManager.ProbeRequest)
@@ -120,15 +126,6 @@ final class UpstreamHealthManager: Sendable {
     enum Event: Sendable {
         case requestSucceeded(UpstreamTopologyProof)
         case upstreamOverloaded(UpstreamTopologyProof)
-        case healthProbeFinished(
-            request: ProbeRequest,
-            success: Bool,
-            nowUptimeNs: UInt64
-        )
-        case toolsListRefreshSucceeded(
-            UpstreamTopologyProof,
-            nowUptimeNs: UInt64
-        )
     }
 
     struct UpstreamState: Sendable {
@@ -272,6 +269,80 @@ final class UpstreamHealthManager: Sendable {
                 return nil
             }
             return operation()
+        }
+    }
+
+    /// Returns the exact active slot generations that can currently support
+    /// cached handshake state. A quarantined or merely in-flight channel is
+    /// not a valid source-rebind candidate.
+    func withUsableInitializedTopologyProofs<Result>(
+        retaining authoritativeProofs: Set<UpstreamTopologyProof>,
+        _ operation: (Set<UpstreamTopologyProof>) -> Result
+    ) -> Result {
+        state.withLockedValue { state in
+            let proofs = Set<UpstreamTopologyProof>(
+                Self.activeIDs(in: state).compactMap { upstreamID in
+                guard let proof = state.topology?.proof(upstreamID),
+                      authoritativeProofs.contains(proof),
+                      Self.isUsableInitialized(proof, state: state) else {
+                    return nil
+                }
+                return proof
+                }
+            )
+            return operation(proofs)
+        }
+    }
+
+    func earliestInitializedQuarantineRecovery() -> QuarantineRecoveryLease? {
+        state.withLockedValue { state in
+            Self.activeIDs(in: state).compactMap { upstreamID -> QuarantineRecoveryLease? in
+                guard let proof = state.topology?.proof(upstreamID),
+                      let upstream = state.upstreamStates[upstreamID],
+                      upstream.isInitialized,
+                      upstream.healthProbeInFlight == false,
+                      case .quarantined(let deadlineUptimeNs) = upstream.healthState else {
+                    return nil
+                }
+                return QuarantineRecoveryLease(
+                    topologyProof: proof,
+                    healthProbeGeneration: upstream.healthProbeGeneration,
+                    deadlineUptimeNs: deadlineUptimeNs
+                )
+            }.min { lhs, rhs in
+                if lhs.deadlineUptimeNs != rhs.deadlineUptimeNs {
+                    return lhs.deadlineUptimeNs < rhs.deadlineUptimeNs
+                }
+                if lhs.topologyProof.slotID != rhs.topologyProof.slotID {
+                    return lhs.topologyProof.slotID.rawValue
+                        < rhs.topologyProof.slotID.rawValue
+                }
+                return lhs.topologyProof.slotGeneration < rhs.topologyProof.slotGeneration
+            }
+        }
+    }
+
+    func beginQuarantineRecovery(
+        _ lease: QuarantineRecoveryLease,
+        nowUptimeNs: UInt64
+    ) -> ProbeRequest? {
+        state.withLockedValue { state in
+            guard Self.isActive(lease.topologyProof, state: state) else { return nil }
+            let upstreamIndex = lease.topologyProof.slotID.rawValue
+            guard state.upstreamStates[upstreamIndex].isInitialized,
+                  state.upstreamStates[upstreamIndex].healthProbeInFlight == false,
+                  state.upstreamStates[upstreamIndex].healthProbeGeneration
+                    == lease.healthProbeGeneration,
+                  case .quarantined(let deadlineUptimeNs) =
+                    state.upstreamStates[upstreamIndex].healthState,
+                  deadlineUptimeNs == lease.deadlineUptimeNs,
+                  nowUptimeNs >= deadlineUptimeNs else { return nil }
+            state.upstreamStates[upstreamIndex].healthProbeInFlight = true
+            state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            return ProbeRequest(
+                topologyProof: lease.topologyProof,
+                probeGeneration: state.upstreamStates[upstreamIndex].healthProbeGeneration
+            )
         }
     }
 
@@ -476,22 +547,44 @@ final class UpstreamHealthManager: Sendable {
         _ request: ProbeRequest,
         success: Bool,
         nowUptimeNs: UInt64
-    ) {
-        _ = apply(event: .healthProbeFinished(
-            request: request,
-            success: success,
-            nowUptimeNs: nowUptimeNs
-        ))
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard Self.isActive(request.topologyProof, state: state) else { return false }
+            let upstreamIndex = request.upstreamIndex
+            guard state.upstreamStates[upstreamIndex].healthProbeInFlight,
+                  state.upstreamStates[upstreamIndex].healthProbeGeneration
+                    == request.probeGeneration else { return false }
+            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            if success {
+                state.upstreamStates[upstreamIndex].healthState = .healthy
+                state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
+            } else {
+                state.upstreamStates[upstreamIndex].healthState = .quarantined(
+                    untilUptimeNs: nowUptimeNs &+ 15_000_000_000
+                )
+            }
+            return true
+        }
     }
 
     func markToolsListRefreshSucceeded(
         _ proof: UpstreamTopologyProof,
         nowUptimeNs: UInt64
-    ) {
-        _ = apply(event: .toolsListRefreshSucceeded(
-            proof,
-            nowUptimeNs: nowUptimeNs
-        ))
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard Self.isActive(proof, state: state) else { return false }
+            let upstreamIndex = proof.slotID.rawValue
+            if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            }
+            state.upstreamStates[upstreamIndex].healthState = .healthy
+            state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
+            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
+            state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nowUptimeNs
+            return true
+        }
     }
 
     func markToolsListRefreshFailed(
@@ -501,6 +594,9 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             guard Self.isActive(proof, state: state) else { return nil }
             let upstreamIndex = proof.slotID.rawValue
+            if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+            }
             let quarantineUntil = nowUptimeNs &+ 30 * 1_000_000_000
             state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
@@ -523,7 +619,10 @@ final class UpstreamHealthManager: Sendable {
                 state.upstreamStates[$0].initTimeout
             }
             for index in activeIndices {
+                let nextProbeGeneration =
+                    state.upstreamStates[index].healthProbeGeneration &+ 1
                 state.upstreamStates[index] = UpstreamState()
+                state.upstreamStates[index].healthProbeGeneration = nextProbeGeneration
             }
             state.nextPick = 0
             return timeouts
@@ -825,6 +924,9 @@ final class UpstreamHealthManager: Sendable {
             case .requestSucceeded(let proof):
                 guard Self.isActive(proof, state: state) else { return [] }
                 let upstreamIndex = proof.slotID.rawValue
+                if case .quarantined = state.upstreamStates[upstreamIndex].healthState {
+                    return []
+                }
                 state.upstreamStates[upstreamIndex].healthState = .healthy
                 state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
                 if state.upstreamStates[upstreamIndex].healthProbeInFlight {
@@ -845,37 +947,6 @@ final class UpstreamHealthManager: Sendable {
                 state.upstreamStates[upstreamIndex].healthProbeInFlight = false
                 return [.failQueuedIfNoRecovery]
 
-            case .healthProbeFinished(
-                let request,
-                let success,
-                let nowUptimeNs
-            ):
-                guard Self.isActive(request.topologyProof, state: state) else { return [] }
-                let upstreamIndex = request.upstreamIndex
-                guard state.upstreamStates[upstreamIndex].healthProbeGeneration
-                        == request.probeGeneration else {
-                    return []
-                }
-                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
-                if success {
-                    state.upstreamStates[upstreamIndex].healthState = .healthy
-                    state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-                } else {
-                    state.upstreamStates[upstreamIndex].healthState = .quarantined(
-                        untilUptimeNs: nowUptimeNs &+ 15_000_000_000
-                    )
-                }
-                return success ? [] : [.failQueuedIfNoRecovery]
-
-            case .toolsListRefreshSucceeded(let proof, let nowUptimeNs):
-                guard Self.isActive(proof, state: state) else { return [] }
-                let upstreamIndex = proof.slotID.rawValue
-                state.upstreamStates[upstreamIndex].healthState = .healthy
-                state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
-                state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
-                state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nowUptimeNs
-                return []
             }
         }
     }
