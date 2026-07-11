@@ -919,15 +919,22 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func processRouteRepublishStartsFreshCatalogWithoutPrewarmGate() async throws {
         let target = xcodeProcessTarget(processID: 27020, xcodeVersion: "27.0")
         let upstream = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = false
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [upstream],
+            eventLoop: eventLoopGroup.next(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
             ],
             processRoutingEnabled: true,
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -955,6 +962,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await upstream.nextSent(at: 1)
         }
+        #expect(try await nextRecordedValue(initializedUpstreams, at: 0) == 0)
         let firstCatalog = try await waitWithTimeout(
             "waiting for initial route catalog",
             timeout: .seconds(2)
@@ -1006,6 +1014,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 matching: { methodName(from: $0) == "notifications/initialized" }
             )
         }
+        #expect(try await nextRecordedValue(initializedUpstreams, at: 1) == 0)
         let freshCatalog = try await waitWithTimeout(
             "waiting for republished route fresh catalog",
             timeout: .seconds(2)
@@ -1253,8 +1262,11 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let secondTarget = xcodeProcessTarget(processID: 26617, xcodeVersion: "26.6")
         let createdUpstreams = NIOLockedValueBox<[pid_t: TestUpstreamClient]>([:])
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
+            eventLoop: eventLoopGroup.next(),
             processRoutingEnabled: true,
             dynamicUpstreamFactory: { target in
                 let upstream = TestUpstreamClient()

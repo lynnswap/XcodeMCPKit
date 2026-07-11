@@ -188,7 +188,7 @@ actor StdioAdapter {
     }
 
     func stop() async {
-        let task = beginClose(cancelReadTask: true)
+        let task = beginClose(cancelReadTask: true, abortsPendingWork: true)
         await task.value
     }
 
@@ -208,8 +208,16 @@ private extension StdioAdapter {
             logger.error("STDIO read failed", metadata: ["error": "\(error)"])
         }
         if lifecycle == .running {
-            await drainRequestTasksAfterInputClosed()
-            _ = beginClose(cancelReadTask: false)
+            let drained: Bool
+            if error == nil {
+                drained = await drainRequestTasksAfterInputClosed()
+            } else {
+                drained = false
+            }
+            _ = beginClose(
+                cancelReadTask: false,
+                abortsPendingWork: drained == false
+            )
         }
     }
 
@@ -266,7 +274,7 @@ private extension StdioAdapter {
                 "preview": "\(violation.preview)",
             ]
         )
-        _ = beginClose(cancelReadTask: true)
+        _ = beginClose(cancelReadTask: true, abortsPendingWork: true)
     }
 
     func operationFinished(
@@ -280,7 +288,7 @@ private extension StdioAdapter {
                 for: envelope,
                 message: adapterErrorMessage(error)
             ) == false {
-                _ = beginClose(cancelReadTask: true)
+                _ = beginClose(cancelReadTask: true, abortsPendingWork: true)
             }
         }
         requestTasks.removeValue(forKey: id)
@@ -338,38 +346,58 @@ private extension StdioAdapter {
 
     func outputDidFail() {
         guard lifecycle == .running else { return }
-        _ = beginClose(cancelReadTask: true)
+        _ = beginClose(cancelReadTask: true, abortsPendingWork: true)
     }
 
-    func beginClose(cancelReadTask: Bool) -> Task<Void, Never> {
-        if let closeTask { return closeTask }
+    func beginClose(
+        cancelReadTask: Bool,
+        abortsPendingWork: Bool
+    ) -> Task<Void, Never> {
+        if let closeTask {
+            if abortsPendingWork {
+                cancelPendingWork(cancelReadTask: cancelReadTask)
+            }
+            return closeTask
+        }
         if lifecycle == .closed { return Task {} }
         lifecycle = .closing
-        if cancelReadTask {
-            readTask?.cancel()
+        if abortsPendingWork {
+            cancelPendingWork(cancelReadTask: cancelReadTask)
         }
-        outputWriter.cancel()
-        for task in requestTasks.values { task.cancel() }
         let task = Task<Void, Never> { [weak self] in
             guard let self else { return }
-            await self.performClose()
+            await self.performClose(drainsOutput: abortsPendingWork == false)
         }
         closeTask = task
         return task
     }
 
-    func performClose() async {
+    func cancelPendingWork(cancelReadTask: Bool) {
+        if cancelReadTask {
+            readTask?.cancel()
+        }
+        outputWriter.cancel()
+        for task in requestTasks.values { task.cancel() }
+    }
+
+    func performClose(drainsOutput: Bool) async {
         if readTask != nil {
             await readTaskActivation.waitUntilActivated()
             try? inputHandle.close()
         }
         await authority.close()
         await drainRequestTasks()
-        authorityEventTask?.cancel()
         let eventTask = authorityEventTask
         authorityEventTask = nil
+        if drainsOutput == false {
+            eventTask?.cancel()
+        }
         await eventTask?.value
-        await outputWriter.close()
+        if drainsOutput {
+            await outputWriter.finish()
+        } else {
+            await outputWriter.close()
+        }
         let reader = readTask
         await reader?.value
         readTask = nil
@@ -387,12 +415,13 @@ private extension StdioAdapter {
         }
     }
 
-    func drainRequestTasksAfterInputClosed() async {
-        guard requestTasks.isEmpty == false else { return }
+    func drainRequestTasksAfterInputClosed() async -> Bool {
+        guard requestTasks.isEmpty == false else { return true }
         let deadline = requestDrainDeadline()
         while requestTasks.isEmpty == false, requestDrainDeadlineHasTimeRemaining(deadline) {
             await shutdownPolicy.clock.sleep(requestDrainPollDuration(until: deadline))
         }
+        return requestTasks.isEmpty
     }
 
     func requestDrainDeadline() -> UInt64? {
@@ -458,7 +487,7 @@ private extension StdioAdapter {
             code: -32600,
             message: "invalid request"
         ) else {
-            _ = beginClose(cancelReadTask: true)
+            _ = beginClose(cancelReadTask: true, abortsPendingWork: true)
             return
         }
         let task = Task { [weak self] in
@@ -471,7 +500,7 @@ private extension StdioAdapter {
     func standaloneOutputFinished(id: UUID, succeeded: Bool) {
         requestTasks.removeValue(forKey: id)
         if succeeded == false, lifecycle == .running {
-            _ = beginClose(cancelReadTask: true)
+            _ = beginClose(cancelReadTask: true, abortsPendingWork: true)
         }
     }
 

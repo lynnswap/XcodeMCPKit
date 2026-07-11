@@ -1011,7 +1011,11 @@ struct XcodeMCPTests {
 
     @Test func streamableHTTPGetSSERoutesProgressWhilePOSTReturnsJSONResult() async throws {
         let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
-        let server = FakeStreamableHTTPServer(progressDelivery: .getSSE)
+        let resultGate = ManualGate()
+        let server = FakeStreamableHTTPServer(
+            progressDelivery: .getSSE,
+            getSSEResultGate: resultGate
+        )
         let session = makeFakeHTTPURLSession(server: server)
         defer {
             session.invalidateAndCancel()
@@ -1034,15 +1038,27 @@ struct XcodeMCPTests {
         }
 
         let progressValues = RecordedValues<MCPProgress>()
-        let result = try await xcode.callTool(
-            "DocumentationSearch",
-            arguments: ["query": .string("GET SSE")]
-        ) { progress in
-            await progressValues.append(progress)
+        let callTask = Task {
+            try await xcode.callTool(
+                "DocumentationSearch",
+                arguments: ["query": .string("GET SSE")]
+            ) { progress in
+                await progressValues.append(progress)
+            }
         }
-
-        let progress = try await waitWithTimeout("GET SSE progress was not delivered") {
-            try await progressValues.nextValue()
+        let progress: MCPProgress
+        let result: MCPToolResult
+        do {
+            progress = try await waitWithTimeout("GET SSE progress was not delivered") {
+                try await progressValues.nextValue()
+            }
+            await resultGate.open()
+            result = try await callTask.value
+        } catch {
+            await resultGate.open()
+            callTask.cancel()
+            _ = await callTask.result
+            throw error
         }
         #expect(progress.message == "from GET SSE")
         #expect(result.structuredContent?.objectValue?["source"] == .string("get-sse"))
@@ -3408,6 +3424,7 @@ private actor FakeStreamableHTTPServer {
     private let initializeFinishesLoading: Bool
     private let deleteClosesEventStream: Bool
     private let deleteFinishesLoading: Bool
+    private let getSSEResultGate: ManualGate?
     private let requestValues = RecordedValues<RecordedHTTPRequest>()
     private var requests: [RecordedHTTPRequest] = []
     private var eventConnection: ActiveHTTPConnection?
@@ -3423,7 +3440,8 @@ private actor FakeStreamableHTTPServer {
         initializeUsesSSE: Bool = false,
         initializeFinishesLoading: Bool = true,
         deleteClosesEventStream: Bool = true,
-        deleteFinishesLoading: Bool = true
+        deleteFinishesLoading: Bool = true,
+        getSSEResultGate: ManualGate? = nil
     ) {
         self.progressDelivery = progressDelivery
         self.sessionID = sessionID
@@ -3435,6 +3453,7 @@ private actor FakeStreamableHTTPServer {
         self.initializeFinishesLoading = initializeFinishesLoading
         self.deleteClosesEventStream = deleteClosesEventStream
         self.deleteFinishesLoading = deleteFinishesLoading
+        self.getSSEResultGate = getSSEResultGate
     }
 
     func response(
@@ -3475,7 +3494,7 @@ private actor FakeStreamableHTTPServer {
                 finishesLoading: deleteFinishesLoading
             )
         case "POST":
-            return postResponse(for: recorded)
+            return await postResponse(for: recorded)
         default:
             return FakeURLProtocolResponse(statusCode: 405, chunks: [Data("method not allowed".utf8)])
         }
@@ -3497,7 +3516,7 @@ private actor FakeStreamableHTTPServer {
         try await requestValues.nextValue(startingAt: startIndex, matching: predicate)
     }
 
-    private func postResponse(for request: RecordedHTTPRequest) -> FakeURLProtocolResponse {
+    private func postResponse(for request: RecordedHTTPRequest) async -> FakeURLProtocolResponse {
         guard let method = request.jsonRPCMethod else {
             return FakeURLProtocolResponse(statusCode: 400, chunks: [Data("missing method".utf8)])
         }
@@ -3562,13 +3581,13 @@ private actor FakeStreamableHTTPServer {
                 ]
             )
         case "tools/call":
-            return toolCallResponse(for: request)
+            return await toolCallResponse(for: request)
         default:
             return jsonResponse(id: request.body?.objectValue?["id"], result: .null)
         }
     }
 
-    private func toolCallResponse(for request: RecordedHTTPRequest) -> FakeURLProtocolResponse {
+    private func toolCallResponse(for request: RecordedHTTPRequest) async -> FakeURLProtocolResponse {
         let params = request.body?.objectValue?["params"]?.objectValue
         let progressToken = params?["_meta"]?.objectValue?["progressToken"]?.stringValue
         let query = params?["arguments"]?.objectValue?["query"]?.stringValue ?? ""
@@ -3597,6 +3616,7 @@ private actor FakeStreamableHTTPServer {
                     message: "from GET SSE"
                 )))
             }
+            await getSSEResultGate?.wait()
             return FakeURLProtocolResponse(
                 headers: ["Content-Type": "application/json"],
                 chunks: [

@@ -75,6 +75,10 @@ private final class StdioOutputChannel: @unchecked Sendable {
         channel.close(flags: .stop)
     }
 
+    func finish() {
+        channel.close()
+    }
+
     func waitUntilClosed() async {
         await terminal.wait()
     }
@@ -157,6 +161,14 @@ actor StdioWriter {
     }
 
     func close() async {
+        await completeClose(aborting: true)
+    }
+
+    func finish() async {
+        await completeClose(aborting: false)
+    }
+
+    private func completeClose(aborting: Bool) async {
         switch lifecycle {
         case .closed:
             return
@@ -168,10 +180,15 @@ actor StdioWriter {
         }
 
         admission.close()
-        channel.cancel()
         let tasks = Array(writes.values)
-        for task in tasks { task.cancel() }
+        if aborting {
+            channel.cancel()
+            for task in tasks { task.cancel() }
+        }
         for task in tasks { _ = await task.value }
+        if aborting == false {
+            channel.finish()
+        }
         await channel.waitUntilClosed()
 
         tail = nil
