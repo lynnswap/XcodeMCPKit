@@ -35,25 +35,8 @@ package struct AsyncTestCleanupTrait: SuiteTrait, TestTrait, TestScoping {
     }
 }
 
-/// Serializes sibling proxy runtime suites through their complete cleanup scope.
-package struct ProxyRuntimeSuiteSerialTrait: SuiteTrait, TestScoping {
-    package init() {}
-
-    package func provideScope(
-        for test: Test,
-        testCase: Test.Case?,
-        performing function: @Sendable () async throws -> Void
-    ) async throws {
-        try await TestResourceGate.withProxyRuntimeSuiteAccess(function)
-    }
-}
-
 extension Trait where Self == AsyncTestCleanupTrait {
     package static var asyncTestCleanup: Self { Self() }
-}
-
-extension Trait where Self == ProxyRuntimeSuiteSerialTrait {
-    package static var proxyRuntimeSuiteSerial: Self { Self() }
 }
 
 private final class AsyncTestCleanupContext: @unchecked Sendable {

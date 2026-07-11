@@ -21,7 +21,7 @@ func testOperationLease(_ upstreamIndex: Int, generation: UInt64 = 1) -> Upstrea
     )
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct ControlPlaneAuthorityTests {
     @Test func catalogCommitPublishesProcessAndCanonicalStateAtomically() throws {
         let target = xcodeProcessTarget(processID: 41001, xcodeVersion: "27.0")

@@ -306,6 +306,44 @@ struct DocumentationProviderTests {
         await closeTask.value
     }
 
+    @Test func sessionBackedDocumentationProviderDetachedStopRetainsTransportUntilCompletion()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 121, xcodeVersion: "27.0")
+        let stopStarted = TestSignal()
+        let stopGate = AsyncGate()
+        let session = BlockingStopDocumentationSession(
+            serverVersion: "27.0",
+            stopStarted: stopStarted,
+            stopGate: stopGate
+        )
+        var transport: SessionBackedDocumentationProviderTransport? =
+            SessionBackedDocumentationProviderTransport(
+                sessionFactory: FixedDocumentationSessionFactory(session: session)
+            )
+        let retainedTransport = WeakDocumentationProviderTransportReference(transport)
+        do {
+            let transport = try #require(transport)
+            let route = try await transport.openRoute(
+                for: target,
+                requestTimeout: .seconds(1),
+                initializeParams: [:]
+            )
+
+            await transport.close(route: route)
+        }
+        try await stopStarted.wait(description: "waiting for detached provider session stop")
+        transport = nil
+
+        #expect(retainedTransport.value != nil)
+        await stopGate.signal()
+        try await waitWithTimeout("waiting for detached stop to release provider transport") {
+            while retainedTransport.value != nil {
+                await Task.yield()
+            }
+        }
+    }
+
     @Test func sessionBackedDocumentationProviderShutdownWaitsForDetachedSessionStopDrain()
         async throws
     {
@@ -5832,6 +5870,18 @@ private actor RecordingDocumentationProviderTransport: DocumentationProviderRout
 
     func documentationSearchTimeouts() -> [TimeAmount?] {
         documentationSearchTimeoutValues
+    }
+}
+
+private final class WeakDocumentationProviderTransportReference: @unchecked Sendable {
+    private weak var storage: SessionBackedDocumentationProviderTransport?
+
+    init(_ value: SessionBackedDocumentationProviderTransport?) {
+        storage = value
+    }
+
+    var value: SessionBackedDocumentationProviderTransport? {
+        storage
     }
 }
 

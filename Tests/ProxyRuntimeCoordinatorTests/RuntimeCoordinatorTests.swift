@@ -8,7 +8,7 @@ import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyInternalTestSupport
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorProcessRoutingTests {
     @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
@@ -2019,7 +2019,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorInitializationTests {
     @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOnIdleActiveRoute()
         async throws
@@ -3933,7 +3933,7 @@ struct RuntimeCoordinatorInitializationTests {
 
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorRecoveryTests {
     @Test func sessionManagerInitializeErrorDoesNotClearRecreatedSessionInitializeRoutingState()
         async throws
@@ -6526,7 +6526,7 @@ struct RuntimeCoordinatorRecoveryTests {
 
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUncatalogedProcessRouteRetires()
         async throws
@@ -7914,7 +7914,7 @@ struct RuntimeCoordinatorCatalogTests {
 
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorWindowCatalogTests {
     @Test func sessionManagerKeepsWindowlessProcessRouteAvailable() async throws {
         let group = borrowSharedTestEventLoopGroup()
@@ -9253,7 +9253,7 @@ struct RuntimeCoordinatorWindowCatalogTests {
 
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorWindowRoutingTests {
     @Test func liveXcodeListWindowsClearsOwnersForCatalogFilteredRoutes() async throws {
         let group = borrowSharedTestEventLoopGroup()
@@ -11484,7 +11484,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
 }
 
-@Suite(.serialized, .proxyRuntimeSuiteSerial, .asyncTestCleanup)
+@Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorSchedulingTests {
     @Test func sessionManagerQueuedPreferredRequestDoesNotBlockLaterGenericDispatch()
         async throws
