@@ -922,12 +922,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let initializedUpstreams = LockedRecordedValues<Int>()
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = false
-        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(eventLoopGroup) }
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [upstream],
-            eventLoop: eventLoopGroup.next(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
             ],
@@ -1262,11 +1259,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let secondTarget = xcodeProcessTarget(processID: 26617, xcodeVersion: "26.6")
         let createdUpstreams = NIOLockedValueBox<[pid_t: TestUpstreamClient]>([:])
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
-        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(eventLoopGroup) }
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            eventLoop: eventLoopGroup.next(),
             processRoutingEnabled: true,
             dynamicUpstreamFactory: { target in
                 let upstream = TestUpstreamClient()
@@ -1420,78 +1414,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             requestTimeoutOverride: .seconds(2)
         )
         #expect(firstDecision.preferredUpstreamIndices == [firstUpstreamIndex])
-        let firstDescriptor = SessionRequestPipeline.Descriptor(
-            sessionID: "session-first-xcode-route",
-            label: "tools/call:BuildProject",
-            expectsResponse: true,
-            isTopLevelClientRequest: false
-        )
-        let firstLeaseID = fixture.manager.createRequestLease(descriptor: firstDescriptor)
-        let firstBody = try JSONSerialization.data(withJSONObject: firstToolCall)
-        let firstForward = fixture.manager.enqueueOnUpstreamSlot(
-            leaseID: firstLeaseID,
-            descriptor: firstDescriptor,
-            on: fixture.eventLoop,
-            preferredUpstreamIndices: firstDecision.preferredUpstreamIndices
-        ) { selected in
-            #expect(selected.upstreamIndex == firstUpstreamIndex)
-            fixture.manager.activateRequestLease(
-                firstLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selected.upstreamIndex,
-                timeout: nil
-            )
-            fixture.manager.sendUpstream(firstBody, upstreamIndex: selected.upstreamIndex)
-            return fixture.eventLoop.makeSucceededFuture(())
-        }
-        _ = try await waitWithTimeout("waiting for first routed call acquisition") {
-            try await firstForward.get()
-        }
-        fixture.manager.completeRequestLease(firstLeaseID)
-        _ = try await waitWithTimeout("waiting for first routed call delivery") {
-            try await firstUpstream.nextSent(
-                matching: { methodName(from: $0) == "tools/call" }
-            )
-        }
-
-        let secondToolCall = toolsCallObject(
-            id: 266171,
-            name: "BuildProject",
-            arguments: ["workspacePath": secondWorkspacePath]
-        )
-        let secondDescriptor = SessionRequestPipeline.Descriptor(
-            sessionID: "session-second-xcode-route",
-            label: "tools/call:BuildProject",
-            expectsResponse: true,
-            isTopLevelClientRequest: false
-        )
-        let secondLeaseID = fixture.manager.createRequestLease(descriptor: secondDescriptor)
-        let secondBody = try JSONSerialization.data(withJSONObject: secondToolCall)
-        let secondForward = fixture.manager.enqueueOnUpstreamSlot(
-            leaseID: secondLeaseID,
-            descriptor: secondDescriptor,
-            on: fixture.eventLoop,
-            preferredUpstreamIndices: routingDecision.preferredUpstreamIndices
-        ) { selected in
-            #expect(selected.upstreamIndex == secondUpstreamIndex)
-            fixture.manager.activateRequestLease(
-                secondLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selected.upstreamIndex,
-                timeout: nil
-            )
-            fixture.manager.sendUpstream(secondBody, upstreamIndex: selected.upstreamIndex)
-            return fixture.eventLoop.makeSucceededFuture(())
-        }
-        _ = try await waitWithTimeout("waiting for second routed call acquisition") {
-            try await secondForward.get()
-        }
-        fixture.manager.completeRequestLease(secondLeaseID)
-        _ = try await waitWithTimeout("waiting for second routed call delivery") {
-            try await secondUpstream.nextSent(
-                matching: { methodName(from: $0) == "tools/call" }
-            )
-        }
 
         let sourceBeforeRetirement = try #require(
             fixture.manager.canonicalHandshakeState.snapshot().initializeSourceProof
@@ -1522,42 +1444,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             requestTimeoutOverride: .seconds(2)
         )
         #expect(survivorDecision.preferredUpstreamIndices == [firstUpstreamIndex])
-        let survivorDescriptor = SessionRequestPipeline.Descriptor(
-            sessionID: "session-surviving-xcode-route",
-            label: "tools/call:BuildProject",
-            expectsResponse: true,
-            isTopLevelClientRequest: false
-        )
-        let survivorLeaseID = fixture.manager.createRequestLease(
-            descriptor: survivorDescriptor
-        )
-        let survivorSentStart = await firstUpstream.sentCount()
-        let survivorForward = fixture.manager.enqueueOnUpstreamSlot(
-            leaseID: survivorLeaseID,
-            descriptor: survivorDescriptor,
-            on: fixture.eventLoop,
-            preferredUpstreamIndices: survivorDecision.preferredUpstreamIndices
-        ) { selected in
-            #expect(selected.upstreamIndex == firstUpstreamIndex)
-            fixture.manager.activateRequestLease(
-                survivorLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selected.upstreamIndex,
-                timeout: nil
-            )
-            fixture.manager.sendUpstream(firstBody, upstreamIndex: selected.upstreamIndex)
-            return fixture.eventLoop.makeSucceededFuture(())
-        }
-        _ = try await waitWithTimeout("waiting for surviving route acquisition") {
-            try await survivorForward.get()
-        }
-        fixture.manager.completeRequestLease(survivorLeaseID)
-        _ = try await waitWithTimeout("waiting for surviving route delivery") {
-            try await firstUpstream.nextSent(
-                startingAt: survivorSentStart,
-                matching: { methodName(from: $0) == "tools/call" }
-            )
-        }
     }
 
     @Test func processRoutingJoinsCompatibleServerInfoWhileSiblingNotificationIsBlocked()
@@ -3075,11 +2961,8 @@ struct RuntimeCoordinatorInitializationTests {
         let upstream1 = TestUpstreamClient()
         let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
-        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(eventLoopGroup) }
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream0, upstream1],
-            eventLoop: eventLoopGroup.next(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),

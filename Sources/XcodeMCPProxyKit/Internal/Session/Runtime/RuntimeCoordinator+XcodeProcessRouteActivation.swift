@@ -263,8 +263,9 @@ extension RuntimeCoordinator {
             attempt: attempt,
             initializeClaim: initializeClaim
         )
-        refreshPendingProcessToolsCatalogForReadyUpstream(
-            upstreamIndex: upstreamIndex,
+        refreshProcessRouteToolsCatalog(
+            route: route,
+            upstreamProof: upstreamProof,
             reason: "route_activation_initialized_\(upstreamIndex)"
         )
     }

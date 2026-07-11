@@ -2327,7 +2327,6 @@ struct RuntimeCoordinatorFixture {
     init(
         config: ProxyConfig = makeConfig(requestTimeout: 5),
         upstreams: [any UpstreamSlotControlling],
-        eventLoop injectedEventLoop: EventLoop? = nil,
         clock: ClockClient = .liveValue,
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
         nowUptimeNanoseconds: (@Sendable () -> UInt64)? = nil,
@@ -2346,9 +2345,8 @@ struct RuntimeCoordinatorFixture {
         runtimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
         // RuntimeCoordinator owns its tasks, but not the injected event loop. Reuse NIO's
-        // process-scoped group by default so the package suite does not create hundreds of
-        // kernel threads. Tests that assert EventLoop dispatch timing inject an owned loop.
-        let eventLoop = injectedEventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
+        // process-scoped group so the package suite does not create hundreds of kernel threads.
+        let eventLoop = MultiThreadedEventLoopGroup.singleton.next()
         self.eventLoop = eventLoop
         self.manager = RuntimeCoordinator(
             config: config,

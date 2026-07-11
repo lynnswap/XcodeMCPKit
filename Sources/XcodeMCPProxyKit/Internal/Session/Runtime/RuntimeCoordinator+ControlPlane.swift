@@ -439,6 +439,40 @@ extension RuntimeCoordinator {
                 lease: lease
             )
         }
+        refreshProcessToolsCatalogs(missingRoutes, reason: reason)
+    }
+
+    func refreshProcessRouteToolsCatalog(
+        route: XcodeProcessRoute,
+        upstreamProof: UpstreamTopologyProof,
+        reason: String
+    ) {
+        guard processRoutingEnabled,
+              isInitialized(),
+              processControlPlane.catalog(forProcessID: route.target.processID) == nil,
+              let (lease, transition) = processControlPlane.beginCatalogAttempt(
+                  routeID: route.id,
+                  preferredUpstreamProof: upstreamProof,
+                  nowUptimeNanoseconds: nowUptimeNanoseconds()
+              ) else { return }
+        applyProcessControlPlaneTransition(transition)
+        refreshProcessToolsCatalogs(
+            [
+                AvailableToolsCatalogRoute(
+                    route: route,
+                    target: route.target,
+                    upstreamIndices: [upstreamProof.slotID.rawValue],
+                    lease: lease
+                )
+            ],
+            reason: reason
+        )
+    }
+
+    private func refreshProcessToolsCatalogs(
+        _ missingRoutes: [AvailableToolsCatalogRoute],
+        reason: String
+    ) {
         guard missingRoutes.isEmpty == false else {
             return
         }
