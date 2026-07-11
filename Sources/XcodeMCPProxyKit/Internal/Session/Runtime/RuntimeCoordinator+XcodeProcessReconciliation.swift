@@ -272,12 +272,36 @@ extension RuntimeCoordinator {
         guard routesWithUpstreams.isEmpty == false else {
             return
         }
+        startProcessRouteAttachments(routesWithUpstreams)
         guard isInitialized() else {
             startProcessRouteActivation(for: routesWithUpstreams[0])
             return
         }
         for route in routesWithUpstreams {
             startProcessRouteActivation(for: route)
+        }
+    }
+
+    func startProcessRouteAttachments(_ routes: [XcodeProcessRoute]) {
+        // Route membership starts one bridge per Xcode independently. The
+        // canonical initialize result remains serialized by InitializeManager.
+        for route in routes {
+            guard let upstreamIndex = route.primaryUpstreamIndex else { continue }
+            runWhenUpstreamReady(
+                reason: "xcode_process_attach_\(route.target.processID)"
+            ) { [weak self, route, upstreamIndex] in
+                guard let self,
+                      self.unavailableXcodeProcessIDs().contains(
+                          route.target.processID
+                      ) == false,
+                      self.xcodeProcessRoutes.contains(where: {
+                          $0.id == route.id && $0.primaryUpstreamIndex == upstreamIndex
+                      })
+                else {
+                    return
+                }
+                self.startUpstreamSlot(upstreamIndex)
+            }
         }
     }
 

@@ -990,6 +990,28 @@ extension RuntimeCoordinator {
 
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
+        if processRoutingEnabled {
+            // A different Xcode needs route activation and its own catalog,
+            // not a regular secondary-slot warmup.
+            for route in xcodeProcessRoutes {
+                if route.upstreamIndices.contains(resolvedPrimaryUpstreamIndex) {
+                    for upstreamIndex in route.upstreamIndices
+                    where upstreamIndex != resolvedPrimaryUpstreamIndex {
+                        startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+                    }
+                } else if processControlPlane.catalog(
+                    forProcessID: route.target.processID
+                ) == nil {
+                    startProcessRouteActivation(for: route)
+                } else {
+                    for upstreamIndex in route.upstreamIndices {
+                        startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+                    }
+                }
+            }
+            retryPendingProcessRouteReadiness(reason: "canonical_initialize_succeeded")
+            return
+        }
         for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }

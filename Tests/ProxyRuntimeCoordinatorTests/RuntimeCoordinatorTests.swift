@@ -333,9 +333,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(processRoutes.map(\.state) == ["active", "retired"])
     }
 
-    @Test func processRoutingStartupConsumesInventoryChangeBeforeEagerInitialization() {
+    @Test func processRoutingStartupConsumesInventoryChangeBeforeEagerInitialization() async throws {
         let olderTarget = xcodeProcessTarget(processID: 27045, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27046, xcodeVersion: "27.0")
+        let createdUpstreams = NIOLockedValueBox<[pid_t: TestUpstreamClient]>([:])
         let monitor = StartupChangingXcodeProcessMonitor(
             firstTargets: [olderTarget],
             latestTargets: [newerTarget]
@@ -347,7 +348,11 @@ struct RuntimeCoordinatorProcessRoutingTests {
             processRoutingEnabled: true,
             xcodeTargetDiscovery: monitor,
             xcodeProcessEventMonitor: monitor,
-            dynamicUpstreamFactory: { _ in [] },
+            dynamicUpstreamFactory: { target in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0[target.processID] = upstream }
+                return [upstream]
+            },
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -356,6 +361,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         #expect(monitor.discoveryCallCount() == 2)
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
+        let newerUpstream = try #require(
+            createdUpstreams.withLockedValue { $0[newerTarget.processID] }
+        )
+        _ = try await newerUpstream.nextStartCount(at: 1)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await newerUpstream.startCount() == 2)
     }
 
     @Test func processRoutingReschedulesQueuedReconcileAfterWorkerCancellation() async throws {
@@ -1065,6 +1076,17 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await initializeFuture.get()
         }
+        let toolsRequest = try await upstream.nextSent(
+            matching: { methodName(from: $0) == "tools/list" }
+        )
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: toolsRequest),
+                    tools: [toolDescriptor(name: "XcodeListWindows")]
+                )
+            )
+        )
         await manager.drainRuntimeTasksForTesting()
 
         let methods = await upstream.sent().compactMap { methodName(from: $0) }
@@ -1072,22 +1094,28 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let attempt = try #require(
             manager.processControlPlane.attemptSnapshot(processID: target.processID)
         )
-        #expect(attempt.phase == .initialized)
+        #expect(attempt.phase == .cataloged)
         #expect(attempt.readinessWaiterCount == 0)
     }
 
-    @Test func processRouteActivationStartsSingleRouteBeforeGlobalInitialize() async throws {
+    @Test func processRoutingAttachesEveryRouteBeforeSerialCanonicalInitialize() async throws {
         let firstTarget = xcodeProcessTarget(processID: 27017, xcodeVersion: "27.0")
         let secondTarget = xcodeProcessTarget(processID: 26617, xcodeVersion: "26.6")
-        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let createdUpstreams = NIOLockedValueBox<[pid_t: TestUpstreamClient]>([:])
+        let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             processRoutingEnabled: true,
-            dynamicUpstreamFactory: { _ in
+            dynamicUpstreamFactory: { target in
                 let upstream = TestUpstreamClient()
-                createdUpstreams.withLockedValue { $0.append(upstream) }
+                createdUpstreams.withLockedValue { $0[target.processID] = upstream }
                 return [upstream]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                toolsListRefreshCompleted: { upstreamIndex, succeeded in
+                    toolsListRefreshes.append((upstreamIndex, succeeded))
+                }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -1097,30 +1125,130 @@ struct RuntimeCoordinatorProcessRoutingTests {
             reason: "test_multiple_routes_before_initialize"
         )
 
-        _ = try await waitWithTimeout(
-            "waiting for one pre-initialize route activation",
-            timeout: .seconds(2)
-        ) {
-            while true {
-                let upstreams = createdUpstreams.withLockedValue { $0 }
-                var sentCount = 0
-                for upstream in upstreams {
-                    sentCount += await upstream.sentCount()
-                }
-                if sentCount > 0 {
-                    return sentCount
-                }
-                try await Task.sleep(nanoseconds: 1_000_000)
-            }
-        }
-        await fixture.manager.drainRuntimeTasksForTesting()
         let upstreams = createdUpstreams.withLockedValue { $0 }
-        var initializeCount = 0
-        for upstream in upstreams {
-            let methods = await upstream.sent().compactMap { methodName(from: $0) }
-            initializeCount += methods.filter { $0 == "initialize" }.count
+        let firstUpstream = try #require(upstreams[firstTarget.processID])
+        let secondUpstream = try #require(upstreams[secondTarget.processID])
+        _ = try await firstUpstream.nextStartCount()
+        _ = try await secondUpstream.nextStartCount()
+        await fixture.manager.drainRuntimeTasksForTesting()
+
+        let firstMethods = await firstUpstream.sent().compactMap { methodName(from: $0) }
+        let secondMethods = await secondUpstream.sent().compactMap { methodName(from: $0) }
+        #expect(firstMethods.filter { $0 == "initialize" }.count == 1)
+        #expect(secondMethods.filter { $0 == "initialize" }.isEmpty)
+
+        let firstInitialize = try await firstUpstream.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+        await firstUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: firstInitialize)))
+        )
+        _ = try await firstUpstream.nextSent(
+            matching: { methodName(from: $0) == "notifications/initialized" }
+        )
+
+        let secondInitialize = try await secondUpstream.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+        await secondUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: secondInitialize)))
+        )
+        _ = try await secondUpstream.nextSent(
+            matching: { methodName(from: $0) == "notifications/initialized" }
+        )
+
+        for upstream in [firstUpstream, secondUpstream] {
+            let toolsRequest = try await upstream.nextSent(
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+            await upstream.yield(
+                .message(
+                    try makeDocumentationToolsListResponse(
+                        id: try extractUpstreamID(from: toolsRequest),
+                        tools: [
+                            ownerBoundToolDescriptor(name: "BuildProject"),
+                            toolDescriptor(name: "XcodeListWindows"),
+                        ]
+                    )
+                )
+            )
         }
-        #expect(initializeCount == 1)
+
+        let firstRefresh = try await nextRecordedValue(toolsListRefreshes, at: 0)
+        let secondRefresh = try await nextRecordedValue(toolsListRefreshes, at: 1)
+        #expect(firstRefresh.1)
+        #expect(secondRefresh.1)
+        await fixture.manager.drainRuntimeTasksForTesting()
+        let routesByProcessID = Dictionary(
+            uniqueKeysWithValues: fixture.manager.xcodeProcessRoutes.map {
+                ($0.target.processID, $0)
+            }
+        )
+        let firstRoute = try #require(routesByProcessID[firstTarget.processID])
+        let secondRoute = try #require(routesByProcessID[secondTarget.processID])
+        let firstUpstreamIndex = try #require(firstRoute.primaryUpstreamIndex)
+        let secondUpstreamIndex = try #require(secondRoute.primaryUpstreamIndex)
+        #expect(Set([firstRefresh.0, secondRefresh.0]) == [
+            firstUpstreamIndex,
+            secondUpstreamIndex,
+        ])
+        #expect(fixture.manager.processControlPlane.catalog(
+            forProcessID: firstTarget.processID
+        ) != nil)
+        #expect(fixture.manager.processControlPlane.catalog(
+            forProcessID: secondTarget.processID
+        ) != nil)
+
+        let secondWorkspacePath = "/Work/Xcode26.xcworkspace"
+        #expect(
+            fixture.manager.recordXcodeWindowOwners(
+                from: try jsonValue([
+                    "structuredContent": [
+                        "message": "* tabIdentifier: xcode-26-tab, workspacePath: \(secondWorkspacePath)",
+                    ],
+                ]),
+                upstreamIndex: secondUpstreamIndex
+            )
+        )
+        let routingDecision = await fixture.manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 27017,
+                name: "BuildProject",
+                arguments: ["workspacePath": secondWorkspacePath]
+            ),
+            requestTimeoutOverride: .seconds(2)
+        )
+        #expect(routingDecision.preferredUpstreamIndices == [secondUpstreamIndex])
+    }
+
+    @Test func processRoutingAttachesEveryInitialRouteAtStartup() async throws {
+        let firstTarget = xcodeProcessTarget(processID: 27018, xcodeVersion: "27.0")
+        let secondTarget = xcodeProcessTarget(processID: 26618, xcodeVersion: "26.6")
+        let firstUpstream = TestUpstreamClient()
+        let secondUpstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [firstUpstream, secondUpstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: firstTarget, upstreamIndices: [0]),
+                XcodeProcessRoute(target: secondTarget, upstreamIndices: [1]),
+            ],
+            processRoutingEnabled: true,
+            xcodeTargetDiscovery: StubXcodeTargetDiscovery(
+                targets: [firstTarget, secondTarget]
+            ),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.start()
+
+        _ = try await firstUpstream.nextStartCount()
+        _ = try await secondUpstream.nextStartCount()
+        let firstInitialize = try await firstUpstream.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+        #expect(methodName(from: firstInitialize) == "initialize")
+        #expect(await secondUpstream.sentCount() == 0)
     }
 
     @Test func processRouteActivationWarmsSecondarySlotsForLateAddedRouteAfterInitialize()

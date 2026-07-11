@@ -204,6 +204,8 @@ Xcode process inventory の外部I/O ownerは `XcodeProcessEventMonitor` だけ�
 
 monitorはcompatible Xcode targetと、`NSWorkspace`が公開する既知のpermission dialog helper application PIDのimmutable cacheを発行する。route reconciliation、upstream readiness、DocumentationProvider、auto-approveはこのcacheだけを読む。`pgrep`、全PID `proc_listpids`、周期的なroute discoveryは削除する。auto-approveの250ms loopはAX window inspectionだけを行い、子PID列挙は構造的にeligibleなpermission dialogを実際に観測した時のownership検証に限定する。
 
+cache内のcompatible Xcode targetはPIDごとに独立したrouteを持つ。inventory membership成立時に各routeのprimary bridge processを起動し、別routeのcanonical initialize完了をprocess attachの前提にしない。一方、canonical initialize resultのpublishはsingle-writerのままとし、先頭routeのresult公開後に残るrouteを明示的なactivationとcatalog loadへ進める。workspace/tab owner resolutionはcataloged route集合から対象PIDを選ぶ。この進行はinventoryの周期的再走査に依存しない。
+
 Appleの契約上、`runningApplications` のKVO更新にはmain run loopのcommon modeが動作している必要がある。repoのDarwin async-main executableと通常のAppKit hostはこの条件を満たす。embedding hostがmain threadをblocking waitで占有する形はprocess-observation contract外とし、public async lifecycleを使う。
 
 readiness waitは`(isReady, generation)` snapshotとgeneration change waitでlost wakeupを防ぐ。Xcodeが無い場合の自動launchは1回だけで、その後はprocess eventを待つ。route cooldown後の再activationはprocess再走査に相乗りさせず、`routeID + scope + deadline`でfenceしたone-shot timerが既存routeを再試行する。retire/reset/shutdownはtimerをcancelする。

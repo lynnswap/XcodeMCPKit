@@ -26,6 +26,25 @@ struct XcodeProcessEventMonitorTests {
         #expect(readiness.generation == 1)
     }
 
+    @Test func initialSnapshotPreservesEveryRunningXcodeProcess() throws {
+        let xcode27 = try makeTemporaryXcodeApplication(processID: 270)
+        let xcode26 = try makeTemporaryXcodeApplication(processID: 266)
+        defer {
+            try? FileManager.default.removeItem(at: xcode27.rootURL)
+            try? FileManager.default.removeItem(at: xcode26.rootURL)
+        }
+        let observation = RunningApplicationsObservationFake(initial: [
+            xcode27.snapshot,
+            xcode26.snapshot,
+        ])
+        let monitor = makeMonitor(observation: observation)
+        defer { monitor.stop() }
+
+        monitor.start()
+
+        #expect(Set(monitor.runningXcodeTargets().map(\.processID)) == [266, 270])
+    }
+
     @Test func launchAndTerminationReplaceTheTargetCache() throws {
         let fixture = try makeTemporaryXcodeApplication(processID: 202)
         defer { try? FileManager.default.removeItem(at: fixture.rootURL) }

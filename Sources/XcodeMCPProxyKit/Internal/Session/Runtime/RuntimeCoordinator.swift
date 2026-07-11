@@ -766,6 +766,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
         guard shouldStart else { return }
         if processRoutingEnabled {
+            let preexistingRouteIDs = xcodeProcessRoutes.map(\.id)
             if let xcodeProcessEventMonitor {
                 let startupReconcileState = NIOLockedValueBox(
                     XcodeProcessStartupReconcileState()
@@ -795,6 +796,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             } else {
                 triggerXcodeProcessReconcile(reason: "startup")
             }
+            startProcessRouteAttachments(
+                xcodeProcessRoutes.filter { preexistingRouteIDs.contains($0.id) }
+            )
         }
         startEagerInitializePrimary()
         if prewarmDocumentationProviderOnStartup {
