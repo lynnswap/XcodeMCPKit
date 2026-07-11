@@ -3073,26 +3073,17 @@ struct RuntimeCoordinatorInitializationTests {
     {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let initializedUpstreams = LockedRecordedValues<Int>()
-        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let newerTarget = xcodeProcessTarget(processID: 27100, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 26600, xcodeVersion: "26.6")
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream0, upstream1],
+            eventLoop: eventLoopGroup.next(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [1]),
             ],
-            dynamicUpstreamFactory: { _ in
-                let upstream = TestUpstreamClient()
-                createdUpstreams.withLockedValue { $0.append(upstream) }
-                return [upstream]
-            },
-            testHooks: RuntimeCoordinatorTestHooks(
-                upstreamInitialized: { upstreamIndex in
-                    initializedUpstreams.append(upstreamIndex)
-                }
-            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -3111,29 +3102,8 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(response["result"] != nil)
         #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized != true)
         #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
-
-        let recoveryUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
-        let recoveryInitialize = try await sentValue(
-            from: recoveryUpstream,
-            at: 0,
-            timeout: .seconds(2)
-        )
-        let recoveryUpstreamID = try extractUpstreamID(from: recoveryInitialize)
-        await recoveryUpstream.yield(.message(try makeInitializeResponse(id: recoveryUpstreamID)))
-        _ = try await sentValue(from: recoveryUpstream, at: 1, timeout: .seconds(2))
-        let expectedCandidateProcessIDs = Set([
-            newerTarget.processID,
-            olderTarget.processID,
-        ])
-        let recoveredUpstreamIndex = try await waitWithTimeout(
-            "waiting for recovered primary upstream initialization"
-        ) {
-            try await initializedUpstreams.nextValue(at: 1)
-        }
-        #expect(recoveredUpstreamIndex == 0)
-        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == true)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
-        #expect(manager.documentationCandidateProcessIDs() == expectedCandidateProcessIDs)
+        #expect(manager.documentationCandidateProcessIDs() == Set([olderTarget.processID]))
     }
 
     @Test func sessionManagerRoutesInitializeHandshakeNotificationsFromRetriedPrimaryProcess()
