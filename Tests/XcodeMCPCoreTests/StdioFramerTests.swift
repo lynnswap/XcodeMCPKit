@@ -4,7 +4,7 @@ import XcodeMCPKit
 
 @Suite
 struct StdioFramerTests {
-    @Test func stdioFramerEmitsJSONObject() async throws {
+    @Test func stdioFramerEmitsJSONObject() {
         let framer = StdioFramer()
         let json = #"{"jsonrpc":"2.0","id":1}"#
 
@@ -16,7 +16,7 @@ struct StdioFramerTests {
         #expect(String(data: result.messages[0], encoding: .utf8) == json)
     }
 
-    @Test func stdioFramerEmitsMultipleMessagesSeparatedByNewlines() async throws {
+    @Test func stdioFramerEmitsMultipleMessagesSeparatedByNewlines() {
         let framer = StdioFramer()
         let json1 = #"{"jsonrpc":"2.0","id":1}"#
         let json2 = #"{"jsonrpc":"2.0","id":2}"#
@@ -29,7 +29,7 @@ struct StdioFramerTests {
         #expect(String(data: result.messages[1], encoding: .utf8) == json2)
     }
 
-    @Test func stdioFramerEmitsTopLevelJSONArrayForBoundaryValidation() async throws {
+    @Test func stdioFramerEmitsTopLevelJSONArrayForBoundaryValidation() {
         let framer = StdioFramer()
         let json = #"[{"jsonrpc":"2.0","id":1},{"jsonrpc":"2.0","method":"notifications/progress"}]"#
 
@@ -40,7 +40,7 @@ struct StdioFramerTests {
         #expect(String(data: result.messages[0], encoding: .utf8) == json)
     }
 
-    @Test func stdioFramerEmitsContentLengthFrame() async throws {
+    @Test func stdioFramerEmitsContentLengthFrame() {
         let framer = StdioFramer()
         let json = #"{"jsonrpc":"2.0","id":1}"#
         let payload = "Content-Length: \(json.utf8.count)\r\n\r\n\(json)"
@@ -53,7 +53,7 @@ struct StdioFramerTests {
         #expect(String(data: result.messages[0], encoding: .utf8) == json)
     }
 
-    @Test func stdioFramerBuffersPartialContentLengthFrameAcrossAppends() async throws {
+    @Test func stdioFramerBuffersPartialContentLengthFrameAcrossAppends() {
         let framer = StdioFramer()
         let json = #"{"jsonrpc":"2.0","id":1}"#
         let header = "Content-Length: \(json.utf8.count)\r\n"
@@ -70,7 +70,7 @@ struct StdioFramerTests {
         #expect(String(data: resultB.messages[0], encoding: .utf8) == json)
     }
 
-    @Test func stdioFramerBuffersIncompleteJSONWithoutDroppingBytes() async throws {
+    @Test func stdioFramerBuffersIncompleteJSONWithoutDroppingBytes() {
         let framer = StdioFramer()
         let partial = #"{"jsonrpc":"2.0","id":1,"result":{"value":"abc"#
 
@@ -81,7 +81,7 @@ struct StdioFramerTests {
         #expect(result.bufferedByteCount == partial.utf8.count)
     }
 
-    @Test func stdioFramerEmitsLargeMessageSplitAcrossAppends() async throws {
+    @Test func stdioFramerEmitsLargeMessageSplitAcrossAppends() {
         let framer = StdioFramer()
         let text = String(repeating: "x", count: 128 * 1024)
         let json = #"{"jsonrpc":"2.0","id":1,"result":{"text":"\#(text)"}}"#
@@ -99,7 +99,7 @@ struct StdioFramerTests {
         #expect(String(data: resultB.messages[0], encoding: .utf8) == json)
     }
 
-    @Test func stdioFramerTreatsInvalidContentLengthHeaderAsProtocolViolation() async throws {
+    @Test func stdioFramerTreatsInvalidContentLengthHeaderAsProtocolViolation() {
         let framer = StdioFramer()
         let payload = "Content-Length: abc\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1}"
 
@@ -110,7 +110,7 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .invalidContentLengthHeader)
     }
 
-    @Test func stdioFramerTreatsInvalidContentLengthBodyAsProtocolViolation() async throws {
+    @Test func stdioFramerTreatsInvalidContentLengthBodyAsProtocolViolation() {
         let framer = StdioFramer()
         let payload = "Content-Length: 5\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1}"
 
@@ -121,7 +121,7 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .invalidJSON)
     }
 
-    @Test func stdioFramerTreatsLeadingLogLineAsProtocolViolation() async throws {
+    @Test func stdioFramerTreatsLeadingLogLineAsProtocolViolation() {
         let framer = StdioFramer()
         let payload = "some log line\n{\"jsonrpc\":\"2.0\",\"id\":1}"
 
@@ -132,7 +132,7 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .unexpectedLeadingByte)
     }
 
-    @Test func stdioFramerTreatsMalformedJSONFollowedByValidJSONAsProtocolViolation() async throws {
+    @Test func stdioFramerTreatsMalformedJSONFollowedByValidJSONAsProtocolViolation() {
         let framer = StdioFramer()
         let payload = #"{"jsonrpc":"2.0","id":1,"result":tru}{"jsonrpc":"2.0","id":2}"#
 
@@ -143,7 +143,7 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .invalidJSON)
     }
 
-    @Test func stdioFramerFailsOversizedIncompleteJSONAtHardLimit() async throws {
+    @Test func stdioFramerFailsOversizedIncompleteJSONAtHardLimit() {
         let framer = StdioFramer()
         let text = String(repeating: "x", count: 4 * 1024 * 1024)
         let payload = #"{"jsonrpc":"2.0","id":1,"result":{"text":"\#(text)"#
@@ -155,7 +155,7 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .bufferLimitExceeded)
     }
 
-    @Test func stdioFramerTreatsContentLengthLookingLogLineAsProtocolViolation() async throws {
+    @Test func stdioFramerTreatsContentLengthLookingLogLineAsProtocolViolation() {
         let framer = StdioFramer()
         let payload = "Content-Length: 123\n{\"jsonrpc\":\"2.0\",\"id\":1}"
 
