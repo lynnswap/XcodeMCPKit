@@ -1180,11 +1180,40 @@ struct RuntimeCoordinatorProcessRoutingTests {
             try await recoveredUpstream.nextSent(at: 0)
         }
         #expect(methodName(from: initialize) == "initialize")
+        await recoveredUpstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+        )
+        let initializedNotification = try await recoveredUpstream.nextSent(at: 1)
+        #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        let toolsRequest = try await recoveredUpstream.nextSent(
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
+        await recoveredUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: toolsRequest),
+                    tools: [toolDescriptor(name: "RecoveredRouteTool")]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for recovered route catalog completion",
+            timeout: .seconds(2)
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 1
+            }
+        }
         let recoveredRoute = try #require(
             manager.processControlPlane.route(forProcessID: target.processID)
         )
         #expect(recoveredRoute.upstreamIndices == [1])
         #expect(manager.upstreamTopology.snapshot().slotIDs == [UpstreamSlotID(rawValue: 1)])
+        #expect(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)?.phase
+                == .cataloged
+        )
     }
 
     @Test func processRouteActivationOwnsInitializeWhileReadinessWaits() async throws {
